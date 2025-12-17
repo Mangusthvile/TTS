@@ -1,342 +1,448 @@
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Book, Chapter, Rule, AppState } from './types';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, ReaderSettings } from './types';
 import Library from './components/Library';
 import Reader from './components/Reader';
 import Player from './components/Player';
 import RuleManager from './components/RuleManager';
+import Settings from './components/Settings';
 import Extractor from './components/Extractor';
-import { speechController, applyRules } from './services/speechService';
-import { saveChapterToFile } from './services/fileService';
-import { Settings2, BookText, Zap, Keyboard, FolderPlus, Info } from 'lucide-react';
+import ChapterFolderView from './components/ChapterFolderView';
+import { speechController, applyRules, NextSegment } from './services/speechService';
+import { authenticateDrive, fetchDriveFile, uploadToDrive, createDriveFolder } from './services/driveService';
+import { BookText, Zap, Sun, Coffee, Moon, X, Sparkles, Settings as SettingsIcon, Menu, RefreshCw } from 'lucide-react';
+
+// Mocking useRegisterSW to prevent crashes in non-Vite preview environments
+// In a real build, this would be imported from 'virtual:pwa-register/react'
+const useRegisterSW = () => {
+  const [offlineReady, setOfflineReady] = useState(false);
+  const [needRefresh, setNeedRefresh] = useState(false);
+  
+  const updateServiceWorker = (reload: boolean) => {
+    if (reload) window.location.reload();
+  };
+
+  return {
+    offlineReady: [offlineReady, setOfflineReady],
+    needRefresh: [needRefresh, setNeedRefresh],
+    updateServiceWorker,
+  };
+};
 
 const App: React.FC = () => {
+  // --- PWA UPDATE LOGIC ---
+  const {
+    offlineReady: [offlineReady, setOfflineReady],
+    needRefresh: [needRefresh, setNeedRefresh],
+    updateServiceWorker,
+  } = useRegisterSW();
+
+  // --- STATE ---
   const [state, setState] = useState<AppState>(() => {
-    const saved = localStorage.getItem('voxlib_state');
-    return saved ? JSON.parse(saved) : {
-      books: [],
-      activeBookId: undefined,
-      playbackSpeed: 1.0,
-      selectedVoiceName: undefined
+    const saved = localStorage.getItem('talevox_pro_v2');
+    const parsed = saved ? JSON.parse(saved) : {};
+    return {
+      books: (parsed.books || []).map((b: any) => ({
+        ...b,
+        directoryHandle: undefined,
+        settings: b.settings || { useBookSettings: false, highlightMode: HighlightMode.WORD }
+      })),
+      activeBookId: parsed.activeBookId,
+      playbackSpeed: parsed.playbackSpeed || 1.0,
+      selectedVoiceName: parsed.selectedVoiceName,
+      theme: parsed.theme || Theme.LIGHT,
+      currentOffset: 0,
+      debugMode: parsed.debugMode || false,
+      keepAwake: parsed.keepAwake ?? false,
+      readerSettings: parsed.readerSettings || {
+        fontFamily: "'Source Serif 4', serif",
+        fontSizePx: 20,
+        lineHeight: 1.8,
+        paragraphSpacing: 1
+      },
+      driveToken: parsed.driveToken,
+      lastSession: parsed.lastSession
     };
   });
 
-  const [activeTab, setActiveTab] = useState<'reader' | 'rules'>('reader');
+  const [activeTab, setActiveTab] = useState<'reader' | 'rules' | 'settings'>('reader');
+  const [isAddChapterOpen, setIsAddChapterOpen] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [currentOffset, setCurrentOffset] = useState(0);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [activeChapterText, setActiveChapterText] = useState<string>('');
+  const [isLoadingChapter, setIsLoadingChapter] = useState(false);
+  const [transitionToast, setTransitionToast] = useState<{ number: number; title: string } | null>(null);
   
-  // Ref to break circular dependency between handlePlay and playNext
-  const playNextRef = useRef<() => void>(() => {});
+  const [sleepTimerSeconds, setSleepTimerSeconds] = useState<number | null>(null);
+  const [stopAfterChapter, setStopAfterChapter] = useState(false);
 
-  // Persistence
+  const stateRef = useRef(state);
+  useEffect(() => { stateRef.current = state; }, [state]);
+
+  const wakeLockSentinel = useRef<any>(null);
+
+  // --- PERSISTENCE ---
   useEffect(() => {
-    localStorage.setItem('voxlib_state', JSON.stringify(state));
+    const { driveToken, books, ...rest } = state;
+    const persistentBooks = books.map(({ directoryHandle, ...b }) => b);
+    localStorage.setItem('talevox_pro_v2', JSON.stringify({ ...rest, books: persistentBooks }));
   }, [state]);
 
-  const activeBook = state.books.find(b => b.id === state.activeBookId);
-  const activeChapter = activeBook?.chapters.find(c => c.id === activeBook.currentChapterId);
-
-  // Core Actions
-  const handleAddBook = async () => {
-    let directoryHandle = null;
-    try {
-      if ((window as any).showDirectoryPicker) {
-        directoryHandle = await (window as any).showDirectoryPicker();
+  // --- WAKE LOCK ---
+  useEffect(() => {
+    const handleWakeLock = async () => {
+      if (isPlaying && state.keepAwake && 'wakeLock' in navigator && !wakeLockSentinel.current) {
+        try {
+          wakeLockSentinel.current = await (navigator as any).wakeLock.request('screen');
+        } catch (err) {
+          console.error("Wake Lock error:", err);
+        }
+      } else if ((!isPlaying || !state.keepAwake) && wakeLockSentinel.current) {
+        try {
+          await wakeLockSentinel.current.release();
+          wakeLockSentinel.current = null;
+        } catch (err) {}
       }
-    } catch (e) {
-      console.warn("Folder selection cancelled or not supported");
-    }
+    };
+    handleWakeLock();
+  }, [isPlaying, state.keepAwake]);
 
-    const defaultTitle = directoryHandle ? directoryHandle.name : 'New Book';
-    const chosenTitle = window.prompt("Enter a name for this book/folder:", defaultTitle);
-    
-    if (chosenTitle === null) return; // User cancelled
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden' && wakeLockSentinel.current) {
+        wakeLockSentinel.current.release();
+        wakeLockSentinel.current = null;
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, []);
+
+  const activeBook = state.books.find(b => b.id === state.activeBookId);
+  const activeChapterMetadata = activeBook?.chapters.find(c => c.id === activeBook.currentChapterId);
+
+  const playbackText = useMemo(() => {
+    if (!activeChapterText) return "";
+    return applyRules(activeChapterText, activeBook?.rules || []);
+  }, [activeChapterText, activeBook?.rules]);
+
+  // --- CHAPTER LOADING ---
+  const loadChapterContent = async (bookId: string, chapterId: string) => {
+    const book = state.books.find(b => b.id === bookId);
+    const chapter = book?.chapters.find(c => c.id === chapterId);
+    if (!book || !chapter) return;
+
+    setIsLoadingChapter(true);
+    try {
+      let content = "";
+      if (book.backend === StorageBackend.DRIVE) {
+        if (!state.driveToken) {
+          const token = await authenticateDrive();
+          setState(prev => ({ ...prev, driveToken: token }));
+          content = await fetchDriveFile(token, chapter.driveId!);
+        } else {
+          try {
+            content = await fetchDriveFile(state.driveToken, chapter.driveId!);
+          } catch (e: any) {
+            if (e.message === 'UNAUTHORIZED') {
+              const token = await authenticateDrive();
+              setState(prev => ({ ...prev, driveToken: token }));
+              content = await fetchDriveFile(token, chapter.driveId!);
+            }
+          }
+        }
+      } else if (book.backend === StorageBackend.LOCAL && book.directoryHandle) {
+        const handle = book.directoryHandle;
+        const fileHandle = await handle.getFileHandle(chapter.filename);
+        const file = await fileHandle.getFile();
+        content = await file.text();
+      } else {
+        content = chapter.content; 
+      }
+      setActiveChapterText(content);
+    } catch (err) {
+      console.error("Failed to load chapter:", err);
+    } finally {
+      setIsLoadingChapter(false);
+    }
+  };
+
+  useEffect(() => {
+    // Initial load of the current chapter if one is active
+    if (state.activeBookId && activeBook?.currentChapterId) {
+        loadChapterContent(state.activeBookId, activeBook.currentChapterId);
+    }
+  }, []);
+
+  const handleAddBook = async (title: string, backend: StorageBackend, directoryHandle?: any) => {
+    let driveFolderId = undefined;
+    if (backend === StorageBackend.DRIVE) {
+      try {
+        const token = await authenticateDrive();
+        setState(prev => ({ ...prev, driveToken: token }));
+        driveFolderId = await createDriveFolder(token, `Talevox - ${title}`);
+      } catch (err) {
+        console.error("Failed to create Drive folder:", err);
+        return;
+      }
+    }
 
     const newBook: Book = {
       id: crypto.randomUUID(),
-      title: chosenTitle || defaultTitle,
+      title,
+      backend,
       chapters: [],
       rules: [],
-      directoryHandle
+      directoryHandle,
+      driveFolderId,
+      settings: { useBookSettings: false, highlightMode: HighlightMode.WORD }
     };
+
     setState(prev => ({ ...prev, books: [...prev.books, newBook], activeBookId: newBook.id }));
+    setIsAddChapterOpen(true);
+    setIsSidebarOpen(false);
   };
 
-  const handleDeleteBook = (id: string) => {
-    if (!window.confirm("Are you sure you want to remove this book from your library?")) return;
-    setState(prev => ({
-      ...prev,
-      books: prev.books.filter(b => b.id !== id),
-      activeBookId: prev.activeBookId === id ? undefined : prev.activeBookId
-    }));
-  };
+  const handleSelectChapter = useCallback(async (bookId: string, chapterId: string, offset?: number) => {
+    const book = state.books.find(b => b.id === bookId);
+    if (!book) return;
 
-  const handleSelectBook = (id: string) => {
-    setState(prev => ({ ...prev, activeBookId: id }));
-  };
-
-  const handleSelectChapter = (bookId: string, chapterId: string) => {
-    setState(prev => ({
-      ...prev,
-      books: prev.books.map(b => b.id === bookId ? { ...b, currentChapterId: chapterId } : b)
-    }));
     speechController.stop();
     setIsPlaying(false);
-    setCurrentOffset(0);
+    
+    setState(prev => ({
+      ...prev,
+      activeBookId: bookId,
+      books: prev.books.map(b => b.id === bookId ? { ...b, currentChapterId: chapterId } : b),
+      currentOffset: offset ?? 0
+    }));
+
+    await loadChapterContent(bookId, chapterId);
+    setActiveTab('reader');
+    setIsSidebarOpen(false);
+  }, [state.books, state.driveToken]);
+
+  const handleSelectBook = (id: string) => {
+    speechController.stop();
+    setIsPlaying(false);
+    setState(prev => ({ 
+      ...prev, 
+      activeBookId: id,
+      books: prev.books.map(b => b.id === id ? { ...b, currentChapterId: undefined } : b)
+    }));
+    setActiveTab('reader');
+    setIsSidebarOpen(false);
   };
 
   const handleChapterExtracted = async (data: { title: string; content: string; url: string; index: number }) => {
-    let currentBook = activeBook;
-    
-    if (!currentBook) {
-      const bookId = crypto.randomUUID();
-      currentBook = {
-        id: bookId,
-        title: 'Imported Library',
-        chapters: [],
-        rules: []
-      };
-      setState(prev => ({ ...prev, books: [...prev.books, currentBook!], activeBookId: bookId }));
-    }
+    if (!activeBook) return;
 
-    const sanitizedTitle = data.title.replace(/[/\\?%*:|"<>]/g, '-');
-    const filename = `${data.index.toString().padStart(3, '0')} ${sanitizedTitle}.txt`;
-    
     const newChapter: Chapter = {
       id: crypto.randomUUID(),
       index: data.index,
       title: data.title,
       content: data.content,
-      sourceUrl: data.url,
-      filename,
-      wordCount: data.content.split(/\s+/).filter(Boolean).length,
-      progress: 0
+      wordCount: data.content.trim().split(/\s+/).length,
+      progress: 0,
+      filename: `ch_${data.index}_${Date.now()}.txt`,
+      sourceUrl: data.url
     };
 
-    if (currentBook.directoryHandle) {
-      await saveChapterToFile(currentBook.directoryHandle, newChapter);
+    if (activeBook.backend === StorageBackend.DRIVE && state.driveToken) {
+      const driveId = await uploadToDrive(state.driveToken, activeBook.driveFolderId!, newChapter.filename, data.content);
+      newChapter.driveId = driveId;
+    } else if (activeBook.backend === StorageBackend.LOCAL && activeBook.directoryHandle) {
+      const handle = activeBook.directoryHandle;
+      const fileHandle = await handle.getFileHandle(newChapter.filename, { create: true });
+      const writable = await fileHandle.createWritable();
+      await writable.write(data.content);
+      await writable.close();
     }
 
     setState(prev => ({
       ...prev,
-      books: prev.books.map(b => {
-        if (b.id === currentBook!.id) {
-          // Check if a chapter with this index already exists to warn or replace?
-          // For now, just append and sort later
-          const updatedChapters = [...b.chapters, newChapter].sort((a, b) => a.index - b.index);
-          return {
-            ...b,
-            chapters: updatedChapters,
-            currentChapterId: newChapter.id
-          };
-        }
-        return b;
-      })
+      books: prev.books.map(b => b.id === activeBook.id ? {
+        ...b,
+        chapters: [...b.chapters, newChapter].sort((a, b) => a.index - b.index)
+      } : b)
     }));
-  };
 
-  // Rule Actions
-  const handleAddRule = (rule: Rule) => {
-    setState(prev => ({
-      ...prev,
-      books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, rules: [...b.rules, rule] } : b)
-    }));
-  };
-
-  const handleUpdateRule = (rule: Rule) => {
-    setState(prev => ({
-      ...prev,
-      books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, rules: b.rules.map(r => r.id === rule.id ? rule : r) } : b)
-    }));
-  };
-
-  const handleDeleteRule = (id: string) => {
-    setState(prev => ({
-      ...prev,
-      books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, rules: b.rules.filter(r => r.id !== id) } : b)
-    }));
+    setIsAddChapterOpen(false);
+    handleSelectChapter(activeBook.id, newChapter.id, 0);
   };
 
   const handlePlay = useCallback(() => {
-    const book = state.books.find(b => b.id === state.activeBookId);
-    const chapter = book?.chapters.find(c => c.id === book.currentChapterId);
-    
-    if (!chapter || !book) return;
-    
-    const textToRead = chapter.content.substring(currentOffset);
-    const processedText = applyRules(textToRead, book.rules);
-    
+    if (!playbackText || !activeBook || !activeChapterMetadata) return;
     setIsPlaying(true);
     speechController.speak(
-      processedText,
+      playbackText,
       state.selectedVoiceName || '',
       state.playbackSpeed,
-      () => playNextRef.current(), // Call via Ref to avoid circular dependency
-      (offset) => setCurrentOffset(prev => prev + offset)
+      state.currentOffset,
+      () => setIsPlaying(false),
+      (offset) => {
+        if (Math.abs(stateRef.current.currentOffset - offset) > 20) {
+          setState(prev => ({ ...prev, currentOffset: offset }));
+        }
+      },
+      async () => {
+        const s = stateRef.current;
+        const book = s.books.find(b => b.id === s.activeBookId);
+        if (!book || stopAfterChapter) return null;
+        const currentIdx = book.chapters.findIndex(c => c.id === book.currentChapterId);
+        if (currentIdx < book.chapters.length - 1) {
+          const next = book.chapters[currentIdx + 1];
+          setTransitionToast({ number: next.index, title: next.title });
+          setTimeout(() => setTransitionToast(null), 2500);
+          await handleSelectChapter(book.id, next.id, 0);
+          return {
+            announcementPrefix: `Chapter ${next.index}: ${next.title}. `,
+            content: applyRules(activeChapterText, book.rules),
+            bookTitle: book.title,
+            chapterTitle: next.title
+          };
+        }
+        return null;
+      },
+      activeBook.title,
+      activeChapterMetadata.title
     );
-  }, [state.books, state.activeBookId, state.selectedVoiceName, state.playbackSpeed, currentOffset]);
+  }, [playbackText, state.selectedVoiceName, state.playbackSpeed, state.currentOffset, stopAfterChapter, activeChapterText, activeBook, activeChapterMetadata]);
 
-  const playNext = useCallback(() => {
-    if (!activeBook || !activeChapter) return;
-    const currentIndex = activeBook.chapters.findIndex(c => c.id === activeChapter.id);
-    if (currentIndex < activeBook.chapters.length - 1) {
-      const nextId = activeBook.chapters[currentIndex + 1].id;
-      handleSelectChapter(activeBook.id, nextId);
-      // Wait for state to settle before playing next chapter
-      setTimeout(() => handlePlay(), 150);
-    } else {
-      setIsPlaying(false);
-      speechController.stop();
-    }
-  }, [activeBook, activeChapter, handlePlay]);
-
-  // Keep playNextRef in sync with latest playNext function
-  useEffect(() => {
-    playNextRef.current = playNext;
-  }, [playNext]);
-
-  const handlePause = () => {
-    speechController.pause();
-    setIsPlaying(false);
-  };
-
-  const handleResume = () => {
-    speechController.resume();
-    setIsPlaying(true);
-  };
-
-  const handleStop = () => {
+  const handlePause = useCallback(() => {
     speechController.stop();
     setIsPlaying(false);
-    setCurrentOffset(0);
-  };
-
-  // Keyboard Shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      
-      if (e.code === 'Space') {
-        e.preventDefault();
-        isPlaying ? handlePause() : (speechController.isPaused ? handleResume() : handlePlay());
-      } else if (e.key === 'n' || e.key === 'N') {
-        playNext();
-      } else if (e.key === 'b' || e.key === 'B') {
-        const currentIndex = activeBook?.chapters.findIndex(c => c.id === activeChapter?.id) ?? -1;
-        if (activeBook && currentIndex > 0) {
-          handleSelectChapter(activeBook.id, activeBook.chapters[currentIndex - 1].id);
-        }
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isPlaying, handlePlay, playNext, activeBook, activeChapter]);
-
-  const getNextSuggestedIndex = () => {
-    if (!activeBook || activeBook.chapters.length === 0) return 1;
-    const maxIndex = Math.max(...activeBook.chapters.map(c => c.index));
-    return maxIndex + 1;
-  };
+  }, []);
 
   return (
-    <div className="flex flex-col h-screen overflow-hidden bg-slate-50">
-      <div className="flex flex-1 overflow-hidden">
+    <div className={`flex flex-col h-screen overflow-hidden font-sans transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-950 text-slate-100' : state.theme === Theme.SEPIA ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
+      
+      {/* PWA UPDATE BANNER */}
+      {needRefresh && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[200] w-full max-w-sm px-4">
+          <div className="bg-indigo-600 text-white p-4 rounded-2xl shadow-2xl flex items-center justify-between border border-white/20 backdrop-blur-md">
+            <div className="flex items-center gap-3">
+              <RefreshCw className="w-5 h-5 animate-spin-slow" />
+              <span className="font-bold text-sm">Update available</span>
+            </div>
+            <button 
+              onClick={() => updateServiceWorker(true)}
+              className="bg-white text-indigo-600 px-4 py-1.5 rounded-xl font-black text-xs hover:bg-indigo-50 transition-colors"
+            >
+              REFRESH
+            </button>
+          </div>
+        </div>
+      )}
+
+      {transitionToast && (
+        <div className="fixed top-24 left-1/2 -translate-x-1/2 z-[100] pointer-events-none">
+          <div className="bg-indigo-600 text-white px-8 py-4 rounded-3xl shadow-2xl flex items-center gap-4 border border-white/20 backdrop-blur-md toast-animate">
+            <div className="text-lg font-black leading-tight">Chapter {transitionToast.number}: {transitionToast.title}</div>
+          </div>
+        </div>
+      )}
+
+      <div className="flex flex-1 overflow-hidden relative">
         <Library 
-          books={state.books}
-          activeBookId={state.activeBookId}
-          onSelectBook={handleSelectBook}
+          isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)}
+          books={state.books} activeBookId={state.activeBookId} lastSession={state.lastSession}
+          onSelectBook={handleSelectBook} onDeleteBook={id => setState(p => ({ ...p, books: p.books.filter(b => b.id !== id) }))}
+          onSelectChapter={handleSelectChapter} theme={state.theme}
           onAddBook={handleAddBook}
-          onDeleteBook={handleDeleteBook}
-          onSelectChapter={handleSelectChapter}
         />
         
-        <main className="flex-1 flex flex-col min-w-0 bg-white shadow-2xl relative">
-          <header className="h-16 border-b border-slate-100 flex items-center justify-between px-8 bg-white/80 backdrop-blur-md sticky top-0 z-10">
-            <div className="flex items-center gap-8">
-              <button 
-                onClick={() => setActiveTab('reader')}
-                className={`flex items-center gap-2 h-16 border-b-2 transition-all font-semibold ${
-                  activeTab === 'reader' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-400 hover:text-slate-600'
-                }`}
-              >
-                <BookText className="w-4 h-4" />
-                Reader
-              </button>
-              <button 
-                onClick={() => setActiveTab('rules')}
-                className={`flex items-center gap-2 h-16 border-b-2 transition-all font-semibold ${
-                  activeTab === 'rules' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-400 hover:text-slate-600'
-                }`}
-              >
-                <Zap className="w-4 h-4" />
-                Pronunciation
-              </button>
+        <main className={`flex-1 flex flex-col min-w-0 shadow-2xl relative transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-900' : state.theme === Theme.SEPIA ? 'bg-[#efe6d5]' : 'bg-white'}`}>
+          <header className={`h-16 border-b flex items-center justify-between px-4 lg:px-8 z-10 sticky top-0 transition-colors duration-300 ${state.theme === Theme.DARK ? 'border-slate-800 bg-slate-900/80 backdrop-blur-md' : state.theme === Theme.SEPIA ? 'border-[#d8ccb6] bg-[#efe6d5]/90 backdrop-blur-md' : 'border-black/5 bg-white/90 backdrop-blur-md'}`}>
+            <div className="flex items-center gap-2 lg:gap-6">
+              <button onClick={() => setIsSidebarOpen(true)} className="p-2 lg:hidden rounded-lg hover:bg-black/5 text-inherit"><Menu className="w-5 h-5" /></button>
+              <nav className="flex items-center gap-6">
+                <button onClick={() => setActiveTab('reader')} className={`flex items-center gap-2 h-16 border-b-2 transition-all font-black uppercase text-[10px] tracking-widest ${activeTab === 'reader' ? 'border-indigo-600 text-indigo-600' : 'border-transparent opacity-60 hover:opacity-100'}`}><BookText className="w-4 h-4" /> <span className="hidden sm:inline">Reader</span></button>
+                <button onClick={() => setActiveTab('rules')} className={`flex items-center gap-2 h-16 border-b-2 transition-all font-black uppercase text-[10px] tracking-widest ${activeTab === 'rules' ? 'border-indigo-600 text-indigo-600' : 'border-transparent opacity-60 hover:opacity-100'}`}><Zap className="w-4 h-4" /> <span className="hidden sm:inline">Rules</span></button>
+                <button onClick={() => setActiveTab('settings')} className={`flex items-center gap-2 h-16 border-b-2 transition-all font-black uppercase text-[10px] tracking-widest ${activeTab === 'settings' ? 'border-indigo-600 text-indigo-600' : 'border-transparent opacity-60 hover:opacity-100'}`}><SettingsIcon className="w-4 h-4" /> <span className="hidden sm:inline">Settings</span></button>
+              </nav>
             </div>
-            
-            <div className="flex items-center gap-4">
-              {!activeBook?.directoryHandle && state.activeBookId && (
-                <div className="flex items-center gap-2 text-amber-500 text-[10px] font-bold bg-amber-50 px-3 py-1.5 rounded-full border border-amber-100 uppercase tracking-tighter">
-                  <Info className="w-3 h-3" />
-                  No Folder Link
-                </div>
-              )}
-              {activeBook?.directoryHandle && (
-                <div className="flex items-center gap-2 text-emerald-500 text-[10px] font-bold bg-emerald-50 px-3 py-1.5 rounded-full border border-emerald-100 uppercase tracking-tighter">
-                  <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></div>
-                  Auto-Saving
-                </div>
-              )}
-              <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg">
-                <span className="px-2 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-tighter flex items-center gap-1">
-                  <Keyboard className="w-3 h-3" />
-                </span>
-                <kbd className="bg-white px-1.5 py-0.5 rounded text-[10px] font-mono shadow-sm text-slate-500 border border-slate-200">Space</kbd>
-                <kbd className="bg-white px-1.5 py-0.5 rounded text-[10px] font-mono shadow-sm text-slate-500 border border-slate-200">N</kbd>
-                <kbd className="bg-white px-1.5 py-0.5 rounded text-[10px] font-mono shadow-sm text-slate-500 border border-slate-200">B</kbd>
+
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-1 p-1 rounded-xl bg-black/5">
+                <button onClick={() => setState(p => ({ ...p, theme: Theme.LIGHT }))} className={`p-1.5 rounded-lg ${state.theme === Theme.LIGHT ? 'bg-white shadow-sm text-indigo-600' : 'opacity-60'}`}><Sun className="w-4 h-4" /></button>
+                <button onClick={() => setState(p => ({ ...p, theme: Theme.SEPIA }))} className={`p-1.5 rounded-lg ${state.theme === Theme.SEPIA ? 'bg-[#f4ecd8] shadow-sm text-[#9c6644]' : 'opacity-60'}`}><Coffee className="w-4 h-4" /></button>
+                <button onClick={() => setState(p => ({ ...p, theme: Theme.DARK }))} className={`p-1.5 rounded-lg ${state.theme === Theme.DARK ? 'bg-slate-800 shadow-sm text-indigo-400' : 'opacity-60'}`}><Moon className="w-4 h-4" /></button>
               </div>
             </div>
           </header>
 
           <div className="flex-1 overflow-y-auto">
-            {activeTab === 'reader' ? (
-              <div className="p-4 lg:p-12">
-                <Extractor 
-                  onChapterExtracted={handleChapterExtracted} 
-                  suggestedIndex={getNextSuggestedIndex()}
-                />
-                <Reader 
-                  chapter={activeChapter || null} 
-                  rules={activeBook?.rules || []}
-                  currentOffset={currentOffset}
-                />
-              </div>
-            ) : (
+             {activeTab === 'reader' ? (
+              activeBook ? (
+                activeBook.currentChapterId ? (
+                  <Reader 
+                    chapter={activeChapterMetadata || null} rules={activeBook.rules} 
+                    currentOffset={state.currentOffset} theme={state.theme}
+                    debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))}
+                    onJumpToOffset={(off) => setState(p => ({ ...p, currentOffset: off }))}
+                    highlightMode={activeBook.settings.highlightMode}
+                    onBackToChapters={() => handleSelectBook(activeBook.id)}
+                    readerSettings={state.readerSettings}
+                  />
+                ) : (
+                  <ChapterFolderView 
+                    book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)}
+                    onOpenChapter={(id) => handleSelectChapter(activeBook.id, id)}
+                    onToggleFavorite={(id) => {}}
+                  />
+                )
+              ) : (
+                <div className="h-full flex flex-col items-center justify-center font-black tracking-widest text-lg opacity-40 uppercase">Select a book to begin</div>
+              )
+            ) : activeTab === 'rules' ? (
               <RuleManager 
-                rules={activeBook?.rules || []}
-                onAddRule={handleAddRule}
-                onUpdateRule={handleUpdateRule}
-                onDeleteRule={handleDeleteRule}
+                rules={activeBook?.rules || []} theme={state.theme}
+                onAddRule={r => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: [...b.rules, r] } : b) }))}
+                onUpdateRule={r => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: b.rules.map(old => old.id === r.id ? r : old) } : b) }))}
+                onDeleteRule={id => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: b.rules.filter(r => r.id !== id) } : b) }))}
+                onImportRules={nr => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: nr } : b) }))}
+              />
+            ) : (
+              <Settings 
+                settings={state.readerSettings} 
+                onUpdate={s => setState(p => ({ ...p, readerSettings: { ...p.readerSettings, ...s } }))} 
+                theme={state.theme}
+                keepAwake={state.keepAwake}
+                onSetKeepAwake={v => setState(p => ({ ...p, keepAwake: v }))}
+                onCheckForUpdates={async () => {
+                  try {
+                    const registration = await navigator.serviceWorker.getRegistration();
+                    if (registration) await registration.update();
+                  } catch (e) {}
+                }}
               />
             )}
           </div>
 
-          {activeChapter && (
+          {activeChapterMetadata && activeTab === 'reader' && (
             <Player 
-              isPlaying={isPlaying}
-              onPlay={speechController.isPaused ? handleResume : handlePlay}
-              onPause={handlePause}
-              onStop={handleStop}
-              onNext={playNext}
-              onPrev={() => {
-                 const currentIndex = activeBook?.chapters.findIndex(c => c.id === activeChapter.id) ?? 0;
-                 if (currentIndex > 0) handleSelectChapter(activeBook!.id, activeBook!.chapters[currentIndex-1].id);
-              }}
-              onSeek={(delta) => setCurrentOffset(prev => Math.max(0, prev + (delta * 10)))}
-              speed={state.playbackSpeed}
-              onSpeedChange={(v) => setState(prev => ({...prev, playbackSpeed: v}))}
-              selectedVoice={state.selectedVoiceName || ''}
-              onVoiceChange={(v) => setState(prev => ({...prev, selectedVoiceName: v}))}
+              isPlaying={isPlaying} onPlay={handlePlay} onPause={handlePause}
+              onStop={handlePause} onNext={() => {}} onPrev={() => {}} onSeek={d => setState(p => ({ ...p, currentOffset: p.currentOffset + d }))}
+              speed={state.playbackSpeed} onSpeedChange={v => setState(p => ({ ...p, playbackSpeed: v }))}
+              selectedVoice={state.selectedVoiceName || ''} onVoiceChange={v => setState(p => ({ ...p, selectedVoiceName: v }))}
+              theme={state.theme} onThemeChange={() => {}} progress={state.currentOffset} totalLength={playbackText.length}
+              wordCount={activeChapterMetadata.wordCount} onSeekToOffset={o => setState(p => ({ ...p, currentOffset: o }))}
+              sleepTimer={sleepTimerSeconds} onSetSleepTimer={setSleepTimerSeconds}
+              stopAfterChapter={stopAfterChapter} onSetStopAfterChapter={setStopAfterChapter}
+              useBookSettings={false} onSetUseBookSettings={() => {}}
+              highlightMode={activeBook?.settings.highlightMode || HighlightMode.WORD}
+              onSetHighlightMode={m => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, settings: { ...b.settings, highlightMode: m } } : b) }))}
             />
+          )}
+
+          {isAddChapterOpen && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+               <button onClick={() => setIsAddChapterOpen(false)} className="fixed top-8 right-8 z-[110] p-3 bg-white/10 text-white rounded-full"><X className="w-6 h-6" /></button>
+               <div className="w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-3xl shadow-2xl">
+                  <Extractor onChapterExtracted={handleChapterExtracted} suggestedIndex={activeBook?.chapters.length ? Math.max(...activeBook.chapters.map(c => c.index)) + 1 : 1} theme={state.theme} />
+               </div>
+            </div>
           )}
         </main>
       </div>

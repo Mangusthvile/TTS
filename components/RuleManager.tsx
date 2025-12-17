@@ -1,186 +1,143 @@
 
-import React, { useState } from 'react';
-import { Rule, CaseMode, Scope } from '../types';
-import { Plus, Trash2, Edit2, Check, X, Settings2, Info } from 'lucide-react';
+import React, { useState, useMemo, useRef } from 'react';
+import { Rule, CaseMode, Scope, Theme } from '../types';
+import { applyRules } from '../services/speechService';
+import { Plus, Trash2, Settings2, Eye, Zap, Download, Upload, X, Save } from 'lucide-react';
 
 interface RuleManagerProps {
   rules: Rule[];
+  theme: Theme;
   onAddRule: (rule: Rule) => void;
   onUpdateRule: (rule: Rule) => void;
   onDeleteRule: (id: string) => void;
+  onImportRules: (rules: Rule[]) => void;
 }
 
-const RuleManager: React.FC<RuleManagerProps> = ({ rules, onAddRule, onUpdateRule, onDeleteRule }) => {
+const RuleManager: React.FC<RuleManagerProps> = ({ rules, theme, onAddRule, onUpdateRule, onDeleteRule, onImportRules }) => {
   const [isAdding, setIsAdding] = useState(false);
   const [newRule, setNewRule] = useState<Partial<Rule>>({
-    find: '',
-    speakAs: '',
-    caseMode: CaseMode.IGNORE,
-    wholeWord: true,
-    scope: Scope.PHRASE,
-    priority: 1,
-    enabled: true
+    find: '', speakAs: '', caseMode: CaseMode.IGNORE, wholeWord: true, scope: Scope.PHRASE, priority: 1, enabled: true
   });
+  
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleSave = () => {
-    if (newRule.find && newRule.speakAs) {
-      onAddRule({
-        ...newRule as Rule,
-        id: crypto.randomUUID(),
-        priority: newRule.priority || 1,
-        enabled: true
-      });
-      setIsAdding(false);
-      setNewRule({
-        find: '',
-        speakAs: '',
-        caseMode: CaseMode.IGNORE,
-        wholeWord: true,
-        scope: Scope.PHRASE,
-        priority: 1,
-        enabled: true
-      });
-    }
+  const handleExport = () => {
+    const data = JSON.stringify(rules, null, 2);
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `talevox-rules-${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
-  return (
-    <div className="p-6 bg-slate-50 h-full overflow-y-auto">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h2 className="text-2xl font-bold text-slate-800">Pronunciation Rules</h2>
-          <p className="text-sm text-slate-500">Control how specific words or names are spoken.</p>
-        </div>
-        {!isAdding && (
-          <button 
-            onClick={() => setIsAdding(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-all font-semibold shadow-sm"
-          >
-            <Plus className="w-4 h-4" />
-            Add Rule
-          </button>
-        )}
-      </div>
+  const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const imported = JSON.parse(event.target?.result as string);
+        if (Array.isArray(imported)) onImportRules(imported);
+      } catch (err) { alert("Invalid rule file format."); }
+    };
+    reader.readAsText(file);
+  };
 
-      {isAdding && (
-        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 mb-6 animate-in slide-in-from-top duration-300">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-            <div className="space-y-2">
-              <label className="text-sm font-semibold text-slate-700">Find Text</label>
-              <input 
-                type="text" 
-                value={newRule.find}
-                onChange={e => setNewRule({...newRule, find: e.target.value})}
-                placeholder="e.g. Fang Yuan"
-                className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-semibold text-slate-700">Speak As</label>
-              <input 
-                type="text" 
-                value={newRule.speakAs}
-                onChange={e => setNewRule({...newRule, speakAs: e.target.value})}
-                placeholder="e.g. Jack"
-                className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
-              />
+  const isDark = theme === Theme.DARK;
+  const isSepia = theme === Theme.SEPIA;
+  const cardBg = isDark ? 'bg-slate-800 border-slate-700' : isSepia ? 'bg-[#f4ecd8] border-[#d8ccb6]' : 'bg-white border-black/10';
+  const textClass = isDark ? 'text-slate-100' : isSepia ? 'text-[#3c2f25]' : 'text-black';
+  const labelColor = isDark ? 'text-indigo-400' : 'text-indigo-600';
+
+  return (
+    <div className={`p-8 h-full overflow-y-auto transition-colors duration-500 ${isDark ? 'bg-slate-900' : isSepia ? 'bg-[#efe6d5]' : 'bg-slate-50'}`}>
+      <div className="max-w-5xl mx-auto space-y-12 pb-32">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+          <div>
+            <h2 className={`text-3xl font-black tracking-tight ${textClass}`}>Pronunciation Rules</h2>
+            <div className="flex gap-8 mt-4">
+              <button onClick={handleExport} className={`text-[11px] font-black uppercase tracking-widest flex items-center gap-2 hover:scale-105 transition-transform ${isDark ? 'text-slate-100' : 'text-slate-600'}`}><Download className="w-4 h-4" /> Export</button>
+              <button onClick={() => fileInputRef.current?.click()} className={`text-[11px] font-black uppercase tracking-widest flex items-center gap-2 hover:scale-105 transition-transform ${isDark ? 'text-slate-100' : 'text-slate-600'}`}><Upload className="w-4 h-4" /> Import</button>
+              <input type="file" ref={fileInputRef} onChange={handleImport} className="hidden" accept=".json" />
             </div>
           </div>
+          {!isAdding && (
+            <button 
+              onClick={() => setIsAdding(true)} 
+              className="px-8 py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase tracking-widest shadow-2xl shadow-indigo-600/30 flex items-center gap-2 hover:scale-105 active:scale-95 transition-all"
+            >
+              <Plus className="w-5 h-5" /> New Rule
+            </button>
+          )}
+        </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-            <div className="space-y-3">
-              <label className="text-sm font-semibold text-slate-700 flex items-center gap-2">
-                <Settings2 className="w-4 h-4" /> Case Matching
-              </label>
-              <div className="flex flex-wrap gap-2">
-                {Object.values(CaseMode).map(mode => (
-                  <button
-                    key={mode}
-                    onClick={() => setNewRule({...newRule, caseMode: mode})}
-                    className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all ${
-                      newRule.caseMode === mode 
-                        ? 'bg-indigo-600 text-white' 
-                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                    }`}
-                  >
-                    {mode}
-                  </button>
-                ))}
+        {isAdding && (
+          <div className={`p-8 rounded-[2.5rem] border shadow-2xl animate-in zoom-in-95 duration-200 ${cardBg}`}>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+              <div className="space-y-2">
+                <label className={`text-[11px] font-black uppercase tracking-widest ml-1 ${labelColor}`}>Find Text</label>
+                <input 
+                  type="text" 
+                  value={newRule.find} 
+                  onChange={e => setNewRule({...newRule, find: e.target.value})} 
+                  placeholder="e.g. MC" 
+                  className={`w-full px-5 py-4 rounded-xl border outline-none font-black ${isDark ? 'bg-slate-900 border-slate-700 text-white' : 'bg-slate-50 border-slate-200 text-black'}`} 
+                />
+              </div>
+              <div className="space-y-2">
+                <label className={`text-[11px] font-black uppercase tracking-widest ml-1 ${labelColor}`}>Speak As</label>
+                <input 
+                  type="text" 
+                  value={newRule.speakAs} 
+                  onChange={e => setNewRule({...newRule, speakAs: e.target.value})} 
+                  placeholder="e.g. Master" 
+                  className={`w-full px-5 py-4 rounded-xl border outline-none font-black ${isDark ? 'bg-slate-900 border-slate-700 text-white' : 'bg-slate-50 border-slate-200 text-black'}`} 
+                />
               </div>
             </div>
-
-            <div className="space-y-3">
-              <label className="text-sm font-semibold text-slate-700">Whole Word Only</label>
-              <button
-                onClick={() => setNewRule({...newRule, wholeWord: !newRule.wholeWord})}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ring-offset-2 focus:ring-2 focus:ring-indigo-500 ${
-                  newRule.wholeWord ? 'bg-indigo-600' : 'bg-slate-200'
-                }`}
+            <div className="flex justify-end gap-5">
+              <button onClick={() => setIsAdding(false)} className={`px-8 py-3 text-xs font-black uppercase tracking-widest ${isDark ? 'text-slate-400 hover:text-white' : 'text-slate-500 hover:text-black'}`}>Cancel</button>
+              <button 
+                onClick={() => { 
+                  if (!newRule.find || !newRule.speakAs) return;
+                  onAddRule({...newRule as Rule, id: crypto.randomUUID()}); 
+                  setIsAdding(false); 
+                }} 
+                className="px-12 py-4 bg-indigo-600 text-white rounded-xl font-black uppercase tracking-widest shadow-xl flex items-center gap-2 hover:bg-indigo-700"
               >
-                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                  newRule.wholeWord ? 'translate-x-6' : 'translate-x-1'
-                }`} />
+                <Save className="w-4 h-4" /> Save
               </button>
             </div>
-
-            <div className="space-y-3">
-              <label className="text-sm font-semibold text-slate-700">Priority (Higher First)</label>
-              <input 
-                type="number" 
-                value={newRule.priority}
-                onChange={e => setNewRule({...newRule, priority: parseInt(e.target.value) || 1})}
-                className="w-full px-3 py-1.5 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-sm"
-              />
-            </div>
           </div>
+        )}
 
-          <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
-            <button 
-              onClick={() => setIsAdding(false)}
-              className="px-4 py-2 text-slate-500 font-semibold hover:text-slate-700 transition-colors"
-            >
-              Cancel
-            </button>
-            <button 
-              onClick={handleSave}
-              className="px-6 py-2 bg-indigo-600 text-white rounded-lg font-bold shadow-md hover:bg-indigo-700"
-            >
-              Save Rule
-            </button>
+        {rules.length === 0 ? (
+          <div className={`p-20 text-center rounded-[3rem] border-2 border-dashed ${isDark ? 'border-slate-800' : 'border-indigo-600/10'}`}>
+            <Zap className={`w-16 h-16 mx-auto mb-6 opacity-40 ${isDark ? 'text-slate-600' : 'text-indigo-600'}`} />
+            <h3 className={`text-xl font-black ${textClass}`}>Your Rulebook is Empty</h3>
+            <p className={`mt-3 font-bold text-[14px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Add rules to fix mispronounced names or terms unique to your stories.</p>
           </div>
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        {rules.map(rule => (
-          <div key={rule.id} className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 group">
-            <div className="flex justify-between items-start mb-2">
-              <div className="flex items-center gap-3">
-                <span className="font-mono text-sm bg-slate-100 px-2 py-1 rounded text-slate-600">"{rule.find}"</span>
-                <span className="text-slate-300">→</span>
-                <span className="font-bold text-indigo-600">{rule.speakAs}</span>
-              </div>
-              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {rules.map(rule => (
+              <div key={rule.id} className={`p-7 rounded-[1.5rem] border transition-all hover:shadow-lg flex items-center justify-between group ${cardBg}`}>
+                <div className="flex flex-col gap-1 min-w-0">
+                  <div className="flex items-center gap-3">
+                    <span className={`font-mono text-[13px] font-black truncate px-2 py-0.5 rounded ${isDark ? 'bg-slate-950 text-slate-100' : 'bg-black/5 text-black'}`}>"{rule.find}"</span>
+                    <span className="text-indigo-500 font-black">→</span>
+                  </div>
+                  <span className={`font-black text-xl ${isDark ? 'text-indigo-400' : 'text-indigo-700'} truncate`}>{rule.speakAs}</span>
+                </div>
                 <button 
-                  onClick={() => onDeleteRule(rule.id)}
-                  className="p-1.5 text-slate-400 hover:text-red-500 rounded-lg"
+                  onClick={() => onDeleteRule(rule.id)} 
+                  className={`p-3.5 rounded-xl transition-all ${isDark ? 'text-slate-500 hover:text-red-500 hover:bg-white/10' : 'text-slate-400 hover:text-red-600 hover:bg-black/5'} opacity-0 group-hover:opacity-100`}
                 >
-                  <Trash2 className="w-4 h-4" />
+                  <Trash2 className="w-5.5 h-5.5" />
                 </button>
               </div>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <span className="text-[10px] bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full font-bold uppercase">{rule.caseMode}</span>
-              {rule.wholeWord && (
-                <span className="text-[10px] bg-amber-50 text-amber-600 px-2 py-0.5 rounded-full font-bold uppercase">Whole Word</span>
-              )}
-              <span className="text-[10px] bg-slate-50 text-slate-400 px-2 py-0.5 rounded-full font-bold uppercase">Prio: {rule.priority}</span>
-            </div>
-          </div>
-        ))}
-        {rules.length === 0 && !isAdding && (
-          <div className="col-span-full py-12 text-center bg-white rounded-2xl border-2 border-dashed border-slate-200">
-            <Info className="w-8 h-8 text-slate-300 mx-auto mb-3" />
-            <p className="text-slate-400">No rules yet. Rules allow you to fix bad pronunciation for names or jargon.</p>
+            ))}
           </div>
         )}
       </div>

@@ -7,11 +7,9 @@ export async function saveChapterToFile(bookHandle: FileSystemDirectoryHandle, c
     const writable = await fileHandle.createWritable();
     await writable.write(chapter.content);
     await writable.close();
-    
-    // Update manifest
     await updateManifest(bookHandle, chapter);
   } catch (err) {
-    console.error('Failed to save file:', err);
+    console.error('File storage failed:', err);
   }
 }
 
@@ -19,31 +17,23 @@ async function updateManifest(bookHandle: FileSystemDirectoryHandle, newChapter:
   try {
     let manifest: any = { chapters: [] };
     try {
-      const manifestHandle = await bookHandle.getFileHandle('manifest.json', { create: true });
+      const manifestHandle = await bookHandle.getFileHandle('manifest.json', { create: false });
       const file = await manifestHandle.getFile();
       const text = await file.text();
       if (text) manifest = JSON.parse(text);
-    } catch (e) {
-      // Manifest might not exist yet
-    }
+    } catch (e) { /* Expected if new book */ }
 
-    // Replace or add
-    const existingIndex = manifest.chapters.findIndex((c: any) => c.filename === newChapter.filename);
     const entry = {
       index: newChapter.index,
       title: newChapter.title,
-      source_url: newChapter.sourceUrl,
       filename: newChapter.filename,
       word_count: newChapter.wordCount
     };
 
-    if (existingIndex > -1) {
-      manifest.chapters[existingIndex] = entry;
-    } else {
-      manifest.chapters.push(entry);
-    }
+    const existingIndex = manifest.chapters.findIndex((c: any) => c.filename === newChapter.filename);
+    if (existingIndex > -1) manifest.chapters[existingIndex] = entry;
+    else manifest.chapters.push(entry);
     
-    // Sort by index to maintain reader order
     manifest.chapters.sort((a: any, b: any) => a.index - b.index);
 
     const manifestHandle = await bookHandle.getFileHandle('manifest.json', { create: true });
@@ -51,6 +41,6 @@ async function updateManifest(bookHandle: FileSystemDirectoryHandle, newChapter:
     await writable.write(JSON.stringify(manifest, null, 2));
     await writable.close();
   } catch (err) {
-    console.error('Failed to update manifest:', err);
+    console.error('Manifest update failed:', err);
   }
 }
