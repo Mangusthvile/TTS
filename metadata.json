@@ -1,0 +1,7 @@
+{
+  "name": "VoxLib: Intelligent TTS Reader",
+  "description": "A feature-rich Text-to-Speech reader with automated web chapter extraction, persistent library management, and a powerful custom pronunciation rules system.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
