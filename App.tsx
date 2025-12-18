@@ -9,7 +9,7 @@ import Settings from './components/Settings';
 import Extractor from './components/Extractor';
 import ChapterFolderView from './components/ChapterFolderView';
 import { speechController, applyRules } from './services/speechService';
-import { authenticateDrive, fetchDriveFile, uploadToDrive, createDriveFolder, findFileSync } from './services/driveService';
+import { authenticateDrive, fetchDriveFile, uploadToDrive, createDriveFolder, findFileSync, findFolderSync } from './services/driveService';
 import { BookText, Zap, Sun, Coffee, Moon, X, Settings as SettingsIcon, Menu, RefreshCw, Loader2, Cloud } from 'lucide-react';
 
 const SYNC_FILENAME = 'talevox_sync_manifest.json';
@@ -80,7 +80,6 @@ const App: React.FC = () => {
     }));
   }, [state]);
 
-  // Check if we are in an iframe (e.g. AI Studio) where Service Workers often fail due to origin mismatch
   const isIframe = useMemo(() => {
     try {
       return window.self !== window.top;
@@ -89,7 +88,6 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // Handle Cloud Syncing
   const handleSync = useCallback(async (manual = false) => {
     if (!state.driveToken) return;
     setIsSyncing(true);
@@ -118,14 +116,13 @@ const App: React.FC = () => {
         });
       }
 
-      // After pulling, push current state back to manifest
       const manifestContent = JSON.stringify({
         books: stateRef.current.books.map(({ directoryHandle, ...b }) => b),
         readerSettings: stateRef.current.readerSettings,
         updatedAt: new Date().toISOString()
       });
 
-      await uploadToDrive(state.driveToken, null, SYNC_FILENAME, manifestContent, existingFileId || undefined);
+      await uploadToDrive(state.driveToken, null, SYNC_FILENAME, manifestContent, existingFileId || undefined, 'application/json');
       if (manual) alert("Cloud Sync Complete");
     } catch (err) {
       console.error("Sync failed:", err);
@@ -140,7 +137,6 @@ const App: React.FC = () => {
     }
   }, [state.driveToken]);
 
-  // Auto-sync on load
   useEffect(() => {
     if (state.driveToken) handleSync();
   }, [state.driveToken, handleSync]);
@@ -155,8 +151,8 @@ const App: React.FC = () => {
       if (err instanceof Error && err.message === 'MISSING_CLIENT_ID') {
         alert("Action Required: Please provide a valid Google OAuth Client ID in Settings.");
         setActiveTab('settings');
-      } else if (err instanceof Error && err.message.includes('idpiframe_initialization_failed')) {
-        alert("Auth initialization failed. Ensure you have authorized your current URL (" + window.location.origin + ") in the Google Cloud Console.");
+      } else if (err instanceof Error && err.message === 'GSI_NOT_LOADED') {
+        alert("Google library is still loading. Please wait a moment and try again.");
       } else {
         alert("Failed to connect to Google: " + (err instanceof Error ? err.message : "Unknown error"));
       }
@@ -168,14 +164,11 @@ const App: React.FC = () => {
     if (!isIframe && 'serviceWorker' in navigator) {
       try {
         const reg = await navigator.serviceWorker.getRegistration();
-        if (reg) {
-          await reg.update();
-        }
+        if (reg) await reg.update();
       } catch (err) {
         console.warn("Service Worker update failed:", err);
       }
     }
-    // Hard refresh clears memory and fetches potentially new index.html/manifest from GitHub/Server
     window.location.reload();
   };
 
@@ -234,7 +227,11 @@ const App: React.FC = () => {
     if (backend === StorageBackend.DRIVE) {
       try {
         const token = state.driveToken || await handleLinkCloud();
-        driveFolderId = await createDriveFolder(token, `Talevox - ${title}`);
+        const folderName = `Talevox - ${title}`;
+        driveFolderId = await findFolderSync(token, folderName);
+        if (!driveFolderId) {
+          driveFolderId = await createDriveFolder(token, folderName);
+        }
       } catch (err) { 
         console.error("Add Drive Book Error:", err);
         throw err;
@@ -285,7 +282,7 @@ const App: React.FC = () => {
       filename: `ch_${data.index}_${Date.now()}.txt`, sourceUrl: data.url
     };
     if (activeBook.backend === StorageBackend.DRIVE && state.driveToken) {
-      newChapter.driveId = await uploadToDrive(state.driveToken, activeBook.driveFolderId!, newChapter.filename, data.content);
+      newChapter.driveId = await uploadToDrive(state.driveToken, activeBook.driveFolderId!, newChapter.filename, data.content, undefined, 'text/plain');
     } else if (activeBook.backend === StorageBackend.LOCAL && activeBook.directoryHandle) {
       const fileHandle = await activeBook.directoryHandle.getFileHandle(newChapter.filename, { create: true });
       const writable = await fileHandle.createWritable();
