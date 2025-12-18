@@ -49,7 +49,7 @@ const Settings: React.FC<SettingsProps> = ({
         <div className="flex justify-between items-end">
           <div>
             <h2 className={`text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
-            <p className={`text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v1.2.3</p>
+            <p className={`text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v1.2.4</p>
           </div>
           <button 
             onClick={onCheckForUpdates}
@@ -78,7 +78,7 @@ const Settings: React.FC<SettingsProps> = ({
                 />
                 <p className="text-[9px] font-bold opacity-40 leading-relaxed">
                    Required for sync. Create one at <a href="https://console.cloud.google.com" target="_blank" rel="noopener noreferrer" className="underline">Google Cloud Console</a>. 
-                   Authorized origin: <span className="text-indigo-500 select-all font-mono">{window.location.origin}</span>
+                   Authorized JavaScript Origin: <span className="text-indigo-500 select-all font-mono">{window.location.origin}</span>
                 </p>
              </div>
 
@@ -249,7 +249,7 @@ const Settings: React.FC<SettingsProps> = ({
         </div>
 
         <div className={`text-center font-black uppercase tracking-[0.4em] text-[11px] pt-12 ${isDark ? 'text-white/20' : 'text-black/30'}`}>
-          VoxLib Engine v1.2.3
+          VoxLib Engine v1.2.4
         </div>
       </div>
     </div>

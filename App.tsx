@@ -80,6 +80,15 @@ const App: React.FC = () => {
     }));
   }, [state]);
 
+  // Check if we are in an iframe (e.g. AI Studio) where Service Workers often fail due to origin mismatch
+  const isIframe = useMemo(() => {
+    try {
+      return window.self !== window.top;
+    } catch (e) {
+      return true;
+    }
+  }, []);
+
   // Handle Cloud Syncing
   const handleSync = useCallback(async (manual = false) => {
     if (!state.driveToken) return;
@@ -156,16 +165,17 @@ const App: React.FC = () => {
   };
 
   const handleUpdateCheck = async () => {
-    try {
-      if ('serviceWorker' in navigator) {
+    if (!isIframe && 'serviceWorker' in navigator) {
+      try {
         const reg = await navigator.serviceWorker.getRegistration();
         if (reg) {
           await reg.update();
         }
+      } catch (err) {
+        console.warn("Service Worker update failed:", err);
       }
-    } catch (err) {
-      console.warn("Service Worker update skipped:", err);
     }
+    // Hard refresh clears memory and fetches potentially new index.html/manifest from GitHub/Server
     window.location.reload();
   };
 
@@ -226,7 +236,6 @@ const App: React.FC = () => {
         const token = state.driveToken || await handleLinkCloud();
         driveFolderId = await createDriveFolder(token, `Talevox - ${title}`);
       } catch (err) { 
-        // handleLinkCloud already alerts
         console.error("Add Drive Book Error:", err);
         throw err;
       }

@@ -2,9 +2,9 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
-import pkg from './package.json';
 
 export default defineConfig({
+  base: './',
   plugins: [
     react(),
     VitePWA({
@@ -62,7 +62,7 @@ export default defineConfig({
     })
   ],
   define: {
-    __APP_VERSION__: JSON.stringify('1.2.3'),
+    __APP_VERSION__: JSON.stringify('1.2.4'),
   },
   server: {
     port: 3000
