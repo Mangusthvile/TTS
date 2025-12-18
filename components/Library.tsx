@@ -50,6 +50,7 @@ const Library: React.FC<LibraryProps> = ({
     if (!newTitle.trim()) return;
     setIsProcessingAdd(true);
     try {
+      console.debug(`Adding book '${newTitle}' with backend ${backend} and driveFolderId: ${driveFolderId}`);
       await onAddBook(newTitle, backend, handle, driveFolderId);
       setIsAdding(false);
       setIsPickingFolder(false);
@@ -148,7 +149,7 @@ const Library: React.FC<LibraryProps> = ({
                   className={`flex items-center justify-between p-3 rounded-xl text-xs font-black border transition-all ${isDark ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-200 text-black hover:border-indigo-600'}`}
                 >
                   <div className="flex items-center gap-3">
-                    <Cloud className="w-4 h-4 text-indigo-500" /> Choose Drive Folder
+                    <Cloud className="w-4 h-4 text-indigo-500" /> Google Drive
                   </div>
                   {isProcessingAdd && <Loader2 className="w-3.5 h-3.5 animate-spin opacity-60" />}
                 </button>
@@ -175,7 +176,7 @@ const Library: React.FC<LibraryProps> = ({
             <div className={`p-5 rounded-3xl border space-y-4 mb-4 flex flex-col h-[400px] ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-indigo-50 border-indigo-100'}`}>
               <div className="flex items-center gap-2">
                  <button onClick={() => setIsPickingFolder(false)} className="p-1 rounded-lg hover:bg-black/5"><ChevronLeft className="w-4 h-4 text-indigo-600" /></button>
-                 <span className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Select Drive Folder</span>
+                 <span className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Select Folder</span>
               </div>
               
               <div className="relative">
@@ -205,7 +206,7 @@ const Library: React.FC<LibraryProps> = ({
                   ))
                 )}
               </div>
-              <p className="text-[9px] font-bold opacity-40 leading-tight">Only folders with "Metadata Readonly" access are shown.</p>
+              <p className="text-[9px] font-bold opacity-40 leading-tight">Shared Drives and Folders you've added to Drive are supported.</p>
             </div>
           )}
 

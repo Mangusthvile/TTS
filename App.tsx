@@ -8,7 +8,7 @@ import Settings from './components/Settings';
 import Extractor from './components/Extractor';
 import ChapterFolderView from './components/ChapterFolderView';
 import { speechController, applyRules } from './services/speechService';
-import { authenticateDrive, fetchDriveFile, uploadToDrive, createDriveFolder, findFileSync, findFolderSync } from './services/driveService';
+import { authenticateDrive, fetchDriveFile, uploadToDrive, createDriveFolder, findFileSync, findFolderSync, listFilesInFolder } from './services/driveService';
 import { BookText, Zap, Sun, Coffee, Moon, X, Settings as SettingsIcon, Menu, RefreshCw, Loader2 } from 'lucide-react';
 
 const SYNC_FILENAME = 'talevox_sync_manifest.json';
@@ -109,7 +109,9 @@ const App: React.FC = () => {
               mergedBooks[localIdx] = {
                 ...remoteBook,
                 directoryHandle: mergedBooks[localIdx].directoryHandle,
-                backend: mergedBooks[localIdx].backend 
+                backend: mergedBooks[localIdx].backend,
+                // Ensure drive folder ID from local is preserved if not in remote
+                driveFolderId: remoteBook.driveFolderId || mergedBooks[localIdx].driveFolderId
               };
             }
           });
@@ -127,7 +129,7 @@ const App: React.FC = () => {
       if (manual) alert("Cloud Sync Complete");
     } catch (err) {
       console.error("Sync failed:", err);
-      if (err instanceof Error && err.message === 'UNAUTHORIZED') {
+      if (err instanceof Error && (err.message.includes('401') || err.message === 'UNAUTHORIZED')) {
         setState(prev => ({ ...prev, driveToken: undefined }));
         if (manual) alert("Session expired. Please link your account again.");
       } else if (manual) {
@@ -201,6 +203,7 @@ const App: React.FC = () => {
     try {
       let content = "";
       if (book.backend === StorageBackend.DRIVE && state.driveToken) {
+        console.debug(`Loading content for chapter '${chapter.title}' from Drive ID: ${chapter.driveId}`);
         content = await fetchDriveFile(state.driveToken, chapter.driveId!);
       } else if (book.backend === StorageBackend.LOCAL && book.directoryHandle) {
         const fileHandle = await book.directoryHandle.getFileHandle(chapter.filename);
@@ -211,6 +214,7 @@ const App: React.FC = () => {
       setActiveChapterText(content);
     } catch (err) {
       console.error("Failed to load chapter:", err);
+      alert(`Error loading chapter: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
       setIsLoadingChapter(false);
     }
@@ -224,17 +228,37 @@ const App: React.FC = () => {
 
   const handleAddBook = async (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string) => {
     let finalDriveFolderId: string | undefined = driveFolderId;
+    let initialChapters: Chapter[] = [];
     
-    if (backend === StorageBackend.DRIVE && !finalDriveFolderId) {
+    if (backend === StorageBackend.DRIVE) {
       try {
         const token = state.driveToken || await handleLinkCloud();
-        const folderName = `Talevox - ${title}`;
-        const foundId = await findFolderSync(token, folderName);
-        if (foundId) {
-          finalDriveFolderId = foundId;
-        } else {
-          finalDriveFolderId = await createDriveFolder(token, folderName);
+        
+        if (!finalDriveFolderId) {
+          const folderName = `Talevox - ${title}`;
+          const foundId = await findFolderSync(token, folderName);
+          if (foundId) {
+            finalDriveFolderId = foundId;
+          } else {
+            finalDriveFolderId = await createDriveFolder(token, folderName);
+          }
         }
+        
+        console.debug(`Book linked to Drive folder ID: ${finalDriveFolderId}`);
+        // Optionally scan for existing .txt files
+        const files = await listFilesInFolder(token, finalDriveFolderId);
+        const txtFiles = files.filter(f => f.name.toLowerCase().endsWith('.txt'));
+        
+        initialChapters = txtFiles.map((f, i) => ({
+          id: crypto.randomUUID(),
+          index: i + 1,
+          title: f.name.replace(/\.txt$/i, ''),
+          content: '', // Load on demand
+          driveId: f.id,
+          filename: f.name,
+          progress: 0,
+          wordCount: 0
+        }));
       } catch (err) { 
         console.error("Add Drive Book Error:", err);
         throw err;
@@ -245,7 +269,7 @@ const App: React.FC = () => {
       id: crypto.randomUUID(),
       title, 
       backend, 
-      chapters: [], 
+      chapters: initialChapters, 
       rules: [], 
       directoryHandle, 
       driveFolderId: finalDriveFolderId,
@@ -253,7 +277,7 @@ const App: React.FC = () => {
     };
     
     setState(prev => ({ ...prev, books: [...prev.books, newBook], activeBookId: newBook.id }));
-    setIsAddChapterOpen(true);
+    setIsAddChapterOpen(initialChapters.length === 0);
     setIsSidebarOpen(false);
   };
 
@@ -291,7 +315,9 @@ const App: React.FC = () => {
       wordCount: data.content.trim().split(/\s+/).length, progress: 0,
       filename: `ch_${data.index}_${Date.now()}.txt`, sourceUrl: data.url
     };
+    
     if (activeBook.backend === StorageBackend.DRIVE && state.driveToken) {
+      console.debug(`Uploading extracted chapter to specific folder ID: ${activeBook.driveFolderId}`);
       newChapter.driveId = await uploadToDrive(state.driveToken, activeBook.driveFolderId!, newChapter.filename, data.content, undefined, 'text/plain');
     } else if (activeBook.backend === StorageBackend.LOCAL && activeBook.directoryHandle) {
       const fileHandle = await activeBook.directoryHandle.getFileHandle(newChapter.filename, { create: true });
@@ -299,6 +325,7 @@ const App: React.FC = () => {
       await writable.write(data.content);
       await writable.close();
     }
+    
     setState(prev => ({
       ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, chapters: [...b.chapters, newChapter].sort((a, b) => a.index - b.index) } : b)
     }));

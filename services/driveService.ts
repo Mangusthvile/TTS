@@ -1,6 +1,6 @@
 /**
  * Talevox Google Drive Service
- * Handles authentication and file synchronization with enhanced error reporting.
+ * Handles authentication and file synchronization with enhanced error reporting and Shared Drive support.
  */
 
 export async function authenticateDrive(explicitClientId?: string): Promise<string> {
@@ -18,7 +18,6 @@ export async function authenticateDrive(explicitClientId?: string): Promise<stri
 
       const client = (window as any).google.accounts.oauth2.initTokenClient({
         client_id: CLIENT_ID,
-        // Using requested scopes for specific app access + metadata reading for folder picking
         scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.metadata.readonly',
         callback: (response: any) => {
           if (response.error) {
@@ -43,7 +42,6 @@ async function getErrorFromResponse(response: Response, fallbackPrefix: string):
   let details = '';
   let reason = '';
   try {
-    // Clone response so we can read it twice if needed
     const resClone = response.clone();
     const errorJson = await resClone.json();
     details = errorJson.error?.message || '';
@@ -52,12 +50,10 @@ async function getErrorFromResponse(response: Response, fallbackPrefix: string):
     try { details = await response.text(); } catch (e2) {}
   }
 
-  // 401: Token expired or invalid
   if (response.status === 401) {
     return new Error('Authentication token expired or invalid (401). Please re-link your Google account.');
   }
 
-  // 403: Forbidden - often configuration or scope issues
   if (response.status === 403) {
     if (reason === 'accessNotConfigured') {
       return new Error('Google Drive API is not enabled for this project (403). You must enable "Google Drive API" in the Google Cloud Console.');
@@ -68,24 +64,22 @@ async function getErrorFromResponse(response: Response, fallbackPrefix: string):
     return new Error(`Access forbidden (403): ${details || 'Check your OAuth and GCP project settings.'}`);
   }
 
-  // 404: Resource not found
   if (response.status === 404) {
     return new Error('Requested resource not found (404). The folder or file ID might be incorrect or has been deleted from Drive.');
   }
 
-  // 429: Rate limit
   if (response.status === 429) {
     return new Error('Too many requests (429). Google Drive API rate limit reached. Please wait a moment before trying again.');
   }
 
-  // General error with as much info as possible
   return new Error(`${details || fallbackPrefix} (HTTP ${response.status})`);
 }
 
 export async function listFolders(token: string): Promise<{id: string, name: string}[]> {
   const q = encodeURIComponent("mimeType = 'application/vnd.google-apps.folder' and trashed = false");
-  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)&orderBy=name&pageSize=100`;
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)&orderBy=name&pageSize=100&includeItemsFromAllDrives=true&supportsAllDrives=true`;
   
+  console.debug("Listing folders...");
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` }
   });
@@ -98,9 +92,29 @@ export async function listFolders(token: string): Promise<{id: string, name: str
   return data.files || [];
 }
 
+/**
+ * Lists files within a specific folder.
+ */
+export async function listFilesInFolder(token: string, folderId: string): Promise<{id: string, name: string}[]> {
+  const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, mimeType)&orderBy=name&pageSize=1000&includeItemsFromAllDrives=true&supportsAllDrives=true`;
+  
+  console.debug(`Listing files in folder: ${folderId}`);
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  
+  if (!response.ok) {
+    throw await getErrorFromResponse(response, 'DRIVE_LIST_FILES_ERROR');
+  }
+  
+  const data = await response.json();
+  return data.files || [];
+}
+
 export async function findFileSync(token: string, name: string): Promise<string | null> {
   const q = encodeURIComponent(`name = '${name}' and trashed = false`);
-  const response = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)`, {
+  const response = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)&includeItemsFromAllDrives=true&supportsAllDrives=true`, {
     headers: { Authorization: `Bearer ${token}` }
   });
   
@@ -114,17 +128,17 @@ export async function findFileSync(token: string, name: string): Promise<string 
 
 export async function findFolderSync(token: string, name: string): Promise<string | null> {
   const q = encodeURIComponent(`name = '${name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
-  const response = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)`, {
+  const response = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)&includeItemsFromAllDrives=true&supportsAllDrives=true`, {
     headers: { Authorization: `Bearer ${token}` }
   });
   
-  if (!response.ok) return null; // Silently fail for discovery
+  if (!response.ok) return null;
   const data = await response.json();
   return data.files && data.files.length > 0 ? data.files[0].id : null;
 }
 
 export async function fetchDriveFile(token: string, fileId: string): Promise<string> {
-  const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+  const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`, {
     headers: { Authorization: `Bearer ${token}` }
   });
   
@@ -153,7 +167,12 @@ export async function uploadToDrive(
     name: filename,
     mimeType: mimeType
   };
-  if (folderId && !existingFileId) metadata.parents = [folderId];
+  if (folderId && !existingFileId) {
+    metadata.parents = [folderId];
+    console.debug(`Uploading new file '${filename}' to folder: ${folderId}`);
+  } else if (existingFileId) {
+    console.debug(`Updating existing file ID: ${existingFileId}`);
+  }
 
   const multipartRequestBody =
     delimiter +
@@ -165,8 +184,8 @@ export async function uploadToDrive(
     close_delim;
 
   const url = existingFileId 
-    ? `https://www.googleapis.com/upload/drive/v3/files/${existingFileId}?uploadType=multipart`
-    : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id';
+    ? `https://www.googleapis.com/upload/drive/v3/files/${existingFileId}?uploadType=multipart&supportsAllDrives=true`
+    : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&supportsAllDrives=true';
 
   const method = existingFileId ? 'PATCH' : 'POST';
 
@@ -188,7 +207,7 @@ export async function uploadToDrive(
 }
 
 export async function createDriveFolder(token: string, name: string): Promise<string> {
-  const response = await fetch('https://www.googleapis.com/drive/v3/files', {
+  const response = await fetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
     method: 'POST',
     headers: { 
       Authorization: `Bearer ${token}`,
