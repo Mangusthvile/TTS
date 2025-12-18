@@ -25,7 +25,7 @@ export default defineConfig({
           },
           {
             src: 'https://cdn-icons-png.flaticon.com/512/3145/3145761.png',
-            sizes: 512,
+            sizes: '512x512',
             type: 'image/png'
           }
         ]
