@@ -1,4 +1,3 @@
-
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
@@ -10,7 +9,7 @@ declare global {
 }
 
 // Set version on window for settings display
-window.__APP_VERSION__ = '1.2.4';
+window.__APP_VERSION__ = '2.0.0';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
