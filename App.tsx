@@ -223,13 +223,16 @@ const App: React.FC = () => {
   }, [state.activeBookId, activeBook?.currentChapterId, loadChapterContent]);
 
   const handleAddBook = async (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string) => {
-    let finalDriveFolderId = driveFolderId;
+    let finalDriveFolderId: string | undefined = driveFolderId;
+    
     if (backend === StorageBackend.DRIVE && !finalDriveFolderId) {
       try {
         const token = state.driveToken || await handleLinkCloud();
         const folderName = `Talevox - ${title}`;
-        finalDriveFolderId = await findFolderSync(token, folderName);
-        if (!finalDriveFolderId) {
+        const foundId = await findFolderSync(token, folderName);
+        if (foundId) {
+          finalDriveFolderId = foundId;
+        } else {
           finalDriveFolderId = await createDriveFolder(token, folderName);
         }
       } catch (err) { 
@@ -237,11 +240,18 @@ const App: React.FC = () => {
         throw err;
       }
     }
+    
     const newBook: Book = {
       id: crypto.randomUUID(),
-      title, backend, chapters: [], rules: [], directoryHandle, driveFolderId: finalDriveFolderId,
+      title, 
+      backend, 
+      chapters: [], 
+      rules: [], 
+      directoryHandle, 
+      driveFolderId: finalDriveFolderId,
       settings: { useBookSettings: false, highlightMode: HighlightMode.WORD }
     };
+    
     setState(prev => ({ ...prev, books: [...prev.books, newBook], activeBookId: newBook.id }));
     setIsAddChapterOpen(true);
     setIsSidebarOpen(false);
