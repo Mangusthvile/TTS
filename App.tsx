@@ -110,8 +110,8 @@ const App: React.FC = () => {
                 ...remoteBook,
                 directoryHandle: mergedBooks[localIdx].directoryHandle,
                 backend: mergedBooks[localIdx].backend,
-                // Ensure drive folder ID from local is preserved if not in remote
-                driveFolderId: remoteBook.driveFolderId || mergedBooks[localIdx].driveFolderId
+                driveFolderId: remoteBook.driveFolderId || mergedBooks[localIdx].driveFolderId,
+                driveFolderName: remoteBook.driveFolderName || mergedBooks[localIdx].driveFolderName
               };
             }
           });
@@ -203,7 +203,7 @@ const App: React.FC = () => {
     try {
       let content = "";
       if (book.backend === StorageBackend.DRIVE && state.driveToken) {
-        console.debug(`Loading content for chapter '${chapter.title}' from Drive ID: ${chapter.driveId}`);
+        console.debug(`[App] Loading content from specific Drive ID: ${chapter.driveId}`);
         content = await fetchDriveFile(state.driveToken, chapter.driveId!);
       } else if (book.backend === StorageBackend.LOCAL && book.directoryHandle) {
         const fileHandle = await book.directoryHandle.getFileHandle(chapter.filename);
@@ -226,8 +226,9 @@ const App: React.FC = () => {
     } else { setActiveChapterText(''); }
   }, [state.activeBookId, activeBook?.currentChapterId, loadChapterContent]);
 
-  const handleAddBook = async (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string) => {
+  const handleAddBook = async (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string, driveFolderName?: string) => {
     let finalDriveFolderId: string | undefined = driveFolderId;
+    let finalDriveFolderName: string | undefined = driveFolderName;
     let initialChapters: Chapter[] = [];
     
     if (backend === StorageBackend.DRIVE) {
@@ -239,14 +240,16 @@ const App: React.FC = () => {
           const foundId = await findFolderSync(token, folderName);
           if (foundId) {
             finalDriveFolderId = foundId;
+            finalDriveFolderName = folderName;
           } else {
             finalDriveFolderId = await createDriveFolder(token, folderName);
+            finalDriveFolderName = folderName;
           }
         }
         
-        console.debug(`Book linked to Drive folder ID: ${finalDriveFolderId}`);
-        // Optionally scan for existing .txt files
-        const files = await listFilesInFolder(token, finalDriveFolderId);
+        console.debug(`[App] Book linked to Folder: ${finalDriveFolderName} (${finalDriveFolderId})`);
+        // Scan for existing .txt files strictly inside this folder
+        const files = await listFilesInFolder(token, finalDriveFolderId!);
         const txtFiles = files.filter(f => f.name.toLowerCase().endsWith('.txt'));
         
         initialChapters = txtFiles.map((f, i) => ({
@@ -273,6 +276,7 @@ const App: React.FC = () => {
       rules: [], 
       directoryHandle, 
       driveFolderId: finalDriveFolderId,
+      driveFolderName: finalDriveFolderName,
       settings: { useBookSettings: false, highlightMode: HighlightMode.WORD }
     };
     
@@ -317,7 +321,7 @@ const App: React.FC = () => {
     };
     
     if (activeBook.backend === StorageBackend.DRIVE && state.driveToken) {
-      console.debug(`Uploading extracted chapter to specific folder ID: ${activeBook.driveFolderId}`);
+      console.debug(`[App] Uploading to linked folder ID: ${activeBook.driveFolderId}`);
       newChapter.driveId = await uploadToDrive(state.driveToken, activeBook.driveFolderId!, newChapter.filename, data.content, undefined, 'text/plain');
     } else if (activeBook.backend === StorageBackend.LOCAL && activeBook.directoryHandle) {
       const fileHandle = await activeBook.directoryHandle.getFileHandle(newChapter.filename, { create: true });

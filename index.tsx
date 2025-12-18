@@ -5,11 +5,13 @@ import App from './App';
 declare global {
   interface Window {
     __APP_VERSION__: string;
+    gapi: any;
+    google: any;
   }
 }
 
 // Set version on window for settings display
-window.__APP_VERSION__ = '2.0.4';
+window.__APP_VERSION__ = '2.0.7';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {

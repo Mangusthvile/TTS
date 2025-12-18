@@ -1,4 +1,3 @@
-
 export enum CaseMode {
   EXACT = 'EXACT',
   IGNORE = 'IGNORE',
@@ -87,6 +86,7 @@ export interface Book {
   rules: Rule[];
   directoryHandle?: any;
   driveFolderId?: string;
+  driveFolderName?: string;
   backend: StorageBackend;
   settings: BookSettings;
 }

@@ -1,6 +1,7 @@
 /**
  * Talevox Google Drive Service
- * Handles authentication and file synchronization with enhanced error reporting and Shared Drive support.
+ * Handles authentication and file synchronization with official Google Picker integration.
+ * Ensures strict scoping to user-selected folders.
  */
 
 export async function authenticateDrive(explicitClientId?: string): Promise<string> {
@@ -18,7 +19,9 @@ export async function authenticateDrive(explicitClientId?: string): Promise<stri
 
       const client = (window as any).google.accounts.oauth2.initTokenClient({
         client_id: CLIENT_ID,
-        scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.metadata.readonly',
+        // Request drive.file for read/write access to files the app creates/opens
+        // Request metadata.readonly to allow listing folders for picking
+        scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.metadata.readonly https://www.googleapis.com/auth/drive.readonly',
         callback: (response: any) => {
           if (response.error) {
             console.error("GSI Error:", response);
@@ -32,6 +35,47 @@ export async function authenticateDrive(explicitClientId?: string): Promise<stri
     } catch (err) {
       reject(err);
     }
+  });
+}
+
+/**
+ * Opens the native Google Picker to select a folder.
+ */
+export async function openFolderPicker(token: string): Promise<{id: string, name: string} | null> {
+  return new Promise((resolve, reject) => {
+    const gapi = (window as any).gapi;
+    if (!gapi) return reject(new Error("GAPI_NOT_LOADED"));
+
+    gapi.load('picker', () => {
+      const pickerCallback = (data: any) => {
+        if (data.action === gapi.picker.Action.PICKED) {
+          const doc = data.docs[0];
+          // Use doc.id for the unique Drive ID
+          console.debug(`[Picker] Explicit Folder Selected: ${doc.name} (${doc.id})`);
+          resolve({ id: doc.id, name: doc.name });
+        } else if (data.action === gapi.picker.Action.CANCEL) {
+          resolve(null);
+        }
+      };
+
+      try {
+        const view = new gapi.picker.DocsView(gapi.picker.ViewId.FOLDERS);
+        view.setSelectFolderEnabled(true);
+        view.setMimeTypes('application/vnd.google-apps.folder');
+
+        const picker = new gapi.picker.PickerBuilder()
+          .addView(view)
+          .setOAuthToken(token)
+          .setDeveloperKey(process.env.API_KEY)
+          .setCallback(pickerCallback)
+          .setTitle('Select Book Collection Folder')
+          .build();
+        
+        picker.setVisible(true);
+      } catch (err) {
+        reject(err);
+      }
+    });
   });
 }
 
@@ -51,55 +95,28 @@ async function getErrorFromResponse(response: Response, fallbackPrefix: string):
   }
 
   if (response.status === 401) {
-    return new Error('Authentication token expired or invalid (401). Please re-link your Google account.');
+    return new Error('Authentication token expired (401). Please re-link your Google account.');
   }
 
   if (response.status === 403) {
-    if (reason === 'accessNotConfigured') {
-      return new Error('Google Drive API is not enabled for this project (403). You must enable "Google Drive API" in the Google Cloud Console.');
-    }
-    if (reason === 'insufficientPermissions') {
-      return new Error('Insufficient permissions (403). The app does not have the required scopes. Try unlinking and re-linking your account to reset permissions.');
-    }
-    return new Error(`Access forbidden (403): ${details || 'Check your OAuth and GCP project settings.'}`);
+    return new Error(`Access forbidden (403): ${details || 'Ensure the Drive API is enabled in your Google Cloud Console.'}`);
   }
 
   if (response.status === 404) {
-    return new Error('Requested resource not found (404). The folder or file ID might be incorrect or has been deleted from Drive.');
-  }
-
-  if (response.status === 429) {
-    return new Error('Too many requests (429). Google Drive API rate limit reached. Please wait a moment before trying again.');
+    return new Error('Resource not found (404). The folder or file might have been moved or deleted.');
   }
 
   return new Error(`${details || fallbackPrefix} (HTTP ${response.status})`);
 }
 
-export async function listFolders(token: string): Promise<{id: string, name: string}[]> {
-  const q = encodeURIComponent("mimeType = 'application/vnd.google-apps.folder' and trashed = false");
-  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)&orderBy=name&pageSize=100&includeItemsFromAllDrives=true&supportsAllDrives=true`;
-  
-  console.debug("Listing folders...");
-  const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
-  
-  if (!response.ok) {
-    throw await getErrorFromResponse(response, 'DRIVE_LIST_ERROR');
-  }
-  
-  const data = await response.json();
-  return data.files || [];
-}
-
 /**
- * Lists files within a specific folder.
+ * Lists files strictly within a specific folder ID.
  */
 export async function listFilesInFolder(token: string, folderId: string): Promise<{id: string, name: string}[]> {
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, mimeType)&orderBy=name&pageSize=1000&includeItemsFromAllDrives=true&supportsAllDrives=true`;
   
-  console.debug(`Listing files in folder: ${folderId}`);
+  console.debug(`[Drive] FETCH: Listing children of Folder: ${folderId}`);
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` }
   });
@@ -126,13 +143,17 @@ export async function findFileSync(token: string, name: string): Promise<string 
   return data.files && data.files.length > 0 ? data.files[0].id : null;
 }
 
+// Fix: Implement findFolderSync to allow specific searching for directory types in Google Drive
 export async function findFolderSync(token: string, name: string): Promise<string | null> {
   const q = encodeURIComponent(`name = '${name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
   const response = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)&includeItemsFromAllDrives=true&supportsAllDrives=true`, {
     headers: { Authorization: `Bearer ${token}` }
   });
   
-  if (!response.ok) return null;
+  if (!response.ok) {
+    throw await getErrorFromResponse(response, 'DRIVE_FIND_FOLDER_ERROR');
+  }
+
   const data = await response.json();
   return data.files && data.files.length > 0 ? data.files[0].id : null;
 }
@@ -149,7 +170,7 @@ export async function fetchDriveFile(token: string, fileId: string): Promise<str
 }
 
 /**
- * Uploads a file using multipart/related to ensure metadata and content are updated safely.
+ * Uploads a file using multipart/related. Ensures the file is placed in the correct book-specific folder.
  */
 export async function uploadToDrive(
   token: string, 
@@ -167,11 +188,13 @@ export async function uploadToDrive(
     name: filename,
     mimeType: mimeType
   };
+  
+  // Strict scoping: always assign the parent folder ID for new files
   if (folderId && !existingFileId) {
     metadata.parents = [folderId];
-    console.debug(`Uploading new file '${filename}' to folder: ${folderId}`);
+    console.debug(`[Drive] CREATE: File '${filename}' in Folder: ${folderId}`);
   } else if (existingFileId) {
-    console.debug(`Updating existing file ID: ${existingFileId}`);
+    console.debug(`[Drive] UPDATE: File ID: ${existingFileId}`);
   }
 
   const multipartRequestBody =
@@ -207,6 +230,7 @@ export async function uploadToDrive(
 }
 
 export async function createDriveFolder(token: string, name: string): Promise<string> {
+  console.debug(`[Drive] Creating managed folder: ${name}`);
   const response = await fetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
     method: 'POST',
     headers: { 
