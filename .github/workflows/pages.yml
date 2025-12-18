@@ -20,7 +20,6 @@ jobs:
     env:
       VITE_GOOGLE_API_KEY: ${{ secrets.VITE_GOOGLE_API_KEY }}
       VITE_GOOGLE_CLIENT_ID: ${{ secrets.VITE_GOOGLE_CLIENT_ID }}
-      VITE_GEMINI_API_KEY: ${{ secrets.VITE_GEMINI_API_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

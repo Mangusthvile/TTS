@@ -5,7 +5,9 @@
  */
 
 export async function authenticateDrive(explicitClientId?: string): Promise<string> {
-  const CLIENT_ID = (explicitClientId?.trim()) || (process.env as any).GOOGLE_CLIENT_ID || 'YOUR_CLIENT_ID_HERE.apps.googleusercontent.com';
+  // Use import.meta.env for Vite environment variables
+  // Fix: Cast import.meta to any to bypass TypeScript error "Property 'env' does not exist on type 'ImportMeta'".
+  const CLIENT_ID = (explicitClientId?.trim()) || ((import.meta as any).env.VITE_GOOGLE_CLIENT_ID) || 'YOUR_CLIENT_ID_HERE.apps.googleusercontent.com';
 
   if (!CLIENT_ID || CLIENT_ID.includes('YOUR_CLIENT_ID_HERE')) {
     throw new Error('MISSING_CLIENT_ID');
@@ -42,6 +44,17 @@ export async function authenticateDrive(explicitClientId?: string): Promise<stri
  * Opens the native Google Picker to select a folder.
  */
 export async function openFolderPicker(token: string): Promise<{id: string, name: string} | null> {
+  // Read API Key from Vite environment variables
+  // Fix: Cast import.meta to any to bypass TypeScript error "Property 'env' does not exist on type 'ImportMeta'".
+  const apiKey = (import.meta as any).env.VITE_GOOGLE_API_KEY;
+  
+  // Temporary console log for debugging as requested
+  console.log(`[Drive] API Key present: ${!!apiKey}${apiKey ? ` (last 4: ${apiKey.slice(-4)})` : ""}`);
+
+  if (!apiKey) {
+    throw new Error("Missing VITE_GOOGLE_API_KEY");
+  }
+
   return new Promise((resolve, reject) => {
     const gapi = (window as any).gapi;
     if (!gapi) return reject(new Error("GAPI_NOT_LOADED"));
@@ -79,7 +92,7 @@ export async function openFolderPicker(token: string): Promise<{id: string, name
         const picker = new google.picker.PickerBuilder()
           .addView(view)
           .setOAuthToken(token)
-          .setDeveloperKey(process.env.API_KEY) // Required for Picker Service
+          .setDeveloperKey(apiKey) // Call setDeveloperKey before build
           .setCallback(pickerCallback)
           .setTitle('Select Book Collection Folder')
           .build();
