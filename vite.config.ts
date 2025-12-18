@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
-  base: './',
+  base: '/TTS/',
   plugins: [
     react(),
     VitePWA({
@@ -61,7 +61,7 @@ export default defineConfig({
     })
   ],
   define: {
-    'process.env': process.env,
+    'process.env': {},
     __APP_VERSION__: JSON.stringify('1.2.4'),
   },
   server: {
