@@ -48,7 +48,7 @@ const Settings: React.FC<SettingsProps> = ({
         <div className="flex justify-between items-end">
           <div>
             <h2 className={`text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
-            <p className={`text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.1.1</p>
+            <p className={`text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.1.5</p>
           </div>
           <button 
             onClick={onCheckForUpdates}
@@ -248,7 +248,7 @@ const Settings: React.FC<SettingsProps> = ({
         </div>
 
         <div className="text-center font-black uppercase tracking-[0.4em] text-[11px] pt-12 text-black/30">
-          VoxLib Engine v2.1.1
+          VoxLib Engine v2.1.5
         </div>
       </div>
     </div>

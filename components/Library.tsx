@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Book, Theme, StorageBackend } from '../types';
-import { BookOpen, Plus, Trash2, History, Cloud, Monitor, X, FileText, Database, Loader2, Folder, ChevronLeft, Search, Info } from 'lucide-react';
+import { BookOpen, Plus, Trash2, History, Cloud, Monitor, X, FileText, Database, Loader2, ChevronRight, CheckCircle2 } from 'lucide-react';
 import { openFolderPicker, authenticateDrive } from '../services/driveService';
 
 interface LibraryProps {
@@ -45,12 +45,10 @@ const Library: React.FC<LibraryProps> = ({
     if (!newTitle.trim()) return;
     setIsProcessingAdd(true);
     try {
-      console.debug(`[Library] Adding book: ${newTitle} | Backend: ${backend} | FolderID: ${driveFolderId}`);
       await onAddBook(newTitle, backend, handle, driveFolderId, driveFolderName);
       setIsAdding(false);
       setNewTitle('');
     } catch (e: any) {
-      console.error("Failed to add book", e);
       alert("Error adding book: " + e.message);
     } finally {
       setIsProcessingAdd(false);
@@ -180,9 +178,6 @@ const Library: React.FC<LibraryProps> = ({
                         <span className="font-bold truncate text-sm block leading-none mb-1">{book.title}</span>
                         <div className="flex items-center gap-2">
                           <span className={`text-[10px] font-black uppercase tracking-tighter ${isActive ? 'text-white/80' : 'opacity-70'}`}>{book.chapters.length} chapters</span>
-                          {book.driveFolderName && (
-                            <span className={`text-[9px] font-bold truncate italic ${isActive ? 'text-white/40' : 'opacity-30'}`}>• {book.driveFolderName}</span>
-                          )}
                         </div>
                       </div>
                     </div>
@@ -193,6 +188,25 @@ const Library: React.FC<LibraryProps> = ({
                       <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
+                  
+                  {/* Nested Chapters List for Active Book - Refined styling for visibility */}
+                  {isActive && book.chapters.length > 0 && (
+                    <div className={`mt-2 ml-4 border-l-2 pl-3 space-y-1 max-h-80 overflow-y-auto scrollbar-hide ${isDark ? 'border-slate-800' : 'border-black/5'}`}>
+                      {book.chapters.map(chapter => {
+                        const isCurrent = book.currentChapterId === chapter.id;
+                        return (
+                          <div 
+                            key={chapter.id}
+                            onClick={() => { onSelectChapter(book.id, chapter.id); onClose?.(); }}
+                            className={`flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-all text-[11px] font-black uppercase tracking-tight ${isCurrent ? 'bg-indigo-600 text-white shadow-md' : 'opacity-60 hover:opacity-100 hover:bg-black/5'}`}
+                          >
+                            {chapter.isCompleted ? <CheckCircle2 className={`w-3 h-3 ${isCurrent ? 'text-white' : 'text-emerald-500'}`} /> : <ChevronRight className="w-3 h-3" />}
+                            <span className="truncate">CH {chapter.index}. {chapter.title}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               );
             })}
