@@ -1,12 +1,22 @@
-
 import { GoogleGenAI, Type } from "@google/genai";
+
+// Local ambient declaration to satisfy TypeScript compiler (TS2591) 
+// for the required process.env.API_KEY pattern.
+declare const process: any;
 
 /**
  * Cleanly extracts chapter content using Gemini.
  */
 export async function smartExtractChapter(rawContent: string) {
-  // Use process.env.API_KEY exclusively as per Google GenAI guidelines to resolve the ImportMeta error
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  // Use the required pattern process.env.API_KEY. 
+  // This is replaced at build time by Vite as configured in vite.config.ts.
+  const apiKey = process.env.API_KEY;
+
+  if (!apiKey) {
+    throw new Error("VITE_GEMINI_API_KEY is not configured in the environment. Please set this variable in your Netlify settings or local .env file.");
+  }
+
+  const ai = new GoogleGenAI({ apiKey });
   
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',

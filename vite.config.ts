@@ -1,4 +1,3 @@
-
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
@@ -45,6 +44,9 @@ export default defineConfig({
   ],
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
+    // Map the Vite-prefixed environment variable to process.env.API_KEY as required by GenAI guidelines.
+    // This replacement happens at build time, so 'process' is not needed at runtime.
+    'process.env.API_KEY': JSON.stringify(process.env.VITE_GEMINI_API_KEY || process.env.API_KEY || ''),
   },
   server: {
     port: 3000
