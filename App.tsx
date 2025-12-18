@@ -9,8 +9,10 @@ import Settings from './components/Settings';
 import Extractor from './components/Extractor';
 import ChapterFolderView from './components/ChapterFolderView';
 import { speechController, applyRules } from './services/speechService';
-import { authenticateDrive, fetchDriveFile, uploadToDrive, createDriveFolder } from './services/driveService';
-import { BookText, Zap, Sun, Coffee, Moon, X, Settings as SettingsIcon, Menu, RefreshCw, Loader2 } from 'lucide-react';
+import { authenticateDrive, fetchDriveFile, uploadToDrive, createDriveFolder, findFileSync } from './services/driveService';
+import { BookText, Zap, Sun, Coffee, Moon, X, Settings as SettingsIcon, Menu, RefreshCw, Loader2, Cloud } from 'lucide-react';
+
+const SYNC_FILENAME = 'talevox_sync_manifest.json';
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(() => {
@@ -56,6 +58,7 @@ const App: React.FC = () => {
   const [sleepTimerSeconds, setSleepTimerSeconds] = useState<number | null>(null);
   const [stopAfterChapter, setStopAfterChapter] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
@@ -75,6 +78,73 @@ const App: React.FC = () => {
       } : state.lastSession
     }));
   }, [state]);
+
+  // Handle Cloud Syncing
+  const handleSync = useCallback(async (manual = false) => {
+    if (!state.driveToken) return;
+    setIsSyncing(true);
+    try {
+      const existingFileId = await findFileSync(state.driveToken, SYNC_FILENAME);
+      
+      if (existingFileId) {
+        const remoteDataRaw = await fetchDriveFile(state.driveToken, existingFileId);
+        const remoteData = JSON.parse(remoteDataRaw);
+        
+        // Merge strategy: 
+        // 1. Keep all remote books that aren't local
+        // 2. Overwrite local metadata with remote if newer (simple ID match for now)
+        setState(prev => {
+          const mergedBooks = [...prev.books];
+          remoteData.books.forEach((remoteBook: Book) => {
+            const localIdx = mergedBooks.findIndex(b => b.id === remoteBook.id);
+            if (localIdx === -1) {
+              mergedBooks.push({ ...remoteBook, directoryHandle: undefined });
+            } else {
+              // Merge rules and settings but keep local directory handle
+              mergedBooks[localIdx] = {
+                ...remoteBook,
+                directoryHandle: mergedBooks[localIdx].directoryHandle,
+                backend: mergedBooks[localIdx].backend // Keep local backend type
+              };
+            }
+          });
+          return { ...prev, books: mergedBooks };
+        });
+      }
+
+      // After pulling, push current state back to manifest
+      const manifestContent = JSON.stringify({
+        books: stateRef.current.books.map(({ directoryHandle, ...b }) => b),
+        readerSettings: stateRef.current.readerSettings,
+        updatedAt: new Date().toISOString()
+      });
+
+      await uploadToDrive(state.driveToken, null, SYNC_FILENAME, manifestContent, existingFileId || undefined);
+      if (manual) alert("Cloud Sync Complete");
+    } catch (err) {
+      console.error("Sync failed:", err);
+      if (err instanceof Error && err.message === 'UNAUTHORIZED') {
+        setState(prev => ({ ...prev, driveToken: undefined }));
+      }
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [state.driveToken]);
+
+  // Auto-sync on load
+  useEffect(() => {
+    if (state.driveToken) handleSync();
+  }, [state.driveToken]);
+
+  const handleLinkCloud = async () => {
+    try {
+      const token = await authenticateDrive();
+      setState(prev => ({ ...prev, driveToken: token }));
+      handleSync(true);
+    } catch (err) {
+      console.error("Cloud link failed", err);
+    }
+  };
 
   useEffect(() => {
     const handleWakeLock = async () => {
@@ -130,8 +200,8 @@ const App: React.FC = () => {
     let driveFolderId = undefined;
     if (backend === StorageBackend.DRIVE) {
       try {
-        const token = await authenticateDrive();
-        setState(prev => ({ ...prev, driveToken: token }));
+        const token = state.driveToken || await authenticateDrive();
+        if (!state.driveToken) setState(prev => ({ ...prev, driveToken: token }));
         driveFolderId = await createDriveFolder(token, `Talevox - ${title}`);
       } catch (err) { return; }
     }
@@ -286,7 +356,7 @@ const App: React.FC = () => {
                  selectedVoice={currentVoice || ''}
                  playbackSpeed={currentSpeed}
                />
-             ) : (<Settings settings={state.readerSettings} onUpdate={s => setState(p => ({ ...p, readerSettings: { ...p.readerSettings, ...s } }))} theme={state.theme} keepAwake={state.keepAwake} onSetKeepAwake={v => setState(p => ({ ...p, keepAwake: v }))} onCheckForUpdates={async () => { if ('serviceWorker' in navigator) { const reg = await navigator.serviceWorker.getRegistration(); if (reg) await reg.update(); } }} />)}
+             ) : (<Settings settings={state.readerSettings} onUpdate={s => setState(p => ({ ...p, readerSettings: { ...p.readerSettings, ...s } }))} theme={state.theme} keepAwake={state.keepAwake} onSetKeepAwake={v => setState(p => ({ ...p, keepAwake: v }))} onCheckForUpdates={async () => { if ('serviceWorker' in navigator) { const reg = await navigator.serviceWorker.getRegistration(); if (reg) await reg.update(); } }} isCloudLinked={!!state.driveToken} onLinkCloud={handleLinkCloud} onSyncNow={() => handleSync(true)} isSyncing={isSyncing} />)}
           </div>
           {activeChapterMetadata && activeTab === 'reader' && (
             <Player 

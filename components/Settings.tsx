@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { ReaderSettings, Theme } from '../types';
-import { Type, AlignJustify, MoveVertical, Minus, Plus, RefreshCw, Smartphone, MonitorOff, AlertTriangle } from 'lucide-react';
+import { Type, AlignJustify, MoveVertical, Minus, Plus, RefreshCw, Smartphone, MonitorOff, AlertTriangle, Cloud, CloudOff, Loader2 } from 'lucide-react';
 
 interface SettingsProps {
   settings: ReaderSettings;
@@ -10,10 +10,15 @@ interface SettingsProps {
   keepAwake: boolean;
   onSetKeepAwake: (v: boolean) => void;
   onCheckForUpdates: () => void;
+  isCloudLinked?: boolean;
+  onLinkCloud?: () => void;
+  onSyncNow?: () => void;
+  isSyncing?: boolean;
 }
 
 const Settings: React.FC<SettingsProps> = ({ 
-  settings, onUpdate, theme, keepAwake, onSetKeepAwake, onCheckForUpdates 
+  settings, onUpdate, theme, keepAwake, onSetKeepAwake, onCheckForUpdates,
+  isCloudLinked, onLinkCloud, onSyncNow, isSyncing
 }) => {
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
@@ -48,6 +53,50 @@ const Settings: React.FC<SettingsProps> = ({
           >
             <RefreshCw className="w-3 h-3" /> Check for updates
           </button>
+        </div>
+
+        {/* Cloud Sync */}
+        <div className={`p-8 rounded-[2.5rem] border shadow-sm space-y-6 ${cardBg}`}>
+          <label className={labelClass}>Cloud Synchronization</label>
+          <div className="flex items-center justify-between gap-6">
+             <div className="flex items-center gap-4 min-w-0">
+                <div className={`p-4 rounded-2xl ${isCloudLinked ? 'bg-indigo-600 text-white' : 'bg-black/5 text-slate-400'}`}>
+                   {isCloudLinked ? <Cloud className="w-6 h-6" /> : <CloudOff className="w-6 h-6" />}
+                </div>
+                <div className="min-w-0">
+                   <div className={`text-sm font-black ${textClass}`}>{isCloudLinked ? 'Library Linked' : 'Offline Mode'}</div>
+                   <div className="text-[10px] font-bold opacity-60 truncate">
+                      {isCloudLinked ? 'Connected to Google Drive' : 'Sync libraries between PC and Mobile'}
+                   </div>
+                </div>
+             </div>
+             {isCloudLinked ? (
+                <button 
+                  onClick={onSyncNow}
+                  disabled={isSyncing}
+                  className="px-6 py-2.5 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2 hover:scale-105 transition-all disabled:opacity-50"
+                >
+                   {isSyncing ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                   Sync Now
+                </button>
+             ) : (
+                <button 
+                  onClick={onLinkCloud}
+                  className="px-6 py-2.5 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2 hover:scale-105 transition-all"
+                >
+                   <Cloud className="w-3 h-3" />
+                   Link Account
+                </button>
+             )}
+          </div>
+          {isCloudLinked && (
+            <div className="p-4 rounded-2xl bg-indigo-600/5 border border-indigo-600/10">
+              <p className="text-[10px] font-bold text-indigo-600 leading-relaxed italic">
+                Talevox automatically synchronizes your books and settings to a JSON manifest on your Google Drive. 
+                Local Folder books sync their structure, but their raw files remain on your PC for security.
+              </p>
+            </div>
+          )}
         </div>
 
         {/* System Settings */}
