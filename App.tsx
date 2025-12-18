@@ -89,23 +89,31 @@ const App: React.FC = () => {
     setIsPlaying(false); 
   }, []);
 
-  // FIXED: updateChapterProgress now accepts progressTotalLength to fix the % tracker
-  const updateChapterProgress = useCallback((bookId: string, chapterId: string, offset: number, total: number) => {
+  const updateChapterProgress = useCallback((bookId: string, chapterId: string, offset: number, total: number, completed: boolean = false) => {
     setState(prev => ({
       ...prev,
       books: prev.books.map(b => b.id === bookId ? {
         ...b,
-        chapters: b.chapters.map(c => c.id === chapterId ? { ...c, progress: offset, progressTotalLength: total } : c)
+        chapters: b.chapters.map(c => c.id === chapterId ? { 
+          ...c, 
+          progress: offset, 
+          progressTotalLength: total,
+          isCompleted: completed || c.isCompleted
+        } : c)
       } : b)
     }));
   }, []);
 
   const handleJumpToOffset = useCallback((offset: number) => {
     handlePause(); // MANDATORY PAUSE: Jumping sections
-    setState(prev => ({ ...prev, currentOffset: offset }));
+    const finalPlaybackText = applyRules(activeChapterText, activeBook?.rules || []);
+    const total = finalPlaybackText.length || 1;
+    const boundedOffset = Math.min(Math.max(0, offset), total);
+    const isFinished = boundedOffset >= total * 0.98;
+    
+    setState(prev => ({ ...prev, currentOffset: boundedOffset }));
     if (stateRef.current.activeBookId && activeBook?.currentChapterId) {
-      const finalPlaybackText = applyRules(activeChapterText, activeBook.rules);
-      updateChapterProgress(stateRef.current.activeBookId, activeBook.currentChapterId, offset, finalPlaybackText.length);
+      updateChapterProgress(stateRef.current.activeBookId, activeBook.currentChapterId, boundedOffset, total, isFinished);
     }
   }, [handlePause, activeBook, activeChapterText, updateChapterProgress]);
 
@@ -199,14 +207,14 @@ const App: React.FC = () => {
   };
 
   const loadChapterContent = useCallback(async (bookId: string, chapterId: string) => {
-    const book = state.books.find(b => b.id === bookId);
+    const book = stateRef.current.books.find(b => b.id === bookId);
     const chapter = book?.chapters.find(c => c.id === chapterId);
     if (!book || !chapter) return;
     setIsLoadingChapter(true);
     try {
       let content = "";
-      if (book.backend === StorageBackend.DRIVE && state.driveToken) {
-        content = await fetchDriveFile(state.driveToken, chapter.driveId!);
+      if (book.backend === StorageBackend.DRIVE && stateRef.current.driveToken) {
+        content = await fetchDriveFile(stateRef.current.driveToken, chapter.driveId!);
       } else if (book.backend === StorageBackend.LOCAL && book.directoryHandle) {
         const fileHandle = await book.directoryHandle.getFileHandle(chapter.filename);
         content = await (await fileHandle.getFile()).text();
@@ -220,13 +228,38 @@ const App: React.FC = () => {
     } finally {
       setIsLoadingChapter(false);
     }
-  }, [state.books, state.driveToken]);
+  }, []);
 
   useEffect(() => {
     if (state.activeBookId && activeBook?.currentChapterId) {
       loadChapterContent(state.activeBookId, activeBook.currentChapterId);
     } else { setActiveChapterText(''); }
   }, [state.activeBookId, activeBook?.currentChapterId, loadChapterContent]);
+
+  const handleSelectBook = useCallback((id: string) => {
+    handlePause(); // MANDATORY PAUSE: Switch book
+    setState(prev => ({
+      ...prev,
+      activeBookId: id,
+      lastSession: undefined, // Clear resume card after interaction
+      books: prev.books.map(b => b.id === id ? { ...b, currentChapterId: undefined } : b),
+      currentOffset: 0
+    }));
+    setActiveTab('reader');
+  }, [handlePause]);
+
+  const handleSelectChapter = useCallback(async (bookId: string, chapterId: string, offset?: number, isInternalTransition = false) => {
+    if (!isInternalTransition) handlePause(); // MANDATORY PAUSE: Switch chapter
+    setState(prev => ({
+      ...prev, 
+      activeBookId: bookId,
+      lastSession: undefined, // Clear resume card after interaction
+      books: prev.books.map(b => b.id === bookId ? { ...b, currentChapterId: chapterId } : b),
+      currentOffset: offset ?? 0
+    }));
+    setActiveTab('reader');
+    setIsSidebarOpen(false);
+  }, [handlePause]);
 
   const handlePlay = useCallback(() => {
     if (!activeBook || !activeChapterMetadata || isLoadingChapter) return;
@@ -250,13 +283,28 @@ const App: React.FC = () => {
         const s = stateRef.current;
         const book = s.books.find(b => b.id === s.activeBookId);
         if (!book || stopAfterChapter || (sleepTimerSeconds !== null && sleepTimerSeconds <= 0)) return null;
+        
         const currentIdx = book.chapters.findIndex(c => c.id === book.currentChapterId);
+        
+        // Mark current chapter as finished
+        if (book.currentChapterId) {
+          const currentChapter = book.chapters[currentIdx];
+          const textAtEnd = applyRules(currentChapter.content, book.rules);
+          updateChapterProgress(book.id, book.currentChapterId, textAtEnd.length, textAtEnd.length, true);
+        }
+
         if (currentIdx < book.chapters.length - 1) {
           const next = book.chapters[currentIdx + 1];
           setTransitionToast({ number: next.index, title: next.title });
           setTimeout(() => setTransitionToast(null), 3500);
+          
+          // Switch state internally
           handleSelectChapter(book.id, next.id, 0, true);
           const nextText = applyRules(next.content, book.rules);
+          
+          // Immediately update activeChapterText to keep Reader's segments in sync
+          setActiveChapterText(next.content);
+          
           return {
             announcementPrefix: `Chapter ${next.index}: ${next.title}. `,
             content: nextText,
@@ -268,29 +316,7 @@ const App: React.FC = () => {
       },
       activeBook.title, activeChapterMetadata.title
     );
-  }, [activeBook, activeChapterMetadata, isLoadingChapter, activeChapterText, state.selectedVoiceName, state.playbackSpeed, state.currentOffset, stopAfterChapter, sleepTimerSeconds, updateChapterProgress]);
-
-  const handleSelectBook = useCallback((id: string) => {
-    handlePause(); // MANDATORY PAUSE: Switch book
-    setState(prev => ({
-      ...prev,
-      activeBookId: id,
-      books: prev.books.map(b => b.id === id ? { ...b, currentChapterId: undefined } : b),
-      currentOffset: 0
-    }));
-    setActiveTab('reader');
-  }, [handlePause]);
-
-  const handleSelectChapter = useCallback(async (bookId: string, chapterId: string, offset?: number, isInternalTransition = false) => {
-    if (!isInternalTransition) handlePause(); // MANDATORY PAUSE: Switch chapter
-    setState(prev => ({
-      ...prev, activeBookId: bookId,
-      books: prev.books.map(b => b.id === bookId ? { ...b, currentChapterId: chapterId } : b),
-      currentOffset: offset ?? 0
-    }));
-    setActiveTab('reader');
-    setIsSidebarOpen(false);
-  }, [handlePause]);
+  }, [activeBook, activeChapterMetadata, isLoadingChapter, activeChapterText, state.selectedVoiceName, state.playbackSpeed, state.currentOffset, stopAfterChapter, sleepTimerSeconds, updateChapterProgress, handleSelectChapter]);
 
   const handleAddBook = async (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string, driveFolderName?: string) => {
     const newBook: Book = {
@@ -338,6 +364,14 @@ const App: React.FC = () => {
     setIsAddChapterOpen(false);
   };
 
+  const handleDeleteBook = (id: string) => {
+     setState(p => ({
+        ...p,
+        books: p.books.filter(b => b.id !== id),
+        activeBookId: p.activeBookId === id ? undefined : p.activeBookId
+     }));
+  };
+
   return (
     <div className={`flex flex-col h-screen overflow-hidden font-sans transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-950 text-slate-100' : state.theme === Theme.SEPIA ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
       <div className="flex flex-1 overflow-hidden relative">
@@ -348,7 +382,7 @@ const App: React.FC = () => {
           activeBookId={state.activeBookId} 
           lastSession={state.lastSession} 
           onSelectBook={handleSelectBook} 
-          onDeleteBook={id => setState(p => ({ ...p, books: p.books.filter(b => b.id !== id) }))} 
+          onDeleteBook={handleDeleteBook} 
           onSelectChapter={handleSelectChapter} 
           theme={state.theme} 
           onAddBook={handleAddBook}
