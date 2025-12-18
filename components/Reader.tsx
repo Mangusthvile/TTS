@@ -6,6 +6,7 @@ import { Bug, FolderOpen, Plus } from 'lucide-react';
 
 interface ReaderProps {
   chapter: Chapter | null;
+  chapterText?: string;
   rules: Rule[];
   currentOffset: number;
   theme: Theme;
@@ -19,17 +20,19 @@ interface ReaderProps {
 }
 
 const Reader: React.FC<ReaderProps> = ({ 
-  chapter, rules, currentOffset, theme, debugMode, onToggleDebug, onJumpToOffset, 
+  chapter, chapterText, rules, currentOffset, theme, debugMode, onToggleDebug, onJumpToOffset, 
   onBackToChapters, onAddChapter, highlightMode, readerSettings
 }) => {
   const activeWordRef = useRef<HTMLSpanElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const lastScrollTime = useRef<number>(0);
 
+  const rawText = chapterText ?? chapter?.content ?? "";
+
   const speakText = useMemo(() => {
-    if (!chapter) return "";
-    return applyRules(chapter.content, rules);
-  }, [chapter, rules]);
+    if (!rawText) return "";
+    return applyRules(rawText, rules);
+  }, [rawText, rules]);
 
   const segments = useMemo(() => {
     if (!speakText) return { words: [], sentences: [] };
@@ -65,7 +68,7 @@ const Reader: React.FC<ReaderProps> = ({
 
   useEffect(() => {
     const now = Date.now();
-    if (activeWordRef.current && containerRef.current && now - lastScrollTime.current > 100) {
+    if (activeWordRef.current && containerRef.current && now - lastScrollTime.current > 250) {
       const el = activeWordRef.current;
       const container = containerRef.current;
       const rect = el.getBoundingClientRect();

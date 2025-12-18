@@ -13,11 +13,28 @@ import { authenticateDrive, fetchDriveFile, uploadToDrive, createDriveFolder, fi
 import { BookText, Zap, Sun, Coffee, Moon, X, Settings as SettingsIcon, Menu, RefreshCw, Loader2, Cloud } from 'lucide-react';
 
 const SYNC_FILENAME = 'talevox_sync_manifest.json';
+const STORAGE_KEY = 'talevox_pro_v2';
+const SESSION_KEY = 'talevox_pro_v2_session';
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(() => {
-    const saved = localStorage.getItem('talevox_pro_v2');
-    const parsed = saved ? JSON.parse(saved) : {};
+    let parsed: any = {};
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      parsed = saved ? JSON.parse(saved) : {};
+    } catch (e) {
+      parsed = {};
+    }
+
+    let storedSession: any = undefined;
+    try {
+      const sessionRaw = localStorage.getItem(SESSION_KEY);
+      storedSession = sessionRaw ? JSON.parse(sessionRaw) : undefined;
+    } catch (e) {
+      storedSession = undefined;
+    }
+
+    const lastSession = storedSession || parsed.lastSession;
     return {
       books: (parsed.books || []).map((b: any) => ({
         ...b,
@@ -34,7 +51,7 @@ const App: React.FC = () => {
       playbackSpeed: parsed.playbackSpeed || 1.0,
       selectedVoiceName: parsed.selectedVoiceName,
       theme: parsed.theme || Theme.LIGHT,
-      currentOffset: parsed.lastSession?.bookId === parsed.activeBookId ? parsed.lastSession?.offset || 0 : 0,
+      currentOffset: lastSession?.bookId === parsed.activeBookId ? lastSession?.offset || 0 : 0,
       debugMode: parsed.debugMode || false,
       keepAwake: parsed.keepAwake ?? false,
       readerSettings: parsed.readerSettings || {
@@ -44,7 +61,7 @@ const App: React.FC = () => {
         paragraphSpacing: 1
       },
       driveToken: parsed.driveToken,
-      lastSession: parsed.lastSession
+      lastSession: lastSession
     };
   });
 
@@ -63,21 +80,86 @@ const App: React.FC = () => {
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
 
-  const wakeLockSentinel = useRef<any>(null);
+  const activeBook = useMemo(() => state.books.find(b => b.id === state.activeBookId), [state.books, state.activeBookId]);
+  const activeChapterMetadata = useMemo(
+    () => activeBook?.chapters.find(c => c.id === activeBook.currentChapterId),
+    [activeBook]
+  );
 
-  useEffect(() => {
-    const { driveToken, books, ...rest } = state;
-    const persistentBooks = books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined }));
-    localStorage.setItem('talevox_pro_v2', JSON.stringify({ 
-      ...rest, 
-      books: persistentBooks,
-      lastSession: state.activeBookId && activeBook?.currentChapterId ? {
+  const lastSession = useMemo(() => {
+    if (state.activeBookId && activeBook?.currentChapterId) {
+      return {
         bookId: state.activeBookId,
         chapterId: activeBook.currentChapterId,
         offset: state.currentOffset
-      } : state.lastSession
-    }));
-  }, [state]);
+      };
+    }
+    return state.lastSession;
+  }, [state.activeBookId, activeBook?.currentChapterId, state.currentOffset, state.lastSession]);
+
+  const wakeLockSentinel = useRef<any>(null);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      const stateToPersist = stateRef.current;
+      const { books, ...rest } = stateToPersist;
+      const persistentBooks = books.map(({ directoryHandle, ...b }) => {
+        const chapters = (b.chapters || []).map((c: Chapter) => {
+          if (b.backend === StorageBackend.DRIVE) return { ...c, content: "" };
+          return c;
+        });
+        return { ...b, directoryHandle: undefined, chapters };
+      });
+
+      const currentBook = stateToPersist.books.find(b => b.id === stateToPersist.activeBookId);
+      const computedLastSession = stateToPersist.activeBookId && currentBook?.currentChapterId
+        ? {
+            bookId: stateToPersist.activeBookId,
+            chapterId: currentBook.currentChapterId,
+            offset: stateToPersist.currentOffset
+          }
+        : stateToPersist.lastSession;
+
+      const payload = { ...rest, books: persistentBooks, lastSession: computedLastSession };
+
+      const write = () => {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+        } catch (e) {}
+      };
+
+      if ('requestIdleCallback' in window) {
+        try {
+          (window as any).requestIdleCallback(write, { timeout: 1500 });
+          return;
+        } catch (e) {}
+      }
+
+      write();
+    }, 800);
+
+    return () => window.clearTimeout(timeout);
+  }, [
+    state.books,
+    state.activeBookId,
+    state.playbackSpeed,
+    state.selectedVoiceName,
+    state.theme,
+    state.debugMode,
+    state.keepAwake,
+    state.readerSettings,
+    state.driveToken
+  ]);
+
+  useEffect(() => {
+    if (!lastSession) return;
+    const timeout = window.setTimeout(() => {
+      try {
+        localStorage.setItem(SESSION_KEY, JSON.stringify(lastSession));
+      } catch (e) {}
+    }, 1200);
+    return () => window.clearTimeout(timeout);
+  }, [lastSession]);
 
   // Handle Cloud Syncing
   const handleSync = useCallback(async (manual = false) => {
@@ -157,8 +239,6 @@ const App: React.FC = () => {
     handleWakeLock();
   }, [isPlaying, state.keepAwake]);
 
-  const activeBook = state.books.find(b => b.id === state.activeBookId);
-  const activeChapterMetadata = activeBook?.chapters.find(c => c.id === activeBook.currentChapterId);
   const currentSpeed = (activeBook?.settings.useBookSettings && activeBook.settings.playbackSpeed) ? activeBook.settings.playbackSpeed : state.playbackSpeed;
   const currentVoice = (activeBook?.settings.useBookSettings && activeBook.settings.selectedVoiceName) ? activeBook.settings.selectedVoiceName : state.selectedVoiceName;
 
@@ -166,6 +246,23 @@ const App: React.FC = () => {
     if (!activeChapterText) return "";
     return applyRules(activeChapterText, activeBook?.rules || []);
   }, [activeChapterText, activeBook?.rules]);
+
+  const pendingOffsetRef = useRef<number | null>(null);
+  const offsetRafRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (offsetRafRef.current !== null) cancelAnimationFrame(offsetRafRef.current);
+    };
+  }, []);
+
+  const flushOffsetUpdate = useCallback(() => {
+    offsetRafRef.current = null;
+    const nextOffset = pendingOffsetRef.current;
+    if (nextOffset === null) return;
+    if (Math.abs(stateRef.current.currentOffset - nextOffset) >= 1) {
+      setState(prev => ({ ...prev, currentOffset: nextOffset }));
+    }
+  }, []);
 
   const loadChapterContent = useCallback(async (bookId: string, chapterId: string) => {
     const book = state.books.find(b => b.id === bookId);
@@ -271,8 +368,9 @@ const App: React.FC = () => {
       playbackText, currentVoice || '', currentSpeed, state.currentOffset,
       () => setIsPlaying(false),
       (offset) => { 
-        if (Math.abs(stateRef.current.currentOffset - offset) >= 1) {
-          setState(prev => ({ ...prev, currentOffset: offset }));
+        pendingOffsetRef.current = offset;
+        if (offsetRafRef.current === null) {
+          offsetRafRef.current = requestAnimationFrame(flushOffsetUpdate);
         }
       },
       async () => {
@@ -297,7 +395,7 @@ const App: React.FC = () => {
       },
       activeBook.title, activeChapterMetadata.title
     );
-  }, [playbackText, currentVoice, currentSpeed, state.currentOffset, stopAfterChapter, sleepTimerSeconds, activeBook, activeChapterMetadata, isLoadingChapter, handleSelectChapter]);
+  }, [playbackText, currentVoice, currentSpeed, state.currentOffset, stopAfterChapter, sleepTimerSeconds, activeBook, activeChapterMetadata, isLoadingChapter, handleSelectChapter, flushOffsetUpdate]);
 
   const handlePause = useCallback(() => { speechController.stop(); setIsPlaying(false); }, []);
 
@@ -331,7 +429,7 @@ const App: React.FC = () => {
         </div>
       )}
       <div className="flex flex-1 overflow-hidden relative">
-        <Library isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} books={state.books} activeBookId={state.activeBookId} lastSession={state.lastSession} onSelectBook={(id) => { handleSelectBook(id); setIsSidebarOpen(false); }} onDeleteBook={id => setState(p => ({ ...p, books: p.books.filter(b => b.id !== id) }))} onSelectChapter={handleSelectChapter} theme={state.theme} onAddBook={handleAddBook} />
+        <Library isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} books={state.books} activeBookId={state.activeBookId} lastSession={lastSession} onSelectBook={(id) => { handleSelectBook(id); setIsSidebarOpen(false); }} onDeleteBook={id => setState(p => ({ ...p, books: p.books.filter(b => b.id !== id) }))} onSelectChapter={handleSelectChapter} theme={state.theme} onAddBook={handleAddBook} />
         <main className={`flex-1 flex flex-col min-w-0 shadow-2xl relative transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-900' : state.theme === Theme.SEPIA ? 'bg-[#efe6d5]' : 'bg-white'}`}>
           <header className={`h-16 border-b flex items-center justify-between px-4 lg:px-8 z-10 sticky top-0 transition-colors duration-300 ${state.theme === Theme.DARK ? 'border-slate-800 bg-slate-900/80 backdrop-blur-md' : state.theme === Theme.SEPIA ? 'border-[#d8ccb6] bg-[#efe6d5]/90 backdrop-blur-md' : 'border-black/5 bg-white/90 backdrop-blur-md'}`}>
             <div className="flex items-center gap-2 lg:gap-6"><button onClick={() => setIsSidebarOpen(true)} className="p-2 lg:hidden rounded-lg hover:bg-black/5 text-inherit"><Menu className="w-5 h-5" /></button>
@@ -345,7 +443,7 @@ const App: React.FC = () => {
           </header>
           <div className="flex-1 overflow-y-auto relative">
              {isLoadingChapter && (<div className="absolute inset-0 flex items-center justify-center bg-inherit z-[5] animate-in fade-in duration-300"><div className="flex flex-col items-center gap-4"><Loader2 className="w-10 h-10 text-indigo-600 animate-spin" /><span className="text-xs font-black uppercase tracking-widest opacity-40">Loading Content...</span></div></div>)}
-             {activeTab === 'reader' ? (activeBook ? (activeBook.currentChapterId ? (<Reader chapter={activeChapterMetadata || null} rules={activeBook.rules} currentOffset={state.currentOffset} theme={state.theme} debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={(off) => setState(p => ({ ...p, currentOffset: off }))} highlightMode={activeBook.settings.highlightMode} onBackToChapters={() => handleSelectBook(activeBook.id)} onAddChapter={() => setIsAddChapterOpen(true)} readerSettings={state.readerSettings} />) : (<ChapterFolderView book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)} onOpenChapter={(id) => handleSelectChapter(activeBook.id, id)} onToggleFavorite={(id) => {}} />)) : (<div className="h-full flex flex-col items-center justify-center font-black tracking-widest text-lg opacity-40 uppercase">Select a book to begin</div>)) : activeTab === 'rules' ? (
+             {activeTab === 'reader' ? (activeBook ? (activeBook.currentChapterId ? (<Reader chapter={activeChapterMetadata || null} chapterText={activeChapterText} rules={activeBook.rules} currentOffset={state.currentOffset} theme={state.theme} debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={(off) => setState(p => ({ ...p, currentOffset: off }))} highlightMode={activeBook.settings.highlightMode} onBackToChapters={() => handleSelectBook(activeBook.id)} onAddChapter={() => setIsAddChapterOpen(true)} readerSettings={state.readerSettings} />) : (<ChapterFolderView book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)} onOpenChapter={(id) => handleSelectChapter(activeBook.id, id)} onToggleFavorite={(id) => {}} />)) : (<div className="h-full flex flex-col items-center justify-center font-black tracking-widest text-lg opacity-40 uppercase">Select a book to begin</div>)) : activeTab === 'rules' ? (
                <RuleManager 
                  rules={activeBook?.rules || []} 
                  theme={state.theme} 

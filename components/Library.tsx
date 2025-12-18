@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Book, Theme, StorageBackend, Chapter } from '../types';
 import { BookOpen, Plus, Trash2, History, Cloud, Monitor, X, FileText, ChevronRight, Database } from 'lucide-react';
 
@@ -31,6 +31,13 @@ const Library: React.FC<LibraryProps> = ({
 
   const lastBook = lastSession ? books.find(b => b.id === lastSession.bookId) : null;
   const lastChapter = lastBook?.chapters.find(c => c.id === lastSession?.chapterId);
+  const chaptersByBookId = useMemo(() => {
+    const map = new Map<string, Chapter[]>();
+    for (const book of books) {
+      map.set(book.id, [...(book.chapters || [])].sort((a, b) => a.index - b.index));
+    }
+    return map;
+  }, [books]);
 
   const sidebarClass = `
     fixed inset-y-0 left-0 z-50 w-[280px] sm:w-80 transform transition-transform duration-300 ease-in-out lg:relative lg:translate-x-0
@@ -125,6 +132,7 @@ const Library: React.FC<LibraryProps> = ({
             <p className={`text-[11px] font-black uppercase tracking-widest ml-2 mb-2 ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>My Library</p>
             {books.map(book => {
               const isActive = activeBookId === book.id;
+              const sortedChapters = chaptersByBookId.get(book.id) || [];
               return (
                 <div key={book.id} className="mb-2">
                   <div 
@@ -150,9 +158,9 @@ const Library: React.FC<LibraryProps> = ({
                     </button>
                   </div>
                   
-                  {isActive && book.chapters.length > 0 && (
+                  {isActive && sortedChapters.length > 0 && (
                     <div className={`mt-2 ml-4 space-y-1 border-l-2 pl-2 ${isDark ? 'border-slate-800' : 'border-indigo-600/20'}`}>
-                      {book.chapters.sort((a,b) => a.index - b.index).map(chapter => (
+                      {sortedChapters.map(chapter => (
                         <div 
                           key={chapter.id}
                           onClick={() => { onSelectChapter(book.id, chapter.id); onClose?.(); }}

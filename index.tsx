@@ -2,6 +2,8 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 
+declare const __APP_VERSION__: string;
+
 declare global {
   interface Window {
     __APP_VERSION__: string;
@@ -12,7 +14,7 @@ declare global {
 }
 
 // Set version on window for settings display
-window.__APP_VERSION__ = '1.2.0';
+window.__APP_VERSION__ = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : 'dev';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
