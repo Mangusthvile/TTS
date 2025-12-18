@@ -7,7 +7,8 @@ export interface ExtractedChapter {
 }
 
 export async function extractChapterWithAI(rawText: string): Promise<ExtractedChapter> {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
+  // Use the API key string directly from process.env as per guidelines
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
@@ -41,10 +42,16 @@ export async function extractChapterWithAI(rawText: string): Promise<ExtractedCh
     },
   });
 
+  // Extract text and verify it exists to satisfy TypeScript's strict null checks
+  const text = response.text;
+  if (typeof text !== 'string') {
+    throw new Error("Failed to parse AI extraction results: The AI returned an empty response.");
+  }
+
   try {
-    const data = JSON.parse(response.text);
+    const data = JSON.parse(text);
     return data as ExtractedChapter;
   } catch (e) {
-    throw new Error("Failed to parse AI extraction results.");
+    throw new Error("Failed to parse AI extraction results: The AI response was not valid JSON.");
   }
 }
