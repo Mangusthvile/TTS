@@ -6,6 +6,9 @@ declare global {
   interface Window {
     __APP_VERSION__: string;
   }
+  // Removed the 'var process' declaration because it conflicts with existing 
+  // block-scoped definitions of 'process' in the global scope. 
+  // The environment (e.g., Vite shim or index.html) provides this variable.
 }
 
 // Set version on window for settings display
