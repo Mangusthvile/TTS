@@ -90,9 +90,6 @@ const App: React.FC = () => {
         const remoteDataRaw = await fetchDriveFile(state.driveToken, existingFileId);
         const remoteData = JSON.parse(remoteDataRaw);
         
-        // Merge strategy: 
-        // 1. Keep all remote books that aren't local
-        // 2. Overwrite local metadata with remote if newer (simple ID match for now)
         setState(prev => {
           const mergedBooks = [...prev.books];
           remoteData.books.forEach((remoteBook: Book) => {
@@ -100,11 +97,10 @@ const App: React.FC = () => {
             if (localIdx === -1) {
               mergedBooks.push({ ...remoteBook, directoryHandle: undefined });
             } else {
-              // Merge rules and settings but keep local directory handle
               mergedBooks[localIdx] = {
                 ...remoteBook,
                 directoryHandle: mergedBooks[localIdx].directoryHandle,
-                backend: mergedBooks[localIdx].backend // Keep local backend type
+                backend: mergedBooks[localIdx].backend 
               };
             }
           });
@@ -113,6 +109,7 @@ const App: React.FC = () => {
       }
 
       // After pulling, push current state back to manifest
+      // Ensure we don't push an empty library if we just pulled data
       const manifestContent = JSON.stringify({
         books: stateRef.current.books.map(({ directoryHandle, ...b }) => b),
         readerSettings: stateRef.current.readerSettings,
@@ -125,6 +122,9 @@ const App: React.FC = () => {
       console.error("Sync failed:", err);
       if (err instanceof Error && err.message === 'UNAUTHORIZED') {
         setState(prev => ({ ...prev, driveToken: undefined }));
+        if (manual) alert("Session expired. Please link your account again.");
+      } else if (manual) {
+        alert("Sync failed. Check console for details.");
       }
     } finally {
       setIsSyncing(false);
@@ -134,15 +134,22 @@ const App: React.FC = () => {
   // Auto-sync on load
   useEffect(() => {
     if (state.driveToken) handleSync();
-  }, [state.driveToken]);
+  }, [state.driveToken, handleSync]);
 
   const handleLinkCloud = async () => {
     try {
       const token = await authenticateDrive();
       setState(prev => ({ ...prev, driveToken: token }));
-      handleSync(true);
+      // The useEffect for handleSync will trigger automatically due to token change
     } catch (err) {
       console.error("Cloud link failed", err);
+      if (err instanceof Error && err.message === 'MISSING_CLIENT_ID') {
+        alert("Action Required: Google OAuth Client ID is missing. Please configure your GOOGLE_CLIENT_ID environment variable or update driveService.ts.");
+      } else if (err instanceof Error && err.message.includes('idpiframe_initialization_failed')) {
+        alert("Google Auth initialization failed. Ensure you have a valid Client ID and authorized origin.");
+      } else {
+        alert("Failed to connect to Google: " + (err instanceof Error ? err.message : "Unknown error"));
+      }
     }
   };
 
