@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, ReaderSettings } from './types';
 import Library from './components/Library';
@@ -8,13 +7,11 @@ import RuleManager from './components/RuleManager';
 import Settings from './components/Settings';
 import Extractor from './components/Extractor';
 import ChapterFolderView from './components/ChapterFolderView';
-import { speechController, applyRules, NextSegment } from './services/speechService';
+import { speechController, applyRules } from './services/speechService';
 import { authenticateDrive, fetchDriveFile, uploadToDrive, createDriveFolder } from './services/driveService';
-import { BookText, Zap, Sun, Coffee, Moon, X, Sparkles, Settings as SettingsIcon, Menu, RefreshCw } from 'lucide-react';
+import { BookText, Zap, Sun, Coffee, Moon, X, Settings as SettingsIcon, Menu, RefreshCw } from 'lucide-react';
 
-// Mocking useRegisterSW to prevent crashes in non-Vite preview environments
-// In a real build, this would be imported from 'virtual:pwa-register/react'
-const useRegisterSW = () => {
+const usePWAUpdate = () => {
   const [offlineReady, setOfflineReady] = useState(false);
   const [needRefresh, setNeedRefresh] = useState(false);
   
@@ -30,14 +27,11 @@ const useRegisterSW = () => {
 };
 
 const App: React.FC = () => {
-  // --- PWA UPDATE LOGIC ---
   const {
-    offlineReady: [offlineReady, setOfflineReady],
-    needRefresh: [needRefresh, setNeedRefresh],
+    needRefresh: [needRefresh],
     updateServiceWorker,
-  } = useRegisterSW();
+  } = usePWAUpdate();
 
-  // --- STATE ---
   const [state, setState] = useState<AppState>(() => {
     const saved = localStorage.getItem('talevox_pro_v2');
     const parsed = saved ? JSON.parse(saved) : {};
@@ -81,14 +75,12 @@ const App: React.FC = () => {
 
   const wakeLockSentinel = useRef<any>(null);
 
-  // --- PERSISTENCE ---
   useEffect(() => {
     const { driveToken, books, ...rest } = state;
     const persistentBooks = books.map(({ directoryHandle, ...b }) => b);
     localStorage.setItem('talevox_pro_v2', JSON.stringify({ ...rest, books: persistentBooks }));
   }, [state]);
 
-  // --- WAKE LOCK ---
   useEffect(() => {
     const handleWakeLock = async () => {
       if (isPlaying && state.keepAwake && 'wakeLock' in navigator && !wakeLockSentinel.current) {
@@ -107,17 +99,6 @@ const App: React.FC = () => {
     handleWakeLock();
   }, [isPlaying, state.keepAwake]);
 
-  useEffect(() => {
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden' && wakeLockSentinel.current) {
-        wakeLockSentinel.current.release();
-        wakeLockSentinel.current = null;
-      }
-    };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, []);
-
   const activeBook = state.books.find(b => b.id === state.activeBookId);
   const activeChapterMetadata = activeBook?.chapters.find(c => c.id === activeBook.currentChapterId);
 
@@ -126,7 +107,6 @@ const App: React.FC = () => {
     return applyRules(activeChapterText, activeBook?.rules || []);
   }, [activeChapterText, activeBook?.rules]);
 
-  // --- CHAPTER LOADING ---
   const loadChapterContent = async (bookId: string, chapterId: string) => {
     const book = state.books.find(b => b.id === bookId);
     const chapter = book?.chapters.find(c => c.id === chapterId);
@@ -168,7 +148,6 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    // Initial load of the current chapter if one is active
     if (state.activeBookId && activeBook?.currentChapterId) {
         loadChapterContent(state.activeBookId, activeBook.currentChapterId);
     }
@@ -317,7 +296,6 @@ const App: React.FC = () => {
   return (
     <div className={`flex flex-col h-screen overflow-hidden font-sans transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-950 text-slate-100' : state.theme === Theme.SEPIA ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
       
-      {/* PWA UPDATE BANNER */}
       {needRefresh && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[200] w-full max-w-sm px-4">
           <div className="bg-indigo-600 text-white p-4 rounded-2xl shadow-2xl flex items-center justify-between border border-white/20 backdrop-blur-md">

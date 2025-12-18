@@ -1,9 +1,13 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
+/**
+ * Cleanly extracts chapter content using Gemini.
+ */
 export async function smartExtractChapter(rawContent: string) {
+  // Use process.env.API_KEY exclusively as per Google GenAI guidelines to resolve the ImportMeta error
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
     contents: `Extract the main chapter title and the primary narrative text content from the following input. 
@@ -26,10 +30,16 @@ export async function smartExtractChapter(rawContent: string) {
     }
   });
 
+  // Use the .text property directly to extract output from GenerateContentResponse
+  const text = response.text;
+  if (!text) {
+    throw new Error("No text returned from Gemini");
+  }
+
   try {
-    return JSON.parse(response.text);
+    return JSON.parse(text);
   } catch (e) {
-    console.error("Failed to parse Gemini response:", response.text);
-    throw new Error("Gemini failed to return valid JSON. The input might be too messy.");
+    console.error("Failed to parse Gemini response:", text);
+    throw new Error("Gemini failed to return valid JSON. The model may have returned an unexpected format.");
   }
 }

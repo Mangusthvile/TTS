@@ -1,4 +1,3 @@
-
 import { Rule, CaseMode } from '../types';
 
 export function applyRules(text: string, rules: Rule[]): string {
@@ -67,30 +66,29 @@ class SpeechController {
 
   private setupMediaSession() {
     if ('mediaSession' in navigator) {
-      navigator.mediaSession.setActionHandler('play', () => this.resumeFromMediaSession());
-      navigator.mediaSession.setActionHandler('pause', () => this.pauseFromMediaSession());
-      navigator.mediaSession.setActionHandler('stop', () => this.stop());
-      navigator.mediaSession.setActionHandler('seekbackward', (details) => {
-        const skip = details.seekOffset || 500;
-        this.seekRelative(-skip);
-      });
-      navigator.mediaSession.setActionHandler('seekforward', (details) => {
-        const skip = details.seekOffset || 500;
-        this.seekRelative(skip);
-      });
-      // Placeholder next/prev handlers that usually trigger a callback to App
-      navigator.mediaSession.setActionHandler('nexttrack', () => { /* No-op, managed by auto-advance logic */ });
-      navigator.mediaSession.setActionHandler('previoustrack', () => { /* No-op */ });
+      try {
+        navigator.mediaSession.setActionHandler('play', () => this.resumeFromMediaSession());
+        navigator.mediaSession.setActionHandler('pause', () => this.pauseFromMediaSession());
+        navigator.mediaSession.setActionHandler('stop', () => this.stop());
+        navigator.mediaSession.setActionHandler('seekbackward', (details) => {
+          const skip = details.seekOffset || 500;
+          this.seekRelative(-skip);
+        });
+        navigator.mediaSession.setActionHandler('seekforward', (details) => {
+          const skip = details.seekOffset || 500;
+          this.seekRelative(skip);
+        });
+      } catch (e) {
+        console.warn("MediaSession handlers could not be set", e);
+      }
     }
   }
 
   private seekRelative(delta: number) {
-    // Media session seek is context dependent, usually we emit an event or call back
-    // For now we assume we can find the current play callback in App.tsx
+    // Seek is typically handled via events back to the App component
   }
 
   private resumeFromMediaSession() {
-    // If truly paused at system level
     if (this.synth.paused) {
       this.synth.resume();
       this.updatePlaybackState('playing');
@@ -105,12 +103,14 @@ class SpeechController {
   }
 
   private updateMediaMetadata(title: string, artist: string) {
-    if ('mediaSession' in navigator) {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: title,
-        artist: artist,
-        album: 'Talevox Library'
-      });
+    if ('mediaSession' in navigator && window.MediaMetadata) {
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: title,
+          artist: artist,
+          album: 'Talevox Library'
+        });
+      } catch (e) {}
     }
   }
 
@@ -202,7 +202,7 @@ class SpeechController {
       }
       this.speakNextChunk(currentSession);
     } else {
-      onEnd();
+      if (onEnd) onEnd();
     }
   }
 
@@ -243,13 +243,12 @@ class SpeechController {
         const effectiveOffset = Math.max(0, totalOffset - this.currentPrefixLength);
         this.globalBoundaryCallback(effectiveOffset, event.charIndex, this.currentChunkIndex);
         
-        // Update position state for better lock screen progress
         if ('mediaSession' in navigator && (navigator as any).mediaSession.setPositionState) {
           try {
             (navigator as any).mediaSession.setPositionState({
-              duration: 100, // Percentage based or estimated seconds. Here dummy 100 as proxy.
+              duration: 100,
               playbackRate: this.rate,
-              position: Math.min(100, (effectiveOffset / chunk.text.length) * 100)
+              position: Math.min(100, (effectiveOffset / Math.max(1, chunk.text.length)) * 100)
             });
           } catch(e) {}
         }
@@ -258,13 +257,11 @@ class SpeechController {
 
     utterance.onend = () => {
       if (this.sessionToken !== session) return;
-      // IMMEDIATE chaining for background stability
       this.currentChunkIndex++;
       this.speakNextChunk(session);
     };
 
     utterance.onerror = (err) => {
-      console.error("Speech Error:", err);
       if (this.sessionToken === session) {
         this.currentChunkIndex++;
         this.speakNextChunk(session);
