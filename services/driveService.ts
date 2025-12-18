@@ -1,6 +1,6 @@
 /**
  * Talevox Google Drive Service
- * Handles authentication and file synchronization.
+ * Handles authentication and file synchronization with enhanced error reporting.
  */
 
 export async function authenticateDrive(explicitClientId?: string): Promise<string> {
@@ -18,7 +18,7 @@ export async function authenticateDrive(explicitClientId?: string): Promise<stri
 
       const client = (window as any).google.accounts.oauth2.initTokenClient({
         client_id: CLIENT_ID,
-        // Expanded scope to allow browsing existing folders
+        // Using requested scopes for specific app access + metadata reading for folder picking
         scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.metadata.readonly',
         callback: (response: any) => {
           if (response.error) {
@@ -36,17 +36,50 @@ export async function authenticateDrive(explicitClientId?: string): Promise<stri
   });
 }
 
-async function handleDriveResponse(response: Response, defaultError: string) {
-  if (!response.ok) {
-    if (response.status === 401) throw new Error('UNAUTHORIZED');
-    let details = '';
-    try {
-      const errorJson = await response.json();
-      details = errorJson.error?.message || JSON.stringify(errorJson);
-    } catch (e) {}
-    throw new Error(`${defaultError}${details ? ': ' + details : ''}`);
+/**
+ * Parses the response and returns a meaningful Error object if the status is not OK.
+ */
+async function getErrorFromResponse(response: Response, fallbackPrefix: string): Promise<Error> {
+  let details = '';
+  let reason = '';
+  try {
+    // Clone response so we can read it twice if needed
+    const resClone = response.clone();
+    const errorJson = await resClone.json();
+    details = errorJson.error?.message || '';
+    reason = errorJson.error?.errors?.[0]?.reason || '';
+  } catch (e) {
+    try { details = await response.text(); } catch (e2) {}
   }
-  return response.json();
+
+  // 401: Token expired or invalid
+  if (response.status === 401) {
+    return new Error('Authentication token expired or invalid (401). Please re-link your Google account.');
+  }
+
+  // 403: Forbidden - often configuration or scope issues
+  if (response.status === 403) {
+    if (reason === 'accessNotConfigured') {
+      return new Error('Google Drive API is not enabled for this project (403). You must enable "Google Drive API" in the Google Cloud Console.');
+    }
+    if (reason === 'insufficientPermissions') {
+      return new Error('Insufficient permissions (403). The app does not have the required scopes. Try unlinking and re-linking your account to reset permissions.');
+    }
+    return new Error(`Access forbidden (403): ${details || 'Check your OAuth and GCP project settings.'}`);
+  }
+
+  // 404: Resource not found
+  if (response.status === 404) {
+    return new Error('Requested resource not found (404). The folder or file ID might be incorrect or has been deleted from Drive.');
+  }
+
+  // 429: Rate limit
+  if (response.status === 429) {
+    return new Error('Too many requests (429). Google Drive API rate limit reached. Please wait a moment before trying again.');
+  }
+
+  // General error with as much info as possible
+  return new Error(`${details || fallbackPrefix} (HTTP ${response.status})`);
 }
 
 export async function listFolders(token: string): Promise<{id: string, name: string}[]> {
@@ -57,7 +90,11 @@ export async function listFolders(token: string): Promise<{id: string, name: str
     headers: { Authorization: `Bearer ${token}` }
   });
   
-  const data = await handleDriveResponse(response, 'DRIVE_LIST_ERROR');
+  if (!response.ok) {
+    throw await getErrorFromResponse(response, 'DRIVE_LIST_ERROR');
+  }
+  
+  const data = await response.json();
   return data.files || [];
 }
 
@@ -67,7 +104,11 @@ export async function findFileSync(token: string, name: string): Promise<string 
     headers: { Authorization: `Bearer ${token}` }
   });
   
-  const data = await handleDriveResponse(response, 'DRIVE_FIND_ERROR');
+  if (!response.ok) {
+    throw await getErrorFromResponse(response, 'DRIVE_FIND_ERROR');
+  }
+
+  const data = await response.json();
   return data.files && data.files.length > 0 ? data.files[0].id : null;
 }
 
@@ -77,7 +118,7 @@ export async function findFolderSync(token: string, name: string): Promise<strin
     headers: { Authorization: `Bearer ${token}` }
   });
   
-  if (!response.ok) return null;
+  if (!response.ok) return null; // Silently fail for discovery
   const data = await response.json();
   return data.files && data.files.length > 0 ? data.files[0].id : null;
 }
@@ -86,11 +127,9 @@ export async function fetchDriveFile(token: string, fileId: string): Promise<str
   const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
     headers: { Authorization: `Bearer ${token}` }
   });
-  if (response.status === 401) throw new Error('UNAUTHORIZED');
+  
   if (!response.ok) {
-    let details = '';
-    try { details = (await response.json()).error?.message; } catch(e) {}
-    throw new Error(`FETCH_FAILED${details ? ': ' + details : ''}`);
+    throw await getErrorFromResponse(response, 'FETCH_FAILED');
   }
   return response.text();
 }
@@ -141,9 +180,7 @@ export async function uploadToDrive(
   });
 
   if (!response.ok) {
-    const errorData = await response.json();
-    console.error("Drive Upload Error:", errorData);
-    throw new Error(`UPLOAD_FAILED: ${errorData.error?.message || 'Unknown'}`);
+    throw await getErrorFromResponse(response, 'UPLOAD_FAILED');
   }
 
   const data = await response.json();
@@ -163,6 +200,10 @@ export async function createDriveFolder(token: string, name: string): Promise<st
     })
   });
   
-  const data = await handleDriveResponse(response, 'FOLDER_CREATION_FAILED');
+  if (!response.ok) {
+    throw await getErrorFromResponse(response, 'FOLDER_CREATION_FAILED');
+  }
+
+  const data = await response.json();
   return data.id;
 }
