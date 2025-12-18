@@ -44,9 +44,7 @@ export default defineConfig({
   ],
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
-    // Map the Vite-prefixed environment variable to process.env.API_KEY as required by GenAI guidelines.
-    // This replacement happens at build time, so 'process' is not needed at runtime.
-    'process.env.API_KEY': JSON.stringify(process.env.VITE_GEMINI_API_KEY || process.env.API_KEY || ''),
+    // Removed 'process.env.API_KEY' define to ensure browser build uses Vite envs (import.meta.env).
   },
   server: {
     port: 3000
