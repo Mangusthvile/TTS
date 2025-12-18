@@ -1,14 +1,14 @@
 
 import React, { useState } from 'react';
 import { Book, Theme, StorageBackend, Chapter } from '../types';
-import { BookOpen, Plus, Trash2, History, Cloud, Monitor, X, FileText, ChevronRight, Database } from 'lucide-react';
+import { BookOpen, Plus, Trash2, History, Cloud, Monitor, X, FileText, ChevronRight, Database, Loader2 } from 'lucide-react';
 
 interface LibraryProps {
   books: Book[];
   activeBookId?: string;
   lastSession?: { bookId: string; chapterId: string; offset: number };
   onSelectBook: (id: string) => void;
-  onAddBook: (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string) => void;
+  onAddBook: (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string) => Promise<void>;
   onDeleteBook: (id: string) => void;
   onSelectChapter: (bookId: string, chapterId: string, offset?: number) => void;
   theme: Theme;
@@ -20,6 +20,7 @@ const Library: React.FC<LibraryProps> = ({
   books, activeBookId, lastSession, onSelectBook, onAddBook, onDeleteBook, onSelectChapter, theme, onClose, isOpen 
 }) => {
   const [isAdding, setIsAdding] = useState(false);
+  const [isProcessingAdd, setIsProcessingAdd] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   
   const isPickerSupported = !!(window as any).showDirectoryPicker;
@@ -39,6 +40,20 @@ const Library: React.FC<LibraryProps> = ({
     ${isDark ? 'bg-slate-950 border-slate-900' : isSepia ? 'bg-[#efe6d5] border-[#d8ccb6]' : 'bg-white border-black/5'}
   `;
 
+  const handleAdd = async (backend: StorageBackend, handle?: any) => {
+    if (!newTitle.trim()) return;
+    setIsProcessingAdd(true);
+    try {
+      await onAddBook(newTitle, backend, handle);
+      setIsAdding(false);
+      setNewTitle('');
+    } catch (e) {
+      console.error("Failed to add book", e);
+    } finally {
+      setIsProcessingAdd(false);
+    }
+  };
+
   return (
     <>
       {isOpen && (
@@ -52,8 +67,9 @@ const Library: React.FC<LibraryProps> = ({
           </h2>
           <div className="flex items-center gap-1">
             <button 
+              disabled={isProcessingAdd}
               onClick={() => setIsAdding(true)} 
-              className="p-2 bg-indigo-600 text-white rounded-xl shadow-lg hover:scale-110 active:scale-95 transition-transform"
+              className="p-2 bg-indigo-600 text-white rounded-xl shadow-lg hover:scale-110 active:scale-95 transition-transform disabled:opacity-50"
             >
               <Plus className="w-5 h-5" />
             </button>
@@ -78,37 +94,41 @@ const Library: React.FC<LibraryProps> = ({
             <div className={`p-5 rounded-3xl border space-y-4 mb-4 ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-indigo-50 border-indigo-100'}`}>
               <div className="space-y-1">
                 <label className="text-[10px] font-black uppercase tracking-widest text-indigo-600 ml-1">New Book</label>
-                <input autoFocus type="text" value={newTitle} onChange={e => setNewTitle(e.target.value)} placeholder="Book Title..." className={`w-full px-4 py-2.5 rounded-xl outline-none text-sm font-bold border ${isDark ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-200 text-black'}`} />
+                <input 
+                  autoFocus 
+                  disabled={isProcessingAdd}
+                  type="text" 
+                  value={newTitle} 
+                  onChange={e => setNewTitle(e.target.value)} 
+                  placeholder="Book Title..." 
+                  className={`w-full px-4 py-2.5 rounded-xl outline-none text-sm font-bold border ${isDark ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-200 text-black'}`} 
+                />
               </div>
               <div className="grid grid-cols-1 gap-2">
                 <button 
-                  onClick={async () => {
-                    if (!newTitle) return;
-                    onAddBook(newTitle, StorageBackend.MEMORY);
-                    setIsAdding(false); setNewTitle('');
-                  }}
+                  disabled={isProcessingAdd}
+                  onClick={() => handleAdd(StorageBackend.MEMORY)}
                   className={`flex items-center gap-3 p-3 rounded-xl text-xs font-black border transition-all ${isDark ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-200 text-black hover:border-indigo-600'}`}
                 >
                   <Database className="w-4 h-4 text-emerald-500" /> App Memory
                 </button>
                 <button 
-                  onClick={async () => {
-                    if (!newTitle) return;
-                    onAddBook(newTitle, StorageBackend.DRIVE);
-                    setIsAdding(false); setNewTitle('');
-                  }}
-                  className={`flex items-center gap-3 p-3 rounded-xl text-xs font-black border transition-all ${isDark ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-200 text-black hover:border-indigo-600'}`}
+                  disabled={isProcessingAdd}
+                  onClick={() => handleAdd(StorageBackend.DRIVE)}
+                  className={`flex items-center justify-between p-3 rounded-xl text-xs font-black border transition-all ${isDark ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-200 text-black hover:border-indigo-600'}`}
                 >
-                  <Cloud className="w-4 h-4 text-indigo-500" /> Google Drive
+                  <div className="flex items-center gap-3">
+                    <Cloud className="w-4 h-4 text-indigo-500" /> Google Drive
+                  </div>
+                  {isProcessingAdd && <Loader2 className="w-3.5 h-3.5 animate-spin opacity-60" />}
                 </button>
                 {isPickerSupported && (
                   <button 
+                    disabled={isProcessingAdd}
                     onClick={async () => {
-                      if (!newTitle) return;
                       try {
                         const handle = await (window as any).showDirectoryPicker({ mode: "readwrite" });
-                        onAddBook(newTitle, StorageBackend.LOCAL, handle);
-                        setIsAdding(false); setNewTitle('');
+                        handleAdd(StorageBackend.LOCAL, handle);
                       } catch (e) {}
                     }}
                     className={`flex items-center gap-3 p-3 rounded-xl text-xs font-black border transition-all ${isDark ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-200 text-black hover:border-indigo-600'}`}
@@ -117,7 +137,7 @@ const Library: React.FC<LibraryProps> = ({
                   </button>
                 )}
               </div>
-              <button onClick={() => setIsAdding(false)} className={`w-full py-2 text-xs font-black ${isDark ? 'text-slate-400 hover:text-white' : 'text-slate-500 hover:text-black'}`}>Cancel</button>
+              <button onClick={() => setIsAdding(false)} disabled={isProcessingAdd} className={`w-full py-2 text-xs font-black ${isDark ? 'text-slate-400 hover:text-white' : 'text-slate-500 hover:text-black'}`}>Cancel</button>
             </div>
           )}
 

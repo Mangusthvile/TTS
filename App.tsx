@@ -140,6 +140,7 @@ const App: React.FC = () => {
     try {
       const token = await authenticateDrive(state.googleClientId);
       setState(prev => ({ ...prev, driveToken: token }));
+      return token;
     } catch (err) {
       console.error("Cloud link failed", err);
       if (err instanceof Error && err.message === 'MISSING_CLIENT_ID') {
@@ -150,6 +151,7 @@ const App: React.FC = () => {
       } else {
         alert("Failed to connect to Google: " + (err instanceof Error ? err.message : "Unknown error"));
       }
+      throw err;
     }
   };
 
@@ -162,10 +164,8 @@ const App: React.FC = () => {
         }
       }
     } catch (err) {
-      // Silently catch origin mismatch errors in preview environments
       console.warn("Service Worker update skipped:", err);
     }
-    // Perform hard refresh to see if app assets/manifest changed
     window.location.reload();
   };
 
@@ -223,15 +223,12 @@ const App: React.FC = () => {
     let driveFolderId = undefined;
     if (backend === StorageBackend.DRIVE) {
       try {
-        const token = state.driveToken || await authenticateDrive(state.googleClientId);
-        if (!state.driveToken) setState(prev => ({ ...prev, driveToken: token }));
+        const token = state.driveToken || await handleLinkCloud();
         driveFolderId = await createDriveFolder(token, `Talevox - ${title}`);
       } catch (err) { 
-        if (err instanceof Error && err.message === 'MISSING_CLIENT_ID') {
-          alert("Please set a Google Client ID in Settings first.");
-          setActiveTab('settings');
-        }
-        return; 
+        // handleLinkCloud already alerts
+        console.error("Add Drive Book Error:", err);
+        throw err;
       }
     }
     const newBook: Book = {
