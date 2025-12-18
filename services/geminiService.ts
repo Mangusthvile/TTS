@@ -6,45 +6,52 @@ export interface ExtractedChapter {
   index: number;
 }
 
+export const GEMINI_ENABLED = !!import.meta.env.VITE_GEMINI_API_KEY;
+
 export async function extractChapterWithAI(rawText: string): Promise<ExtractedChapter> {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
-  
+  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      "Missing VITE_GEMINI_API_KEY. Add it to a .env file (Vite env vars must start with VITE_)."
+    );
+  }
+
+  const ai = new GoogleGenAI({ apiKey });
+
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
-    contents: `Extract the story content from the following raw text or HTML. 
-    Identify the chapter title and the chapter number/index. 
-    Ignore all navigation links, ads, footer text, and comments. 
-    Return only the clean story prose.
-    
-    RAW CONTENT:
-    ${rawText.substring(0, 30000)}`, // Limit input to avoid token overflow
+    contents: `Extract the story content from the following raw text or HTML.
+Identify the chapter title and the chapter number/index.
+Ignore all navigation links, ads, footer text, and comments.
+Return only the clean story prose.
+
+RAW CONTENT:
+${rawText.substring(0, 30000)}`,
     config: {
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.OBJECT,
         properties: {
-          title: {
-            type: Type.STRING,
-            description: "The title of the chapter.",
-          },
-          content: {
-            type: Type.STRING,
-            description: "The cleaned story text content.",
-          },
-          index: {
-            type: Type.INTEGER,
-            description: "The chapter number or index.",
-          },
+          title: { type: Type.STRING, description: "The title of the chapter." },
+          content: { type: Type.STRING, description: "The cleaned story text content." },
+          index: { type: Type.INTEGER, description: "The chapter number or index." }
         },
-        required: ["title", "content", "index"],
-      },
-    },
+        required: ["title", "content", "index"]
+      }
+    }
   });
 
   try {
-    const data = JSON.parse(response.text);
-    return data as ExtractedChapter;
-  } catch (e) {
+    const raw = response.text ?? "";
+    if (!raw.trim()) throw new Error("Gemini returned an empty response.");
+    const data = JSON.parse(raw) as ExtractedChapter;
+
+    if (!data?.title || !data?.content || typeof data.index !== "number") {
+      throw new Error("Gemini response JSON missing required fields.");
+    }
+
+    return data;
+  } catch {
     throw new Error("Failed to parse AI extraction results.");
   }
 }
