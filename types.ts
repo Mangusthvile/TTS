@@ -5,6 +5,11 @@ export enum CaseMode {
   SMART = 'SMART'
 }
 
+export enum RuleType {
+  REPLACE = 'REPLACE',
+  DELETE = 'DELETE'
+}
+
 export enum Scope {
   PHRASE = 'PHRASE',
   WORD = 'WORD'
@@ -32,12 +37,16 @@ export interface Rule {
   id: string;
   find: string;
   speakAs: string;
-  caseMode: CaseMode;
+  matchCase: boolean;
+  matchExpression: boolean;
+  ruleType: RuleType;
   wholeWord: boolean;
   scope: Scope;
   priority: number;
   enabled: boolean;
   phoneticHint?: string;
+  /** @deprecated use matchCase instead */
+  caseMode?: CaseMode;
 }
 
 export interface Chapter {

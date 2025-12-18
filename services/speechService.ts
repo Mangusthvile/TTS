@@ -1,5 +1,5 @@
 
-import { Rule, CaseMode } from '../types';
+import { Rule, RuleType } from '../types';
 
 export function applyRules(text: string, rules: Rule[]): string {
   let processedText = text;
@@ -8,24 +8,23 @@ export function applyRules(text: string, rules: Rule[]): string {
     .sort((a, b) => b.priority - a.priority);
 
   activeRules.forEach(rule => {
+    // Determine regex flags based on matchCase toggle
     let flags = 'g';
-    if (rule.caseMode === CaseMode.IGNORE) flags += 'i';
+    if (!rule.matchCase) flags += 'i';
     
-    let pattern = rule.find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    if (rule.wholeWord) pattern = `\\b${pattern}\\b`;
+    // Determine pattern based on matchExpression toggle
+    let pattern = rule.matchExpression 
+      ? rule.find 
+      : rule.find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    if (rule.wholeWord && !rule.matchExpression) {
+      pattern = `\\b${pattern}\\b`;
+    }
 
     try {
       const regex = new RegExp(pattern, flags);
-      if (rule.caseMode === CaseMode.SMART) {
-        processedText = processedText.replace(regex, (match) => {
-          if (match[0] === match[0].toUpperCase()) {
-            return rule.speakAs[0].toUpperCase() + rule.speakAs.slice(1);
-          }
-          return rule.speakAs;
-        });
-      } else {
-        processedText = processedText.replace(regex, rule.speakAs);
-      }
+      const replacement = rule.ruleType === RuleType.DELETE ? "" : (rule.speakAs || "");
+      processedText = processedText.replace(regex, replacement);
     } catch (e) {
       console.warn("Invalid regex for rule:", rule.find);
     }
@@ -83,19 +82,6 @@ class SpeechController {
           }
         });
         navigator.mediaSession.setActionHandler('stop', () => this.stop());
-        navigator.mediaSession.setActionHandler('previoustrack', () => {
-           // Handled by App state via UI but can be mapped here if needed
-        });
-        navigator.mediaSession.setActionHandler('nexttrack', () => {
-           // Handled by App state via UI but can be mapped here if needed
-        });
-        navigator.mediaSession.setActionHandler('seekbackward', (details) => {
-          const skip = details.seekOffset || 500;
-          // Custom seek logic would need global state access, usually handled via UI events
-        });
-        navigator.mediaSession.setActionHandler('seekforward', (details) => {
-          const skip = details.seekOffset || 500;
-        });
       } catch (e) {
         console.warn("MediaSession handlers could not be set", e);
       }
@@ -109,9 +95,7 @@ class SpeechController {
           title: title,
           artist: artist,
           album: 'Talevox Library',
-          artwork: [
-            { src: 'https://cdn-icons-png.flaticon.com/512/3145/3145761.png', sizes: '512x512', type: 'image/png' }
-          ]
+          artwork: [{ src: 'https://cdn-icons-png.flaticon.com/512/3145/3145761.png', sizes: '512x512', type: 'image/png' }]
         });
       } catch (e) {}
     }
@@ -126,44 +110,23 @@ class SpeechController {
   private createChunks(text: string): SpeechChunk[] {
     const chunks: SpeechChunk[] = [];
     const MAX_CHUNK_LENGTH = 1600; 
-    const paragraphs = text.split(/(\n\s*\n)/);
+    const segments = text.split(/([.!?]\s+)/);
     
     let tempChunk = "";
     let tempStart = 0;
 
-    paragraphs.forEach(p => {
-      if (tempChunk.length + p.length > MAX_CHUNK_LENGTH) {
-        if (p.length > MAX_CHUNK_LENGTH) {
-           if (tempChunk) {
-              chunks.push({ text: tempChunk, startOffset: tempStart });
-              tempStart += tempChunk.length;
-              tempChunk = "";
-           }
-           const sentences = p.split(/([.!?]\s+)/);
-           sentences.forEach(s => {
-              if (tempChunk.length + s.length > MAX_CHUNK_LENGTH) {
-                 if (tempChunk) chunks.push({ text: tempChunk, startOffset: tempStart });
-                 tempStart += tempChunk.length;
-                 tempChunk = s;
-              } else {
-                 tempChunk += s;
-              }
-           });
-        } else {
-          if (tempChunk) chunks.push({ text: tempChunk, startOffset: tempStart });
-          tempStart += tempChunk.length;
-          tempChunk = p;
-        }
+    segments.forEach(s => {
+      if (tempChunk.length + s.length > MAX_CHUNK_LENGTH) {
+        if (tempChunk) chunks.push({ text: tempChunk, startOffset: tempStart });
+        tempStart += tempChunk.length;
+        tempChunk = s;
       } else {
-        tempChunk += p;
+        tempChunk += s;
       }
     });
     if (tempChunk) chunks.push({ text: tempChunk, startOffset: tempStart });
     return chunks;
   }
-
-  setRate(rate: number) { this.rate = rate; }
-  setVoice(voiceName: string) { this.voiceName = voiceName; }
 
   speak(
     text: string, 
@@ -178,8 +141,6 @@ class SpeechController {
   ) {
     this.sessionToken++;
     const currentSession = this.sessionToken;
-    
-    // Stop any existing speech immediately
     this.synth.cancel();
     
     this.onEndCallback = onEnd;
@@ -205,12 +166,8 @@ class SpeechController {
         const diff = startOffset - firstChunk.startOffset;
         this.chunks[0] = { text: firstChunk.text.substring(diff), startOffset: startOffset };
       }
-      
-      // Chaining start: Use minimal delay to ensure background process isn't interrupted by a long silence
       this.speakNextChunk(currentSession);
-    } else {
-      if (onEnd) onEnd();
-    }
+    } else if (onEnd) onEnd();
   }
 
   private async speakNextChunk(session: number) {
@@ -225,7 +182,6 @@ class SpeechController {
           this.currentChapterTitle = next.chapterTitle;
           this.totalTextLength = next.content.length;
           this.updateMediaMetadata(next.chapterTitle, next.bookTitle);
-          
           this.chunks = this.createChunks(next.announcementPrefix + next.content);
           this.currentChunkIndex = 0;
           this.speakNextChunk(session);
@@ -245,17 +201,10 @@ class SpeechController {
     }
 
     const utterance = new SpeechSynthesisUtterance(chunk.text);
-    this.currentUtterance = utterance; // Keep reference to avoid GC
-    
+    this.currentUtterance = utterance;
     const voices = this.synth.getVoices();
-    const voice = voices.find(v => v.name === this.voiceName) || 
-                  voices.find(v => v.lang.startsWith('en')) || 
-                  (voices.length > 0 ? voices[0] : null);
-
-    if (voice) {
-      utterance.voice = voice;
-    }
-    
+    const voice = voices.find(v => v.name === this.voiceName) || voices.find(v => v.lang.startsWith('en')) || voices[0];
+    if (voice) utterance.voice = voice;
     utterance.rate = this.rate;
 
     utterance.onboundary = (event) => {
@@ -264,13 +213,11 @@ class SpeechController {
         const effectiveOffset = Math.max(0, totalOffset - this.currentPrefixLength);
         this.globalBoundaryCallback(effectiveOffset, event.charIndex, this.currentChunkIndex);
         
-        // Update Media Position State if supported
-        if ('mediaSession' in navigator && (navigator.mediaSession as any).setPositionState) {
+        if ('mediaSession' in navigator && (navigator as any).setPositionState) {
           try {
             const progress = effectiveOffset / Math.max(1, this.totalTextLength);
-            // Artificial duration estimation for lockscreen progress bar
             const estDuration = (this.totalTextLength / 170) * 60; 
-            (navigator.mediaSession as any).setPositionState({
+            (navigator as any).setPositionState({
               duration: estDuration,
               playbackRate: this.rate,
               position: estDuration * progress
@@ -284,13 +231,10 @@ class SpeechController {
       if (this.sessionToken !== session) return;
       this.currentUtterance = null;
       this.currentChunkIndex++;
-      // Immediate chaining is critical for mobile background playback
       this.speakNextChunk(session);
     };
 
-    utterance.onerror = (event: any) => {
-      if (event.error === 'interrupted' || event.error === 'canceled') return;
-      console.error(`Speech Synthesis Error: ${event.error}`);
+    utterance.onerror = () => {
       if (this.sessionToken === session) {
         this.currentUtterance = null;
         this.currentChunkIndex++;
@@ -307,10 +251,8 @@ class SpeechController {
     this.onEndCallback = null;
     this.getNextSegment = null;
     this.currentUtterance = null;
-    
     this.synth.cancel();
     this.updatePlaybackState('none');
-
     this.chunks = [];
     this.currentChunkIndex = -1;
   }
