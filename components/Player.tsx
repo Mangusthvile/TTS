@@ -74,6 +74,12 @@ const Player: React.FC<PlayerProps> = ({
   const textPrimary = isDark ? 'text-slate-100' : isSepia ? 'text-[#3c2f25]' : 'text-black';
   const textSecondary = isDark ? 'text-slate-400' : isSepia ? 'text-[#3c2f25]/70' : 'text-slate-600';
 
+  const handleSpeedChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseFloat(e.target.value);
+    if (isPlaying) onPause(); // Pause on speed move
+    onSpeedChange(val);
+  };
+
   return (
     <div className={`border-t transition-colors duration-500 relative z-20 ${isDark ? 'bg-slate-900 border-slate-800 text-slate-100' : isSepia ? 'bg-[#efe6d5] border-[#d8ccb6] text-[#3c2f25]' : 'bg-white border-black/10 text-black'}`}>
       <div className="flex items-center gap-4 px-4 lg:px-8 pt-4">
@@ -98,9 +104,14 @@ const Player: React.FC<PlayerProps> = ({
             <div className="flex flex-col gap-1.5">
               <span className={`text-[10px] font-black uppercase tracking-widest ${textSecondary}`}>Speed</span>
               <div className="flex items-center gap-2">
-                <button onClick={() => onSetUseBookSettings(!useBookSettings)} className={`px-2.5 py-1 rounded-lg text-[10px] font-black border transition-all ${useBookSettings ? 'bg-indigo-600 text-white border-indigo-500' : isDark ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-black/5 border-black/5 text-black'}`}>{useBookSettings ? 'Book' : 'Global'}</button>
+                <button 
+                  onClick={() => onSetUseBookSettings(!useBookSettings)} 
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-black border transition-all ${useBookSettings ? 'bg-indigo-600 text-white border-indigo-500' : isDark ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-black/5 border-black/5 text-black'}`}
+                >
+                  {useBookSettings ? 'Book' : 'Global'}
+                </button>
                 <div className="flex items-center gap-2">
-                  <input type="range" min="0.5" max="3.0" step="0.1" value={speed} onChange={e => onSpeedChange(parseFloat(e.target.value))} className="h-1.5 w-16 accent-indigo-600" />
+                  <input type="range" min="0.5" max="3.0" step="0.1" value={speed} onChange={handleSpeedChange} className="h-1.5 w-16 accent-indigo-600" />
                   <span className={`text-xs font-black min-w-[20px] ${textPrimary}`}>{speed}x</span>
                 </div>
               </div>

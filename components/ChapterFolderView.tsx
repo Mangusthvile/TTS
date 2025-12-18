@@ -1,7 +1,6 @@
-
 import React, { useMemo, useState } from 'react';
 import { Book, Theme } from '../types';
-import { LayoutGrid, List, AlignJustify, Plus, Star, Folder, Link2, CheckCircle2 } from 'lucide-react';
+import { LayoutGrid, List, AlignJustify, Plus, Star, Folder, Link2, CheckCircle2, Download } from 'lucide-react';
 
 type ViewMode = 'details' | 'list' | 'grid';
 
@@ -47,6 +46,23 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     } catch (e) {
       console.warn("Folder picker cancelled");
     }
+  };
+
+  const downloadAllChapters = () => {
+    chapters.forEach((chapter, i) => {
+      setTimeout(() => {
+        const blob = new Blob([chapter.content], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const safeTitle = chapter.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+        a.download = `${chapter.index.toString().padStart(3, '0')}_${safeTitle}.txt`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, i * 300); // Small delay to avoid browser block
+    });
   };
 
   const renderRow = (c: any) => {
@@ -101,6 +117,15 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           </div>
 
           <div className="flex items-center flex-wrap gap-3">
+            <button
+              onClick={downloadAllChapters}
+              title="Download all chapters as .txt files"
+              className={`px-4 py-2.5 rounded-2xl border text-[11px] font-black flex items-center gap-2 shadow-sm ${controlBg} ${textPrimary}`}
+            >
+              <Download className="w-4 h-4" />
+              Export .TXT
+            </button>
+
             {onLinkFolder && canPickFolder && (
               <button
                 onClick={handleLinkFolder}

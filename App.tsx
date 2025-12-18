@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, ReaderSettings } from './types';
 import Library from './components/Library';
@@ -9,29 +10,9 @@ import Extractor from './components/Extractor';
 import ChapterFolderView from './components/ChapterFolderView';
 import { speechController, applyRules } from './services/speechService';
 import { authenticateDrive, fetchDriveFile, uploadToDrive, createDriveFolder } from './services/driveService';
-import { BookText, Zap, Sun, Coffee, Moon, X, Settings as SettingsIcon, Menu, RefreshCw } from 'lucide-react';
-
-const usePWAUpdate = () => {
-  const [offlineReady, setOfflineReady] = useState(false);
-  const [needRefresh, setNeedRefresh] = useState(false);
-  
-  const updateServiceWorker = (reload: boolean) => {
-    if (reload) window.location.reload();
-  };
-
-  return {
-    offlineReady: [offlineReady, setOfflineReady],
-    needRefresh: [needRefresh, setNeedRefresh],
-    updateServiceWorker,
-  };
-};
+import { BookText, Zap, Sun, Coffee, Moon, X, Settings as SettingsIcon, Menu, RefreshCw, Loader2 } from 'lucide-react';
 
 const App: React.FC = () => {
-  const {
-    needRefresh: [needRefresh],
-    updateServiceWorker,
-  } = usePWAUpdate();
-
   const [state, setState] = useState<AppState>(() => {
     const saved = localStorage.getItem('talevox_pro_v2');
     const parsed = saved ? JSON.parse(saved) : {};
@@ -45,7 +26,7 @@ const App: React.FC = () => {
       playbackSpeed: parsed.playbackSpeed || 1.0,
       selectedVoiceName: parsed.selectedVoiceName,
       theme: parsed.theme || Theme.LIGHT,
-      currentOffset: 0,
+      currentOffset: parsed.lastSession?.bookId === parsed.activeBookId ? parsed.lastSession?.offset || 0 : 0,
       debugMode: parsed.debugMode || false,
       keepAwake: parsed.keepAwake ?? false,
       readerSettings: parsed.readerSettings || {
@@ -69,18 +50,29 @@ const App: React.FC = () => {
   
   const [sleepTimerSeconds, setSleepTimerSeconds] = useState<number | null>(null);
   const [stopAfterChapter, setStopAfterChapter] = useState(false);
+  const [pwaNeedRefresh, setPwaNeedRefresh] = useState(false);
 
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
 
   const wakeLockSentinel = useRef<any>(null);
 
+  // Persistence logic for library and settings
   useEffect(() => {
     const { driveToken, books, ...rest } = state;
-    const persistentBooks = books.map(({ directoryHandle, ...b }) => b);
-    localStorage.setItem('talevox_pro_v2', JSON.stringify({ ...rest, books: persistentBooks }));
+    const persistentBooks = books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined }));
+    localStorage.setItem('talevox_pro_v2', JSON.stringify({ 
+      ...rest, 
+      books: persistentBooks,
+      lastSession: state.activeBookId && activeBook?.currentChapterId ? {
+        bookId: state.activeBookId,
+        chapterId: activeBook.currentChapterId,
+        offset: state.currentOffset
+      } : state.lastSession
+    }));
   }, [state]);
 
+  // Wake Lock handling to prevent screen dimming
   useEffect(() => {
     const handleWakeLock = async () => {
       if (isPlaying && state.keepAwake && 'wakeLock' in navigator && !wakeLockSentinel.current) {
@@ -107,7 +99,7 @@ const App: React.FC = () => {
     return applyRules(activeChapterText, activeBook?.rules || []);
   }, [activeChapterText, activeBook?.rules]);
 
-  const loadChapterContent = async (bookId: string, chapterId: string) => {
+  const loadChapterContent = useCallback(async (bookId: string, chapterId: string) => {
     const book = state.books.find(b => b.id === bookId);
     const chapter = book?.chapters.find(c => c.id === chapterId);
     if (!book || !chapter) return;
@@ -137,7 +129,7 @@ const App: React.FC = () => {
         const file = await fileHandle.getFile();
         content = await file.text();
       } else {
-        content = chapter.content; 
+        content = chapter.content || ""; 
       }
       setActiveChapterText(content);
     } catch (err) {
@@ -145,13 +137,15 @@ const App: React.FC = () => {
     } finally {
       setIsLoadingChapter(false);
     }
-  };
+  }, [state.books, state.driveToken]);
 
   useEffect(() => {
     if (state.activeBookId && activeBook?.currentChapterId) {
-        loadChapterContent(state.activeBookId, activeBook.currentChapterId);
+      loadChapterContent(state.activeBookId, activeBook.currentChapterId);
+    } else {
+      setActiveChapterText('');
     }
-  }, []);
+  }, [state.activeBookId, activeBook?.currentChapterId, loadChapterContent]);
 
   const handleAddBook = async (title: string, backend: StorageBackend, directoryHandle?: any) => {
     let driveFolderId = undefined;
@@ -183,9 +177,6 @@ const App: React.FC = () => {
   };
 
   const handleSelectChapter = useCallback(async (bookId: string, chapterId: string, offset?: number) => {
-    const book = state.books.find(b => b.id === bookId);
-    if (!book) return;
-
     speechController.stop();
     setIsPlaying(false);
     
@@ -196,10 +187,9 @@ const App: React.FC = () => {
       currentOffset: offset ?? 0
     }));
 
-    await loadChapterContent(bookId, chapterId);
     setActiveTab('reader');
     setIsSidebarOpen(false);
-  }, [state.books, state.driveToken]);
+  }, []);
 
   const handleSelectBook = (id: string) => {
     speechController.stop();
@@ -251,7 +241,7 @@ const App: React.FC = () => {
   };
 
   const handlePlay = useCallback(() => {
-    if (!playbackText || !activeBook || !activeChapterMetadata) return;
+    if (!playbackText || !activeBook || !activeChapterMetadata || isLoadingChapter) return;
     setIsPlaying(true);
     speechController.speak(
       playbackText,
@@ -260,7 +250,7 @@ const App: React.FC = () => {
       state.currentOffset,
       () => setIsPlaying(false),
       (offset) => {
-        if (Math.abs(stateRef.current.currentOffset - offset) > 20) {
+        if (Math.abs(stateRef.current.currentOffset - offset) >= 5) {
           setState(prev => ({ ...prev, currentOffset: offset }));
         }
       },
@@ -286,7 +276,7 @@ const App: React.FC = () => {
       activeBook.title,
       activeChapterMetadata.title
     );
-  }, [playbackText, state.selectedVoiceName, state.playbackSpeed, state.currentOffset, stopAfterChapter, activeChapterText, activeBook, activeChapterMetadata]);
+  }, [playbackText, state.selectedVoiceName, state.playbackSpeed, state.currentOffset, stopAfterChapter, activeChapterText, activeBook, activeChapterMetadata, isLoadingChapter, handleSelectChapter]);
 
   const handlePause = useCallback(() => {
     speechController.stop();
@@ -296,19 +286,14 @@ const App: React.FC = () => {
   return (
     <div className={`flex flex-col h-screen overflow-hidden font-sans transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-950 text-slate-100' : state.theme === Theme.SEPIA ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
       
-      {needRefresh && (
+      {pwaNeedRefresh && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[200] w-full max-w-sm px-4">
           <div className="bg-indigo-600 text-white p-4 rounded-2xl shadow-2xl flex items-center justify-between border border-white/20 backdrop-blur-md">
             <div className="flex items-center gap-3">
-              <RefreshCw className="w-5 h-5 animate-spin-slow" />
+              <RefreshCw className="w-5 h-5 animate-spin" />
               <span className="font-bold text-sm">Update available</span>
             </div>
-            <button 
-              onClick={() => updateServiceWorker(true)}
-              className="bg-white text-indigo-600 px-4 py-1.5 rounded-xl font-black text-xs hover:bg-indigo-50 transition-colors"
-            >
-              REFRESH
-            </button>
+            <button onClick={() => window.location.reload()} className="bg-white text-indigo-600 px-4 py-1.5 rounded-xl font-black text-xs hover:bg-indigo-50 transition-colors">REFRESH</button>
           </div>
         </div>
       )}
@@ -350,7 +335,15 @@ const App: React.FC = () => {
             </div>
           </header>
 
-          <div className="flex-1 overflow-y-auto">
+          <div className="flex-1 overflow-y-auto relative">
+             {isLoadingChapter && (
+               <div className="absolute inset-0 flex items-center justify-center bg-inherit z-[5] animate-in fade-in duration-300">
+                 <div className="flex flex-col items-center gap-4">
+                    <Loader2 className="w-10 h-10 text-indigo-600 animate-spin" />
+                    <span className="text-xs font-black uppercase tracking-widest opacity-40">Loading Content...</span>
+                 </div>
+               </div>
+             )}
              {activeTab === 'reader' ? (
               activeBook ? (
                 activeBook.currentChapterId ? (
@@ -389,10 +382,10 @@ const App: React.FC = () => {
                 keepAwake={state.keepAwake}
                 onSetKeepAwake={v => setState(p => ({ ...p, keepAwake: v }))}
                 onCheckForUpdates={async () => {
-                  try {
-                    const registration = await navigator.serviceWorker.getRegistration();
-                    if (registration) await registration.update();
-                  } catch (e) {}
+                  if ('serviceWorker' in navigator) {
+                    const reg = await navigator.serviceWorker.getRegistration();
+                    if (reg) await reg.update();
+                  }
                 }}
               />
             )}

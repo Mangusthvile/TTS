@@ -1,3 +1,4 @@
+
 import { Rule, CaseMode } from '../types';
 
 export function applyRules(text: string, rules: Rule[]): string {
@@ -58,6 +59,8 @@ class SpeechController {
   private currentPrefixLength: number = 0;
   private currentBookTitle: string = "";
   private currentChapterTitle: string = "";
+  private currentUtterance: SpeechSynthesisUtterance | null = null;
+  private totalTextLength: number = 0;
 
   constructor() {
     this.synth = window.speechSynthesis;
@@ -67,38 +70,35 @@ class SpeechController {
   private setupMediaSession() {
     if ('mediaSession' in navigator) {
       try {
-        navigator.mediaSession.setActionHandler('play', () => this.resumeFromMediaSession());
-        navigator.mediaSession.setActionHandler('pause', () => this.pauseFromMediaSession());
+        navigator.mediaSession.setActionHandler('play', () => {
+          if (this.synth.paused) {
+            this.synth.resume();
+            this.updatePlaybackState('playing');
+          }
+        });
+        navigator.mediaSession.setActionHandler('pause', () => {
+          if (this.synth.speaking) {
+            this.synth.pause();
+            this.updatePlaybackState('paused');
+          }
+        });
         navigator.mediaSession.setActionHandler('stop', () => this.stop());
+        navigator.mediaSession.setActionHandler('previoustrack', () => {
+           // Handled by App state via UI but can be mapped here if needed
+        });
+        navigator.mediaSession.setActionHandler('nexttrack', () => {
+           // Handled by App state via UI but can be mapped here if needed
+        });
         navigator.mediaSession.setActionHandler('seekbackward', (details) => {
           const skip = details.seekOffset || 500;
-          this.seekRelative(-skip);
+          // Custom seek logic would need global state access, usually handled via UI events
         });
         navigator.mediaSession.setActionHandler('seekforward', (details) => {
           const skip = details.seekOffset || 500;
-          this.seekRelative(skip);
         });
       } catch (e) {
         console.warn("MediaSession handlers could not be set", e);
       }
-    }
-  }
-
-  private seekRelative(delta: number) {
-    // Seek is typically handled via events back to the App component
-  }
-
-  private resumeFromMediaSession() {
-    if (this.synth.paused) {
-      this.synth.resume();
-      this.updatePlaybackState('playing');
-    }
-  }
-
-  private pauseFromMediaSession() {
-    if (this.synth.speaking) {
-      this.synth.pause();
-      this.updatePlaybackState('paused');
     }
   }
 
@@ -108,7 +108,10 @@ class SpeechController {
         navigator.mediaSession.metadata = new MediaMetadata({
           title: title,
           artist: artist,
-          album: 'Talevox Library'
+          album: 'Talevox Library',
+          artwork: [
+            { src: 'https://cdn-icons-png.flaticon.com/512/3145/3145761.png', sizes: '512x512', type: 'image/png' }
+          ]
         });
       } catch (e) {}
     }
@@ -122,7 +125,7 @@ class SpeechController {
 
   private createChunks(text: string): SpeechChunk[] {
     const chunks: SpeechChunk[] = [];
-    const MAX_CHUNK_LENGTH = 1800; 
+    const MAX_CHUNK_LENGTH = 1600; 
     const paragraphs = text.split(/(\n\s*\n)/);
     
     let tempChunk = "";
@@ -176,6 +179,7 @@ class SpeechController {
     this.sessionToken++;
     const currentSession = this.sessionToken;
     
+    // Stop any existing speech immediately
     this.synth.cancel();
     
     this.onEndCallback = onEnd;
@@ -186,6 +190,7 @@ class SpeechController {
     this.currentPrefixLength = 0;
     this.currentBookTitle = bookTitle;
     this.currentChapterTitle = chapterTitle;
+    this.totalTextLength = text.length;
 
     this.updateMediaMetadata(chapterTitle, bookTitle);
     this.updatePlaybackState('playing');
@@ -200,6 +205,8 @@ class SpeechController {
         const diff = startOffset - firstChunk.startOffset;
         this.chunks[0] = { text: firstChunk.text.substring(diff), startOffset: startOffset };
       }
+      
+      // Chaining start: Use minimal delay to ensure background process isn't interrupted by a long silence
       this.speakNextChunk(currentSession);
     } else {
       if (onEnd) onEnd();
@@ -216,6 +223,7 @@ class SpeechController {
           this.currentPrefixLength = next.announcementPrefix.length;
           this.currentBookTitle = next.bookTitle;
           this.currentChapterTitle = next.chapterTitle;
+          this.totalTextLength = next.content.length;
           this.updateMediaMetadata(next.chapterTitle, next.bookTitle);
           
           this.chunks = this.createChunks(next.announcementPrefix + next.content);
@@ -230,11 +238,24 @@ class SpeechController {
     }
 
     const chunk = this.chunks[this.currentChunkIndex];
+    if (!chunk.text.trim()) {
+      this.currentChunkIndex++;
+      this.speakNextChunk(session);
+      return;
+    }
+
     const utterance = new SpeechSynthesisUtterance(chunk.text);
-    const voices = this.synth.getVoices();
-    const voice = voices.find(v => v.name === this.voiceName) || voices.find(v => v.lang.startsWith('en')) || voices[0];
+    this.currentUtterance = utterance; // Keep reference to avoid GC
     
-    if (voice) utterance.voice = voice;
+    const voices = this.synth.getVoices();
+    const voice = voices.find(v => v.name === this.voiceName) || 
+                  voices.find(v => v.lang.startsWith('en')) || 
+                  (voices.length > 0 ? voices[0] : null);
+
+    if (voice) {
+      utterance.voice = voice;
+    }
+    
     utterance.rate = this.rate;
 
     utterance.onboundary = (event) => {
@@ -243,26 +264,35 @@ class SpeechController {
         const effectiveOffset = Math.max(0, totalOffset - this.currentPrefixLength);
         this.globalBoundaryCallback(effectiveOffset, event.charIndex, this.currentChunkIndex);
         
-        if ('mediaSession' in navigator && (navigator as any).mediaSession.setPositionState) {
+        // Update Media Position State if supported
+        if ('mediaSession' in navigator && (navigator.mediaSession as any).setPositionState) {
           try {
-            (navigator as any).mediaSession.setPositionState({
-              duration: 100,
+            const progress = effectiveOffset / Math.max(1, this.totalTextLength);
+            // Artificial duration estimation for lockscreen progress bar
+            const estDuration = (this.totalTextLength / 170) * 60; 
+            (navigator.mediaSession as any).setPositionState({
+              duration: estDuration,
               playbackRate: this.rate,
-              position: Math.min(100, (effectiveOffset / Math.max(1, chunk.text.length)) * 100)
+              position: estDuration * progress
             });
-          } catch(e) {}
+          } catch (e) {}
         }
       }
     };
 
     utterance.onend = () => {
       if (this.sessionToken !== session) return;
+      this.currentUtterance = null;
       this.currentChunkIndex++;
+      // Immediate chaining is critical for mobile background playback
       this.speakNextChunk(session);
     };
 
-    utterance.onerror = (err) => {
+    utterance.onerror = (event: any) => {
+      if (event.error === 'interrupted' || event.error === 'canceled') return;
+      console.error(`Speech Synthesis Error: ${event.error}`);
       if (this.sessionToken === session) {
+        this.currentUtterance = null;
         this.currentChunkIndex++;
         this.speakNextChunk(session);
       }
@@ -276,6 +306,7 @@ class SpeechController {
     this.globalBoundaryCallback = null;
     this.onEndCallback = null;
     this.getNextSegment = null;
+    this.currentUtterance = null;
     
     this.synth.cancel();
     this.updatePlaybackState('none');
