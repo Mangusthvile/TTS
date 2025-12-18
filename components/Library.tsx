@@ -54,8 +54,9 @@ const Library: React.FC<LibraryProps> = ({
       setIsAdding(false);
       setIsPickingFolder(false);
       setNewTitle('');
-    } catch (e) {
+    } catch (e: any) {
       console.error("Failed to add book", e);
+      alert("Error adding book: " + e.message);
     } finally {
       setIsProcessingAdd(false);
     }
@@ -70,7 +71,12 @@ const Library: React.FC<LibraryProps> = ({
       setAvailableFolders(folders);
       setIsPickingFolder(true);
     } catch (e: any) {
-      alert("Failed to access Google Drive: " + e.message);
+      const msg = e.message || '';
+      if (msg.includes('Google Drive API has not been used')) {
+        alert("Google Drive API is not enabled for this project. Please go to Google Cloud Console, search for 'Google Drive API' and click 'Enable'.");
+      } else {
+        alert("Failed to access Google Drive: " + e.message);
+      }
     } finally {
       setIsProcessingAdd(false);
     }

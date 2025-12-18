@@ -36,16 +36,28 @@ export async function authenticateDrive(explicitClientId?: string): Promise<stri
   });
 }
 
-export async function listFolders(token: string): Promise<{id: string, name: string}[]> {
-  const q = encodeURIComponent("mimeType = 'application/vnd.google-apps.folder' and trashed = false");
-  const response = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)&orderBy=name`, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
+async function handleDriveResponse(response: Response, defaultError: string) {
   if (!response.ok) {
     if (response.status === 401) throw new Error('UNAUTHORIZED');
-    throw new Error('DRIVE_API_ERROR');
+    let details = '';
+    try {
+      const errorJson = await response.json();
+      details = errorJson.error?.message || JSON.stringify(errorJson);
+    } catch (e) {}
+    throw new Error(`${defaultError}${details ? ': ' + details : ''}`);
   }
-  const data = await response.json();
+  return response.json();
+}
+
+export async function listFolders(token: string): Promise<{id: string, name: string}[]> {
+  const q = encodeURIComponent("mimeType = 'application/vnd.google-apps.folder' and trashed = false");
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)&orderBy=name&pageSize=100`;
+  
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  
+  const data = await handleDriveResponse(response, 'DRIVE_LIST_ERROR');
   return data.files || [];
 }
 
@@ -54,11 +66,8 @@ export async function findFileSync(token: string, name: string): Promise<string 
   const response = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)`, {
     headers: { Authorization: `Bearer ${token}` }
   });
-  if (!response.ok) {
-    if (response.status === 401) throw new Error('UNAUTHORIZED');
-    throw new Error('DRIVE_API_ERROR');
-  }
-  const data = await response.json();
+  
+  const data = await handleDriveResponse(response, 'DRIVE_FIND_ERROR');
   return data.files && data.files.length > 0 ? data.files[0].id : null;
 }
 
@@ -67,6 +76,7 @@ export async function findFolderSync(token: string, name: string): Promise<strin
   const response = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)`, {
     headers: { Authorization: `Bearer ${token}` }
   });
+  
   if (!response.ok) return null;
   const data = await response.json();
   return data.files && data.files.length > 0 ? data.files[0].id : null;
@@ -77,7 +87,11 @@ export async function fetchDriveFile(token: string, fileId: string): Promise<str
     headers: { Authorization: `Bearer ${token}` }
   });
   if (response.status === 401) throw new Error('UNAUTHORIZED');
-  if (!response.ok) throw new Error('FETCH_FAILED');
+  if (!response.ok) {
+    let details = '';
+    try { details = (await response.json()).error?.message; } catch(e) {}
+    throw new Error(`FETCH_FAILED${details ? ': ' + details : ''}`);
+  }
   return response.text();
 }
 
@@ -129,7 +143,7 @@ export async function uploadToDrive(
   if (!response.ok) {
     const errorData = await response.json();
     console.error("Drive Upload Error:", errorData);
-    throw new Error('UPLOAD_FAILED');
+    throw new Error(`UPLOAD_FAILED: ${errorData.error?.message || 'Unknown'}`);
   }
 
   const data = await response.json();
@@ -149,8 +163,6 @@ export async function createDriveFolder(token: string, name: string): Promise<st
     })
   });
   
-  if (!response.ok) throw new Error('FOLDER_CREATION_FAILED');
-  
-  const data = await response.json();
+  const data = await handleDriveResponse(response, 'FOLDER_CREATION_FAILED');
   return data.id;
 }
