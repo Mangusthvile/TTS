@@ -46,33 +46,47 @@ export async function openFolderPicker(token: string): Promise<{id: string, name
     const gapi = (window as any).gapi;
     if (!gapi) return reject(new Error("GAPI_NOT_LOADED"));
 
-    gapi.load('picker', () => {
+    gapi.load('picker', async () => {
+      // The picker library populates objects under window.google.picker
+      const google = (window as any).google;
+      
+      // Safety: Sometimes gapi.load finishes but the constructors aren't quite ready
+      if (!google.picker) {
+        console.warn("[Drive] Picker loaded but namespace not attached yet. Retrying once...");
+        await new Promise(r => setTimeout(r, 100));
+      }
+
+      if (!google.picker || !google.picker.PickerBuilder) {
+        return reject(new Error("Picker API namespace missing. Please ensure 'Google Picker API' is enabled in your Google Cloud Console."));
+      }
+      
       const pickerCallback = (data: any) => {
-        if (data.action === gapi.picker.Action.PICKED) {
+        if (data.action === google.picker.Action.PICKED) {
           const doc = data.docs[0];
           // Use doc.id for the unique Drive ID
           console.debug(`[Picker] Explicit Folder Selected: ${doc.name} (${doc.id})`);
           resolve({ id: doc.id, name: doc.name });
-        } else if (data.action === gapi.picker.Action.CANCEL) {
+        } else if (data.action === google.picker.Action.CANCEL) {
           resolve(null);
         }
       };
 
       try {
-        const view = new gapi.picker.DocsView(gapi.picker.ViewId.FOLDERS);
+        const view = new google.picker.DocsView(google.picker.ViewId.FOLDERS);
         view.setSelectFolderEnabled(true);
         view.setMimeTypes('application/vnd.google-apps.folder');
 
-        const picker = new gapi.picker.PickerBuilder()
+        const picker = new google.picker.PickerBuilder()
           .addView(view)
           .setOAuthToken(token)
-          .setDeveloperKey(process.env.API_KEY)
+          .setDeveloperKey(process.env.API_KEY) // Required for Picker Service
           .setCallback(pickerCallback)
           .setTitle('Select Book Collection Folder')
           .build();
         
         picker.setVisible(true);
       } catch (err) {
+        console.error("Picker Initialization Error:", err);
         reject(err);
       }
     });
@@ -143,7 +157,9 @@ export async function findFileSync(token: string, name: string): Promise<string 
   return data.files && data.files.length > 0 ? data.files[0].id : null;
 }
 
-// Fix: Implement findFolderSync to allow specific searching for directory types in Google Drive
+/**
+ * Find a specific folder by name.
+ */
 export async function findFolderSync(token: string, name: string): Promise<string | null> {
   const q = encodeURIComponent(`name = '${name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
   const response = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)&includeItemsFromAllDrives=true&supportsAllDrives=true`, {

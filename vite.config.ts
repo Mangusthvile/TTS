@@ -25,7 +25,7 @@ export default defineConfig({
           },
           {
             src: 'https://cdn-icons-png.flaticon.com/512/3145/3145761.png',
-            sizes: '512x512',
+            sizes: 512,
             type: 'image/png'
           }
         ]
@@ -34,7 +34,7 @@ export default defineConfig({
   ],
   define: {
     'process.env': {},
-    __APP_VERSION__: JSON.stringify('2.0.7'),
+    __APP_VERSION__: JSON.stringify('2.0.9'),
   },
   server: {
     port: 3000
