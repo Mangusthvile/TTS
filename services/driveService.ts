@@ -2,17 +2,13 @@
 /**
  * Talevox Google Drive Service
  * Handles authentication and file synchronization.
- * 
- * NOTE: To use this, you must have a "Web application" Client ID from 
- * the Google Cloud Console (console.cloud.google.com) with your
- * current origin (e.g., http://localhost:3000) added to "Authorized JavaScript origins".
  */
 
-export async function authenticateDrive(): Promise<string> {
-  // Use the environment variable if available, otherwise fallback to a clear placeholder
-  const CLIENT_ID = (process.env as any).GOOGLE_CLIENT_ID || 'YOUR_CLIENT_ID_HERE.apps.googleusercontent.com';
+export async function authenticateDrive(explicitClientId?: string): Promise<string> {
+  // Trim the ID to remove common copy-paste issues like trailing spaces or newlines
+  const CLIENT_ID = (explicitClientId?.trim()) || (process.env as any).GOOGLE_CLIENT_ID || 'YOUR_CLIENT_ID_HERE.apps.googleusercontent.com';
 
-  if (CLIENT_ID === 'YOUR_CLIENT_ID_HERE.apps.googleusercontent.com') {
+  if (!CLIENT_ID || CLIENT_ID.includes('YOUR_CLIENT_ID_HERE')) {
     throw new Error('MISSING_CLIENT_ID');
   }
 

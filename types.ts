@@ -101,6 +101,7 @@ export interface AppState {
   debugMode: boolean;
   readerSettings: ReaderSettings;
   driveToken?: string;
+  googleClientId?: string;
   keepAwake: boolean;
   lastSession?: {
     bookId: string;

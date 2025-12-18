@@ -62,7 +62,7 @@ export default defineConfig({
     })
   ],
   define: {
-    __APP_VERSION__: JSON.stringify(pkg.version),
+    __APP_VERSION__: JSON.stringify('1.2.2'),
   },
   server: {
     port: 3000

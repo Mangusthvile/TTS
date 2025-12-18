@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { ReaderSettings, Theme } from '../types';
-import { Type, AlignJustify, MoveVertical, Minus, Plus, RefreshCw, Smartphone, MonitorOff, AlertTriangle, Cloud, CloudOff, Loader2 } from 'lucide-react';
+import { Type, AlignJustify, MoveVertical, Minus, Plus, RefreshCw, Smartphone, MonitorOff, AlertTriangle, Cloud, CloudOff, Loader2, Key, LogOut } from 'lucide-react';
 
 interface SettingsProps {
   settings: ReaderSettings;
@@ -14,11 +14,15 @@ interface SettingsProps {
   onLinkCloud?: () => void;
   onSyncNow?: () => void;
   isSyncing?: boolean;
+  googleClientId?: string;
+  onUpdateGoogleClientId?: (id: string) => void;
+  onClearAuth?: () => void;
 }
 
 const Settings: React.FC<SettingsProps> = ({ 
   settings, onUpdate, theme, keepAwake, onSetKeepAwake, onCheckForUpdates,
-  isCloudLinked, onLinkCloud, onSyncNow, isSyncing
+  isCloudLinked, onLinkCloud, onSyncNow, isSyncing,
+  googleClientId, onUpdateGoogleClientId, onClearAuth
 }) => {
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
@@ -45,7 +49,7 @@ const Settings: React.FC<SettingsProps> = ({
         <div className="flex justify-between items-end">
           <div>
             <h2 className={`text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
-            <p className={`text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib v{ (window as any).__APP_VERSION__ || '1.2.0' }</p>
+            <p className={`text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v1.2.2</p>
           </div>
           <button 
             onClick={onCheckForUpdates}
@@ -58,37 +62,70 @@ const Settings: React.FC<SettingsProps> = ({
         {/* Cloud Sync */}
         <div className={`p-8 rounded-[2.5rem] border shadow-sm space-y-6 ${cardBg}`}>
           <label className={labelClass}>Cloud Synchronization</label>
-          <div className="flex items-center justify-between gap-6">
-             <div className="flex items-center gap-4 min-w-0">
-                <div className={`p-4 rounded-2xl ${isCloudLinked ? 'bg-indigo-600 text-white' : 'bg-black/5 text-slate-400'}`}>
-                   {isCloudLinked ? <Cloud className="w-6 h-6" /> : <CloudOff className="w-6 h-6" />}
+
+          <div className="space-y-4">
+             <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2 mb-1">
+                   <Key className="w-3.5 h-3.5 text-indigo-500" />
+                   <span className="text-[10px] font-black uppercase tracking-widest opacity-60">Google OAuth Client ID</span>
                 </div>
-                <div className="min-w-0">
-                   <div className={`text-sm font-black ${textClass}`}>{isCloudLinked ? 'Library Linked' : 'Offline Mode'}</div>
-                   <div className="text-[10px] font-bold opacity-60 truncate">
-                      {isCloudLinked ? 'Connected to Google Drive' : 'Sync libraries between PC and Mobile'}
+                <input 
+                  type="text"
+                  value={googleClientId || ''}
+                  onChange={e => onUpdateGoogleClientId?.(e.target.value.trim())}
+                  placeholder="...apps.googleusercontent.com"
+                  className={`w-full px-4 py-3 rounded-xl border-none outline-none font-mono text-xs ${isDark ? 'bg-slate-950 text-white' : 'bg-slate-50 text-black'}`}
+                />
+                <p className="text-[9px] font-bold opacity-40 leading-relaxed">
+                   Required for sync. Create one at <a href="https://console.cloud.google.com" target="_blank" rel="noopener noreferrer" className="underline">Google Cloud Console</a>. 
+                   Authorized origin: <span className="text-indigo-500 select-all font-mono">{window.location.origin}</span>
+                </p>
+             </div>
+
+             <div className="flex items-center justify-between gap-6 pt-4 border-t border-black/5">
+                <div className="flex items-center gap-4 min-w-0">
+                   <div className={`p-4 rounded-2xl ${isCloudLinked ? 'bg-indigo-600 text-white' : 'bg-black/5 text-slate-400'}`}>
+                      {isCloudLinked ? <Cloud className="w-6 h-6" /> : <CloudOff className="w-6 h-6" />}
+                   </div>
+                   <div className="min-w-0">
+                      <div className={`text-sm font-black ${textClass}`}>{isCloudLinked ? 'Library Linked' : 'Offline Mode'}</div>
+                      <div className="text-[10px] font-bold opacity-60 truncate">
+                         {isCloudLinked ? 'Connected to Google Drive' : 'Sync libraries between PC and Mobile'}
+                      </div>
                    </div>
                 </div>
+                <div className="flex items-center gap-2">
+                   {isCloudLinked ? (
+                      <>
+                        <button 
+                          onClick={onSyncNow}
+                          disabled={isSyncing}
+                          className="px-6 py-2.5 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2 hover:scale-105 transition-all disabled:opacity-50"
+                        >
+                           {isSyncing ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                           Sync
+                        </button>
+                        <button 
+                          onClick={onClearAuth}
+                          className={`p-2.5 rounded-xl border transition-all ${isDark ? 'bg-slate-800 text-slate-400 hover:text-red-500' : 'bg-white text-slate-400 hover:text-red-600'}`}
+                          title="Unlink Account"
+                        >
+                           <LogOut className="w-4 h-4" />
+                        </button>
+                      </>
+                   ) : (
+                      <button 
+                        onClick={onLinkCloud}
+                        className="px-6 py-2.5 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2 hover:scale-105 transition-all"
+                      >
+                         <Cloud className="w-3 h-3" />
+                         Link Account
+                      </button>
+                   )}
+                </div>
              </div>
-             {isCloudLinked ? (
-                <button 
-                  onClick={onSyncNow}
-                  disabled={isSyncing}
-                  className="px-6 py-2.5 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2 hover:scale-105 transition-all disabled:opacity-50"
-                >
-                   {isSyncing ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-                   Sync Now
-                </button>
-             ) : (
-                <button 
-                  onClick={onLinkCloud}
-                  className="px-6 py-2.5 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2 hover:scale-105 transition-all"
-                >
-                   <Cloud className="w-3 h-3" />
-                   Link Account
-                </button>
-             )}
           </div>
+          
           {isCloudLinked && (
             <div className="p-4 rounded-2xl bg-indigo-600/5 border border-indigo-600/10">
               <p className="text-[10px] font-bold text-indigo-600 leading-relaxed italic">
@@ -212,7 +249,7 @@ const Settings: React.FC<SettingsProps> = ({
         </div>
 
         <div className={`text-center font-black uppercase tracking-[0.4em] text-[11px] pt-12 ${isDark ? 'text-white/20' : 'text-black/30'}`}>
-          VoxLib Engine v{ (window as any).__APP_VERSION__ || '1.2.0' }
+          VoxLib Engine v1.2.2
         </div>
       </div>
     </div>

@@ -44,6 +44,7 @@ const App: React.FC = () => {
         paragraphSpacing: 1
       },
       driveToken: parsed.driveToken,
+      googleClientId: parsed.googleClientId,
       lastSession: parsed.lastSession
     };
   });
@@ -109,7 +110,6 @@ const App: React.FC = () => {
       }
 
       // After pulling, push current state back to manifest
-      // Ensure we don't push an empty library if we just pulled data
       const manifestContent = JSON.stringify({
         books: stateRef.current.books.map(({ directoryHandle, ...b }) => b),
         readerSettings: stateRef.current.readerSettings,
@@ -124,7 +124,7 @@ const App: React.FC = () => {
         setState(prev => ({ ...prev, driveToken: undefined }));
         if (manual) alert("Session expired. Please link your account again.");
       } else if (manual) {
-        alert("Sync failed. Check console for details.");
+        alert("Sync failed: " + (err instanceof Error ? err.message : "Unknown error"));
       }
     } finally {
       setIsSyncing(false);
@@ -138,19 +138,35 @@ const App: React.FC = () => {
 
   const handleLinkCloud = async () => {
     try {
-      const token = await authenticateDrive();
+      const token = await authenticateDrive(state.googleClientId);
       setState(prev => ({ ...prev, driveToken: token }));
-      // The useEffect for handleSync will trigger automatically due to token change
     } catch (err) {
       console.error("Cloud link failed", err);
       if (err instanceof Error && err.message === 'MISSING_CLIENT_ID') {
-        alert("Action Required: Google OAuth Client ID is missing. Please configure your GOOGLE_CLIENT_ID environment variable or update driveService.ts.");
+        alert("Action Required: Please provide a valid Google OAuth Client ID in Settings.");
+        setActiveTab('settings');
       } else if (err instanceof Error && err.message.includes('idpiframe_initialization_failed')) {
-        alert("Google Auth initialization failed. Ensure you have a valid Client ID and authorized origin.");
+        alert("Auth initialization failed. Ensure you have authorized your current URL (" + window.location.origin + ") in the Google Cloud Console.");
       } else {
         alert("Failed to connect to Google: " + (err instanceof Error ? err.message : "Unknown error"));
       }
     }
+  };
+
+  const handleUpdateCheck = async () => {
+    try {
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (reg) {
+          await reg.update();
+        }
+      }
+    } catch (err) {
+      // Silently catch origin mismatch errors in preview environments
+      console.warn("Service Worker update skipped:", err);
+    }
+    // Perform hard refresh to see if app assets/manifest changed
+    window.location.reload();
   };
 
   useEffect(() => {
@@ -207,10 +223,16 @@ const App: React.FC = () => {
     let driveFolderId = undefined;
     if (backend === StorageBackend.DRIVE) {
       try {
-        const token = state.driveToken || await authenticateDrive();
+        const token = state.driveToken || await authenticateDrive(state.googleClientId);
         if (!state.driveToken) setState(prev => ({ ...prev, driveToken: token }));
         driveFolderId = await createDriveFolder(token, `Talevox - ${title}`);
-      } catch (err) { return; }
+      } catch (err) { 
+        if (err instanceof Error && err.message === 'MISSING_CLIENT_ID') {
+          alert("Please set a Google Client ID in Settings first.");
+          setActiveTab('settings');
+        }
+        return; 
+      }
     }
     const newBook: Book = {
       id: crypto.randomUUID(),
@@ -363,7 +385,7 @@ const App: React.FC = () => {
                  selectedVoice={currentVoice || ''}
                  playbackSpeed={currentSpeed}
                />
-             ) : (<Settings settings={state.readerSettings} onUpdate={s => setState(p => ({ ...p, readerSettings: { ...p.readerSettings, ...s } }))} theme={state.theme} keepAwake={state.keepAwake} onSetKeepAwake={v => setState(p => ({ ...p, keepAwake: v }))} onCheckForUpdates={async () => { if ('serviceWorker' in navigator) { const reg = await navigator.serviceWorker.getRegistration(); if (reg) await reg.update(); } }} isCloudLinked={!!state.driveToken} onLinkCloud={handleLinkCloud} onSyncNow={() => handleSync(true)} isSyncing={isSyncing} />)}
+             ) : (<Settings settings={state.readerSettings} onUpdate={s => setState(p => ({ ...p, readerSettings: { ...p.readerSettings, ...s } }))} theme={state.theme} keepAwake={state.keepAwake} onSetKeepAwake={v => setState(p => ({ ...p, keepAwake: v }))} onCheckForUpdates={handleUpdateCheck} isCloudLinked={!!state.driveToken} onLinkCloud={handleLinkCloud} onSyncNow={() => handleSync(true)} isSyncing={isSyncing} googleClientId={state.googleClientId} onUpdateGoogleClientId={id => setState(p => ({ ...p, googleClientId: id }))} onClearAuth={() => setState(p => ({ ...p, driveToken: undefined }))} />)}
           </div>
           {activeChapterMetadata && activeTab === 'reader' && (
             <Player 
