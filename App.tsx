@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, ReaderSettings, RuleType } from './types';
 import Library from './components/Library';
@@ -10,7 +9,7 @@ import Extractor from './components/Extractor';
 import ChapterFolderView from './components/ChapterFolderView';
 import { speechController, applyRules } from './services/speechService';
 import { authenticateDrive, fetchDriveFile, uploadToDrive, createDriveFolder, findFileSync, findFolderSync } from './services/driveService';
-import { BookText, Zap, Sun, Coffee, Moon, X, Settings as SettingsIcon, Menu, RefreshCw, Loader2, Cloud } from 'lucide-react';
+import { BookText, Zap, Sun, Coffee, Moon, X, Settings as SettingsIcon, Menu, RefreshCw, Loader2 } from 'lucide-react';
 
 const SYNC_FILENAME = 'talevox_sync_manifest.json';
 
@@ -66,6 +65,8 @@ const App: React.FC = () => {
 
   const wakeLockSentinel = useRef<any>(null);
 
+  const activeBook = state.books.find(b => b.id === state.activeBookId);
+
   useEffect(() => {
     const { driveToken, books, ...rest } = state;
     const persistentBooks = books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined }));
@@ -78,7 +79,7 @@ const App: React.FC = () => {
         offset: state.currentOffset
       } : state.lastSession
     }));
-  }, [state]);
+  }, [state, activeBook]);
 
   const isIframe = useMemo(() => {
     try {
@@ -183,7 +184,6 @@ const App: React.FC = () => {
     handleWakeLock();
   }, [isPlaying, state.keepAwake]);
 
-  const activeBook = state.books.find(b => b.id === state.activeBookId);
   const activeChapterMetadata = activeBook?.chapters.find(c => c.id === activeBook.currentChapterId);
   const currentSpeed = (activeBook?.settings.useBookSettings && activeBook.settings.playbackSpeed) ? activeBook.settings.playbackSpeed : state.playbackSpeed;
   const currentVoice = (activeBook?.settings.useBookSettings && activeBook.settings.selectedVoiceName) ? activeBook.settings.selectedVoiceName : state.selectedVoiceName;
@@ -222,15 +222,15 @@ const App: React.FC = () => {
     } else { setActiveChapterText(''); }
   }, [state.activeBookId, activeBook?.currentChapterId, loadChapterContent]);
 
-  const handleAddBook = async (title: string, backend: StorageBackend, directoryHandle?: any) => {
-    let driveFolderId = undefined;
-    if (backend === StorageBackend.DRIVE) {
+  const handleAddBook = async (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string) => {
+    let finalDriveFolderId = driveFolderId;
+    if (backend === StorageBackend.DRIVE && !finalDriveFolderId) {
       try {
         const token = state.driveToken || await handleLinkCloud();
         const folderName = `Talevox - ${title}`;
-        driveFolderId = await findFolderSync(token, folderName);
-        if (!driveFolderId) {
-          driveFolderId = await createDriveFolder(token, folderName);
+        finalDriveFolderId = await findFolderSync(token, folderName);
+        if (!finalDriveFolderId) {
+          finalDriveFolderId = await createDriveFolder(token, folderName);
         }
       } catch (err) { 
         console.error("Add Drive Book Error:", err);
@@ -239,7 +239,7 @@ const App: React.FC = () => {
     }
     const newBook: Book = {
       id: crypto.randomUUID(),
-      title, backend, chapters: [], rules: [], directoryHandle, driveFolderId,
+      title, backend, chapters: [], rules: [], directoryHandle, driveFolderId: finalDriveFolderId,
       settings: { useBookSettings: false, highlightMode: HighlightMode.WORD }
     };
     setState(prev => ({ ...prev, books: [...prev.books, newBook], activeBookId: newBook.id }));
@@ -363,7 +363,19 @@ const App: React.FC = () => {
         </div>
       )}
       <div className="flex flex-1 overflow-hidden relative">
-        <Library isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} books={state.books} activeBookId={state.activeBookId} lastSession={state.lastSession} onSelectBook={(id) => { handleSelectBook(id); setIsSidebarOpen(false); }} onDeleteBook={id => setState(p => ({ ...p, books: p.books.filter(b => b.id !== id) }))} onSelectChapter={handleSelectChapter} theme={state.theme} onAddBook={handleAddBook} />
+        <Library 
+          isOpen={isSidebarOpen} 
+          onClose={() => setIsSidebarOpen(false)} 
+          books={state.books} 
+          activeBookId={state.activeBookId} 
+          lastSession={state.lastSession} 
+          onSelectBook={(id) => { handleSelectBook(id); setIsSidebarOpen(false); }} 
+          onDeleteBook={id => setState(p => ({ ...p, books: p.books.filter(b => b.id !== id) }))} 
+          onSelectChapter={handleSelectChapter} 
+          theme={state.theme} 
+          onAddBook={handleAddBook}
+          googleClientId={state.googleClientId}
+        />
         <main className={`flex-1 flex flex-col min-w-0 shadow-2xl relative transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-900' : state.theme === Theme.SEPIA ? 'bg-[#efe6d5]' : 'bg-white'}`}>
           <header className={`h-16 border-b flex items-center justify-between px-4 lg:px-8 z-10 sticky top-0 transition-colors duration-300 ${state.theme === Theme.DARK ? 'border-slate-800 bg-slate-900/80 backdrop-blur-md' : state.theme === Theme.SEPIA ? 'border-[#d8ccb6] bg-[#efe6d5]/90 backdrop-blur-md' : 'border-black/5 bg-white/90 backdrop-blur-md'}`}>
             <div className="flex items-center gap-2 lg:gap-6"><button onClick={() => setIsSidebarOpen(true)} className="p-2 lg:hidden rounded-lg hover:bg-black/5 text-inherit"><Menu className="w-5 h-5" /></button>

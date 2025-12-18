@@ -1,7 +1,7 @@
-
 import React, { useState } from 'react';
-import { Book, Theme, StorageBackend, Chapter } from '../types';
-import { BookOpen, Plus, Trash2, History, Cloud, Monitor, X, FileText, ChevronRight, Database, Loader2 } from 'lucide-react';
+import { Book, Theme, StorageBackend } from '../types';
+import { BookOpen, Plus, Trash2, History, Cloud, Monitor, X, FileText, Database, Loader2, Folder, ChevronLeft, Search } from 'lucide-react';
+import { listFolders, authenticateDrive } from '../services/driveService';
 
 interface LibraryProps {
   books: Book[];
@@ -14,15 +14,21 @@ interface LibraryProps {
   theme: Theme;
   onClose?: () => void;
   isOpen?: boolean;
+  googleClientId?: string;
 }
 
 const Library: React.FC<LibraryProps> = ({ 
-  books, activeBookId, lastSession, onSelectBook, onAddBook, onDeleteBook, onSelectChapter, theme, onClose, isOpen 
+  books, activeBookId, lastSession, onSelectBook, onAddBook, onDeleteBook, onSelectChapter, theme, onClose, isOpen, googleClientId 
 }) => {
   const [isAdding, setIsAdding] = useState(false);
   const [isProcessingAdd, setIsProcessingAdd] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   
+  // Folder Picker State
+  const [isPickingFolder, setIsPickingFolder] = useState(false);
+  const [availableFolders, setAvailableFolders] = useState<{id: string, name: string}[]>([]);
+  const [folderSearch, setFolderSearch] = useState('');
+
   const isPickerSupported = !!(window as any).showDirectoryPicker;
 
   const isDark = theme === Theme.DARK;
@@ -40,12 +46,13 @@ const Library: React.FC<LibraryProps> = ({
     ${isDark ? 'bg-slate-950 border-slate-900' : isSepia ? 'bg-[#efe6d5] border-[#d8ccb6]' : 'bg-white border-black/5'}
   `;
 
-  const handleAdd = async (backend: StorageBackend, handle?: any) => {
+  const handleAdd = async (backend: StorageBackend, handle?: any, driveFolderId?: string) => {
     if (!newTitle.trim()) return;
     setIsProcessingAdd(true);
     try {
-      await onAddBook(newTitle, backend, handle);
+      await onAddBook(newTitle, backend, handle, driveFolderId);
       setIsAdding(false);
+      setIsPickingFolder(false);
       setNewTitle('');
     } catch (e) {
       console.error("Failed to add book", e);
@@ -53,6 +60,23 @@ const Library: React.FC<LibraryProps> = ({
       setIsProcessingAdd(false);
     }
   };
+
+  const handleStartDrivePick = async () => {
+    if (!newTitle.trim()) return;
+    setIsProcessingAdd(true);
+    try {
+      const token = await authenticateDrive(googleClientId);
+      const folders = await listFolders(token);
+      setAvailableFolders(folders);
+      setIsPickingFolder(true);
+    } catch (e: any) {
+      alert("Failed to access Google Drive: " + e.message);
+    } finally {
+      setIsProcessingAdd(false);
+    }
+  };
+
+  const filteredFolders = availableFolders.filter(f => f.name.toLowerCase().includes(folderSearch.toLowerCase()));
 
   return (
     <>
@@ -68,7 +92,7 @@ const Library: React.FC<LibraryProps> = ({
           <div className="flex items-center gap-1">
             <button 
               disabled={isProcessingAdd}
-              onClick={() => setIsAdding(true)} 
+              onClick={() => { setIsAdding(true); setIsPickingFolder(false); }} 
               className="p-2 bg-indigo-600 text-white rounded-xl shadow-lg hover:scale-110 active:scale-95 transition-transform disabled:opacity-50"
             >
               <Plus className="w-5 h-5" />
@@ -90,7 +114,7 @@ const Library: React.FC<LibraryProps> = ({
             </div>
           )}
 
-          {isAdding && (
+          {isAdding && !isPickingFolder && (
             <div className={`p-5 rounded-3xl border space-y-4 mb-4 ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-indigo-50 border-indigo-100'}`}>
               <div className="space-y-1">
                 <label className="text-[10px] font-black uppercase tracking-widest text-indigo-600 ml-1">New Book</label>
@@ -114,11 +138,11 @@ const Library: React.FC<LibraryProps> = ({
                 </button>
                 <button 
                   disabled={isProcessingAdd}
-                  onClick={() => handleAdd(StorageBackend.DRIVE)}
+                  onClick={handleStartDrivePick}
                   className={`flex items-center justify-between p-3 rounded-xl text-xs font-black border transition-all ${isDark ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-200 text-black hover:border-indigo-600'}`}
                 >
                   <div className="flex items-center gap-3">
-                    <Cloud className="w-4 h-4 text-indigo-500" /> Google Drive
+                    <Cloud className="w-4 h-4 text-indigo-500" /> Choose Drive Folder
                   </div>
                   {isProcessingAdd && <Loader2 className="w-3.5 h-3.5 animate-spin opacity-60" />}
                 </button>
@@ -138,6 +162,44 @@ const Library: React.FC<LibraryProps> = ({
                 )}
               </div>
               <button onClick={() => setIsAdding(false)} disabled={isProcessingAdd} className={`w-full py-2 text-xs font-black ${isDark ? 'text-slate-400 hover:text-white' : 'text-slate-500 hover:text-black'}`}>Cancel</button>
+            </div>
+          )}
+
+          {isAdding && isPickingFolder && (
+            <div className={`p-5 rounded-3xl border space-y-4 mb-4 flex flex-col h-[400px] ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-indigo-50 border-indigo-100'}`}>
+              <div className="flex items-center gap-2">
+                 <button onClick={() => setIsPickingFolder(false)} className="p-1 rounded-lg hover:bg-black/5"><ChevronLeft className="w-4 h-4 text-indigo-600" /></button>
+                 <span className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Select Drive Folder</span>
+              </div>
+              
+              <div className="relative">
+                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 opacity-40" />
+                 <input 
+                   type="text" 
+                   value={folderSearch}
+                   onChange={e => setFolderSearch(e.target.value)}
+                   placeholder="Search folders..."
+                   className={`w-full pl-9 pr-4 py-2 rounded-xl outline-none text-[11px] font-bold border ${isDark ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-200 text-black'}`}
+                 />
+              </div>
+
+              <div className="flex-1 overflow-y-auto space-y-1 pr-1 custom-scrollbar">
+                {filteredFolders.length === 0 ? (
+                  <div className="text-center py-10 opacity-40 text-[10px] font-bold">No folders found</div>
+                ) : (
+                  filteredFolders.map(f => (
+                    <button 
+                      key={f.id}
+                      onClick={() => handleAdd(StorageBackend.DRIVE, null, f.id)}
+                      className={`w-full flex items-center gap-3 p-3 rounded-xl text-left transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-indigo-600/5'}`}
+                    >
+                      <Folder className="w-4 h-4 text-indigo-500 flex-shrink-0" />
+                      <span className={`text-[12px] font-bold truncate ${textClass}`}>{f.name}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+              <p className="text-[9px] font-bold opacity-40 leading-tight">Only folders with "Metadata Readonly" access are shown.</p>
             </div>
           )}
 
@@ -169,21 +231,6 @@ const Library: React.FC<LibraryProps> = ({
                       <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
-                  
-                  {isActive && book.chapters.length > 0 && (
-                    <div className={`mt-2 ml-4 space-y-1 border-l-2 pl-2 ${isDark ? 'border-slate-800' : 'border-indigo-600/20'}`}>
-                      {book.chapters.sort((a,b) => a.index - b.index).map(chapter => (
-                        <div 
-                          key={chapter.id}
-                          onClick={() => { onSelectChapter(book.id, chapter.id); onClose?.(); }}
-                          className={`flex items-center gap-2 p-2.5 rounded-lg cursor-pointer transition-all text-[12px] font-black ${book.currentChapterId === chapter.id ? (isDark ? 'bg-white/10 text-white' : 'bg-indigo-600/10 text-indigo-700') : (isDark ? 'text-slate-400 hover:text-white hover:bg-white/5' : 'text-slate-600 hover:text-black hover:bg-black/5')}`}
-                        >
-                          <FileText className="w-3.5 h-3.5 flex-shrink-0" />
-                          <span className="truncate">{chapter.index}. {chapter.title}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
                 </div>
               );
             })}

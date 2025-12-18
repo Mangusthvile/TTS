@@ -1,4 +1,3 @@
-
 /**
  * Talevox Google Drive Service
  * Handles authentication and file synchronization.
@@ -19,7 +18,8 @@ export async function authenticateDrive(explicitClientId?: string): Promise<stri
 
       const client = (window as any).google.accounts.oauth2.initTokenClient({
         client_id: CLIENT_ID,
-        scope: 'https://www.googleapis.com/auth/drive.file',
+        // Expanded scope to allow browsing existing folders
+        scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.metadata.readonly',
         callback: (response: any) => {
           if (response.error) {
             console.error("GSI Error:", response);
@@ -34,6 +34,19 @@ export async function authenticateDrive(explicitClientId?: string): Promise<stri
       reject(err);
     }
   });
+}
+
+export async function listFolders(token: string): Promise<{id: string, name: string}[]> {
+  const q = encodeURIComponent("mimeType = 'application/vnd.google-apps.folder' and trashed = false");
+  const response = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)&orderBy=name`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!response.ok) {
+    if (response.status === 401) throw new Error('UNAUTHORIZED');
+    throw new Error('DRIVE_API_ERROR');
+  }
+  const data = await response.json();
+  return data.files || [];
 }
 
 export async function findFileSync(token: string, name: string): Promise<string | null> {
