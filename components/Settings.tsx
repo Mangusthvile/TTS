@@ -43,23 +43,23 @@ const Settings: React.FC<SettingsProps> = ({
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
 
   return (
-    <div className={`p-8 h-full overflow-y-auto transition-colors duration-500 ${isDark ? 'bg-slate-900' : isSepia ? 'bg-[#efe6d5]' : 'bg-slate-50'}`}>
-      <div className="max-w-2xl mx-auto space-y-12 pb-32">
-        <div className="flex justify-between items-end">
+    <div className={`p-4 sm:p-8 h-full overflow-y-auto transition-colors duration-500 ${isDark ? 'bg-slate-900' : isSepia ? 'bg-[#efe6d5]' : 'bg-slate-50'}`}>
+      <div className="max-w-2xl mx-auto space-y-8 sm:space-y-12 pb-32">
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
           <div>
-            <h2 className={`text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
-            <p className={`text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.1.8</p>
+            <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
+            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.2.0</p>
           </div>
           <button 
             onClick={onCheckForUpdates}
-            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${isDark ? 'bg-slate-800 text-slate-100 hover:bg-slate-700' : 'bg-white text-slate-600 shadow-sm hover:bg-slate-50'}`}
+            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-sm ${isDark ? 'bg-slate-800 text-slate-100 hover:bg-slate-700' : 'bg-white text-slate-600 hover:bg-slate-50'}`}
           >
-            <RefreshCw className="w-3 h-3" /> Check for updates
+            <RefreshCw className="w-3.5 h-3.5" /> Force Refresh App
           </button>
         </div>
 
         {/* Cloud Sync */}
-        <div className={`p-8 rounded-[2.5rem] border shadow-sm space-y-6 ${cardBg}`}>
+        <div className={`p-5 sm:p-8 rounded-[1.5rem] sm:rounded-[2.5rem] border shadow-sm space-y-6 ${cardBg}`}>
           <label className={labelClass}>Cloud Synchronization</label>
 
           <div className="space-y-4">
@@ -76,32 +76,31 @@ const Settings: React.FC<SettingsProps> = ({
                   className={`w-full px-4 py-3 rounded-xl border-none outline-none font-mono text-xs ${isDark ? 'bg-slate-950 text-white' : 'bg-slate-50 text-black'}`}
                 />
                 <p className="text-[9px] font-bold opacity-40 leading-relaxed">
-                   Required for sync. Create one at <a href="https://console.cloud.google.com" target="_blank" rel="noopener noreferrer" className="underline">Google Cloud Console</a>. 
-                   Authorized JavaScript Origin: <span className="text-indigo-500 select-all font-mono">{window.location.origin}</span>
+                   Authorized Origin: <span className="text-indigo-500 select-all font-mono">{window.location.origin}</span>
                 </p>
              </div>
 
-             <div className="flex items-center justify-between gap-6 pt-4 border-t border-black/5">
+             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6 pt-4 border-t border-black/5">
                 <div className="flex items-center gap-4 min-w-0">
-                   <div className={`p-4 rounded-2xl ${isCloudLinked ? 'bg-indigo-600 text-white' : 'bg-black/5 text-slate-400'}`}>
-                      {isCloudLinked ? <Cloud className="w-6 h-6" /> : <CloudOff className="w-6 h-6" />}
+                   <div className={`p-3.5 sm:p-4 rounded-2xl flex-shrink-0 ${isCloudLinked ? 'bg-indigo-600 text-white' : 'bg-black/5 text-slate-400'}`}>
+                      {isCloudLinked ? <Cloud className="w-5 h-5 sm:w-6 sm:h-6" /> : <CloudOff className="w-5 h-5 sm:w-6 sm:h-6" />}
                    </div>
                    <div className="min-w-0">
                       <div className={`text-sm font-black ${textClass}`}>{isCloudLinked ? 'Library Linked' : 'Offline Mode'}</div>
                       <div className="text-[10px] font-bold opacity-60 truncate">
-                         {isCloudLinked ? 'Connected to Google Drive' : 'Sync libraries between PC and Mobile'}
+                         {isCloudLinked ? 'Syncing to Google Drive' : 'Sync libraries across devices'}
                       </div>
                    </div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 w-full sm:w-auto">
                    {isCloudLinked ? (
                       <>
                         <button 
                           onClick={onSyncNow}
                           disabled={isSyncing}
-                          className="px-6 py-2.5 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2 hover:scale-105 transition-all disabled:opacity-50"
+                          className="flex-1 sm:flex-none px-6 py-2.5 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 hover:scale-105 transition-all disabled:opacity-50"
                         >
-                           {isSyncing ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                           {isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
                            Sync
                         </button>
                         <button 
@@ -115,28 +114,19 @@ const Settings: React.FC<SettingsProps> = ({
                    ) : (
                       <button 
                         onClick={onLinkCloud}
-                        className="px-6 py-2.5 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2 hover:scale-105 transition-all"
+                        className="w-full sm:w-auto px-8 py-3 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 hover:scale-105 transition-all"
                       >
-                         <Cloud className="w-3 h-3" />
+                         <Cloud className="w-3.5 h-3.5" />
                          Link Account
                       </button>
                    )}
                 </div>
              </div>
           </div>
-          
-          {isCloudLinked && (
-            <div className="p-4 rounded-2xl bg-indigo-600/5 border border-indigo-600/10">
-              <p className="text-[10px] font-bold text-indigo-600 leading-relaxed italic">
-                Talevox automatically synchronizes your books and settings to a JSON manifest on your Google Drive. 
-                Local Folder books sync their structure, but their raw files remain on your PC for security.
-              </p>
-            </div>
-          )}
         </div>
 
         {/* System Settings */}
-        <div className={`p-8 rounded-[2.5rem] border shadow-sm space-y-6 ${cardBg}`}>
+        <div className={`p-5 sm:p-8 rounded-[1.5rem] sm:rounded-[2.5rem] border shadow-sm space-y-6 ${cardBg}`}>
           <label className={labelClass}>System</label>
           
           <div className="flex items-center justify-between">
@@ -144,7 +134,7 @@ const Settings: React.FC<SettingsProps> = ({
               <Smartphone className={`w-5 h-5 ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`} />
               <div>
                 <div className={`text-sm font-black ${textClass}`}>Keep screen awake</div>
-                <div className="text-[10px] font-bold opacity-60">Prevents screen from dimming during playback</div>
+                <div className="text-[10px] font-bold opacity-60">Prevents dimming during playback</div>
               </div>
             </div>
             <button 
@@ -155,100 +145,51 @@ const Settings: React.FC<SettingsProps> = ({
               <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${keepAwake ? 'left-7' : 'left-1'}`} />
             </button>
           </div>
-          
-          {!isWakeLockSupported && (
-            <div className="flex items-start gap-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20">
-              <MonitorOff className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
-              <div className="text-[10px] font-bold text-amber-600 leading-tight">Screen Wake Lock is not supported by your browser or environment.</div>
-            </div>
-          )}
-
-          {isIOS && (
-            <div className="flex items-start gap-2 p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20">
-              <AlertTriangle className="w-4 h-4 text-indigo-500 flex-shrink-0 mt-0.5" />
-              <div className="text-[10px] font-bold text-indigo-600 leading-tight">iOS Safari often limits background TTS. Installing to Home Screen and using specific voices may help, but playback might still pause when the device locks.</div>
-            </div>
-          )}
         </div>
 
         {/* Font Picker */}
-        <div className={`p-8 rounded-[2.5rem] border shadow-sm ${cardBg}`}>
+        <div className={`p-5 sm:p-8 rounded-[1.5rem] sm:rounded-[2.5rem] border shadow-sm ${cardBg}`}>
           <label className={labelClass}>Typography</label>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-2 gap-3 sm:gap-4">
             {fonts.map((f) => (
               <button
                 key={f.name}
                 onClick={() => onUpdate({ fontFamily: f.font })}
-                className={`p-6 rounded-2xl border text-left transition-all hover:scale-[1.02] active:scale-95 flex flex-col items-center justify-center text-center ${
+                className={`p-4 sm:p-6 rounded-2xl border text-left transition-all hover:scale-[1.02] flex flex-col items-center justify-center text-center ${
                   settings.fontFamily === f.font
                     ? 'border-indigo-600 bg-indigo-600/5 ring-1 ring-indigo-600 text-indigo-600'
                     : `border-transparent ${controlBg} ${textClass}`
                 }`}
               >
-                <div style={{ fontFamily: f.font }} className="text-3xl mb-2">Aa</div>
-                <div className="text-[11px] font-black uppercase tracking-tight">{f.name}</div>
+                <div style={{ fontFamily: f.font }} className="text-2xl sm:text-3xl mb-1 sm:mb-2">Aa</div>
+                <div className="text-[9px] sm:text-[11px] font-black uppercase tracking-tight">{f.name}</div>
               </button>
             ))}
           </div>
         </div>
 
         {/* Sliders Group */}
-        <div className={`p-8 rounded-[2.5rem] border shadow-sm space-y-10 ${cardBg}`}>
+        <div className={`p-5 sm:p-8 rounded-[1.5rem] sm:rounded-[2.5rem] border shadow-sm space-y-8 sm:space-y-10 ${cardBg}`}>
           <div>
-            <div className="flex justify-between items-center mb-5">
+            <div className="flex justify-between items-center mb-4 sm:mb-5">
               <label className={labelClass}>Font Size</label>
               <span className={`text-sm font-black ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`}>{settings.fontSizePx}px</span>
             </div>
-            <div className="flex items-center gap-6">
-              <button onClick={() => onUpdate({ fontSizePx: Math.max(12, settings.fontSizePx - 2) })} className={`p-3 rounded-xl transition-colors ${controlBg} ${textClass}`}><Minus className="w-5 h-5" /></button>
+            <div className="flex items-center gap-4 sm:gap-6">
+              <button onClick={() => onUpdate({ fontSizePx: Math.max(12, settings.fontSizePx - 2) })} className={`p-2.5 sm:p-3 rounded-xl transition-colors ${controlBg} ${textClass}`}><Minus className="w-5 h-5" /></button>
               <input 
                 type="range" min="12" max="48" step="1"
                 value={settings.fontSizePx}
                 onChange={(e) => onUpdate({ fontSizePx: parseInt(e.target.value) })}
                 className="flex-1 h-2 bg-indigo-600/20 rounded-full accent-indigo-600 cursor-pointer"
               />
-              <button onClick={() => onUpdate({ fontSizePx: Math.min(48, settings.fontSizePx + 2) })} className={`p-3 rounded-xl transition-colors ${controlBg} ${textClass}`}><Plus className="w-5 h-5" /></button>
-            </div>
-          </div>
-
-          <div>
-            <div className="flex justify-between items-center mb-5">
-              <label className={labelClass}>Line Height</label>
-              <span className={`text-sm font-black ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`}>{settings.lineHeight.toFixed(1)}</span>
-            </div>
-            <div className="flex items-center gap-6">
-              <button onClick={() => onUpdate({ lineHeight: Math.max(1, settings.lineHeight - 0.1) })} className={`p-3 rounded-xl transition-colors ${controlBg} ${textClass}`}><Minus className="w-5 h-5" /></button>
-              <input 
-                type="range" min="1" max="2.5" step="0.1"
-                value={settings.lineHeight}
-                onChange={(e) => onUpdate({ lineHeight: parseFloat(e.target.value) })}
-                className="flex-1 h-2 bg-indigo-600/20 rounded-full accent-indigo-600 cursor-pointer"
-              />
-              <button onClick={() => onUpdate({ lineHeight: Math.min(2.5, settings.lineHeight + 0.1) })} className={`p-3 rounded-xl transition-colors ${controlBg} ${textClass}`}><Plus className="w-5 h-5" /></button>
+              <button onClick={() => onUpdate({ fontSizePx: Math.min(48, settings.fontSizePx + 2) })} className={`p-2.5 sm:p-3 rounded-xl transition-colors ${controlBg} ${textClass}`}><Plus className="w-5 h-5" /></button>
             </div>
           </div>
         </div>
 
-        <div className={`p-8 rounded-[2.5rem] border shadow-sm ${cardBg}`}>
-           <label className={labelClass}>Paragraph Spacing</label>
-           <div className={`flex p-1 rounded-2xl gap-1 ${isDark ? 'bg-slate-950/40' : 'bg-black/5'}`}>
-              <button 
-                onClick={() => onUpdate({ paragraphSpacing: 1 })}
-                className={`flex-1 flex items-center justify-center gap-3 py-4 rounded-xl text-xs font-black transition-all ${settings.paragraphSpacing === 1 ? (isDark ? 'bg-white/10 text-white shadow-md' : 'bg-white text-black shadow-md') : 'opacity-60 hover:opacity-100'}`}
-              >
-                <AlignJustify className="w-4 h-4" /> Compact
-              </button>
-              <button 
-                onClick={() => onUpdate({ paragraphSpacing: 2 })}
-                className={`flex-1 flex items-center justify-center gap-3 py-4 rounded-xl text-xs font-black transition-all ${settings.paragraphSpacing === 2 ? (isDark ? 'bg-white/10 text-white shadow-md' : 'bg-white text-black shadow-md') : 'opacity-60 hover:opacity-100'}`}
-              >
-                <MoveVertical className="w-4 h-4" /> Wide
-              </button>
-           </div>
-        </div>
-
-        <div className="text-center font-black uppercase tracking-[0.4em] text-[11px] pt-12 text-black/30">
-          VoxLib Engine v2.1.8
+        <div className="text-center font-black uppercase tracking-[0.4em] text-[9px] sm:text-[11px] pt-8 sm:pt-12 opacity-30">
+          VoxLib Engine v2.2.0
         </div>
       </div>
     </div>
