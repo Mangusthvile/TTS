@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Book, Theme, StorageBackend } from '../types';
-import { BookOpen, Plus, Trash2, History, Cloud, Monitor, X, FileText, Database, Loader2, ChevronRight, CheckCircle2 } from 'lucide-react';
+import { BookOpen, Plus, Trash2, History, Cloud, Monitor, X, Database, Loader2, ChevronRight, CheckCircle2 } from 'lucide-react';
 import { openFolderPicker, authenticateDrive } from '../services/driveService';
 
 interface LibraryProps {
@@ -11,6 +11,7 @@ interface LibraryProps {
   onAddBook: (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string, driveFolderName?: string) => Promise<void>;
   onDeleteBook: (id: string) => void;
   onSelectChapter: (bookId: string, chapterId: string, offset?: number) => void;
+  onDeleteChapter: (bookId: string, chapterId: string) => void;
   theme: Theme;
   onClose?: () => void;
   isOpen?: boolean;
@@ -18,7 +19,7 @@ interface LibraryProps {
 }
 
 const Library: React.FC<LibraryProps> = ({ 
-  books, activeBookId, lastSession, onSelectBook, onAddBook, onDeleteBook, onSelectChapter, theme, onClose, isOpen, googleClientId 
+  books, activeBookId, lastSession, onSelectBook, onAddBook, onDeleteBook, onSelectChapter, onDeleteChapter, theme, onClose, isOpen, googleClientId 
 }) => {
   const [isAdding, setIsAdding] = useState(false);
   const [isProcessingAdd, setIsProcessingAdd] = useState(false);
@@ -197,10 +198,19 @@ const Library: React.FC<LibraryProps> = ({
                           <div 
                             key={chapter.id}
                             onClick={() => { onSelectChapter(book.id, chapter.id); onClose?.(); }}
-                            className={`flex items-center gap-2.5 px-3 py-2.5 rounded-lg cursor-pointer transition-all text-[10px] sm:text-[11px] font-black uppercase tracking-tight ${isCurrent ? 'bg-indigo-600 text-white shadow-md' : 'opacity-60 hover:opacity-100 hover:bg-black/5'}`}
+                            className={`flex items-center justify-between px-3 py-2.5 rounded-lg cursor-pointer transition-all text-[10px] sm:text-[11px] font-black uppercase tracking-tight group/chap ${isCurrent ? 'bg-indigo-600 text-white shadow-md' : 'opacity-60 hover:opacity-100 hover:bg-black/5'}`}
                           >
-                            {chapter.isCompleted ? <CheckCircle2 className={`w-3 h-3 flex-shrink-0 ${isCurrent ? 'text-white' : 'text-emerald-500'}`} /> : <ChevronRight className="w-3 h-3 flex-shrink-0" />}
-                            <span className="truncate leading-tight">CH {chapter.index}. {chapter.title}</span>
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              {chapter.isCompleted ? <CheckCircle2 className={`w-3 h-3 flex-shrink-0 ${isCurrent ? 'text-white' : 'text-emerald-500'}`} /> : <ChevronRight className="w-3 h-3 flex-shrink-0" />}
+                              <span className="truncate leading-tight">CH {chapter.index}. {chapter.title}</span>
+                            </div>
+                            <button 
+                              onClick={e => { e.stopPropagation(); onDeleteChapter(book.id, chapter.id); }}
+                              className={`p-1 hover:bg-red-500/20 rounded transition-all opacity-0 group-hover/chap:opacity-100 ${isCurrent ? 'text-white' : 'text-red-500'}`}
+                              title="Delete Chapter"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
                           </div>
                         );
                       })}

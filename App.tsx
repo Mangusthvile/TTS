@@ -481,6 +481,7 @@ const App: React.FC = () => {
           onSelectBook={handleSelectBook} 
           onDeleteBook={id => setState(p => ({ ...p, books: p.books.filter(b => b.id !== id), activeBookId: p.activeBookId === id ? undefined : p.activeBookId }))} 
           onSelectChapter={handleSelectChapter} 
+          onDeleteChapter={handleDeleteChapter}
           theme={state.theme} 
           onAddBook={handleAddBook}
           googleClientId={state.googleClientId}
