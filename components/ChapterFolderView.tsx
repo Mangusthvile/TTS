@@ -101,7 +101,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   };
 
   const handleSynthesizeAll = async (silent: boolean = false) => {
-    if (isBatchSynthesizing || synthesizingId) return;
+    if (isBatchSynthesizing || !!synthesizingId) return;
     if (!silent && !confirm(`This will convert all ${chapters.length} chapters to audio for the current voice/speed settings. This may take a few minutes. Continue?`)) return;
     
     setIsBatchSynthesizing(true);
@@ -162,7 +162,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           ) : (
             <div className="flex items-center gap-2 min-w-0">
               <div className={`truncate font-black text-xs sm:text-sm ${c.isCompleted ? 'line-through decoration-indigo-500/40' : ''}`}>{c.title}</div>
-              {c.hasCachedAudio && <Headphones className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" title="Audio file ready" />}
+              {c.hasCachedAudio && <span title="Audio file ready"><Headphones className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" /></span>}
             </div>
           )}
         </div>
@@ -234,7 +234,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           <div className="flex items-center flex-wrap gap-2 sm:gap-3">
             <button
               onClick={() => handleSynthesizeAll(false)}
-              disabled={isBatchSynthesizing || synthesizingId}
+              disabled={isBatchSynthesizing || !!synthesizingId}
               title="Convert all text chapters to audio files"
               className={`px-3 py-2 rounded-xl border text-[10px] font-black flex items-center gap-1.5 shadow-sm transition-all ${isBatchSynthesizing ? 'bg-indigo-600 text-white animate-pulse' : controlBg + ' ' + textPrimary + ' hover:border-indigo-500 hover:text-indigo-500'}`}
             >
@@ -275,7 +275,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                    // Automatically perform audio sync after refreshing the folder
                    await handleSynthesizeAll(true);
                  }}
-                 disabled={isBatchSynthesizing}
+                 disabled={!!isBatchSynthesizing}
                  title="Force Re-scan Folder and Sync Audio Files"
                  className={`px-3 py-2 rounded-xl border text-[10px] font-black flex items-center gap-1.5 shadow-sm ${controlBg} ${textPrimary} ${isBatchSynthesizing ? 'opacity-50' : 'hover:border-indigo-500'}`}
                >
@@ -330,7 +330,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                       <div className="flex justify-between items-start mb-3 sm:mb-4">
                         <div className={`text-[11px] sm:text-[12px] font-mono font-black flex items-center gap-1.5 ${textSecondary}`}>#{String(c.index).padStart(3, '0')}</div>
                         <div className="flex items-center gap-2">
-                           {c.hasCachedAudio && <Headphones className="w-3.5 h-3.5 text-indigo-500" title="Audio file ready" />}
+                           {c.hasCachedAudio && <span title="Audio file ready"><Headphones className="w-3.5 h-3.5 text-indigo-500" /></span>}
                            {percent > 0 && <div className={`text-[9px] font-black px-2 py-0.5 rounded-full ${isDark ? 'bg-indigo-600/30' : 'bg-indigo-600/15'} text-indigo-500`}>{percent}%</div>}
                         </div>
                       </div>
