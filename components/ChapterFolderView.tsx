@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Book, Theme, StorageBackend } from '../types';
-import { LayoutGrid, List, AlignJustify, Plus, Star, Folder, Link2, CheckCircle2, Download, Edit2, Check, X, RefreshCw } from 'lucide-react';
+import { LayoutGrid, List, AlignJustify, Plus, Star, Folder, Link2, CheckCircle2, Download, Edit2, Check, X, RefreshCw, Trash2 } from 'lucide-react';
 
 type ViewMode = 'details' | 'list' | 'grid';
 
@@ -11,6 +11,7 @@ interface ChapterFolderViewProps {
   onOpenChapter: (chapterId: string) => void;
   onToggleFavorite: (chapterId: string) => void;
   onUpdateChapterTitle: (chapterId: string, newTitle: string) => void;
+  onDeleteChapter: (chapterId: string) => void;
   onRefreshDriveFolder?: () => void;
   onLinkFolder?: (handle: any) => void;
 }
@@ -22,6 +23,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   onOpenChapter,
   onToggleFavorite,
   onUpdateChapterTitle,
+  onDeleteChapter,
   onRefreshDriveFolder,
   onLinkFolder
 }) => {
@@ -100,7 +102,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       <div
         key={c.id}
         onClick={() => !isEditing && onOpenChapter(c.id)}
-        className={`grid grid-cols-[40px_1fr_60px] sm:grid-cols-[86px_1fr_120px_100px_100px] items-center px-4 sm:px-6 py-4 cursor-pointer select-none border-b last:border-0 transition-colors ${isDark ? 'hover:bg-white/5 border-slate-800' : 'hover:bg-black/5 border-black/5'} ${c.isCompleted ? 'opacity-60' : ''}`}
+        className={`grid grid-cols-[40px_1fr_60px] sm:grid-cols-[86px_1fr_120px_100px_130px] items-center px-4 sm:px-6 py-4 cursor-pointer select-none border-b last:border-0 transition-colors ${isDark ? 'hover:bg-white/5 border-slate-800' : 'hover:bg-black/5 border-black/5'} ${c.isCompleted ? 'opacity-60' : ''}`}
       >
         <div className={`font-mono text-[10px] sm:text-xs font-black flex items-center gap-2 ${textSecondary}`}>
           {c.isCompleted && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 hidden sm:block" />}
@@ -134,7 +136,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             {percent}%
           </span>
         </div>
-        <div className="flex justify-end items-center gap-2 hidden sm:flex">
+        <div className="flex justify-end items-center gap-1 hidden sm:flex">
           {!isEditing && (
             <button
               onClick={(e) => handleStartEdit(e, c.id, c.title)}
@@ -152,6 +154,16 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             className={`p-2 rounded-xl border transition-all ${controlBg} ${c.isFavorite ? 'opacity-100 text-amber-500 border-amber-500/30' : 'opacity-60 hover:opacity-100'}`}
           >
             <Star className={`w-4 h-4 ${c.isFavorite ? 'fill-current' : ''}`} />
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onDeleteChapter(c.id);
+            }}
+            className={`p-2 rounded-xl border transition-all ${controlBg} opacity-60 hover:opacity-100 hover:text-red-600 hover:border-red-500/30`}
+            title="Delete Chapter"
+          >
+            <Trash2 className="w-4 h-4" />
           </button>
         </div>
       </div>
@@ -227,7 +239,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             </div>
           ) : viewMode === 'details' ? (
             <div>
-              <div className={`grid grid-cols-[40px_1fr_60px] sm:grid-cols-[86px_1fr_120px_100px_100px] px-4 sm:px-6 py-4 text-[9px] sm:text-[11px] font-black uppercase tracking-widest border-b ${isDark ? 'border-slate-800 bg-slate-950/40 text-indigo-400' : 'border-black/5 bg-black/5 text-indigo-600'}`}>
+              <div className={`grid grid-cols-[40px_1fr_60px] sm:grid-cols-[86px_1fr_120px_100px_130px] px-4 sm:px-6 py-4 text-[9px] sm:text-[11px] font-black uppercase tracking-widest border-b ${isDark ? 'border-slate-800 bg-slate-950/40 text-indigo-400' : 'border-black/5 bg-black/5 text-indigo-600'}`}>
                 <div>Index</div>
                 <div>Name</div>
                 <div className="text-right hidden sm:block">Words</div>
@@ -251,8 +263,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                     ) : (
                       <span className={`font-black text-xs sm:text-sm flex-1 truncate ${c.isCompleted ? 'line-through decoration-indigo-500/40' : ''}`}>{c.title}</span>
                     )}
-                    <button onClick={(e) => handleStartEdit(e, c.id, c.title)} className="p-1.5 opacity-60 sm:opacity-0 group-hover:opacity-100 transition-opacity"><Edit2 className="w-3.5 h-3.5" /></button>
-                    {percent > 0 && <span className={`text-[9px] sm:text-[11px] font-black px-2 py-0.5 rounded-full ${isDark ? 'bg-indigo-600/30' : 'bg-indigo-600/10'} text-indigo-500`}>{percent}%</span>}
+                    <div className="flex items-center gap-1">
+                       <button onClick={(e) => handleStartEdit(e, c.id, c.title)} className="p-1.5 opacity-60 sm:opacity-0 group-hover:opacity-100 transition-opacity hover:text-indigo-500"><Edit2 className="w-3.5 h-3.5" /></button>
+                       <button onClick={(e) => { e.stopPropagation(); onDeleteChapter(c.id); }} className="p-1.5 opacity-60 sm:opacity-0 group-hover:opacity-100 transition-opacity hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                       {percent > 0 && <span className={`text-[9px] sm:text-[11px] font-black px-2 py-0.5 rounded-full ${isDark ? 'bg-indigo-600/30' : 'bg-indigo-600/10'} text-indigo-500`}>{percent}%</span>}
+                    </div>
                   </div>
                 );
               })}
@@ -262,14 +277,23 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               {chapters.map((c) => {
                 const percent = c.progressTotalLength ? Math.min(100, Math.round((c.progress / c.progressTotalLength) * 100)) : 0;
                 return (
-                  <button key={c.id} onClick={() => onOpenChapter(c.id)} className={`text-left p-5 sm:p-6 rounded-2xl sm:rounded-3xl border transition-all ${controlBg} ${isDark ? 'hover:bg-slate-800 hover:border-indigo-600/30' : 'hover:bg-black/5 hover:border-indigo-600/30'} ${c.isCompleted ? 'opacity-60' : ''}`}>
-                    <div className="flex justify-between items-start mb-3 sm:mb-4">
-                      <div className={`text-[11px] sm:text-[12px] font-mono font-black flex items-center gap-1.5 ${textSecondary}`}>{c.isCompleted && <CheckCircle2 className="w-3 h-3 text-emerald-500" />}#{String(c.index).padStart(3, '0')}</div>
-                      {percent > 0 && <div className={`text-[9px] font-black px-2 py-0.5 rounded-full ${isDark ? 'bg-indigo-600/30' : 'bg-indigo-600/15'} text-indigo-500`}>{percent}%</div>}
-                    </div>
-                    <div className={`text-sm sm:text-base font-black leading-tight line-clamp-2 ${textPrimary} ${c.isCompleted ? 'line-through' : ''}`}>{c.title}</div>
-                    <div className={`mt-4 text-[9px] sm:text-[11px] font-black uppercase tracking-wider ${textSecondary}`}>{c.wordCount ? Number(c.wordCount).toLocaleString() : '0'} Words</div>
-                  </button>
+                  <div key={c.id} className="relative group">
+                    <button onClick={() => onOpenChapter(c.id)} className={`w-full text-left p-5 sm:p-6 rounded-2xl sm:rounded-3xl border transition-all ${controlBg} ${isDark ? 'hover:bg-slate-800 hover:border-indigo-600/30' : 'hover:bg-black/5 hover:border-indigo-600/30'} ${c.isCompleted ? 'opacity-60' : ''}`}>
+                      <div className="flex justify-between items-start mb-3 sm:mb-4">
+                        <div className={`text-[11px] sm:text-[12px] font-mono font-black flex items-center gap-1.5 ${textSecondary}`}>{c.isCompleted && <CheckCircle2 className="w-3 h-3 text-emerald-500" />}#{String(c.index).padStart(3, '0')}</div>
+                        {percent > 0 && <div className={`text-[9px] font-black px-2 py-0.5 rounded-full ${isDark ? 'bg-indigo-600/30' : 'bg-indigo-600/15'} text-indigo-500`}>{percent}%</div>}
+                      </div>
+                      <div className={`text-sm sm:text-base font-black leading-tight line-clamp-2 ${textPrimary} ${c.isCompleted ? 'line-through' : ''}`}>{c.title}</div>
+                      <div className={`mt-4 text-[9px] sm:text-[11px] font-black uppercase tracking-wider ${textSecondary}`}>{c.wordCount ? Number(c.wordCount).toLocaleString() : '0'} Words</div>
+                    </button>
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); onDeleteChapter(c.id); }}
+                      className="absolute top-2 right-2 p-2 bg-red-500 text-white rounded-xl shadow-lg opacity-0 group-hover:opacity-100 transition-opacity hover:scale-110 active:scale-95"
+                      title="Delete Chapter"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 );
               })}
             </div>

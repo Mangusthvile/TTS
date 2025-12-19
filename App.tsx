@@ -8,8 +8,8 @@ import Settings from './components/Settings';
 import Extractor from './components/Extractor';
 import ChapterFolderView from './components/ChapterFolderView';
 import { speechController, applyRules } from './services/speechService';
-import { authenticateDrive, fetchDriveFile, uploadToDrive, createDriveFolder, findFileSync, findFolderSync, listFilesInFolder } from './services/driveService';
-import { saveChapterToFile } from './services/fileService';
+import { authenticateDrive, fetchDriveFile, uploadToDrive, deleteDriveFile, findFileSync, listFilesInFolder } from './services/driveService';
+import { saveChapterToFile, deleteChapterFile } from './services/fileService';
 import { BookText, Zap, Sun, Coffee, Moon, X, Settings as SettingsIcon, Menu, RefreshCw, Loader2, Cloud } from 'lucide-react';
 
 const SYNC_FILENAME = 'talevox_sync_manifest.json';
@@ -121,7 +121,6 @@ const App: React.FC = () => {
     }));
   }, []);
 
-  // Added handleUpdateChapterTitle to fix the compilation error
   const handleUpdateChapterTitle = useCallback((bookId: string, chapterId: string, newTitle: string) => {
     setState(prev => ({
       ...prev,
@@ -131,6 +130,41 @@ const App: React.FC = () => {
       } : b)
     }));
   }, []);
+
+  const handleDeleteChapter = useCallback(async (bookId: string, chapterId: string) => {
+    const book = stateRef.current.books.find(b => b.id === bookId);
+    const chapter = book?.chapters.find(c => c.id === chapterId);
+    if (!book || !chapter) return;
+
+    if (!confirm(`Permanently delete "${chapter.title}"?`)) return;
+
+    // Stop if currently reading this chapter
+    if (book.currentChapterId === chapterId) {
+      handlePause();
+    }
+
+    setIsLoadingChapter(true);
+    try {
+      if (book.backend === StorageBackend.DRIVE && stateRef.current.driveToken && chapter.driveId) {
+        await deleteDriveFile(stateRef.current.driveToken, chapter.driveId);
+      } else if (book.backend === StorageBackend.LOCAL && book.directoryHandle) {
+        await deleteChapterFile(book.directoryHandle, chapter.filename);
+      }
+
+      setState(prev => ({
+        ...prev,
+        books: prev.books.map(b => b.id === bookId ? {
+          ...b,
+          currentChapterId: b.currentChapterId === chapterId ? undefined : b.currentChapterId,
+          chapters: b.chapters.filter(c => c.id !== chapterId)
+        } : b)
+      }));
+    } catch (err) {
+      alert("Deletion failed: " + (err instanceof Error ? err.message : 'Unknown error'));
+    } finally {
+      setIsLoadingChapter(false);
+    }
+  }, [handlePause]);
 
   const handleJumpToOffset = useCallback((offset: number) => {
     const finalPlaybackText = applyRules(activeChapterText, activeBook?.rules || []);
@@ -483,7 +517,7 @@ const App: React.FC = () => {
                   </div>
                </div>
              )}
-             {activeTab === 'reader' ? (activeBook ? (activeBook.currentChapterId ? (<Reader chapter={activeChapterMetadata || null} rules={activeBook.rules} currentOffset={state.currentOffset} theme={state.theme} debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset} highlightMode={activeBook.settings.highlightMode} onBackToChapters={() => handleSelectBook(activeBook.id)} onAddChapter={() => setIsAddChapterOpen(true)} readerSettings={state.readerSettings} />) : (<ChapterFolderView book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)} onOpenChapter={(id) => handleSelectChapter(activeBook.id, id)} onToggleFavorite={() => {}} onUpdateChapterTitle={(cid, nt) => handleUpdateChapterTitle(activeBook.id, cid, nt)} onRefreshDriveFolder={() => handleRescanDriveFolder(activeBook.id)} />)) : (<div className="h-full flex flex-col items-center justify-center font-black tracking-widest text-lg opacity-40 uppercase">Select a book to begin</div>)) : activeTab === 'rules' ? (
+             {activeTab === 'reader' ? (activeBook ? (activeBook.currentChapterId ? (<Reader chapter={activeChapterMetadata || null} rules={activeBook.rules} currentOffset={state.currentOffset} theme={state.theme} debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset} highlightMode={activeBook.settings.highlightMode} onBackToChapters={() => handleSelectBook(activeBook.id)} onAddChapter={() => setIsAddChapterOpen(true)} readerSettings={state.readerSettings} />) : (<ChapterFolderView book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)} onOpenChapter={(id) => handleSelectChapter(activeBook.id, id)} onToggleFavorite={() => {}} onUpdateChapterTitle={(cid, nt) => handleUpdateChapterTitle(activeBook.id, cid, nt)} onDeleteChapter={(cid) => handleDeleteChapter(activeBook.id, cid)} onRefreshDriveFolder={() => handleRescanDriveFolder(activeBook.id)} />)) : (<div className="h-full flex flex-col items-center justify-center font-black tracking-widest text-lg opacity-40 uppercase">Select a book to begin</div>)) : activeTab === 'rules' ? (
                <RuleManager 
                  rules={activeBook?.rules || []} 
                  theme={state.theme} 

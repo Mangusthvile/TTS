@@ -199,6 +199,20 @@ export async function fetchDriveFile(token: string, fileId: string): Promise<str
 }
 
 /**
+ * Permanently deletes a file from Google Drive.
+ */
+export async function deleteDriveFile(token: string, fileId: string): Promise<void> {
+  const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  
+  if (!response.ok && response.status !== 404) {
+    throw await getErrorFromResponse(response, 'DELETE_FAILED');
+  }
+}
+
+/**
  * Uploads a file using multipart/related. Ensures the file is placed in the correct book-specific folder.
  */
 export async function uploadToDrive(

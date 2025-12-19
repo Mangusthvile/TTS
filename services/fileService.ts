@@ -1,15 +1,39 @@
-
 import { Chapter } from '../types';
 
 export async function saveChapterToFile(bookHandle: FileSystemDirectoryHandle, chapter: Chapter) {
   try {
     const fileHandle = await bookHandle.getFileHandle(chapter.filename, { create: true });
-    const writable = await fileHandle.createWritable();
+    const writable = await (fileHandle as any).createWritable();
     await writable.write(chapter.content);
     await writable.close();
     await updateManifest(bookHandle, chapter);
   } catch (err) {
     console.error('File storage failed:', err);
+  }
+}
+
+export async function deleteChapterFile(bookHandle: FileSystemDirectoryHandle, filename: string) {
+  try {
+    // Physically delete the .txt file
+    await (bookHandle as any).removeEntry(filename);
+    
+    // Update manifest to remove the entry
+    let manifest: any = { chapters: [] };
+    try {
+      const manifestHandle = await bookHandle.getFileHandle('manifest.json', { create: false });
+      const file = await manifestHandle.getFile();
+      const text = await file.text();
+      if (text) manifest = JSON.parse(text);
+    } catch (e) {}
+
+    manifest.chapters = manifest.chapters.filter((c: any) => c.filename !== filename);
+    
+    const manifestHandle = await bookHandle.getFileHandle('manifest.json', { create: true });
+    const writable = await (manifestHandle as any).createWritable();
+    await writable.write(JSON.stringify(manifest, null, 2));
+    await writable.close();
+  } catch (err) {
+    console.error('File deletion failed:', err);
   }
 }
 
@@ -37,7 +61,7 @@ async function updateManifest(bookHandle: FileSystemDirectoryHandle, newChapter:
     manifest.chapters.sort((a: any, b: any) => a.index - b.index);
 
     const manifestHandle = await bookHandle.getFileHandle('manifest.json', { create: true });
-    const writable = await manifestHandle.createWritable();
+    const writable = await (manifestHandle as any).createWritable();
     await writable.write(JSON.stringify(manifest, null, 2));
     await writable.close();
   } catch (err) {
