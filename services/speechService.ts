@@ -1,4 +1,5 @@
 import { Rule, RuleType } from '../types';
+import { synthesizeChunk } from './cloudTtsService';
 
 export function applyRules(text: string, rules: Rule[]): string {
   let processedText = text;
@@ -42,104 +43,115 @@ export interface NextSegment {
   chapterTitle: string;
 }
 
-const SILENCE_DATA_URI = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
-
-/**
- * Capacitor Bridge Interface
- */
-const Capacitor = (window as any).Capacitor;
-const NativeTTS = Capacitor?.Plugins?.NativeTTS;
-
 class SpeechController {
   private synth: SpeechSynthesis;
-  private chunks: SpeechChunk[] = [];
+  private audio: HTMLAudioElement;
+  private currentChunks: SpeechChunk[] = [];
   private currentChunkIndex: number = -1;
+  private timer: number | null = null;
+  
   private onEndCallback: (() => void) | null = null;
   private globalBoundaryCallback: ((offset: number, charIndex: number, chunkIdx: number) => void) | null = null;
+  
   private rate: number = 1.0;
   private voiceName: string = '';
   private sessionToken: number = 0;
   private getNextSegment: (() => Promise<NextSegment | null>) | null = null;
-  private currentPrefixLength: number = 0;
-  private totalTextLength: number = 0;
   
-  // Audio Anchor for PWA Stability
-  private anchorAudio: HTMLAudioElement;
-  
-  // Highlighting: Velocity Engine
-  private lastEventTime: number = 0;
-  private lastEventOffset: number = 0;
-  private highlightTimer: number | null = null;
-  
-  // Power & Stability
-  private wakeLock: any = null;
-  private isNativeMode: boolean = !!NativeTTS;
+  // Defensive access to environment variables to prevent crash if import.meta or env is missing
+  private isCloudEnabled: boolean = !!(typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_TTS_ENDPOINT);
 
   constructor() {
     this.synth = window.speechSynthesis;
-    this.anchorAudio = new Audio(SILENCE_DATA_URI);
-    this.anchorAudio.loop = true;
-    this.anchorAudio.volume = 0.01;
+    this.audio = new Audio();
+    this.setupAudioListeners();
     this.setupMediaSession();
+  }
+
+  private setupAudioListeners() {
+    this.audio.addEventListener('ended', () => {
+      this.currentChunkIndex++;
+      this.playNextChunk();
+    });
+
+    this.audio.addEventListener('play', () => {
+      this.startTracking();
+      this.updateMediaSessionState();
+    });
+
+    this.audio.addEventListener('pause', () => {
+      this.stopTracking();
+      this.updateMediaSessionState();
+    });
+
+    this.audio.addEventListener('error', (e) => {
+      console.error("Audio error, fallback to WebSpeech:", e);
+      this.isCloudEnabled = false;
+      this.playNextChunk();
+    });
   }
 
   private setupMediaSession() {
     if ('mediaSession' in navigator) {
-      try {
-        navigator.mediaSession.setActionHandler('play', () => {
-          if (this.isNativeMode) NativeTTS.resume();
-          else if (this.synth.paused) {
-            this.resume();
-          }
-        });
-        navigator.mediaSession.setActionHandler('pause', () => {
-          if (this.isNativeMode) NativeTTS.pause();
-          else {
-            this.pause();
-          }
-        });
-        navigator.mediaSession.setActionHandler('stop', () => this.stop());
-      } catch (e) {}
+      navigator.mediaSession.setActionHandler('play', () => this.resume());
+      navigator.mediaSession.setActionHandler('pause', () => this.pause());
+      navigator.mediaSession.setActionHandler('stop', () => this.stop());
     }
   }
 
-  private updatePlaybackState(state: 'playing' | 'paused' | 'none') {
+  private updateMediaSessionState() {
     if ('mediaSession' in navigator) {
-      navigator.mediaSession.playbackState = state;
+      navigator.mediaSession.playbackState = this.audio.paused ? 'paused' : 'playing';
+      if ((navigator as any).mediaSession.setPositionState && this.audio.duration) {
+        try {
+          (navigator as any).mediaSession.setPositionState({
+            duration: this.audio.duration,
+            playbackRate: this.audio.playbackRate,
+            position: this.audio.currentTime,
+          });
+        } catch (e) {}
+      }
     }
   }
 
-  private async requestWakeLock() {
-    if ('wakeLock' in navigator) {
-      try {
-        this.wakeLock = await (navigator as any).wakeLock.request('screen');
-      } catch (err) {}
-    }
+  private startTracking() {
+    this.stopTracking();
+    this.timer = window.setInterval(() => {
+      if (this.globalBoundaryCallback && this.currentChunkIndex >= 0) {
+        const chunk = this.currentChunks[this.currentChunkIndex];
+        if (!chunk || !this.audio.duration) return;
+        
+        const ratio = this.audio.currentTime / this.audio.duration;
+        const charOffset = Math.floor(chunk.text.length * ratio);
+        this.globalBoundaryCallback(chunk.startOffset + charOffset, charOffset, this.currentChunkIndex);
+      }
+    }, 120);
   }
 
-  private releaseWakeLock() {
-    if (this.wakeLock) {
-      this.wakeLock.release().then(() => { this.wakeLock = null; });
+  private stopTracking() {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
     }
   }
 
   private createChunks(text: string): SpeechChunk[] {
     const chunks: SpeechChunk[] = [];
-    const MAX_CHUNK_LENGTH = 800; 
-    const segments = text.split(/([.!?\n]\s*)/);
-    let tempChunk = "";
-    let tempStart = 0;
+    const MAX = this.isCloudEnabled ? 5000 : 800;
+    const parts = text.split(/([.!?\n]\s*)/);
+    let current = "";
+    let start = 0;
 
-    segments.forEach(s => {
-      if (tempChunk.length + s.length > MAX_CHUNK_LENGTH) {
-        if (tempChunk) chunks.push({ text: tempChunk, startOffset: tempStart });
-        tempStart += tempChunk.length;
-        tempChunk = s;
+    parts.forEach(p => {
+      if (current.length + p.length > MAX) {
+        if (current) chunks.push({ text: current, startOffset: start });
+        start += current.length;
+        current = p;
       } else {
-        tempChunk += s;
+        current += p;
       }
     });
-    if (tempChunk) chunks.push({ text: tempChunk, startOffset: tempStart });
+    if (current) chunks.push({ text: current, startOffset: start });
     return chunks;
   }
 
@@ -151,112 +163,69 @@ class SpeechController {
     onEnd: () => void, 
     onBoundary?: (offset: number, charIndex: number, chunkIdx: number) => void,
     getNextSegment?: () => Promise<NextSegment | null>,
-    bookTitle: string = "Unknown Book",
-    chapterTitle: string = "Unknown Chapter"
+    bookTitle?: string,
+    chapterTitle?: string
   ) {
     this.sessionToken++;
-    const currentSession = this.sessionToken;
-    this.stopHighlightTracker();
-    this.requestWakeLock();
+    this.stop();
     
     this.onEndCallback = onEnd;
     this.globalBoundaryCallback = onBoundary || null;
     this.rate = rate;
     this.voiceName = voiceName;
     this.getNextSegment = getNextSegment || null;
-    this.currentPrefixLength = 0;
-    this.totalTextLength = text.length;
 
     if ('mediaSession' in navigator && window.MediaMetadata) {
       navigator.mediaSession.metadata = new MediaMetadata({
-        title: chapterTitle,
-        artist: bookTitle,
+        title: chapterTitle || "Talevox",
+        artist: bookTitle || "TTS Reader",
         artwork: [{ src: 'https://cdn-icons-png.flaticon.com/512/3145/3145761.png', sizes: '512x512', type: 'image/png' }]
       });
     }
 
-    if (this.isNativeMode) {
-      NativeTTS.speak({
-        text: text.substring(startOffset),
-        rate: this.rate,
-        voice: this.voiceName,
-        title: chapterTitle,
-        artist: bookTitle
-      });
-      return;
-    }
-
-    this.synth.cancel();
-    this.anchorAudio.play().catch(() => {});
-    this.updatePlaybackState('playing');
-
-    const fullChunks = this.createChunks(text);
-    this.chunks = fullChunks.filter(c => c.startOffset + c.text.length > startOffset);
+    this.currentChunks = this.createChunks(text);
     
-    if (this.chunks.length > 0) {
-      this.currentChunkIndex = 0;
-      const firstChunk = this.chunks[0];
-      if (startOffset > firstChunk.startOffset) {
-        const diff = startOffset - firstChunk.startOffset;
-        this.chunks[0] = { text: firstChunk.text.substring(diff), startOffset: startOffset };
-      }
-      this.speakNextChunk(currentSession);
-    } else if (onEnd) onEnd();
+    // Find starting chunk
+    const idx = this.currentChunks.findIndex(c => c.startOffset + c.text.length > startOffset);
+    this.currentChunkIndex = idx !== -1 ? idx : 0;
+
+    this.playNextChunk(startOffset);
   }
 
-  private startHighlightTracker(session: number, baseOffset: number) {
-    this.stopHighlightTracker();
-    this.lastEventOffset = baseOffset;
-    this.lastEventTime = performance.now();
+  /**
+   * Specialized seek that avoids a full re-fetch if we are already in the correct chunk.
+   */
+  seekToOffset(offset: number) {
+    if (this.currentChunks.length === 0) return;
+    const idx = this.currentChunks.findIndex(c => c.startOffset + c.text.length > offset);
+    if (idx === -1) return;
 
-    // chars per millisecond base velocity
-    const velocity = (0.016 * this.rate); 
-
-    this.highlightTimer = window.setInterval(() => {
-      if (this.sessionToken !== session || this.synth.paused) return;
-
-      const elapsed = performance.now() - this.lastEventTime;
-      const predictedGlobalOffset = Math.floor(this.lastEventOffset + (elapsed * velocity));
-
-      if (this.globalBoundaryCallback) {
-        const effectiveOffset = Math.max(0, predictedGlobalOffset - this.currentPrefixLength);
-        const predictedCharIndex = Math.max(0, predictedGlobalOffset - baseOffset);
-        
-        if (effectiveOffset < this.totalTextLength) {
-          this.globalBoundaryCallback(effectiveOffset, predictedCharIndex, this.currentChunkIndex);
-        }
-      }
-    }, 100); 
-  }
-
-  private stopHighlightTracker() {
-    if (this.highlightTimer) {
-      clearInterval(this.highlightTimer);
-      this.highlightTimer = null;
+    if (this.isCloudEnabled && idx === this.currentChunkIndex && this.audio.src && this.audio.duration) {
+      const chunk = this.currentChunks[idx];
+      const relative = offset - chunk.startOffset;
+      const ratio = Math.max(0, Math.min(1, relative / chunk.text.length));
+      this.audio.currentTime = ratio * this.audio.duration;
+    } else {
+      // Different chunk or legacy mode, full restart required
+      this.currentChunkIndex = idx;
+      this.playNextChunk(offset);
     }
   }
 
-  private async speakNextChunk(session: number) {
-    if (this.sessionToken !== session) return;
+  private async playNextChunk(initialOffsetInChunk?: number) {
+    const session = this.sessionToken;
 
-    if (this.currentChunkIndex >= this.chunks.length) {
-      this.stopHighlightTracker();
-      
+    if (this.currentChunkIndex >= this.currentChunks.length) {
       if (document.hidden) {
-        console.warn("[Speech] Background auto-advance prevented.");
-        this.pause();
-        if (this.onEndCallback) this.onEndCallback();
+        this.pause(); // Do not advance chapters if the app is minimized
         return;
       }
-
       if (this.getNextSegment) {
         const next = await this.getNextSegment();
         if (next && this.sessionToken === session) {
-          this.currentPrefixLength = next.announcementPrefix.length;
-          this.totalTextLength = next.content.length;
-          this.chunks = this.createChunks(next.announcementPrefix + next.content);
+          this.currentChunks = this.createChunks(next.announcementPrefix + next.content);
           this.currentChunkIndex = 0;
-          this.speakNextChunk(session);
+          this.playNextChunk();
           return;
         }
       }
@@ -265,85 +234,82 @@ class SpeechController {
       return;
     }
 
-    const chunk = this.chunks[this.currentChunkIndex];
-    if (!chunk.text.trim()) {
-      this.currentChunkIndex++;
-      this.speakNextChunk(session);
-      return;
+    const chunk = this.currentChunks[this.currentChunkIndex];
+    
+    if (this.isCloudEnabled) {
+      try {
+        const result = await synthesizeChunk(chunk.text, this.voiceName, this.rate);
+        if (this.sessionToken !== session) return;
+        
+        this.audio.src = result.audioUrl;
+        
+        if (initialOffsetInChunk !== undefined) {
+          const relative = initialOffsetInChunk - chunk.startOffset;
+          const ratio = Math.max(0, Math.min(1, relative / chunk.text.length));
+          
+          this.audio.onloadedmetadata = () => {
+            if (this.sessionToken === session) {
+                this.audio.currentTime = ratio * this.audio.duration;
+                this.audio.play().catch(() => {});
+            }
+            this.audio.onloadedmetadata = null;
+          };
+        } else {
+          this.audio.play().catch(() => {});
+        }
+      } catch (err) {
+        console.warn("Cloud TTS failed, falling back to WebSpeech:", err);
+        this.isCloudEnabled = false;
+        this.playNextChunk(initialOffsetInChunk);
+      }
+    } else {
+      const utterance = new SpeechSynthesisUtterance(chunk.text);
+      const voices = this.synth.getVoices();
+      utterance.voice = voices.find(v => v.name === this.voiceName) || voices[0];
+      utterance.rate = this.rate;
+
+      utterance.onboundary = (event) => {
+        if (this.sessionToken === session && this.globalBoundaryCallback) {
+          this.globalBoundaryCallback(chunk.startOffset + event.charIndex, event.charIndex, this.currentChunkIndex);
+        }
+      };
+
+      utterance.onend = () => {
+        if (this.sessionToken === session) {
+          this.currentChunkIndex++;
+          this.playNextChunk();
+        }
+      };
+
+      this.synth.speak(utterance);
     }
-
-    const utterance = new SpeechSynthesisUtterance(chunk.text);
-    const voices = this.synth.getVoices();
-    const voice = voices.find(v => v.name === this.voiceName) || voices.find(v => v.lang.startsWith('en')) || voices[0];
-    if (voice) utterance.voice = voice;
-    utterance.rate = this.rate;
-
-    const chunkStartTime = performance.now();
-    const expectedDuration = (chunk.text.length / (0.016 * this.rate));
-
-    this.startHighlightTracker(session, chunk.startOffset);
-
-    utterance.onboundary = (event) => {
-      if (this.sessionToken === session && typeof event.charIndex === 'number') {
-        const currentGlobal = chunk.startOffset + event.charIndex;
-        this.lastEventOffset = currentGlobal;
-        this.lastEventTime = performance.now();
-      }
-    };
-
-    utterance.onend = () => {
-      if (this.sessionToken !== session) return;
-
-      const actualDuration = performance.now() - chunkStartTime;
-      if (actualDuration < expectedDuration * 0.2 && chunk.text.length > 20) {
-        console.error("[Speech] Glitch skip detected.");
-        this.stop();
-        if (this.onEndCallback) this.onEndCallback();
-        return;
-      }
-
-      this.currentChunkIndex++;
-      this.speakNextChunk(session);
-    };
-
-    utterance.onerror = (e) => {
-      if (this.sessionToken === session) {
-        this.currentChunkIndex++;
-        this.speakNextChunk(session);
-      }
-    };
-
-    this.synth.speak(utterance);
   }
 
   pause() {
-    this.synth.pause();
-    this.anchorAudio.pause();
-    this.updatePlaybackState('paused');
+    if (this.isCloudEnabled) this.audio.pause();
+    else this.synth.pause();
   }
 
   resume() {
-    this.synth.resume();
-    this.anchorAudio.play().catch(() => {});
-    this.updatePlaybackState('playing');
+    if (this.isCloudEnabled) this.audio.play().catch(() => {});
+    else this.synth.resume();
   }
 
   stop() {
-    this.sessionToken++; 
-    this.stopHighlightTracker();
-    this.releaseWakeLock();
-    if (this.isNativeMode) NativeTTS.stop();
-    else {
-      this.synth.cancel();
-      this.anchorAudio.pause();
-      this.anchorAudio.currentTime = 0;
-      this.updatePlaybackState('none');
+    this.sessionToken++;
+    this.stopTracking();
+    this.audio.pause();
+    if (this.audio.src) {
+      URL.revokeObjectURL(this.audio.src);
+      this.audio.src = "";
     }
-    this.chunks = [];
-    this.currentChunkIndex = -1;
+    this.synth.cancel();
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none';
   }
 
-  get isPaused() { return this.synth.paused; }
+  get isPaused() {
+    return this.isCloudEnabled ? this.audio.paused : this.synth.paused;
+  }
 }
 
 export const speechController = new SpeechController();

@@ -7,7 +7,7 @@
 export async function authenticateDrive(explicitClientId?: string): Promise<string> {
   // Use import.meta.env for Vite environment variables
   // Fix: Cast import.meta to any to bypass TypeScript error "Property 'env' does not exist on type 'ImportMeta'".
-  const CLIENT_ID = (explicitClientId?.trim()) || ((import.meta as any).env.VITE_GOOGLE_CLIENT_ID) || 'YOUR_CLIENT_ID_HERE.apps.googleusercontent.com';
+  const CLIENT_ID = (explicitClientId?.trim()) || ((import.meta as any).env?.VITE_GOOGLE_CLIENT_ID) || 'YOUR_CLIENT_ID_HERE.apps.googleusercontent.com';
 
   if (!CLIENT_ID || CLIENT_ID.includes('YOUR_CLIENT_ID_HERE')) {
     throw new Error('MISSING_CLIENT_ID');
@@ -46,7 +46,7 @@ export async function authenticateDrive(explicitClientId?: string): Promise<stri
 export async function openFolderPicker(token: string): Promise<{id: string, name: string} | null> {
   // Read API Key from Vite environment variables
   // Fix: Cast import.meta to any to bypass TypeScript error "Property 'env' does not exist on type 'ImportMeta'".
-  const apiKey = (import.meta as any).env.VITE_GOOGLE_API_KEY;
+  const apiKey = (import.meta as any).env?.VITE_GOOGLE_API_KEY;
   
   // Temporary console log for debugging as requested
   console.log(`[Drive] API Key present: ${!!apiKey}${apiKey ? ` (last 4: ${apiKey.slice(-4)})` : ""}`);

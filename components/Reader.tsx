@@ -95,13 +95,12 @@ const Reader: React.FC<ReaderProps> = ({
     selection.removeAllRanges();
   };
 
-  // Custom tap handling for mobile to reliably trigger "double click" behavior
-  const handlePointerDown = (e: React.PointerEvent) => {
+  const handlePointerUp = (e: React.PointerEvent) => {
     const now = Date.now();
-    if (now - lastTapTime.current < 350) {
-      // It's a double tap
-      triggerJump();
-      lastTapTime.current = 0; // reset
+    if (now - lastTapTime.current < 300) {
+      // Small timeout to ensure selection is processed by OS
+      setTimeout(triggerJump, 0);
+      lastTapTime.current = 0;
     } else {
       lastTapTime.current = now;
     }
@@ -181,8 +180,7 @@ const Reader: React.FC<ReaderProps> = ({
       <div className={`absolute top-0 left-0 right-0 h-16 lg:h-24 z-10 pointer-events-none bg-gradient-to-b ${fadeColor} to-transparent`} />
       <div ref={containerRef} className="flex-1 overflow-y-auto px-4 lg:px-12 py-12 lg:py-24 scroll-smooth scrollbar-hide">
         <div 
-          onPointerDown={handlePointerDown}
-          onDoubleClick={(e) => { e.preventDefault(); triggerJump(); }}
+          onPointerUp={handlePointerUp}
           style={containerStyles}
           className="max-w-[70ch] mx-auto pb-64 whitespace-pre-wrap select-text cursor-text font-medium leading-relaxed"
         >

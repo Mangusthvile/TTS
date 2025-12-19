@@ -121,6 +121,7 @@ const App: React.FC = () => {
     }));
   }, []);
 
+  // Added handleUpdateChapterTitle to fix the compilation error
   const handleUpdateChapterTitle = useCallback((bookId: string, chapterId: string, newTitle: string) => {
     setState(prev => ({
       ...prev,
@@ -132,17 +133,21 @@ const App: React.FC = () => {
   }, []);
 
   const handleJumpToOffset = useCallback((offset: number) => {
-    handlePause();
     const finalPlaybackText = applyRules(activeChapterText, activeBook?.rules || []);
     const total = finalPlaybackText.length || 1;
     const boundedOffset = Math.min(Math.max(0, offset), total);
     const isFinished = boundedOffset >= total * 0.98;
     
-    setState(prev => ({ ...prev, currentOffset: boundedOffset }));
+    if (isPlaying) {
+      speechController.seekToOffset(boundedOffset);
+    } else {
+      setState(prev => ({ ...prev, currentOffset: boundedOffset }));
+    }
+    
     if (stateRef.current.activeBookId && activeBook?.currentChapterId) {
       updateChapterProgress(stateRef.current.activeBookId, activeBook.currentChapterId, boundedOffset, total, isFinished);
     }
-  }, [handlePause, activeBook, activeChapterText, updateChapterProgress]);
+  }, [isPlaying, activeBook, activeChapterText, updateChapterProgress]);
 
   const handleRuleOperation = useCallback((type: 'add' | 'update' | 'delete' | 'import', rule?: Rule, importedRules?: Rule[]) => {
     setState(prev => {
@@ -350,8 +355,8 @@ const App: React.FC = () => {
       state.currentOffset,
       () => setIsPlaying(false),
       (offset) => { 
-        // Tracker update: throttled slightly for performance but enough for smooth movement
         stateRef.current.currentOffset = offset;
+        // Frequency-aware state update
         if (Math.abs(stateRef.current.currentOffset - state.currentOffset) >= 2) {
           setState(prev => ({ ...prev, currentOffset: offset }));
         }
