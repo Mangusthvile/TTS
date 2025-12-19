@@ -1,4 +1,3 @@
-
 import React, { useState, useMemo, useRef } from 'react';
 import { Rule, RuleType, Scope, Theme } from '../types';
 import { applyRules, speechController } from '../services/speechService';
@@ -97,21 +96,21 @@ const RuleManager: React.FC<RuleManagerProps> = ({
   const inputBg = isDark ? 'bg-slate-900 border-slate-700 text-white' : 'bg-slate-50 border-slate-200 text-black';
 
   return (
-    <div className={`p-8 h-full overflow-y-auto transition-colors duration-500 ${isDark ? 'bg-slate-900' : isSepia ? 'bg-[#efe6d5]' : 'bg-slate-50'}`}>
-      <div className="max-w-5xl mx-auto space-y-12 pb-32">
+    <div className={`p-4 sm:p-8 h-full overflow-y-auto transition-colors duration-500 ${isDark ? 'bg-slate-900' : isSepia ? 'bg-[#efe6d5]' : 'bg-slate-50'}`}>
+      <div className="max-w-5xl mx-auto space-y-8 sm:space-y-12 pb-32">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
           <div>
-            <h2 className={`text-3xl font-black tracking-tight ${textClass}`}>Pronunciation Rules</h2>
-            <div className="flex gap-8 mt-4">
-              <button onClick={handleExport} className={`text-[11px] font-black uppercase tracking-widest flex items-center gap-2 hover:scale-105 transition-transform ${isDark ? 'text-slate-100' : 'text-slate-600'}`}><Download className="w-4 h-4" /> Export</button>
-              <button onClick={() => fileInputRef.current?.click()} className={`text-[11px] font-black uppercase tracking-widest flex items-center gap-2 hover:scale-105 transition-transform ${isDark ? 'text-slate-100' : 'text-slate-600'}`}><Upload className="w-4 h-4" /> Import</button>
+            <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textClass}`}>Pronunciation Rules</h2>
+            <div className="flex gap-6 sm:gap-8 mt-4">
+              <button onClick={handleExport} className={`text-[10px] font-black uppercase tracking-widest flex items-center gap-2 hover:scale-105 transition-transform ${isDark ? 'text-slate-100' : 'text-slate-600'}`}><Download className="w-3.5 h-3.5" /> Export</button>
+              <button onClick={() => fileInputRef.current?.click()} className={`text-[10px] font-black uppercase tracking-widest flex items-center gap-2 hover:scale-105 transition-transform ${isDark ? 'text-slate-100' : 'text-slate-600'}`}><Upload className="w-3.5 h-3.5" /> Import</button>
               <input type="file" ref={fileInputRef} onChange={handleImport} className="hidden" accept=".json" />
             </div>
           </div>
           {!isAdding && (
             <button 
               onClick={() => setIsAdding(true)} 
-              className="px-8 py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase tracking-widest shadow-2xl shadow-indigo-600/30 flex items-center gap-2 hover:scale-105 active:scale-95 transition-all"
+              className="px-6 py-4 sm:px-8 sm:py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase tracking-widest shadow-2xl shadow-indigo-600/30 flex items-center justify-center gap-2 hover:scale-105 active:scale-95 transition-all"
             >
               <Plus className="w-5 h-5" /> New Rule
             </button>
@@ -119,8 +118,8 @@ const RuleManager: React.FC<RuleManagerProps> = ({
         </div>
 
         {isAdding && (
-          <div className={`p-8 rounded-[2.5rem] border shadow-2xl animate-in zoom-in-95 duration-200 ${cardBg}`}>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+          <div className={`p-5 sm:p-8 rounded-[1.5rem] sm:rounded-[2.5rem] border shadow-2xl animate-in zoom-in-95 duration-200 ${cardBg}`}>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 sm:gap-8 mb-8">
               <div className="space-y-4">
                 <div className="space-y-2">
                   <label className={`text-[11px] font-black uppercase tracking-widest ml-1 ${labelColor}`}>Rule Type</label>
@@ -147,7 +146,7 @@ const RuleManager: React.FC<RuleManagerProps> = ({
                     value={newRule.find} 
                     onChange={e => setNewRule({...newRule, find: e.target.value})} 
                     placeholder={newRule.matchExpression ? "Regex pattern..." : "Text to find..."} 
-                    className={`w-full px-5 py-4 rounded-xl border outline-none font-black ${inputBg}`} 
+                    className={`w-full px-5 py-4 rounded-xl border outline-none font-black text-[16px] ${inputBg}`} 
                   />
                 </div>
               </div>
@@ -158,13 +157,13 @@ const RuleManager: React.FC<RuleManagerProps> = ({
                    <div className="grid grid-cols-2 gap-2">
                       <button 
                         onClick={() => setNewRule({...newRule, matchCase: !newRule.matchCase})}
-                        className={`px-3 py-2 rounded-xl text-[10px] font-black border transition-all flex items-center gap-2 ${newRule.matchCase ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-black/5 text-inherit opacity-60'}`}
+                        className={`px-3 py-2.5 rounded-xl text-[10px] font-black border transition-all flex items-center justify-center gap-2 ${newRule.matchCase ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-black/5 text-inherit opacity-60'}`}
                       >
                         <TypeIcon className="w-3 h-3" /> Match Case
                       </button>
                       <button 
                         onClick={() => setNewRule({...newRule, matchExpression: !newRule.matchExpression})}
-                        className={`px-3 py-2 rounded-xl text-[10px] font-black border transition-all flex items-center gap-2 ${newRule.matchExpression ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-black/5 text-inherit opacity-60'}`}
+                        className={`px-3 py-2.5 rounded-xl text-[10px] font-black border transition-all flex items-center justify-center gap-2 ${newRule.matchExpression ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-black/5 text-inherit opacity-60'}`}
                       >
                         <Wand2 className="w-3 h-3" /> Regex
                       </button>
@@ -179,47 +178,47 @@ const RuleManager: React.FC<RuleManagerProps> = ({
                       value={newRule.speakAs} 
                       onChange={e => setNewRule({...newRule, speakAs: e.target.value})} 
                       placeholder="Replacement text..." 
-                      className={`w-full px-5 py-4 rounded-xl border outline-none font-black ${inputBg}`} 
+                      className={`w-full px-5 py-4 rounded-xl border outline-none font-black text-[16px] ${inputBg}`} 
                     />
                   </div>
                 )}
               </div>
             </div>
 
-            <div className={`p-6 rounded-2xl mb-8 border-2 border-dashed ${isDark ? 'border-slate-700 bg-slate-900/50' : 'border-indigo-100 bg-indigo-50/30'}`}>
+            <div className={`p-4 sm:p-6 rounded-2xl mb-8 border-2 border-dashed ${isDark ? 'border-slate-700 bg-slate-900/50' : 'border-indigo-100 bg-indigo-50/30'}`}>
               <label className={`text-[10px] font-black uppercase tracking-widest mb-3 block ${labelColor}`}>Test Rule</label>
               <div className="flex flex-col md:flex-row gap-4">
                 <input 
                   type="text" 
                   value={testText}
                   onChange={e => setTestText(e.target.value)}
-                  className={`flex-1 px-4 py-3 rounded-xl border-none outline-none font-bold text-sm ${isDark ? 'bg-slate-950 text-white' : 'bg-white text-black'}`}
+                  className={`flex-1 px-4 py-3 rounded-xl border-none outline-none font-bold text-[16px] ${isDark ? 'bg-slate-950 text-white' : 'bg-white text-black'}`}
                 />
                 <div className="flex gap-2">
                   {isTesting ? (
                     <button 
                       onClick={handleStopTest}
-                      className="px-6 py-3 bg-red-500 text-white rounded-xl font-black text-[10px] uppercase flex items-center gap-2"
+                      className="flex-1 sm:flex-none px-6 py-3 bg-red-500 text-white rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2"
                     >
                       <Square className="w-3 h-3 fill-current" /> Stop
                     </button>
                   ) : (
                     <button 
                       onClick={handleTestPlayback}
-                      className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase flex items-center gap-2"
+                      className="flex-1 sm:flex-none px-6 py-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2"
                     >
                       <Volume2 className="w-4 h-4" /> Listen
                     </button>
                   )}
                 </div>
               </div>
-              <div className="mt-3 text-[10px] font-black opacity-40 uppercase tracking-tighter">
+              <div className="mt-3 text-[10px] font-black opacity-40 uppercase tracking-tighter line-clamp-1">
                 Preview result: <span className="opacity-100 italic">"{applyRules(testText, [...rules, {...(newRule as Rule), id: 'tmp', enabled: true}])}"</span>
               </div>
             </div>
 
-            <div className="flex justify-end gap-5">
-              <button onClick={() => setIsAdding(false)} className={`px-8 py-3 text-xs font-black uppercase tracking-widest ${isDark ? 'text-slate-400 hover:text-white' : 'text-slate-500 hover:text-black'}`}>Cancel</button>
+            <div className="flex flex-col sm:flex-row justify-end gap-3 sm:gap-5">
+              <button onClick={() => setIsAdding(false)} className={`order-2 sm:order-1 px-8 py-3 text-xs font-black uppercase tracking-widest ${isDark ? 'text-slate-400 hover:text-white' : 'text-slate-500 hover:text-black'}`}>Cancel</button>
               <button 
                 onClick={() => { 
                   if (!newRule.find) return;
@@ -227,7 +226,7 @@ const RuleManager: React.FC<RuleManagerProps> = ({
                   onAddRule({...newRule as Rule, id: crypto.randomUUID()}); 
                   setIsAdding(false); 
                 }} 
-                className="px-12 py-4 bg-indigo-600 text-white rounded-xl font-black uppercase tracking-widest shadow-xl flex items-center gap-2 hover:bg-indigo-700"
+                className="order-1 sm:order-2 px-12 py-4 bg-indigo-600 text-white rounded-xl font-black uppercase tracking-widest shadow-xl flex items-center justify-center gap-2 hover:bg-indigo-700"
               >
                 <Save className="w-4 h-4" /> Save Rule
               </button>
@@ -236,18 +235,18 @@ const RuleManager: React.FC<RuleManagerProps> = ({
         )}
 
         {rules.length === 0 ? (
-          <div className={`p-20 text-center rounded-[3rem] border-2 border-dashed ${isDark ? 'border-slate-800' : 'border-indigo-600/10'}`}>
-            <Zap className={`w-16 h-16 mx-auto mb-6 opacity-40 ${isDark ? 'text-slate-600' : 'text-indigo-600'}`} />
-            <h3 className={`text-xl font-black ${textClass}`}>Your Rulebook is Empty</h3>
-            <p className={`mt-3 font-bold text-[14px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Add rules to fix mispronounced names or terms unique to your stories.</p>
+          <div className={`p-16 sm:p-20 text-center rounded-[2rem] sm:rounded-[3rem] border-2 border-dashed ${isDark ? 'border-slate-800' : 'border-indigo-600/10'}`}>
+            <Zap className={`w-12 h-12 sm:w-16 sm:h-16 mx-auto mb-6 opacity-40 ${isDark ? 'text-slate-600' : 'text-indigo-600'}`} />
+            <h3 className={`text-lg sm:text-xl font-black ${textClass}`}>Your Rulebook is Empty</h3>
+            <p className={`mt-3 font-bold text-[13px] sm:text-[14px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Add rules to fix mispronounced names or terms unique to your stories.</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
             {rules.map(rule => (
-              <div key={rule.id} className={`p-7 rounded-[1.5rem] border transition-all hover:shadow-lg flex items-center justify-between group ${cardBg}`}>
+              <div key={rule.id} className={`p-5 sm:p-7 rounded-[1.2rem] sm:rounded-[1.5rem] border transition-all hover:shadow-lg flex items-center justify-between group ${cardBg}`}>
                 <div className="flex flex-col gap-1 min-w-0">
                   <div className="flex items-center gap-3">
-                    <span className={`font-mono text-[11px] font-black truncate px-2 py-0.5 rounded ${isDark ? 'bg-slate-950 text-slate-100' : 'bg-black/5 text-black'}`}>
+                    <span className={`font-mono text-[10px] sm:text-[11px] font-black truncate px-2 py-0.5 rounded ${isDark ? 'bg-slate-950 text-slate-100' : 'bg-black/5 text-black'}`}>
                       {rule.matchExpression ? '/' : '"'}{rule.find}{rule.matchExpression ? '/' : '"'}
                     </span>
                     <span className="text-indigo-500 font-black">→</span>
@@ -256,15 +255,15 @@ const RuleManager: React.FC<RuleManagerProps> = ({
                       {rule.matchExpression && <span className="bg-emerald-600/20 text-emerald-500 text-[8px] font-black px-1 rounded uppercase">Regex</span>}
                     </div>
                   </div>
-                  <span className={`font-black text-xl truncate ${rule.ruleType === RuleType.DELETE ? 'text-red-500 italic' : isDark ? 'text-indigo-400' : 'text-indigo-700'}`}>
+                  <span className={`font-black text-lg sm:text-xl truncate ${rule.ruleType === RuleType.DELETE ? 'text-red-500 italic' : isDark ? 'text-indigo-400' : 'text-indigo-700'}`}>
                     {rule.ruleType === RuleType.DELETE ? '[DELETED]' : rule.speakAs}
                   </span>
                 </div>
                 <button 
                   onClick={() => onDeleteRule(rule.id)} 
-                  className={`p-3.5 rounded-xl transition-all ${isDark ? 'text-slate-500 hover:text-red-500 hover:bg-white/10' : 'text-slate-400 hover:text-red-600 hover:bg-black/5'} opacity-0 group-hover:opacity-100`}
+                  className={`p-3 rounded-xl transition-all ${isDark ? 'text-slate-500 hover:text-red-500 hover:bg-white/10' : 'text-slate-400 hover:text-red-600 hover:bg-black/5'} opacity-60 sm:opacity-0 sm:group-hover:opacity-100`}
                 >
-                  <Trash2 className="w-5.5 h-5.5" />
+                  <Trash2 className="w-5 h-5" />
                 </button>
               </div>
             ))}

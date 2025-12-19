@@ -1,4 +1,3 @@
-
 import React, { useEffect, useRef, useMemo } from 'react';
 import { Chapter, Rule, Theme, HighlightMode, ReaderSettings } from '../types';
 import { applyRules } from '../services/speechService';
@@ -25,6 +24,7 @@ const Reader: React.FC<ReaderProps> = ({
   const activeWordRef = useRef<HTMLSpanElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const lastScrollTime = useRef<number>(0);
+  const lastTapTime = useRef<number>(0);
 
   const speakText = useMemo(() => {
     if (!chapter) return "";
@@ -80,7 +80,7 @@ const Reader: React.FC<ReaderProps> = ({
     }
   }, [currentOffset]);
 
-  const handleDoubleClick = (e: React.MouseEvent) => {
+  const triggerJump = () => {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return;
     const range = selection.getRangeAt(0);
@@ -93,6 +93,18 @@ const Reader: React.FC<ReaderProps> = ({
                    segments.words.find(s => s.start >= globalOffset);
     if (target) onJumpToOffset(target.start);
     selection.removeAllRanges();
+  };
+
+  // Custom tap handling for mobile to reliably trigger "double click" behavior
+  const handlePointerDown = (e: React.PointerEvent) => {
+    const now = Date.now();
+    if (now - lastTapTime.current < 350) {
+      // It's a double tap
+      triggerJump();
+      lastTapTime.current = 0; // reset
+    } else {
+      lastTapTime.current = now;
+    }
   };
 
   const highlightStyles = useMemo(() => {
@@ -165,11 +177,12 @@ const Reader: React.FC<ReaderProps> = ({
   const fadeColor = theme === Theme.DARK ? 'from-slate-900' : theme === Theme.SEPIA ? 'from-[#efe6d5]' : 'from-white';
 
   return (
-    <div className={`relative flex-1 flex flex-col min-h-0 overflow-hidden ${theme === Theme.DARK ? 'text-slate-100' : theme === Theme.SEPIA ? 'text-[#3c2f25]' : 'text-black'}`}>
+    <div className={`relative flex-1 flex flex-col min-h-0 overflow-hidden touch-manipulation ${theme === Theme.DARK ? 'text-slate-100' : theme === Theme.SEPIA ? 'text-[#3c2f25]' : 'text-black'}`}>
       <div className={`absolute top-0 left-0 right-0 h-16 lg:h-24 z-10 pointer-events-none bg-gradient-to-b ${fadeColor} to-transparent`} />
       <div ref={containerRef} className="flex-1 overflow-y-auto px-4 lg:px-12 py-12 lg:py-24 scroll-smooth scrollbar-hide">
         <div 
-          onDoubleClick={handleDoubleClick}
+          onPointerDown={handlePointerDown}
+          onDoubleClick={(e) => { e.preventDefault(); triggerJump(); }}
           style={containerStyles}
           className="max-w-[70ch] mx-auto pb-64 whitespace-pre-wrap select-text cursor-text font-medium leading-relaxed"
         >

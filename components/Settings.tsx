@@ -48,7 +48,7 @@ const Settings: React.FC<SettingsProps> = ({
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
           <div>
             <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
-            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.2.0</p>
+            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.2.1</p>
           </div>
           <button 
             onClick={onCheckForUpdates}
@@ -73,14 +73,14 @@ const Settings: React.FC<SettingsProps> = ({
                   value={googleClientId || ''}
                   onChange={e => onUpdateGoogleClientId?.(e.target.value.trim())}
                   placeholder="...apps.googleusercontent.com"
-                  className={`w-full px-4 py-3 rounded-xl border-none outline-none font-mono text-xs ${isDark ? 'bg-slate-950 text-white' : 'bg-slate-50 text-black'}`}
+                  className={`w-full px-4 py-3 rounded-xl border-none outline-none font-mono text-[16px] ${isDark ? 'bg-slate-950 text-white' : 'bg-slate-50 text-black'}`}
                 />
                 <p className="text-[9px] font-bold opacity-40 leading-relaxed">
                    Authorized Origin: <span className="text-indigo-500 select-all font-mono">{window.location.origin}</span>
                 </p>
              </div>
 
-             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6 pt-4 border-t border-black/5">
+             <div className="flex flex-col gap-6 pt-4 border-t border-black/5 lg:flex-row lg:items-center lg:justify-between">
                 <div className="flex items-center gap-4 min-w-0">
                    <div className={`p-3.5 sm:p-4 rounded-2xl flex-shrink-0 ${isCloudLinked ? 'bg-indigo-600 text-white' : 'bg-black/5 text-slate-400'}`}>
                       {isCloudLinked ? <Cloud className="w-5 h-5 sm:w-6 sm:h-6" /> : <CloudOff className="w-5 h-5 sm:w-6 sm:h-6" />}
@@ -98,14 +98,14 @@ const Settings: React.FC<SettingsProps> = ({
                         <button 
                           onClick={onSyncNow}
                           disabled={isSyncing}
-                          className="flex-1 sm:flex-none px-6 py-2.5 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 hover:scale-105 transition-all disabled:opacity-50"
+                          className="flex-1 sm:flex-none px-6 py-3 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 hover:scale-105 transition-all disabled:opacity-50"
                         >
                            {isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
                            Sync
                         </button>
                         <button 
                           onClick={onClearAuth}
-                          className={`p-2.5 rounded-xl border transition-all ${isDark ? 'bg-slate-800 text-slate-400 hover:text-red-500' : 'bg-white text-slate-400 hover:text-red-600'}`}
+                          className={`p-3 rounded-xl border transition-all ${isDark ? 'bg-slate-800 text-slate-400 hover:text-red-500' : 'bg-white text-slate-400 hover:text-red-600'}`}
                           title="Unlink Account"
                         >
                            <LogOut className="w-4 h-4" />
@@ -114,7 +114,7 @@ const Settings: React.FC<SettingsProps> = ({
                    ) : (
                       <button 
                         onClick={onLinkCloud}
-                        className="w-full sm:w-auto px-8 py-3 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 hover:scale-105 transition-all"
+                        className="w-full sm:w-auto px-8 py-4 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 hover:scale-105 transition-all"
                       >
                          <Cloud className="w-3.5 h-3.5" />
                          Link Account
@@ -140,9 +140,9 @@ const Settings: React.FC<SettingsProps> = ({
             <button 
               disabled={!isWakeLockSupported}
               onClick={() => onSetKeepAwake(!keepAwake)}
-              className={`w-12 h-6 rounded-full transition-colors relative ${!isWakeLockSupported ? 'opacity-30' : ''} ${keepAwake ? 'bg-indigo-600' : 'bg-slate-300'}`}
+              className={`w-14 h-7 rounded-full transition-colors relative ${!isWakeLockSupported ? 'opacity-30' : ''} ${keepAwake ? 'bg-indigo-600' : 'bg-slate-300'}`}
             >
-              <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${keepAwake ? 'left-7' : 'left-1'}`} />
+              <div className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-all ${keepAwake ? 'left-8' : 'left-1'}`} />
             </button>
           </div>
         </div>
@@ -176,20 +176,20 @@ const Settings: React.FC<SettingsProps> = ({
               <span className={`text-sm font-black ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`}>{settings.fontSizePx}px</span>
             </div>
             <div className="flex items-center gap-4 sm:gap-6">
-              <button onClick={() => onUpdate({ fontSizePx: Math.max(12, settings.fontSizePx - 2) })} className={`p-2.5 sm:p-3 rounded-xl transition-colors ${controlBg} ${textClass}`}><Minus className="w-5 h-5" /></button>
+              <button onClick={() => onUpdate({ fontSizePx: Math.max(12, settings.fontSizePx - 2) })} className={`p-3 rounded-xl transition-colors ${controlBg} ${textClass}`}><Minus className="w-5 h-5" /></button>
               <input 
                 type="range" min="12" max="48" step="1"
                 value={settings.fontSizePx}
                 onChange={(e) => onUpdate({ fontSizePx: parseInt(e.target.value) })}
                 className="flex-1 h-2 bg-indigo-600/20 rounded-full accent-indigo-600 cursor-pointer"
               />
-              <button onClick={() => onUpdate({ fontSizePx: Math.min(48, settings.fontSizePx + 2) })} className={`p-2.5 sm:p-3 rounded-xl transition-colors ${controlBg} ${textClass}`}><Plus className="w-5 h-5" /></button>
+              <button onClick={() => onUpdate({ fontSizePx: Math.min(48, settings.fontSizePx + 2) })} className={`p-3 rounded-xl transition-colors ${controlBg} ${textClass}`}><Plus className="w-5 h-5" /></button>
             </div>
           </div>
         </div>
 
         <div className="text-center font-black uppercase tracking-[0.4em] text-[9px] sm:text-[11px] pt-8 sm:pt-12 opacity-30">
-          VoxLib Engine v2.2.0
+          VoxLib Engine v2.2.1
         </div>
       </div>
     </div>

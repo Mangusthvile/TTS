@@ -70,20 +70,41 @@ const App: React.FC = () => {
     return activeBook.chapters.find(c => c.id === activeBook.currentChapterId) || null;
   }, [activeBook]);
 
-  // Persistence logic
-  useEffect(() => {
-    const { driveToken, books, ...rest } = state;
+  // Unified persistence function
+  const saveCurrentState = useCallback(() => {
+    const s = stateRef.current;
+    const { driveToken, books, ...rest } = s;
     const persistentBooks = books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined }));
+    
+    const activeBook = books.find(b => b.id === s.activeBookId);
+    
     localStorage.setItem('talevox_pro_v2', JSON.stringify({ 
       ...rest, 
       books: persistentBooks,
-      lastSession: state.activeBookId && activeBook?.currentChapterId ? {
-        bookId: state.activeBookId,
+      lastSession: s.activeBookId && activeBook?.currentChapterId ? {
+        bookId: s.activeBookId,
         chapterId: activeBook.currentChapterId,
-        offset: state.currentOffset
-      } : state.lastSession
+        offset: s.currentOffset
+      } : s.lastSession
     }));
-  }, [state, activeBook]);
+  }, []);
+
+  // Standard persistence effect
+  useEffect(() => {
+    saveCurrentState();
+  }, [state, saveCurrentState]);
+
+  // Mobile Lifecycle Persistence: Ensure offset is saved even if OS kills tab
+  useEffect(() => {
+    const handleUnload = () => saveCurrentState();
+    window.addEventListener('pagehide', handleUnload);
+    window.addEventListener('visibilitychange', () => {
+      if (document.hidden) saveCurrentState();
+    });
+    return () => {
+      window.removeEventListener('pagehide', handleUnload);
+    };
+  }, [saveCurrentState]);
 
   const handlePause = useCallback(() => { 
     speechController.stop(); 
@@ -340,6 +361,12 @@ const App: React.FC = () => {
         }
       },
       async () => {
+        // Double check app visibility before transitioning to next chapter
+        if (document.hidden) {
+          console.debug("[App] Suspension guard: pausing at chapter end while in background.");
+          return null;
+        }
+
         const s = stateRef.current;
         const book = s.books.find(b => b.id === s.activeBookId);
         if (!book || stopAfterChapter || (sleepTimerSeconds !== null && sleepTimerSeconds <= 0)) return null;
@@ -446,7 +473,7 @@ const App: React.FC = () => {
               <div className="flex items-center gap-1 p-1 rounded-xl bg-black/5">
                 <button onClick={() => setState(p => ({ ...p, theme: Theme.LIGHT }))} className={`p-1.5 rounded-lg ${state.theme === Theme.LIGHT ? 'bg-white shadow-sm text-indigo-600' : 'opacity-60'}`}><Sun className="w-4 h-4" /></button>
                 <button onClick={() => setState(p => ({ ...p, theme: Theme.SEPIA }))} className={`p-1.5 rounded-lg ${state.theme === Theme.SEPIA ? 'bg-[#f4ecd8] shadow-sm text-[#9c6644]' : 'opacity-60'}`}><Coffee className="w-4 h-4" /></button>
-                <button onClick={() => setState(p => ({ ...p, theme: Theme.DARK }))} className={`p-1.5 rounded-lg ${state.theme === Theme.DARK ? 'bg-slate-800 shadow-sm text-indigo-400' : 'opacity-60'}`}><Moon className="w-4 h-4" /></button>
+                <button onClick={() => setState(p => ({ ...p, theme: Theme.DARK }))} className={`p-1.5 rounded-lg ${state.theme === Theme.DARK ? 'bg-slate-800 shadow-sm text-indigo-400' : 'opacity-60'}`}><Moon className="w-5 h-5" /></button>
               </div>
             </div>
           </header>

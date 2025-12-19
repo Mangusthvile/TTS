@@ -1,4 +1,3 @@
-
 import { Rule, RuleType } from '../types';
 
 export function applyRules(text: string, rules: Rule[]): string {
@@ -8,11 +7,9 @@ export function applyRules(text: string, rules: Rule[]): string {
     .sort((a, b) => b.priority - a.priority);
 
   activeRules.forEach(rule => {
-    // Determine regex flags based on matchCase toggle
     let flags = 'g';
     if (!rule.matchCase) flags += 'i';
     
-    // Determine pattern based on matchExpression toggle
     let pattern = rule.matchExpression 
       ? rule.find 
       : rule.find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -23,7 +20,7 @@ export function applyRules(text: string, rules: Rule[]): string {
 
     try {
       const regex = new RegExp(pattern, flags);
-      const replacement = rule.ruleType === RuleType.DELETE ? "" : (rule.speakAs || "");
+      const replacement = rule.ruleType === RuleType.REPLACE ? "" : (rule.speakAs || "");
       processedText = processedText.replace(regex, replacement);
     } catch (e) {
       console.warn("Invalid regex for rule:", rule.find);
@@ -45,6 +42,53 @@ export interface NextSegment {
   chapterTitle: string;
 }
 
+/**
+ * Silent Audio Keeper
+ * Mobile browsers suspend speech synthesis when the app is in background.
+ * Playing a silent audio loop tricks the OS into keeping the tab alive as a media source.
+ */
+class BackgroundKeeper {
+  private audioContext: AudioContext | null = null;
+  private oscillator: OscillatorNode | null = null;
+  private gain: GainNode | null = null;
+
+  start() {
+    try {
+      if (!this.audioContext) {
+        this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      if (this.audioContext.state === 'suspended') {
+        this.audioContext.resume();
+      }
+      
+      this.stop(); // Clear any existing
+
+      this.oscillator = this.audioContext.createOscillator();
+      this.gain = this.audioContext.createGain();
+      
+      this.oscillator.type = 'sine';
+      this.oscillator.frequency.setValueAtTime(1, this.audioContext.currentTime); // 1Hz - inaudible
+      this.gain.gain.setValueAtTime(0.001, this.audioContext.currentTime); // Extremely low volume
+      
+      this.oscillator.connect(this.gain);
+      this.gain.connect(this.audioContext.destination);
+      this.oscillator.start();
+    } catch (e) {
+      console.warn("BackgroundKeeper failed to start", e);
+    }
+  }
+
+  stop() {
+    if (this.oscillator) {
+      try {
+        this.oscillator.stop();
+        this.oscillator.disconnect();
+      } catch (e) {}
+      this.oscillator = null;
+    }
+  }
+}
+
 class SpeechController {
   private synth: SpeechSynthesis;
   private chunks: SpeechChunk[] = [];
@@ -58,8 +102,9 @@ class SpeechController {
   private currentPrefixLength: number = 0;
   private currentBookTitle: string = "";
   private currentChapterTitle: string = "";
-  private currentUtterance: SpeechSynthesisUtterance | null = null;
   private totalTextLength: number = 0;
+  private backgroundKeeper: BackgroundKeeper = new BackgroundKeeper();
+  private lastChunkStartTime: number = 0;
 
   constructor() {
     this.synth = window.speechSynthesis;
@@ -82,9 +127,7 @@ class SpeechController {
           }
         });
         navigator.mediaSession.setActionHandler('stop', () => this.stop());
-      } catch (e) {
-        console.warn("MediaSession handlers could not be set", e);
-      }
+      } catch (e) {}
     }
   }
 
@@ -156,6 +199,9 @@ class SpeechController {
     this.updateMediaMetadata(chapterTitle, bookTitle);
     this.updatePlaybackState('playing');
     
+    // Start background keeper for mobile
+    this.backgroundKeeper.start();
+
     const fullChunks = this.createChunks(text);
     this.chunks = fullChunks.filter(c => c.startOffset + c.text.length > startOffset);
     
@@ -175,6 +221,22 @@ class SpeechController {
 
     if (this.currentChunkIndex >= this.chunks.length) {
       if (this.getNextSegment) {
+        /**
+         * Mobile Guard: If the app is in background/locked and we hit the end of a chapter,
+         * wait for foreground before transitioning to prevent "skipping" due to browser event floods.
+         */
+        if (document.hidden) {
+           console.debug("[Speech] App hidden, waiting for visibility to transition chapter.");
+           const handleVisibility = () => {
+             if (!document.hidden) {
+               document.removeEventListener('visibilitychange', handleVisibility);
+               this.speakNextChunk(session);
+             }
+           };
+           document.addEventListener('visibilitychange', handleVisibility);
+           return;
+        }
+
         const next = await this.getNextSegment();
         if (next && this.sessionToken === session) {
           this.currentPrefixLength = next.announcementPrefix.length;
@@ -201,11 +263,12 @@ class SpeechController {
     }
 
     const utterance = new SpeechSynthesisUtterance(chunk.text);
-    this.currentUtterance = utterance;
     const voices = this.synth.getVoices();
     const voice = voices.find(v => v.name === this.voiceName) || voices.find(v => v.lang.startsWith('en')) || voices[0];
     if (voice) utterance.voice = voice;
     utterance.rate = this.rate;
+
+    this.lastChunkStartTime = Date.now();
 
     utterance.onboundary = (event) => {
       if (this.sessionToken === session && this.globalBoundaryCallback && typeof event.charIndex === 'number') {
@@ -216,7 +279,7 @@ class SpeechController {
         if ('mediaSession' in navigator && (navigator as any).setPositionState) {
           try {
             const progress = effectiveOffset / Math.max(1, this.totalTextLength);
-            const estDuration = (this.totalTextLength / 170) * 60; 
+            const estDuration = (this.totalTextLength / (170 * this.rate)) * 60; 
             (navigator as any).setPositionState({
               duration: estDuration,
               playbackRate: this.rate,
@@ -229,14 +292,21 @@ class SpeechController {
 
     utterance.onend = () => {
       if (this.sessionToken !== session) return;
-      this.currentUtterance = null;
+
+      // Suspension Guard: If chunks finish in less than 50ms, the system is likely skipping. Stop.
+      if (Date.now() - this.lastChunkStartTime < 50 && chunk.text.length > 10) {
+        console.warn("[Speech] System suspension detected (premature chunk end). Halting playback.");
+        this.stop();
+        if (this.onEndCallback) this.onEndCallback();
+        return;
+      }
+
       this.currentChunkIndex++;
       this.speakNextChunk(session);
     };
 
     utterance.onerror = () => {
       if (this.sessionToken === session) {
-        this.currentUtterance = null;
         this.currentChunkIndex++;
         this.speakNextChunk(session);
       }
@@ -250,8 +320,8 @@ class SpeechController {
     this.globalBoundaryCallback = null;
     this.onEndCallback = null;
     this.getNextSegment = null;
-    this.currentUtterance = null;
     this.synth.cancel();
+    this.backgroundKeeper.stop();
     this.updatePlaybackState('none');
     this.chunks = [];
     this.currentChunkIndex = -1;
