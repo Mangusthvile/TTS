@@ -341,7 +341,7 @@ const App: React.FC = () => {
     if (!activeBook || !activeChapterMetadata || isLoadingChapter) return;
     const finalPlaybackText = applyRules(activeChapterText, activeBook.rules);
     if (!finalPlaybackText) return;
-    const totalLen = finalPlaybackText.length;
+    
     setIsPlaying(true);
     speechController.speak(
       finalPlaybackText, 
@@ -350,9 +350,9 @@ const App: React.FC = () => {
       state.currentOffset,
       () => setIsPlaying(false),
       (offset) => { 
-        // Accurate Boundary Logic: Don't throttle updates to the state ref, but throttle UI updates to ensure responsiveness
+        // Tracker update: throttled slightly for performance but enough for smooth movement
         stateRef.current.currentOffset = offset;
-        if (Math.abs(state.currentOffset - offset) >= 4) {
+        if (Math.abs(stateRef.current.currentOffset - state.currentOffset) >= 2) {
           setState(prev => ({ ...prev, currentOffset: offset }));
         }
       },
@@ -499,7 +499,7 @@ const App: React.FC = () => {
               theme={state.theme} onThemeChange={() => {}} progress={state.currentOffset} totalLength={applyRules(activeChapterText, activeBook?.rules || []).length} wordCount={activeChapterMetadata.wordCount} onSeekToOffset={handleJumpToOffset}
               sleepTimer={sleepTimerSeconds} onSetSleepTimer={setSleepTimerSeconds} stopAfterChapter={stopAfterChapter} onSetStopAfterChapter={setStopAfterChapter}
               useBookSettings={activeBook?.settings.useBookSettings || false} onSetUseBookSettings={v => { handlePause(); setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, settings: { ...b.settings, useBookSettings: v } } : b) })); }}
-              highlightMode={activeBook?.settings.highlightMode || HighlightMode.WORD} onSetHighlightMode={m => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, settings: { ...b.settings, highlightMode: m } } : b) }))}
+              highlightMode={activeBook?.settings.highlightMode || HighlightMode.WORD} onSetHighlightMode={m => setState(p => ({ ...p, books: p.books.map(b => b.id === b.id ? { ...b, settings: { ...b.settings, highlightMode: m } } : b) }))}
             />
           )}
         </main>

@@ -42,9 +42,10 @@ export interface NextSegment {
   chapterTitle: string;
 }
 
+const SILENCE_DATA_URI = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
+
 /**
  * Capacitor Bridge Interface
- * Logic to communicate with Native Android Foreground Service if available.
  */
 const Capacitor = (window as any).Capacitor;
 const NativeTTS = Capacitor?.Plugins?.NativeTTS;
@@ -62,6 +63,9 @@ class SpeechController {
   private currentPrefixLength: number = 0;
   private totalTextLength: number = 0;
   
+  // Audio Anchor for PWA Stability
+  private anchorAudio: HTMLAudioElement;
+  
   // Highlighting: Velocity Engine
   private lastEventTime: number = 0;
   private lastEventOffset: number = 0;
@@ -73,6 +77,9 @@ class SpeechController {
 
   constructor() {
     this.synth = window.speechSynthesis;
+    this.anchorAudio = new Audio(SILENCE_DATA_URI);
+    this.anchorAudio.loop = true;
+    this.anchorAudio.volume = 0.01;
     this.setupMediaSession();
   }
 
@@ -82,15 +89,13 @@ class SpeechController {
         navigator.mediaSession.setActionHandler('play', () => {
           if (this.isNativeMode) NativeTTS.resume();
           else if (this.synth.paused) {
-            this.synth.resume();
-            this.updatePlaybackState('playing');
+            this.resume();
           }
         });
         navigator.mediaSession.setActionHandler('pause', () => {
           if (this.isNativeMode) NativeTTS.pause();
           else {
-            this.synth.pause();
-            this.updatePlaybackState('paused');
+            this.pause();
           }
         });
         navigator.mediaSession.setActionHandler('stop', () => this.stop());
@@ -120,7 +125,7 @@ class SpeechController {
 
   private createChunks(text: string): SpeechChunk[] {
     const chunks: SpeechChunk[] = [];
-    const MAX_CHUNK_LENGTH = 800; // Small chunks reduce impact of skips
+    const MAX_CHUNK_LENGTH = 800; 
     const segments = text.split(/([.!?\n]\s*)/);
     let tempChunk = "";
     let tempStart = 0;
@@ -171,7 +176,6 @@ class SpeechController {
     }
 
     if (this.isNativeMode) {
-      // Logic for Capacitor Native TTS with Foreground Service
       NativeTTS.speak({
         text: text.substring(startOffset),
         rate: this.rate,
@@ -179,11 +183,11 @@ class SpeechController {
         title: chapterTitle,
         artist: bookTitle
       });
-      // Boundary events would come back via plugin listeners
       return;
     }
 
     this.synth.cancel();
+    this.anchorAudio.play().catch(() => {});
     this.updatePlaybackState('playing');
 
     const fullChunks = this.createChunks(text);
@@ -205,23 +209,24 @@ class SpeechController {
     this.lastEventOffset = baseOffset;
     this.lastEventTime = performance.now();
 
-    // Accuracy boost: chars per millisecond
+    // chars per millisecond base velocity
     const velocity = (0.016 * this.rate); 
 
     this.highlightTimer = window.setInterval(() => {
       if (this.sessionToken !== session || this.synth.paused) return;
 
       const elapsed = performance.now() - this.lastEventTime;
-      const predictedOffset = Math.floor(this.lastEventOffset + (elapsed * velocity));
+      const predictedGlobalOffset = Math.floor(this.lastEventOffset + (elapsed * velocity));
 
       if (this.globalBoundaryCallback) {
-        const effective = Math.max(0, predictedOffset - this.currentPrefixLength);
-        if (effective < this.totalTextLength) {
-          // Send update every tick for smooth UI transition
-          this.globalBoundaryCallback(effective, 0, this.currentChunkIndex);
+        const effectiveOffset = Math.max(0, predictedGlobalOffset - this.currentPrefixLength);
+        const predictedCharIndex = Math.max(0, predictedGlobalOffset - baseOffset);
+        
+        if (effectiveOffset < this.totalTextLength) {
+          this.globalBoundaryCallback(effectiveOffset, predictedCharIndex, this.currentChunkIndex);
         }
       }
-    }, 100); // 10Hz updates for smooth highlights
+    }, 100); 
   }
 
   private stopHighlightTracker() {
@@ -237,10 +242,9 @@ class SpeechController {
     if (this.currentChunkIndex >= this.chunks.length) {
       this.stopHighlightTracker();
       
-      // Strict Skip Guard: Never transition chapters in hidden state on web
       if (document.hidden) {
         console.warn("[Speech] Background auto-advance prevented.");
-        this.updatePlaybackState('paused');
+        this.pause();
         if (this.onEndCallback) this.onEndCallback();
         return;
       }
@@ -256,7 +260,7 @@ class SpeechController {
           return;
         }
       }
-      this.updatePlaybackState('none');
+      this.stop();
       if (this.onEndCallback) this.onEndCallback();
       return;
     }
@@ -275,7 +279,7 @@ class SpeechController {
     utterance.rate = this.rate;
 
     const chunkStartTime = performance.now();
-    const expectedDuration = (chunk.text.length / (0.016 * this.rate)); // Estimate min duration
+    const expectedDuration = (chunk.text.length / (0.016 * this.rate));
 
     this.startHighlightTracker(session, chunk.startOffset);
 
@@ -290,10 +294,9 @@ class SpeechController {
     utterance.onend = () => {
       if (this.sessionToken !== session) return;
 
-      // Anti-Glitch Lock: If chunk "finishes" in less than 20% of estimated time, it's a browser skip.
       const actualDuration = performance.now() - chunkStartTime;
       if (actualDuration < expectedDuration * 0.2 && chunk.text.length > 20) {
-        console.error("[Speech] Glitch skip detected. Freezing at current offset.");
+        console.error("[Speech] Glitch skip detected.");
         this.stop();
         if (this.onEndCallback) this.onEndCallback();
         return;
@@ -313,6 +316,18 @@ class SpeechController {
     this.synth.speak(utterance);
   }
 
+  pause() {
+    this.synth.pause();
+    this.anchorAudio.pause();
+    this.updatePlaybackState('paused');
+  }
+
+  resume() {
+    this.synth.resume();
+    this.anchorAudio.play().catch(() => {});
+    this.updatePlaybackState('playing');
+  }
+
   stop() {
     this.sessionToken++; 
     this.stopHighlightTracker();
@@ -320,6 +335,8 @@ class SpeechController {
     if (this.isNativeMode) NativeTTS.stop();
     else {
       this.synth.cancel();
+      this.anchorAudio.pause();
+      this.anchorAudio.currentTime = 0;
       this.updatePlaybackState('none');
     }
     this.chunks = [];
