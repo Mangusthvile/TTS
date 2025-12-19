@@ -37,10 +37,9 @@ const Settings: React.FC<SettingsProps> = ({
     { name: 'System Serif', font: "serif" },
   ];
 
-  const controlBg = isDark ? 'bg-slate-950/40 border-slate-800' : 'bg-black/5 border-black/5';
+  const controlBg = isDark ? 'bg-slate-950/40 border-slate-800' : isSepia ? 'bg-[#efe6d5] border-[#d8ccb6]' : 'bg-white border-black/5';
 
   const isWakeLockSupported = 'wakeLock' in navigator;
-  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
 
   return (
     <div className={`p-4 sm:p-8 h-full overflow-y-auto transition-colors duration-500 ${isDark ? 'bg-slate-900' : isSepia ? 'bg-[#efe6d5]' : 'bg-slate-50'}`}>
@@ -48,7 +47,7 @@ const Settings: React.FC<SettingsProps> = ({
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
           <div>
             <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
-            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.2.1</p>
+            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.2.4</p>
           </div>
           <button 
             onClick={onCheckForUpdates}
@@ -189,7 +188,7 @@ const Settings: React.FC<SettingsProps> = ({
         </div>
 
         <div className="text-center font-black uppercase tracking-[0.4em] text-[9px] sm:text-[11px] pt-8 sm:pt-12 opacity-30">
-          VoxLib Engine v2.2.1
+          VoxLib Engine v2.2.4
         </div>
       </div>
     </div>
