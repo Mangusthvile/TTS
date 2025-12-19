@@ -8,9 +8,9 @@ import Settings from './components/Settings';
 import Extractor from './components/Extractor';
 import ChapterFolderView from './components/ChapterFolderView';
 import { speechController, applyRules } from './services/speechService';
-import { authenticateDrive, fetchDriveFile, uploadToDrive, deleteDriveFile, findFileSync, listFilesInFolder } from './services/driveService';
+import { authenticateDrive, fetchDriveFile, uploadToDrive, deleteDriveFile, findFileSync, listFilesInFolder, fetchDriveBinary } from './services/driveService';
 import { saveChapterToFile, deleteChapterFile } from './services/fileService';
-import { BookText, Zap, Sun, Coffee, Moon, X, Settings as SettingsIcon, Menu, RefreshCw, Loader2, Cloud } from 'lucide-react';
+import { BookText, Zap, Sun, Coffee, Moon, X, Settings as SettingsIcon, Menu, RefreshCw, Loader2, Cloud, Volume2 } from 'lucide-react';
 
 const SYNC_FILENAME = 'talevox_sync_manifest.json';
 
@@ -55,6 +55,7 @@ const App: React.FC = () => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [activeChapterText, setActiveChapterText] = useState<string>('');
   const [isLoadingChapter, setIsLoadingChapter] = useState(false);
+  const [isFetchingAudio, setIsFetchingAudio] = useState(false);
   const [transitionToast, setTransitionToast] = useState<{ number: number; title: string } | null>(null);
   const [sleepTimerSeconds, setSleepTimerSeconds] = useState<number | null>(null);
   const [stopAfterChapter, setStopAfterChapter] = useState(false);
@@ -226,14 +227,12 @@ const App: React.FC = () => {
         currentSettings = { ...currentSettings, ...remoteData.readerSettings };
       }
 
-      // v2.5.0 enhancement: Scan Drive folders for matching audio files to link them
       for (const book of currentBooks) {
         if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
           try {
             const files = await listFilesInFolder(state.driveToken, book.driveFolderId);
             book.chapters.forEach(chapter => {
               if (!chapter.audioDriveId) {
-                // Look for .mp3 files matching chapter index
                 const idxStr = chapter.index.toString().padStart(3, '0');
                 const matchingAudio = files.find(f => f.name.startsWith(idxStr) && f.name.endsWith('.mp3'));
                 if (matchingAudio) {
@@ -288,11 +287,25 @@ const App: React.FC = () => {
     if (state.activeBookId && activeBook?.currentChapterId) loadChapterContent(state.activeBookId, activeBook.currentChapterId);
   }, [state.activeBookId, activeBook?.currentChapterId, loadChapterContent]);
 
-  const handlePlay = useCallback(() => {
+  const handlePlay = useCallback(async () => {
     if (!activeBook || !activeChapterMetadata || isLoadingChapter) return;
     const finalPlaybackText = applyRules(activeChapterText, activeBook.rules);
     if (!finalPlaybackText) return;
     
+    let audioBlob: Blob | undefined;
+    
+    // v2.5.2 Check if cloud audio exists and fetch it for direct playback
+    if (activeBook.backend === StorageBackend.DRIVE && activeChapterMetadata.audioDriveId && state.driveToken) {
+      setIsFetchingAudio(true);
+      try {
+        audioBlob = await fetchDriveBinary(state.driveToken, activeChapterMetadata.audioDriveId);
+      } catch (err) {
+        console.warn("Failed to fetch cloud audio, falling back to local synthesis:", err);
+      } finally {
+        setIsFetchingAudio(false);
+      }
+    }
+
     setIsPlaying(true);
     speechController.speak(
       finalPlaybackText, 
@@ -328,9 +341,10 @@ const App: React.FC = () => {
           };
         }
         return null;
-      }
+      },
+      audioBlob
     );
-  }, [activeBook, activeChapterMetadata, isLoadingChapter, activeChapterText, state.selectedVoiceName, state.playbackSpeed, state.currentOffset, stopAfterChapter, sleepTimerSeconds]);
+  }, [activeBook, activeChapterMetadata, isLoadingChapter, activeChapterText, state.selectedVoiceName, state.playbackSpeed, state.currentOffset, state.driveToken, stopAfterChapter, sleepTimerSeconds]);
 
   const handleAddBook = async (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string, driveFolderName?: string) => {
     const newBook: Book = {
@@ -397,7 +411,6 @@ const App: React.FC = () => {
             </div>
             <div className="flex items-center gap-4">
               {state.driveToken && (
-                /* Fixed: Changed 'manual' to 'true' to correctly call handleSync as a manual action */
                 <button onClick={() => handleSync(true)} className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all ${isSyncing ? 'text-indigo-500 animate-pulse' : 'text-slate-400 hover:text-indigo-600'}`}>
                   <Cloud className="w-3.5 h-3.5" /> {isSyncing ? 'Syncing...' : 'Sync'}
                 </button>
@@ -411,6 +424,7 @@ const App: React.FC = () => {
           </header>
           <div className="flex-1 overflow-y-auto relative">
              {isLoadingChapter && (<div className="absolute inset-0 flex items-center justify-center bg-inherit z-[5] animate-in fade-in duration-300"><div className="flex flex-col items-center gap-4"><Loader2 className="w-10 h-10 text-indigo-600 animate-spin" /><span className="text-xs font-black uppercase tracking-widest opacity-40">Processing...</span></div></div>)}
+             {isFetchingAudio && (<div className="absolute inset-0 flex items-center justify-center bg-inherit/60 z-30 animate-in fade-in duration-300 backdrop-blur-sm"><div className="flex flex-col items-center gap-4 bg-indigo-600 text-white p-8 rounded-3xl shadow-2xl"><Volume2 className="w-10 h-10 animate-bounce" /><span className="text-xs font-black uppercase tracking-widest">Pulling audio from Drive...</span></div></div>)}
              {isAddChapterOpen && (
                <div className="absolute inset-0 z-20 overflow-y-auto p-4 lg:p-12 animate-in slide-in-from-bottom-8 duration-500">
                   <div className="max-w-4xl mx-auto relative">

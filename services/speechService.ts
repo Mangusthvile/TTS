@@ -65,7 +65,8 @@ class SpeechController {
   private sessionToken: number = 0;
   private getNextSegment: (() => Promise<NextSegment | null>) | null = null;
   
-  private isCloudEnabled: boolean = true;
+  private isUsingSingleBlob: boolean = false;
+  private fullTextLengthForBlob: number = 0;
 
   constructor() {
     this.synth = window.speechSynthesis;
@@ -75,7 +76,12 @@ class SpeechController {
 
   private setupAudioListeners() {
     this.audio.addEventListener('ended', () => {
-      // Force completion of previous chunk's offset before moving to next
+      if (this.isUsingSingleBlob) {
+        this.stop();
+        if (this.onEndCallback) this.onEndCallback();
+        return;
+      }
+
       if (this.syncCallback && this.currentChunkIndex >= 0) {
         const chunk = this.currentChunks[this.currentChunkIndex];
         this.syncCallback({
@@ -95,22 +101,34 @@ class SpeechController {
     this.audio.addEventListener('pause', () => {
       this.stopSyncLoop();
     });
+
+    this.audio.addEventListener('error', (e) => {
+      console.error("Audio element error:", this.audio.error);
+    });
   }
 
   private startSyncLoop() {
     const sync = () => {
-      if (this.syncCallback && this.currentChunkIndex >= 0) {
-        const chunk = this.currentChunks[this.currentChunkIndex];
-        if (chunk && this.audio.duration && !this.audio.paused) {
+      if (this.syncCallback && this.audio.duration && !this.audio.paused) {
+        if (this.isUsingSingleBlob) {
           const ratio = Math.min(1, this.audio.currentTime / this.audio.duration);
-          const charOffset = Math.floor(chunk.text.length * ratio);
-          const totalGlobalOffset = chunk.startOffset + charOffset;
-          
           this.syncCallback({
             currentTime: this.audio.currentTime,
             duration: this.audio.duration,
-            charOffset: totalGlobalOffset
+            charOffset: Math.floor(this.fullTextLengthForBlob * ratio)
           });
+        } else if (this.currentChunkIndex >= 0) {
+          const chunk = this.currentChunks[this.currentChunkIndex];
+          if (chunk) {
+            const ratio = Math.min(1, this.audio.currentTime / this.audio.duration);
+            const charOffset = Math.floor(chunk.text.length * ratio);
+            const totalGlobalOffset = chunk.startOffset + charOffset;
+            this.syncCallback({
+              currentTime: this.audio.currentTime,
+              duration: this.audio.duration,
+              charOffset: totalGlobalOffset
+            });
+          }
         }
       }
       this.rafId = requestAnimationFrame(sync);
@@ -129,7 +147,6 @@ class SpeechController {
   private createChunks(text: string): SpeechChunk[] {
     const chunks: SpeechChunk[] = [];
     const MAX = 4800; 
-    // Break on sentence boundaries or newlines for natural chunks
     const parts = text.split(/([.!?\n]\s*)/);
     let current = "";
     let start = 0;
@@ -147,6 +164,9 @@ class SpeechController {
     return chunks;
   }
 
+  /**
+   * Enhanced speak function that accepts a direct Audio Blob (from Drive)
+   */
   async speak(
     text: string, 
     voiceName: string, 
@@ -154,9 +174,11 @@ class SpeechController {
     startOffset: number, 
     onEnd: () => void, 
     onSync?: (meta: PlaybackMetadata) => void,
-    getNextSegment?: () => Promise<NextSegment | null>
+    getNextSegment?: () => Promise<NextSegment | null>,
+    preFetchedAudio?: Blob
   ) {
     this.sessionToken++;
+    const session = this.sessionToken;
     this.stop();
     
     this.onEndCallback = onEnd;
@@ -165,8 +187,30 @@ class SpeechController {
     this.voiceName = voiceName;
     this.getNextSegment = getNextSegment || null;
 
+    if (preFetchedAudio) {
+      this.isUsingSingleBlob = true;
+      this.fullTextLengthForBlob = text.length;
+      const url = URL.createObjectURL(preFetchedAudio);
+      this.audio.src = url;
+      
+      const onLoaded = () => {
+        if (this.sessionToken === session) {
+          const ratio = Math.max(0, Math.min(1, startOffset / Math.max(1, text.length)));
+          if (this.audio.duration) {
+             this.audio.currentTime = ratio * this.audio.duration;
+          }
+          this.audio.play().catch(err => {
+            console.warn("Playback prevented. User interaction required?", err);
+          });
+        }
+        this.audio.removeEventListener('loadedmetadata', onLoaded);
+      };
+      this.audio.addEventListener('loadedmetadata', onLoaded);
+      return;
+    }
+
+    this.isUsingSingleBlob = false;
     this.currentChunks = this.createChunks(text);
-    // Find the starting chunk based on startOffset
     const idx = this.currentChunks.findIndex(c => c.startOffset + c.text.length > startOffset);
     this.currentChunkIndex = idx !== -1 ? idx : 0;
 
@@ -174,6 +218,14 @@ class SpeechController {
   }
 
   seekToOffset(offset: number) {
+    if (this.isUsingSingleBlob) {
+      if (this.audio.duration) {
+        const ratio = Math.max(0, Math.min(1, offset / Math.max(1, this.fullTextLengthForBlob)));
+        this.audio.currentTime = ratio * this.audio.duration;
+      }
+      return;
+    }
+
     if (this.currentChunks.length === 0) return;
     const idx = this.currentChunks.findIndex(c => c.startOffset + c.text.length > offset);
     if (idx === -1) return;
@@ -232,8 +284,10 @@ class SpeechController {
         if (this.sessionToken === session) {
           if (initialOffsetInChunk !== undefined) {
             const relative = Math.max(0, initialOffsetInChunk - chunk.startOffset);
-            const ratio = Math.min(1, relative / chunk.text.length);
-            this.audio.currentTime = ratio * this.audio.duration;
+            const ratio = Math.min(1, relative / Math.max(1, chunk.text.length));
+            if (this.audio.duration) {
+               this.audio.currentTime = ratio * this.audio.duration;
+            }
           }
           this.audio.play().catch(() => {});
         }
@@ -258,11 +312,12 @@ class SpeechController {
     this.sessionToken++;
     this.stopSyncLoop();
     this.audio.pause();
-    if (this.audio.src) {
+    if (this.audio.src && this.audio.src.startsWith('blob:')) {
       URL.revokeObjectURL(this.audio.src);
-      this.audio.src = "";
     }
+    this.audio.src = "";
     this.synth.cancel();
+    this.isUsingSingleBlob = false;
   }
 
   get isPaused() {
