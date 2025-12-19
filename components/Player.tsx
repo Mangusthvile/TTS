@@ -49,12 +49,22 @@ const Player: React.FC<PlayerProps> = ({
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [showSleepMenu, setShowSleepMenu] = useState(false);
   
-  // High-precision time display using real audio metadata if available
+  // High-precision sync:
+  // 1. Calculate an estimate based on word count/speed as a baseline.
+  // 2. Override with real audio metadata if isPlaying is true and metadata exists.
   const totalSecondsEstimate = useMemo(() => Math.max(1, (wordCount / (170 * speed)) * 60), [wordCount, speed]);
-  const elapsedSecondsEstimate = useMemo(() => totalSecondsEstimate * (progress / Math.max(1, totalLength)), [totalSecondsEstimate, progress, totalLength]);
+  
+  // Use character progress ratio to estimate time when paused
+  const charRatio = Math.max(0, Math.min(1, progress / Math.max(1, totalLength)));
+  const elapsedSecondsEstimate = totalSecondsEstimate * charRatio;
 
-  const displayTime = playbackCurrentTime !== undefined && isPlaying ? formatTime(playbackCurrentTime) : formatTime(elapsedSecondsEstimate);
-  const displayTotal = playbackDuration !== undefined && isPlaying && playbackDuration > 0 ? formatTime(playbackDuration) : formatTime(totalSecondsEstimate);
+  const displayTime = (playbackCurrentTime !== undefined && isPlaying) 
+    ? formatTime(playbackCurrentTime) 
+    : formatTime(elapsedSecondsEstimate);
+
+  const displayTotal = (playbackDuration !== undefined && isPlaying && playbackDuration > 0) 
+    ? formatTime(playbackDuration) 
+    : formatTime(totalSecondsEstimate);
 
   useEffect(() => {
     const loadVoices = () => {
@@ -76,7 +86,7 @@ const Player: React.FC<PlayerProps> = ({
   return (
     <div className={`border-t transition-colors duration-500 relative z-20 ${isDark ? 'bg-slate-900 border-slate-800 text-slate-100' : isSepia ? 'bg-[#efe6d5] border-[#d8ccb6] text-[#3c2f25]' : 'bg-white border-black/10 text-black'}`}>
       <div className="flex items-center gap-4 px-4 lg:px-8 pt-4">
-        <span className="text-[11px] font-black font-mono opacity-60 min-w-[40px]">{displayTime}</span>
+        <span className="text-[11px] font-black font-mono opacity-60 min-w-[40px] text-left">{displayTime}</span>
         <div 
           className={`flex-1 h-1.5 rounded-full cursor-pointer relative ${isDark ? 'bg-slate-800' : 'bg-black/5'}`}
           onClick={e => {
@@ -86,7 +96,7 @@ const Player: React.FC<PlayerProps> = ({
         >
           <div className={`h-full rounded-full ${accentBg} transition-all duration-75 shadow-sm`} style={{ width: `${progressPercent}%` }} />
         </div>
-        <span className="text-[11px] font-black font-mono opacity-60 min-w-[40px]">{displayTotal}</span>
+        <span className="text-[11px] font-black font-mono opacity-60 min-w-[40px] text-right">{displayTotal}</span>
       </div>
 
       <div className="max-w-7xl mx-auto px-4 lg:px-8 py-4 lg:py-6 flex flex-col gap-6">

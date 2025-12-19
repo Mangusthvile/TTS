@@ -65,7 +65,6 @@ class SpeechController {
   private sessionToken: number = 0;
   private getNextSegment: (() => Promise<NextSegment | null>) | null = null;
   
-  // Flag to detect if we should use Cloud TTS
   private isCloudEnabled: boolean = true;
 
   constructor() {
@@ -76,6 +75,15 @@ class SpeechController {
 
   private setupAudioListeners() {
     this.audio.addEventListener('ended', () => {
+      // Force completion of previous chunk's offset before moving to next
+      if (this.syncCallback && this.currentChunkIndex >= 0) {
+        const chunk = this.currentChunks[this.currentChunkIndex];
+        this.syncCallback({
+          currentTime: this.audio.duration,
+          duration: this.audio.duration,
+          charOffset: chunk.startOffset + chunk.text.length
+        });
+      }
       this.currentChunkIndex++;
       this.playNextChunk();
     });
@@ -94,7 +102,7 @@ class SpeechController {
       if (this.syncCallback && this.currentChunkIndex >= 0) {
         const chunk = this.currentChunks[this.currentChunkIndex];
         if (chunk && this.audio.duration && !this.audio.paused) {
-          const ratio = this.audio.currentTime / this.audio.duration;
+          const ratio = Math.min(1, this.audio.currentTime / this.audio.duration);
           const charOffset = Math.floor(chunk.text.length * ratio);
           const totalGlobalOffset = chunk.startOffset + charOffset;
           
@@ -121,6 +129,7 @@ class SpeechController {
   private createChunks(text: string): SpeechChunk[] {
     const chunks: SpeechChunk[] = [];
     const MAX = 4800; 
+    // Break on sentence boundaries or newlines for natural chunks
     const parts = text.split(/([.!?\n]\s*)/);
     let current = "";
     let start = 0;
@@ -157,6 +166,7 @@ class SpeechController {
     this.getNextSegment = getNextSegment || null;
 
     this.currentChunks = this.createChunks(text);
+    // Find the starting chunk based on startOffset
     const idx = this.currentChunks.findIndex(c => c.startOffset + c.text.length > startOffset);
     this.currentChunkIndex = idx !== -1 ? idx : 0;
 
@@ -211,20 +221,18 @@ class SpeechController {
         if (this.sessionToken !== session) return;
         audioUrl = result.audioUrl;
         
-        // Persist to cache
         fetch(audioUrl).then(r => r.blob()).then(blob => {
           saveAudioToCache(cacheKey, blob);
         });
       }
 
       this.audio.src = audioUrl;
-      this.audio.playbackRate = 1.0; // Audio is pre-rendered at correct rate usually, or we can use playbackRate
 
       const onLoaded = () => {
         if (this.sessionToken === session) {
           if (initialOffsetInChunk !== undefined) {
-            const relative = initialOffsetInChunk - chunk.startOffset;
-            const ratio = Math.max(0, Math.min(1, relative / chunk.text.length));
+            const relative = Math.max(0, initialOffsetInChunk - chunk.startOffset);
+            const ratio = Math.min(1, relative / chunk.text.length);
             this.audio.currentTime = ratio * this.audio.duration;
           }
           this.audio.play().catch(() => {});
@@ -234,8 +242,7 @@ class SpeechController {
 
       this.audio.addEventListener('loadedmetadata', onLoaded);
     } catch (err) {
-      console.error("Audio playback failed, falling back to Web Speech:", err);
-      // Optional: Add Web Speech fallback logic here if desired
+      console.error("Perfect sync failed, chunk fallback:", err);
     }
   }
 
