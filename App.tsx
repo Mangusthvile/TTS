@@ -104,6 +104,16 @@ const App: React.FC = () => {
     }));
   }, []);
 
+  const handleUpdateChapterTitle = useCallback((bookId: string, chapterId: string, newTitle: string) => {
+    setState(prev => ({
+      ...prev,
+      books: prev.books.map(b => b.id === bookId ? {
+        ...b,
+        chapters: b.chapters.map(c => c.id === chapterId ? { ...c, title: newTitle } : c)
+      } : b)
+    }));
+  }, []);
+
   const handleJumpToOffset = useCallback((offset: number) => {
     handlePause(); // MANDATORY PAUSE: Jumping sections
     const finalPlaybackText = applyRules(activeChapterText, activeBook?.rules || []);
@@ -409,7 +419,7 @@ const App: React.FC = () => {
                   </div>
                </div>
              )}
-             {activeTab === 'reader' ? (activeBook ? (activeBook.currentChapterId ? (<Reader chapter={activeChapterMetadata || null} rules={activeBook.rules} currentOffset={state.currentOffset} theme={state.theme} debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset} highlightMode={activeBook.settings.highlightMode} onBackToChapters={() => handleSelectBook(activeBook.id)} onAddChapter={() => setIsAddChapterOpen(true)} readerSettings={state.readerSettings} />) : (<ChapterFolderView book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)} onOpenChapter={(id) => handleSelectChapter(activeBook.id, id)} onToggleFavorite={() => {}} />)) : (<div className="h-full flex flex-col items-center justify-center font-black tracking-widest text-lg opacity-40 uppercase">Select a book to begin</div>)) : activeTab === 'rules' ? (
+             {activeTab === 'reader' ? (activeBook ? (activeBook.currentChapterId ? (<Reader chapter={activeChapterMetadata || null} rules={activeBook.rules} currentOffset={state.currentOffset} theme={state.theme} debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset} highlightMode={activeBook.settings.highlightMode} onBackToChapters={() => handleSelectBook(activeBook.id)} onAddChapter={() => setIsAddChapterOpen(true)} readerSettings={state.readerSettings} />) : (<ChapterFolderView book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)} onOpenChapter={(id) => handleSelectChapter(activeBook.id, id)} onToggleFavorite={() => {}} onUpdateChapterTitle={(cid, nt) => handleUpdateChapterTitle(activeBook.id, cid, nt)} />)) : (<div className="h-full flex flex-col items-center justify-center font-black tracking-widest text-lg opacity-40 uppercase">Select a book to begin</div>)) : activeTab === 'rules' ? (
                <RuleManager 
                  rules={activeBook?.rules || []} 
                  theme={state.theme} 

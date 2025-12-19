@@ -34,7 +34,7 @@ export default defineConfig({
   ],
   define: {
     'process.env': {},
-    __APP_VERSION__: JSON.stringify('2.1.7'),
+    __APP_VERSION__: JSON.stringify('2.1.8'),
   },
   server: {
     port: 3000
