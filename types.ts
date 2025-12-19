@@ -60,7 +60,8 @@ export interface Chapter {
   isFavorite?: boolean;
   isCompleted?: boolean;
   driveId?: string;
-  hasCachedAudio?: boolean; // New: Tracks if Cloud TTS audio is generated and cached
+  audioDriveId?: string; // New: Tracks the remote MP3 file ID
+  hasCachedAudio?: boolean;
 }
 
 export interface BookSettings {

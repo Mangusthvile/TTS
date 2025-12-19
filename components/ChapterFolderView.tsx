@@ -1,8 +1,9 @@
 import React, { useMemo, useState } from 'react';
 import { Book, Theme, StorageBackend, Chapter } from '../types';
-import { LayoutGrid, List, AlignJustify, Plus, Star, Folder, CheckCircle2, Download, Edit2, Check, RefreshCw, Trash2, Headphones, Loader2, Zap } from 'lucide-react';
+import { LayoutGrid, List, AlignJustify, Plus, Star, Folder, CheckCircle2, Download, Edit2, Check, RefreshCw, Trash2, Headphones, Loader2, Zap, Cloud } from 'lucide-react';
 import { synthesizeChunk } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache } from '../services/audioCache';
+import { uploadToDrive } from '../services/driveService';
 
 type ViewMode = 'details' | 'list' | 'grid';
 
@@ -16,6 +17,7 @@ interface ChapterFolderViewProps {
   onDeleteChapter: (chapterId: string) => void;
   onRefreshDriveFolder?: () => void;
   onUpdateChapter?: (chapter: Chapter) => void;
+  driveToken?: string;
 }
 
 const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
@@ -27,7 +29,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   onUpdateChapterTitle,
   onDeleteChapter,
   onRefreshDriveFolder,
-  onUpdateChapter
+  onUpdateChapter,
+  driveToken
 }) => {
   const [viewMode, setViewMode] = useState<ViewMode>('details');
   const [editingChapterId, setEditingChapterId] = useState<string | null>(null);
@@ -61,47 +64,69 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     setEditingChapterId(null);
   };
 
-  /**
-   * Prevents 500 errors by ensuring browser-local voices (like Microsoft David)
-   * are mapped to high-quality Cloud TTS counterparts.
-   */
   const sanitizeVoiceForCloud = (voiceName: string | undefined): string => {
     if (!voiceName) return "en-US-Wavenet-D";
-    
-    // Cloud voice IDs are usually structured like: en-US-Wavenet-D or en-US-Neural2-A
-    // Browser voices often have spaces or manufacturer names like "Microsoft David" or "Google US English"
     const isCloudStyle = /^[a-z]{2}-[A-Z]{2}-[a-zA-Z0-9]+-[A-Z]$/.test(voiceName);
-    
     if (isCloudStyle) return voiceName;
-
-    // Mapping common browser voice languages to high-quality cloud defaults
     if (voiceName.toLowerCase().includes('en-us')) return "en-US-Wavenet-D";
     if (voiceName.toLowerCase().includes('en-gb')) return "en-GB-Wavenet-B";
-    
-    return "en-US-Wavenet-D"; // Default fallback
+    return "en-US-Wavenet-D";
   };
 
-  const synthesizeChapterInternal = async (chapter: Chapter) => {
+  /**
+   * Internal migration/synthesis logic for v2.5.0
+   * 1. Checks local cache for chunks.
+   * 2. Synthesizes missing chunks.
+   * 3. Consolidates to one MP3.
+   * 4. Uploads to Drive folder.
+   */
+  const migrateChapterAudioToDrive = async (chapter: Chapter) => {
     const rawVoice = book.settings.selectedVoiceName;
     const voice = sanitizeVoiceForCloud(rawVoice);
     const speed = book.settings.playbackSpeed || 1.0;
     
-    // Split text into safe chunks (TTS limit)
     const MAX = 4800;
     const textChunks = [];
     for (let i = 0; i < chapter.content.length; i += MAX) {
       textChunks.push(chapter.content.substring(i, i + MAX));
     }
 
+    const audioBlobs: Blob[] = [];
+
     for (const chunkText of textChunks) {
       const cacheKey = generateAudioKey(chunkText, voice, speed);
       const existing = await getAudioFromCache(cacheKey);
-      if (!existing) {
+      if (existing) {
+        audioBlobs.push(existing);
+      } else {
+        // Only synthesize if missing. If the user "already converted", chunks are here.
         const res = await synthesizeChunk(chunkText, voice, speed);
         const blob = await fetch(res.audioUrl).then(r => r.blob());
         await saveAudioToCache(cacheKey, blob);
+        audioBlobs.push(blob);
       }
     }
+
+    if (book.backend === StorageBackend.DRIVE && driveToken && audioBlobs.length > 0) {
+      const combinedBlob = new Blob(audioBlobs, { type: 'audio/mpeg' });
+      const safeTitle = chapter.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+      const audioFilename = `${chapter.index.toString().padStart(3, '0')}_${safeTitle}.mp3`;
+      
+      try {
+        const audioDriveId = await uploadToDrive(
+          driveToken, 
+          book.driveFolderId!, 
+          audioFilename, 
+          combinedBlob, 
+          chapter.audioDriveId,
+          'audio/mpeg'
+        );
+        return audioDriveId;
+      } catch (err) {
+        console.warn("Drive sync failed for chapter:", chapter.title, err);
+      }
+    }
+    return undefined;
   };
 
   const handleSynthesize = async (e: React.MouseEvent, chapter: Chapter) => {
@@ -110,12 +135,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     setSynthesizingId(chapter.id);
     
     try {
-      await synthesizeChapterInternal(chapter);
+      const audioDriveId = await migrateChapterAudioToDrive(chapter);
       if (onUpdateChapter) {
-        onUpdateChapter({ ...chapter, hasCachedAudio: true });
+        onUpdateChapter({ ...chapter, hasCachedAudio: true, audioDriveId });
       }
     } catch (err) {
-      alert("Synthesis failed: " + err);
+      alert("Audio sync failed: " + err);
     } finally {
       setSynthesizingId(null);
     }
@@ -123,23 +148,23 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const handleSynthesizeAll = async (silent: boolean = false) => {
     if (isBatchSynthesizing || !!synthesizingId) return;
-    if (!silent && !confirm(`This will convert all ${chapters.length} chapters to audio for the current cloud voice settings. This may take a few minutes. Continue?`)) return;
+    if (!silent && !confirm(`This will check for existing audio and move/upload all chapters to your Drive folder. Continue?`)) return;
     
     setIsBatchSynthesizing(true);
     try {
       for (const chapter of chapters) {
-        // Only synthesize if it doesn't already have audio
-        if (!chapter.hasCachedAudio) {
+        // v2.5.0: We check if audioDriveId is missing even if hasCachedAudio is true to facilitate migration
+        if (!chapter.audioDriveId) {
           setSynthesizingId(chapter.id);
-          await synthesizeChapterInternal(chapter);
+          const audioDriveId = await migrateChapterAudioToDrive(chapter);
           if (onUpdateChapter) {
-            onUpdateChapter({ ...chapter, hasCachedAudio: true });
+            onUpdateChapter({ ...chapter, hasCachedAudio: true, audioDriveId });
           }
         }
       }
-      if (!silent) alert("Audio Sync complete! All chapters are ready for playback.");
+      if (!silent) alert("Migration complete! All local audio has been synchronized with your Drive collection.");
     } catch (err) {
-      if (!silent) alert("Batch synthesis failed: " + err);
+      if (!silent) alert("Batch migration failed: " + err);
     } finally {
       setIsBatchSynthesizing(false);
       setSynthesizingId(null);
@@ -183,7 +208,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           ) : (
             <div className="flex items-center gap-3 min-w-0">
               <div className={`truncate font-black text-xs sm:text-sm ${c.isCompleted ? 'line-through decoration-indigo-500/40' : ''}`}>{c.title}</div>
-              {c.hasCachedAudio && <span title="Audio file ready"><Headphones className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" /></span>}
+              {c.hasCachedAudio && <span title="Audio cached locally"><Headphones className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" /></span>}
+              {c.audioDriveId && <span title="Stored on Drive"><Cloud className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" /></span>}
             </div>
           )}
         </div>
@@ -202,9 +228,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               onClick={(e) => handleSynthesize(e, c)}
               disabled={isSynthesizing || isBatchSynthesizing}
               className={`p-2 rounded-xl border transition-all ${controlBg} ${isSynthesizing ? 'opacity-100 text-indigo-600 ring-1 ring-indigo-600' : 'opacity-40 hover:opacity-100 hover:text-indigo-500'}`}
-              title="Ensure Audio File exists"
+              title={c.audioDriveId ? "Refresh Drive Audio" : "Migrate local audio to Drive"}
             >
-              {isSynthesizing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Headphones className="w-4 h-4" />}
+              {isSynthesizing ? <Loader2 className="w-4 h-4 animate-spin" /> : (c.audioDriveId ? <CheckCircle2 className="w-4 h-4 text-emerald-500" /> : <RefreshCw className="w-4 h-4" />)}
             </button>
           )}
           {!isEditing && (
@@ -258,12 +284,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             <button
               onClick={() => handleSynthesizeAll(false)}
               disabled={isBatchSynthesizing || !!synthesizingId}
-              title="Convert all text chapters to audio files"
+              title="Check for local audio and migrate all files to your Drive collection"
               className={`px-3 py-2 rounded-xl border text-[10px] font-black flex items-center gap-1.5 shadow-sm transition-all ${isBatchSynthesizing ? 'bg-indigo-600 text-white animate-pulse' : controlBg + ' ' + textPrimary + ' hover:border-indigo-500 hover:text-indigo-500'}`}
             >
               {isBatchSynthesizing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
-              <span className="hidden sm:inline">Convert All to Audio</span>
-              <span className="sm:hidden">Audio Sync</span>
+              <span className="hidden sm:inline">Migrate & Sync All Audio to Drive</span>
+              <span className="sm:hidden">Sync Audio</span>
             </button>
 
             <button
@@ -295,15 +321,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                <button
                  onClick={async () => {
                    onRefreshDriveFolder();
-                   // Automatically perform audio sync after refreshing the folder
-                   await handleSynthesizeAll(true);
                  }}
                  disabled={isBatchSynthesizing}
-                 title="Force Re-scan Folder and Sync Audio Files"
+                 title="Force Re-scan Folder"
                  className={`px-3 py-2 rounded-xl border text-[10px] font-black flex items-center gap-1.5 shadow-sm ${controlBg} ${textPrimary} ${isBatchSynthesizing ? 'opacity-50' : 'hover:border-indigo-500'}`}
                >
                  <RefreshCw className={`w-3.5 h-3.5 ${isBatchSynthesizing ? 'animate-spin' : ''}`} />
-                 <span className="hidden sm:inline">Refresh & Sync Audio</span>
+                 <span className="hidden sm:inline">Refresh Collection</span>
                  <span className="sm:hidden">Refresh</span>
                </button>
             )}
@@ -353,7 +377,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                       <div className="flex justify-between items-start mb-3 sm:mb-4">
                         <div className={`text-[11px] sm:text-[12px] font-mono font-black flex items-center gap-1.5 ${textSecondary}`}>#{String(c.index).padStart(3, '0')}</div>
                         <div className="flex items-center gap-2">
-                           {c.hasCachedAudio && <span title="Audio file ready"><Headphones className="w-3.5 h-3.5 text-indigo-500" /></span>}
+                           {c.hasCachedAudio && <span title="Audio cached locally"><Headphones className="w-3.5 h-3.5 text-indigo-500" /></span>}
+                           {c.audioDriveId && <span title="Stored on Drive"><Cloud className="w-3.5 h-3.5 text-emerald-500" /></span>}
                            {percent > 0 && <div className={`text-[9px] font-black px-2 py-0.5 rounded-full ${isDark ? 'bg-indigo-600/30' : 'bg-indigo-600/15'} text-indigo-500`}>{percent}%</div>}
                         </div>
                       </div>

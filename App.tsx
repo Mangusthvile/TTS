@@ -60,7 +60,6 @@ const App: React.FC = () => {
   const [stopAfterChapter, setStopAfterChapter] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
-  // Real-time audio playback states
   const [audioDuration, setAudioDuration] = useState(0);
   const [audioCurrentTime, setAudioCurrentTime] = useState(0);
 
@@ -159,6 +158,7 @@ const App: React.FC = () => {
     try {
       if (book.backend === StorageBackend.DRIVE && stateRef.current.driveToken && chapter.driveId) {
         await deleteDriveFile(stateRef.current.driveToken, chapter.driveId);
+        if (chapter.audioDriveId) await deleteDriveFile(stateRef.current.driveToken, chapter.audioDriveId);
       } else if (book.backend === StorageBackend.LOCAL && book.directoryHandle) {
         await deleteChapterFile(book.directoryHandle, chapter.filename);
       }
@@ -224,6 +224,27 @@ const App: React.FC = () => {
           }
         });
         currentSettings = { ...currentSettings, ...remoteData.readerSettings };
+      }
+
+      // v2.5.0 enhancement: Scan Drive folders for matching audio files to link them
+      for (const book of currentBooks) {
+        if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
+          try {
+            const files = await listFilesInFolder(state.driveToken, book.driveFolderId);
+            book.chapters.forEach(chapter => {
+              if (!chapter.audioDriveId) {
+                // Look for .mp3 files matching chapter index
+                const idxStr = chapter.index.toString().padStart(3, '0');
+                const matchingAudio = files.find(f => f.name.startsWith(idxStr) && f.name.endsWith('.mp3'));
+                if (matchingAudio) {
+                  chapter.audioDriveId = matchingAudio.id;
+                }
+              }
+            });
+          } catch (e) {
+            console.warn(`Failed to scan folder for book ${book.title}:`, e);
+          }
+        }
       }
 
       setState(prev => ({ ...prev, books: currentBooks, readerSettings: currentSettings }));
@@ -376,6 +397,7 @@ const App: React.FC = () => {
             </div>
             <div className="flex items-center gap-4">
               {state.driveToken && (
+                /* Fixed: Changed 'manual' to 'true' to correctly call handleSync as a manual action */
                 <button onClick={() => handleSync(true)} className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all ${isSyncing ? 'text-indigo-500 animate-pulse' : 'text-slate-400 hover:text-indigo-600'}`}>
                   <Cloud className="w-3.5 h-3.5" /> {isSyncing ? 'Syncing...' : 'Sync'}
                 </button>
@@ -397,7 +419,7 @@ const App: React.FC = () => {
                   </div>
                </div>
              )}
-             {activeTab === 'reader' ? (activeBook ? (activeBook.currentChapterId ? (<Reader chapter={activeChapterMetadata || null} rules={activeBook.rules} currentOffset={state.currentOffset} theme={state.theme} debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset} highlightMode={activeBook.settings.highlightMode} onBackToChapters={() => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, currentChapterId: undefined } : b) }))} onAddChapter={() => setIsAddChapterOpen(true)} readerSettings={state.readerSettings} />) : (<ChapterFolderView book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)} onOpenChapter={(id) => setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, currentChapterId: id } : b), currentOffset: 0 }))} onToggleFavorite={() => {}} onUpdateChapterTitle={(cid, nt) => handleUpdateChapterTitle(activeBook.id, cid, nt)} onDeleteChapter={(cid) => handleDeleteChapter(activeBook.id, cid)} onRefreshDriveFolder={() => {}} onUpdateChapter={handleUpdateChapter} />)) : (<div className="h-full flex flex-col items-center justify-center font-black tracking-widest text-lg opacity-40 uppercase">Select a book to begin</div>)) : activeTab === 'rules' ? (
+             {activeTab === 'reader' ? (activeBook ? (activeBook.currentChapterId ? (<Reader chapter={activeChapterMetadata || null} rules={activeBook.rules} currentOffset={state.currentOffset} theme={state.theme} debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset} highlightMode={activeBook.settings.highlightMode} onBackToChapters={() => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, currentChapterId: undefined } : b) }))} onAddChapter={() => setIsAddChapterOpen(true)} readerSettings={state.readerSettings} />) : (<ChapterFolderView book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)} onOpenChapter={(id) => setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, currentChapterId: id } : b), currentOffset: 0 }))} onToggleFavorite={() => {}} onUpdateChapterTitle={(cid, nt) => handleUpdateChapterTitle(activeBook.id, cid, nt)} onDeleteChapter={(cid) => handleDeleteChapter(activeBook.id, cid)} onRefreshDriveFolder={() => {}} onUpdateChapter={handleUpdateChapter} driveToken={state.driveToken} />)) : (<div className="h-full flex flex-col items-center justify-center font-black tracking-widest text-lg opacity-40 uppercase">Select a book to begin</div>)) : activeTab === 'rules' ? (
                <RuleManager 
                  rules={activeBook?.rules || []} 
                  theme={state.theme} 
