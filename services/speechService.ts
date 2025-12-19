@@ -43,56 +43,11 @@ export interface NextSegment {
 }
 
 /**
- * Android Media Session Anchor
- * Samsung devices kill background JS if no "Audio Context" is active.
- * We create a "Heartbeat" that plays extreme low-volume noise to stay alive.
+ * Capacitor Bridge Interface
+ * Logic to communicate with Native Android Foreground Service if available.
  */
-class AndroidHeartbeat {
-  private ctx: AudioContext | null = null;
-  private noiseNode: AudioWorkletNode | ScriptProcessorNode | null = null;
-  private gain: GainNode | null = null;
-
-  start() {
-    try {
-      if (!this.ctx) {
-        this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      }
-      if (this.ctx.state === 'suspended') this.ctx.resume();
-
-      this.stop();
-
-      // Generating white noise at 0.0001 volume
-      const bufferSize = 4096;
-      this.noiseNode = this.ctx.createScriptProcessor(bufferSize, 1, 1);
-      this.noiseNode.onaudioprocess = (e) => {
-        const output = e.outputBuffer.getChannelData(0);
-        for (let i = 0; i < bufferSize; i++) {
-          output[i] = (Math.random() * 2 - 1) * 0.0001;
-        }
-      };
-
-      this.gain = this.ctx.createGain();
-      this.gain.gain.value = 0.01; // Final volume is basically 0
-      
-      this.noiseNode.connect(this.gain);
-      this.gain.connect(this.ctx.destination);
-      console.debug("[Heartbeat] Started Android background anchor.");
-    } catch (e) {
-      console.warn("Heartbeat failed:", e);
-    }
-  }
-
-  stop() {
-    if (this.noiseNode) {
-      this.noiseNode.disconnect();
-      this.noiseNode = null;
-    }
-    if (this.gain) {
-      this.gain.disconnect();
-      this.gain = null;
-    }
-  }
-}
+const Capacitor = (window as any).Capacitor;
+const NativeTTS = Capacitor?.Plugins?.NativeTTS;
 
 class SpeechController {
   private synth: SpeechSynthesis;
@@ -106,12 +61,15 @@ class SpeechController {
   private getNextSegment: (() => Promise<NextSegment | null>) | null = null;
   private currentPrefixLength: number = 0;
   private totalTextLength: number = 0;
-  private heartbeat: AndroidHeartbeat = new AndroidHeartbeat();
   
-  // Highlighting: Synthetic Position Tracker
+  // Highlighting: Velocity Engine
   private lastEventTime: number = 0;
   private lastEventOffset: number = 0;
   private highlightTimer: number | null = null;
+  
+  // Power & Stability
+  private wakeLock: any = null;
+  private isNativeMode: boolean = !!NativeTTS;
 
   constructor() {
     this.synth = window.speechSynthesis;
@@ -122,14 +80,18 @@ class SpeechController {
     if ('mediaSession' in navigator) {
       try {
         navigator.mediaSession.setActionHandler('play', () => {
-          if (this.synth.paused) {
+          if (this.isNativeMode) NativeTTS.resume();
+          else if (this.synth.paused) {
             this.synth.resume();
             this.updatePlaybackState('playing');
           }
         });
         navigator.mediaSession.setActionHandler('pause', () => {
-          this.synth.pause();
-          this.updatePlaybackState('paused');
+          if (this.isNativeMode) NativeTTS.pause();
+          else {
+            this.synth.pause();
+            this.updatePlaybackState('paused');
+          }
         });
         navigator.mediaSession.setActionHandler('stop', () => this.stop());
       } catch (e) {}
@@ -142,12 +104,24 @@ class SpeechController {
     }
   }
 
+  private async requestWakeLock() {
+    if ('wakeLock' in navigator) {
+      try {
+        this.wakeLock = await (navigator as any).wakeLock.request('screen');
+      } catch (err) {}
+    }
+  }
+
+  private releaseWakeLock() {
+    if (this.wakeLock) {
+      this.wakeLock.release().then(() => { this.wakeLock = null; });
+    }
+  }
+
   private createChunks(text: string): SpeechChunk[] {
     const chunks: SpeechChunk[] = [];
-    const MAX_CHUNK_LENGTH = 1000; // Even smaller chunks for mobile stability
-    // Split by sentences or newlines
+    const MAX_CHUNK_LENGTH = 800; // Small chunks reduce impact of skips
     const segments = text.split(/([.!?\n]\s*)/);
-    
     let tempChunk = "";
     let tempStart = 0;
 
@@ -164,7 +138,7 @@ class SpeechController {
     return chunks;
   }
 
-  speak(
+  async speak(
     text: string, 
     voiceName: string, 
     rate: number, 
@@ -177,8 +151,8 @@ class SpeechController {
   ) {
     this.sessionToken++;
     const currentSession = this.sessionToken;
-    this.synth.cancel();
     this.stopHighlightTracker();
+    this.requestWakeLock();
     
     this.onEndCallback = onEnd;
     this.globalBoundaryCallback = onBoundary || null;
@@ -188,7 +162,6 @@ class SpeechController {
     this.currentPrefixLength = 0;
     this.totalTextLength = text.length;
 
-    // Update Media Session
     if ('mediaSession' in navigator && window.MediaMetadata) {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: chapterTitle,
@@ -197,7 +170,20 @@ class SpeechController {
       });
     }
 
-    this.heartbeat.start();
+    if (this.isNativeMode) {
+      // Logic for Capacitor Native TTS with Foreground Service
+      NativeTTS.speak({
+        text: text.substring(startOffset),
+        rate: this.rate,
+        voice: this.voiceName,
+        title: chapterTitle,
+        artist: bookTitle
+      });
+      // Boundary events would come back via plugin listeners
+      return;
+    }
+
+    this.synth.cancel();
     this.updatePlaybackState('playing');
 
     const fullChunks = this.createChunks(text);
@@ -214,32 +200,28 @@ class SpeechController {
     } else if (onEnd) onEnd();
   }
 
-  /**
-   * Start the "Synthetic Highlighting" engine.
-   * Mobile browsers rarely fire boundary events. This timer predicts where the voice is
-   * and moves the highlight even if the engine is silent.
-   */
   private startHighlightTracker(session: number, baseOffset: number) {
     this.stopHighlightTracker();
     this.lastEventOffset = baseOffset;
-    this.lastEventTime = Date.now();
+    this.lastEventTime = performance.now();
 
-    // Approx characters per millisecond at 1.0 rate (~18 chars/sec)
-    const velocity = (0.018 * this.rate); 
+    // Accuracy boost: chars per millisecond
+    const velocity = (0.016 * this.rate); 
 
     this.highlightTimer = window.setInterval(() => {
       if (this.sessionToken !== session || this.synth.paused) return;
 
-      const elapsed = Date.now() - this.lastEventTime;
+      const elapsed = performance.now() - this.lastEventTime;
       const predictedOffset = Math.floor(this.lastEventOffset + (elapsed * velocity));
 
       if (this.globalBoundaryCallback) {
         const effective = Math.max(0, predictedOffset - this.currentPrefixLength);
         if (effective < this.totalTextLength) {
+          // Send update every tick for smooth UI transition
           this.globalBoundaryCallback(effective, 0, this.currentChunkIndex);
         }
       }
-    }, 120);
+    }, 100); // 10Hz updates for smooth highlights
   }
 
   private stopHighlightTracker() {
@@ -255,10 +237,9 @@ class SpeechController {
     if (this.currentChunkIndex >= this.chunks.length) {
       this.stopHighlightTracker();
       
-      // Verification: If tab is hidden, DON'T advance chapter. 
-      // This is the primary fix for the "skip forward when phone is closed" bug.
+      // Strict Skip Guard: Never transition chapters in hidden state on web
       if (document.hidden) {
-        console.warn("[Speech] Background auto-advance blocked for safety.");
+        console.warn("[Speech] Background auto-advance prevented.");
         this.updatePlaybackState('paused');
         if (this.onEndCallback) this.onEndCallback();
         return;
@@ -293,29 +274,26 @@ class SpeechController {
     if (voice) utterance.voice = voice;
     utterance.rate = this.rate;
 
-    const chunkStartTime = Date.now();
+    const chunkStartTime = performance.now();
+    const expectedDuration = (chunk.text.length / (0.016 * this.rate)); // Estimate min duration
+
     this.startHighlightTracker(session, chunk.startOffset);
 
     utterance.onboundary = (event) => {
       if (this.sessionToken === session && typeof event.charIndex === 'number') {
         const currentGlobal = chunk.startOffset + event.charIndex;
-        // Re-sync synthetic tracker
         this.lastEventOffset = currentGlobal;
-        this.lastEventTime = Date.now();
-
-        if (this.globalBoundaryCallback) {
-          this.globalBoundaryCallback(Math.max(0, currentGlobal - this.currentPrefixLength), event.charIndex, this.currentChunkIndex);
-        }
+        this.lastEventTime = performance.now();
       }
     };
 
     utterance.onend = () => {
       if (this.sessionToken !== session) return;
 
-      // Temporal Verification: If chunk "finished" impossibly fast, it was a system skip.
-      const duration = Date.now() - chunkStartTime;
-      if (duration < 50 && chunk.text.length > 10) {
-        console.error("[Speech] Sudden skip detected. Emergency pause.");
+      // Anti-Glitch Lock: If chunk "finishes" in less than 20% of estimated time, it's a browser skip.
+      const actualDuration = performance.now() - chunkStartTime;
+      if (actualDuration < expectedDuration * 0.2 && chunk.text.length > 20) {
+        console.error("[Speech] Glitch skip detected. Freezing at current offset.");
         this.stop();
         if (this.onEndCallback) this.onEndCallback();
         return;
@@ -326,7 +304,6 @@ class SpeechController {
     };
 
     utterance.onerror = (e) => {
-      console.warn("[Speech] Utterance Error:", e);
       if (this.sessionToken === session) {
         this.currentChunkIndex++;
         this.speakNextChunk(session);
@@ -339,12 +316,12 @@ class SpeechController {
   stop() {
     this.sessionToken++; 
     this.stopHighlightTracker();
-    this.globalBoundaryCallback = null;
-    this.onEndCallback = null;
-    this.getNextSegment = null;
-    this.synth.cancel();
-    this.heartbeat.stop();
-    this.updatePlaybackState('none');
+    this.releaseWakeLock();
+    if (this.isNativeMode) NativeTTS.stop();
+    else {
+      this.synth.cancel();
+      this.updatePlaybackState('none');
+    }
     this.chunks = [];
     this.currentChunkIndex = -1;
   }

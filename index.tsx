@@ -7,11 +7,12 @@ declare global {
     __APP_VERSION__: string;
     gapi: any;
     google: any;
+    Capacitor: any;
   }
 }
 
 // Set version on window for settings display
-window.__APP_VERSION__ = '2.2.4';
+window.__APP_VERSION__ = '2.2.5';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {

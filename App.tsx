@@ -70,12 +70,10 @@ const App: React.FC = () => {
     return activeBook.chapters.find(c => c.id === activeBook.currentChapterId) || null;
   }, [activeBook]);
 
-  // Unified persistence function
   const saveCurrentState = useCallback(() => {
     const s = stateRef.current;
     const { driveToken, books, ...rest } = s;
     const persistentBooks = books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined }));
-    
     const activeBook = books.find(b => b.id === s.activeBookId);
     
     localStorage.setItem('talevox_pro_v2', JSON.stringify({ 
@@ -89,21 +87,18 @@ const App: React.FC = () => {
     }));
   }, []);
 
-  // Standard persistence effect
-  useEffect(() => {
-    saveCurrentState();
-  }, [state, saveCurrentState]);
+  useEffect(() => { saveCurrentState(); }, [state, saveCurrentState]);
 
-  // Mobile Lifecycle Persistence: Ensure offset is saved even if OS kills tab
   useEffect(() => {
-    const handleUnload = () => saveCurrentState();
+    const handleUnload = () => {
+      if (speechController.isPaused) handlePause();
+      saveCurrentState();
+    };
     window.addEventListener('pagehide', handleUnload);
     window.addEventListener('visibilitychange', () => {
       if (document.hidden) saveCurrentState();
     });
-    return () => {
-      window.removeEventListener('pagehide', handleUnload);
-    };
+    return () => window.removeEventListener('pagehide', handleUnload);
   }, [saveCurrentState]);
 
   const handlePause = useCallback(() => { 
@@ -355,18 +350,14 @@ const App: React.FC = () => {
       state.currentOffset,
       () => setIsPlaying(false),
       (offset) => { 
-        if (Math.abs(stateRef.current.currentOffset - offset) >= 1) {
+        // Accurate Boundary Logic: Don't throttle updates to the state ref, but throttle UI updates to ensure responsiveness
+        stateRef.current.currentOffset = offset;
+        if (Math.abs(state.currentOffset - offset) >= 4) {
           setState(prev => ({ ...prev, currentOffset: offset }));
-          updateChapterProgress(stateRef.current.activeBookId!, activeBook.currentChapterId!, offset, totalLen);
         }
       },
       async () => {
-        // Double check app visibility before transitioning to next chapter
-        if (document.hidden) {
-          console.debug("[App] Suspension guard: pausing at chapter end while in background.");
-          return null;
-        }
-
+        if (document.hidden) return null;
         const s = stateRef.current;
         const book = s.books.find(b => b.id === s.activeBookId);
         if (!book || stopAfterChapter || (sleepTimerSeconds !== null && sleepTimerSeconds <= 0)) return null;
