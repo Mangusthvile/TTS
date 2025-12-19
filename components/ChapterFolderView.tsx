@@ -61,8 +61,29 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     setEditingChapterId(null);
   };
 
+  /**
+   * Prevents 500 errors by ensuring browser-local voices (like Microsoft David)
+   * are mapped to high-quality Cloud TTS counterparts.
+   */
+  const sanitizeVoiceForCloud = (voiceName: string | undefined): string => {
+    if (!voiceName) return "en-US-Wavenet-D";
+    
+    // Cloud voice IDs are usually structured like: en-US-Wavenet-D or en-US-Neural2-A
+    // Browser voices often have spaces or manufacturer names like "Microsoft David" or "Google US English"
+    const isCloudStyle = /^[a-z]{2}-[A-Z]{2}-[a-zA-Z0-9]+-[A-Z]$/.test(voiceName);
+    
+    if (isCloudStyle) return voiceName;
+
+    // Mapping common browser voice languages to high-quality cloud defaults
+    if (voiceName.toLowerCase().includes('en-us')) return "en-US-Wavenet-D";
+    if (voiceName.toLowerCase().includes('en-gb')) return "en-GB-Wavenet-B";
+    
+    return "en-US-Wavenet-D"; // Default fallback
+  };
+
   const synthesizeChapterInternal = async (chapter: Chapter) => {
-    const voice = book.settings.selectedVoiceName || "en-US-Wavenet-D";
+    const rawVoice = book.settings.selectedVoiceName;
+    const voice = sanitizeVoiceForCloud(rawVoice);
     const speed = book.settings.playbackSpeed || 1.0;
     
     // Split text into safe chunks (TTS limit)
@@ -85,7 +106,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const handleSynthesize = async (e: React.MouseEvent, chapter: Chapter) => {
     e.stopPropagation();
-    if (synthesizingId || isBatchSynthesizing) return;
+    if (!!synthesizingId || isBatchSynthesizing) return;
     setSynthesizingId(chapter.id);
     
     try {
@@ -102,7 +123,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const handleSynthesizeAll = async (silent: boolean = false) => {
     if (isBatchSynthesizing || !!synthesizingId) return;
-    if (!silent && !confirm(`This will convert all ${chapters.length} chapters to audio for the current voice/speed settings. This may take a few minutes. Continue?`)) return;
+    if (!silent && !confirm(`This will convert all ${chapters.length} chapters to audio for the current cloud voice settings. This may take a few minutes. Continue?`)) return;
     
     setIsBatchSynthesizing(true);
     try {
@@ -136,7 +157,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       <div
         key={c.id}
         onClick={() => !isEditing && onOpenChapter(c.id)}
-        className={`grid grid-cols-[40px_1fr_60px] sm:grid-cols-[86px_1fr_120px_100px_130px] items-center px-4 sm:px-6 py-4 cursor-pointer select-none border-b last:border-0 transition-colors ${isDark ? 'hover:bg-white/5 border-slate-800' : 'hover:bg-black/5 border-black/5'} ${c.isCompleted ? 'opacity-60' : ''}`}
+        className={`grid grid-cols-[40px_1fr_60px] sm:grid-cols-[60px_1fr_100px_100px_180px] items-center px-4 sm:px-6 py-4 cursor-pointer select-none border-b last:border-0 transition-colors ${isDark ? 'hover:bg-white/5 border-slate-800' : 'hover:bg-black/5 border-black/5'} ${c.isCompleted ? 'opacity-60' : ''}`}
       >
         <div className={`font-mono text-[10px] sm:text-xs font-black flex items-center gap-2 ${textSecondary}`}>
           {c.isCompleted && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 hidden sm:block" />}
@@ -160,7 +181,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               <button onClick={handleSaveEdit} className="p-1.5 bg-emerald-600 text-white rounded-lg hover:scale-110 transition-transform"><Check className="w-4 h-4" /></button>
             </div>
           ) : (
-            <div className="flex items-center gap-2 min-w-0">
+            <div className="flex items-center gap-3 min-w-0">
               <div className={`truncate font-black text-xs sm:text-sm ${c.isCompleted ? 'line-through decoration-indigo-500/40' : ''}`}>{c.title}</div>
               {c.hasCachedAudio && <span title="Audio file ready"><Headphones className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" /></span>}
             </div>
@@ -168,17 +189,19 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         </div>
 
         <div className={`text-[10px] sm:text-xs font-black text-right hidden sm:block ${textSecondary}`}>{words} words</div>
-        <div className="text-right">
-          <span className={`text-[9px] sm:text-[10px] font-black px-2 py-0.5 sm:px-2.5 sm:py-1 rounded-full ${percent >= 100 ? 'bg-emerald-500/20 text-emerald-600' : 'bg-indigo-500/15 text-indigo-500'}`}>
+        
+        <div className="text-right px-4">
+          <span className={`text-[9px] sm:text-[10px] font-black px-2 py-0.5 sm:px-2.5 sm:py-1 rounded-full whitespace-nowrap ${percent >= 100 ? 'bg-emerald-500/20 text-emerald-600' : 'bg-indigo-500/15 text-indigo-500'}`}>
             {percent}%
           </span>
         </div>
-        <div className="flex justify-end items-center gap-1 hidden sm:flex">
+
+        <div className="flex justify-end items-center gap-2 hidden sm:flex">
           {!isEditing && (
             <button
               onClick={(e) => handleSynthesize(e, c)}
               disabled={isSynthesizing || isBatchSynthesizing}
-              className={`p-2 rounded-xl border transition-all ${controlBg} ${isSynthesizing ? 'opacity-100 text-indigo-600' : 'opacity-40 hover:opacity-100 hover:text-indigo-500'}`}
+              className={`p-2 rounded-xl border transition-all ${controlBg} ${isSynthesizing ? 'opacity-100 text-indigo-600 ring-1 ring-indigo-600' : 'opacity-40 hover:opacity-100 hover:text-indigo-500'}`}
               title="Ensure Audio File exists"
             >
               {isSynthesizing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Headphones className="w-4 h-4" />}
@@ -198,7 +221,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               e.stopPropagation();
               onToggleFavorite(c.id);
             }}
-            className={`p-2 rounded-xl border transition-all ${controlBg} ${c.isFavorite ? 'opacity-100 text-amber-500 border-amber-500/30' : 'opacity-40 hover:opacity-100'}`}
+            className={`p-2 rounded-xl border transition-all ${controlBg} ${c.isFavorite ? 'opacity-100 text-amber-500 border-amber-500/30 ring-1 ring-amber-500/20' : 'opacity-40 hover:opacity-100'}`}
           >
             <Star className={`w-4 h-4 ${c.isFavorite ? 'fill-current' : ''}`} />
           </button>
@@ -275,7 +298,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                    // Automatically perform audio sync after refreshing the folder
                    await handleSynthesizeAll(true);
                  }}
-                 disabled={!!isBatchSynthesizing}
+                 disabled={isBatchSynthesizing}
                  title="Force Re-scan Folder and Sync Audio Files"
                  className={`px-3 py-2 rounded-xl border text-[10px] font-black flex items-center gap-1.5 shadow-sm ${controlBg} ${textPrimary} ${isBatchSynthesizing ? 'opacity-50' : 'hover:border-indigo-500'}`}
                >
@@ -311,12 +334,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             </div>
           ) : viewMode === 'details' ? (
             <div>
-              <div className={`grid grid-cols-[40px_1fr_60px] sm:grid-cols-[86px_1fr_120px_100px_130px] px-4 sm:px-6 py-4 text-[9px] sm:text-[11px] font-black uppercase tracking-widest border-b ${isDark ? 'border-slate-800 bg-slate-950/40 text-indigo-400' : 'border-black/5 bg-black/5 text-indigo-600'}`}>
+              <div className={`grid grid-cols-[40px_1fr_60px] sm:grid-cols-[60px_1fr_100px_100px_180px] px-4 sm:px-6 py-4 text-[9px] sm:text-[11px] font-black uppercase tracking-widest border-b ${isDark ? 'border-slate-800 bg-slate-950/40 text-indigo-400' : 'border-black/5 bg-black/5 text-indigo-600'}`}>
                 <div>Index</div>
                 <div>Name</div>
                 <div className="text-right hidden sm:block">Words</div>
-                <div className="text-right">Prog.</div>
-                <div className="text-right hidden sm:block">Action</div>
+                <div className="text-right px-4">Prog.</div>
+                <div className="text-right hidden sm:block">Actions</div>
               </div>
               <div className={`divide-y ${isDark ? 'divide-slate-800' : 'divide-white/5'}`}>{chapters.map(renderRow)}</div>
             </div>

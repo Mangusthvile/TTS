@@ -49,22 +49,26 @@ const Player: React.FC<PlayerProps> = ({
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [showSleepMenu, setShowSleepMenu] = useState(false);
   
-  // High-precision sync:
-  // 1. Calculate an estimate based on word count/speed as a baseline.
-  // 2. Override with real audio metadata if isPlaying is true and metadata exists.
+  // High-precision sync clock logic:
+  // We use the word-count estimate as a baseline when audio metadata hasn't loaded yet.
   const totalSecondsEstimate = useMemo(() => Math.max(1, (wordCount / (170 * speed)) * 60), [wordCount, speed]);
   
-  // Use character progress ratio to estimate time when paused
-  const charRatio = Math.max(0, Math.min(1, progress / Math.max(1, totalLength)));
-  const elapsedSecondsEstimate = totalSecondsEstimate * charRatio;
+  const displayTime = useMemo(() => {
+    // If audio is actively playing and provides high-res time, use it.
+    if (isPlaying && playbackCurrentTime !== undefined && playbackCurrentTime > 0) {
+      return formatTime(playbackCurrentTime);
+    }
+    // Otherwise, interpolate based on the character progress ratio
+    const ratio = Math.max(0, Math.min(1, progress / Math.max(1, totalLength)));
+    return formatTime(totalSecondsEstimate * ratio);
+  }, [playbackCurrentTime, isPlaying, progress, totalLength, totalSecondsEstimate]);
 
-  const displayTime = (playbackCurrentTime !== undefined && isPlaying) 
-    ? formatTime(playbackCurrentTime) 
-    : formatTime(elapsedSecondsEstimate);
-
-  const displayTotal = (playbackDuration !== undefined && isPlaying && playbackDuration > 0) 
-    ? formatTime(playbackDuration) 
-    : formatTime(totalSecondsEstimate);
+  const displayTotal = useMemo(() => {
+    if (isPlaying && playbackDuration !== undefined && playbackDuration > 0) {
+      return formatTime(playbackDuration);
+    }
+    return formatTime(totalSecondsEstimate);
+  }, [playbackDuration, isPlaying, totalSecondsEstimate]);
 
   useEffect(() => {
     const loadVoices = () => {
