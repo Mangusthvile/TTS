@@ -2,15 +2,15 @@ export interface CloudTtsResult {
   audioUrl: string;
 }
 
+const DEFAULT_ENDPOINT = 'https://talevox-tts-762195576430.us-south1.run.app';
+
 export async function synthesizeChunk(
   text: string,
   voiceName: string,
   speakingRate: number
 ): Promise<CloudTtsResult> {
-  const endpoint = (import.meta as any).env?.VITE_TTS_ENDPOINT;
-  if (!endpoint) throw new Error("VITE_TTS_ENDPOINT is not configured.");
+  const endpoint = (import.meta as any).env?.VITE_TTS_ENDPOINT || DEFAULT_ENDPOINT;
 
-  // Using a simplified request for better compatibility with standard Cloud Run TTS wrappers
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -33,7 +33,7 @@ export async function synthesizeChunk(
     throw new Error("Invalid response: missing audio data.");
   }
 
-  // Convert base64 to Blob URL
+  // Convert base64 to Blob
   const binaryString = atob(data.audioBase64);
   const bytes = new Uint8Array(binaryString.length);
   for (let i = 0; i < binaryString.length; i++) {

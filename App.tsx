@@ -60,6 +60,10 @@ const App: React.FC = () => {
   const [stopAfterChapter, setStopAfterChapter] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
+  // Real-time audio playback states
+  const [audioDuration, setAudioDuration] = useState(0);
+  const [audioCurrentTime, setAudioCurrentTime] = useState(0);
+
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
 
@@ -106,6 +110,17 @@ const App: React.FC = () => {
     setIsPlaying(false); 
   }, []);
 
+  const handleUpdateChapter = useCallback((chapter: Chapter) => {
+    if (!stateRef.current.activeBookId) return;
+    setState(prev => ({
+      ...prev,
+      books: prev.books.map(b => b.id === stateRef.current.activeBookId ? {
+        ...b,
+        chapters: b.chapters.map(c => c.id === chapter.id ? chapter : c)
+      } : b)
+    }));
+  }, []);
+
   const updateChapterProgress = useCallback((bookId: string, chapterId: string, offset: number, total: number, completed: boolean = false) => {
     setState(prev => ({
       ...prev,
@@ -138,10 +153,7 @@ const App: React.FC = () => {
 
     if (!confirm(`Permanently delete "${chapter.title}"?`)) return;
 
-    // Stop if currently reading this chapter
-    if (book.currentChapterId === chapterId) {
-      handlePause();
-    }
+    if (book.currentChapterId === chapterId) handlePause();
 
     setIsLoadingChapter(true);
     try {
@@ -170,7 +182,6 @@ const App: React.FC = () => {
     const finalPlaybackText = applyRules(activeChapterText, activeBook?.rules || []);
     const total = finalPlaybackText.length || 1;
     const boundedOffset = Math.min(Math.max(0, offset), total);
-    const isFinished = boundedOffset >= total * 0.98;
     
     if (isPlaying) {
       speechController.seekToOffset(boundedOffset);
@@ -179,57 +190,9 @@ const App: React.FC = () => {
     }
     
     if (stateRef.current.activeBookId && activeBook?.currentChapterId) {
-      updateChapterProgress(stateRef.current.activeBookId, activeBook.currentChapterId, boundedOffset, total, isFinished);
+      updateChapterProgress(stateRef.current.activeBookId, activeBook.currentChapterId, boundedOffset, total, boundedOffset >= total * 0.98);
     }
   }, [isPlaying, activeBook, activeChapterText, updateChapterProgress]);
-
-  const handleRuleOperation = useCallback((type: 'add' | 'update' | 'delete' | 'import', rule?: Rule, importedRules?: Rule[]) => {
-    setState(prev => {
-      if (!prev.activeBookId) return prev;
-      return {
-        ...prev,
-        books: prev.books.map(b => b.id === prev.activeBookId ? {
-          ...b,
-          rules: type === 'add' && rule ? [...b.rules, rule] :
-                 type === 'update' && rule ? b.rules.map(r => r.id === rule.id ? rule : r) :
-                 type === 'delete' && rule ? b.rules.filter(r => r.id !== rule.id) :
-                 type === 'import' && importedRules ? importedRules : b.rules
-        } : b)
-      };
-    });
-  }, []);
-
-  const handleSpeedChange = useCallback((speed: number) => {
-    setState(prev => {
-      const activeBook = prev.books.find(b => b.id === prev.activeBookId);
-      if (activeBook?.settings.useBookSettings) {
-        return {
-          ...prev,
-          books: prev.books.map(b => b.id === prev.activeBookId ? {
-            ...b,
-            settings: { ...b.settings, playbackSpeed: speed }
-          } : b)
-        };
-      }
-      return { ...prev, playbackSpeed: speed };
-    });
-  }, []);
-
-  const handleVoiceChange = useCallback((voiceName: string) => {
-    setState(prev => {
-      const activeBook = prev.books.find(b => b.id === prev.activeBookId);
-      if (activeBook?.settings.useBookSettings) {
-        return {
-          ...prev,
-          books: prev.books.map(b => b.id === prev.activeBookId ? {
-            ...b,
-            settings: { ...b.settings, selectedVoiceName: voiceName }
-          } : b)
-        };
-      }
-      return { ...prev, selectedVoiceName: voiceName };
-    });
-  }, []);
 
   const handleSync = useCallback(async (manual = false) => {
     if (!state.driveToken) return;
@@ -278,52 +241,7 @@ const App: React.FC = () => {
     }
   }, [state.driveToken]);
 
-  const handleRescanDriveFolder = useCallback(async (bookId: string) => {
-    const book = state.books.find(b => b.id === bookId);
-    if (!book || book.backend !== StorageBackend.DRIVE || !state.driveToken || !book.driveFolderId) return;
-    setIsLoadingChapter(true);
-    try {
-      const files = await listFilesInFolder(state.driveToken, book.driveFolderId);
-      const txtFiles = files.filter(f => f.name.toLowerCase().endsWith('.txt'));
-      const updatedChapters: Chapter[] = txtFiles.map(f => {
-        const existing = book.chapters.find(c => c.driveId === f.id || c.filename === f.name);
-        if (existing) return existing;
-        const indexMatch = f.name.match(/^(\d+)/);
-        const index = indexMatch ? parseInt(indexMatch[1]) : 0;
-        return {
-          id: crypto.randomUUID(),
-          index,
-          title: f.name.replace(/\.txt$/i, '').replace(/^\d+\s*_?/, '').replace(/_/g, ' ') || `Chapter ${index}`,
-          filename: f.name,
-          driveId: f.id,
-          content: '',
-          wordCount: 0,
-          progress: 0
-        };
-      });
-      setState(prev => ({
-        ...prev,
-        books: prev.books.map(b => b.id === bookId ? { ...b, chapters: updatedChapters.sort((a, b) => a.index - b.index) } : b)
-      }));
-      alert(`Recovered ${txtFiles.length} chapters.`);
-    } catch (err) {
-      alert("Rescan failed: " + err);
-    } finally {
-      setIsLoadingChapter(false);
-    }
-  }, [state.books, state.driveToken]);
-
-  useEffect(() => {
-    if (state.driveToken) handleSync();
-  }, [state.driveToken]);
-
-  const handleLinkCloud = async () => {
-    try {
-      const token = await authenticateDrive(state.googleClientId);
-      setState(prev => ({ ...prev, driveToken: token }));
-      return token;
-    } catch (err) { throw err; }
-  };
+  useEffect(() => { if (state.driveToken) handleSync(); }, [state.driveToken]);
 
   const loadChapterContent = useCallback(async (bookId: string, chapterId: string) => {
     const book = stateRef.current.books.find(b => b.id === bookId);
@@ -337,7 +255,7 @@ const App: React.FC = () => {
       } else if (book.backend === StorageBackend.LOCAL && book.directoryHandle) {
         const fileHandle = await book.directoryHandle.getFileHandle(chapter.filename);
         content = await (await fileHandle.getFile()).text();
-      } else { content = chapter.content || ""; }
+      } else content = chapter.content || "";
       setActiveChapterText(content);
       setState(prev => ({ ...prev, currentOffset: chapter.progress || 0 }));
     } catch (err) {
@@ -346,35 +264,8 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (state.activeBookId && activeBook?.currentChapterId) {
-      loadChapterContent(state.activeBookId, activeBook.currentChapterId);
-    } else { setActiveChapterText(''); }
+    if (state.activeBookId && activeBook?.currentChapterId) loadChapterContent(state.activeBookId, activeBook.currentChapterId);
   }, [state.activeBookId, activeBook?.currentChapterId, loadChapterContent]);
-
-  const handleSelectBook = useCallback((id: string) => {
-    handlePause();
-    setState(prev => ({
-      ...prev,
-      activeBookId: id,
-      lastSession: undefined,
-      books: prev.books.map(b => b.id === id ? { ...b, currentChapterId: undefined } : b),
-      currentOffset: 0
-    }));
-    setActiveTab('reader');
-  }, [handlePause]);
-
-  const handleSelectChapter = useCallback(async (bookId: string, chapterId: string, offset?: number, isInternalTransition = false) => {
-    if (!isInternalTransition) handlePause();
-    setState(prev => ({
-      ...prev, 
-      activeBookId: bookId,
-      lastSession: undefined,
-      books: prev.books.map(b => b.id === bookId ? { ...b, currentChapterId: chapterId } : b),
-      currentOffset: offset ?? 0
-    }));
-    setActiveTab('reader');
-    setIsSidebarOpen(false);
-  }, [handlePause]);
 
   const handlePlay = useCallback(() => {
     if (!activeBook || !activeChapterMetadata || isLoadingChapter) return;
@@ -388,12 +279,10 @@ const App: React.FC = () => {
       (activeBook.settings.useBookSettings && activeBook.settings.playbackSpeed) ? activeBook.settings.playbackSpeed : state.playbackSpeed, 
       state.currentOffset,
       () => setIsPlaying(false),
-      (offset) => { 
-        stateRef.current.currentOffset = offset;
-        // Frequency-aware state update
-        if (Math.abs(stateRef.current.currentOffset - state.currentOffset) >= 2) {
-          setState(prev => ({ ...prev, currentOffset: offset }));
-        }
+      (meta) => { 
+        setState(prev => ({ ...prev, currentOffset: meta.charOffset }));
+        setAudioCurrentTime(meta.currentTime);
+        setAudioDuration(meta.duration);
       },
       async () => {
         if (document.hidden) return null;
@@ -401,17 +290,15 @@ const App: React.FC = () => {
         const book = s.books.find(b => b.id === s.activeBookId);
         if (!book || stopAfterChapter || (sleepTimerSeconds !== null && sleepTimerSeconds <= 0)) return null;
         const currentIdx = book.chapters.findIndex(c => c.id === book.currentChapterId);
-        if (book.currentChapterId) {
-          const currentChapter = book.chapters[currentIdx];
-          const textAtEnd = applyRules(currentChapter.content, book.rules);
-          updateChapterProgress(book.id, book.currentChapterId, textAtEnd.length, textAtEnd.length, true);
-        }
         if (currentIdx < book.chapters.length - 1) {
           const next = book.chapters[currentIdx + 1];
           setTransitionToast({ number: next.index, title: next.title });
           setTimeout(() => setTransitionToast(null), 3500);
-          handleSelectChapter(book.id, next.id, 0, true);
-          setActiveChapterText(next.content);
+          setState(prev => ({
+            ...prev, 
+            books: prev.books.map(b => b.id === book.id ? { ...b, currentChapterId: next.id } : b),
+            currentOffset: 0
+          }));
           return {
             announcementPrefix: `Chapter ${next.index}: ${next.title}. `,
             content: applyRules(next.content, book.rules),
@@ -420,10 +307,9 @@ const App: React.FC = () => {
           };
         }
         return null;
-      },
-      activeBook.title, activeChapterMetadata.title
+      }
     );
-  }, [activeBook, activeChapterMetadata, isLoadingChapter, activeChapterText, state.selectedVoiceName, state.playbackSpeed, state.currentOffset, stopAfterChapter, sleepTimerSeconds, updateChapterProgress, handleSelectChapter]);
+  }, [activeBook, activeChapterMetadata, isLoadingChapter, activeChapterText, state.selectedVoiceName, state.playbackSpeed, state.currentOffset, stopAfterChapter, sleepTimerSeconds]);
 
   const handleAddBook = async (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string, driveFolderName?: string) => {
     const newBook: Book = {
@@ -473,18 +359,11 @@ const App: React.FC = () => {
     <div className={`flex flex-col h-screen overflow-hidden font-sans transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-950 text-slate-100' : state.theme === Theme.SEPIA ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
       <div className="flex flex-1 overflow-hidden relative">
         <Library 
-          isOpen={isSidebarOpen} 
-          onClose={() => setIsSidebarOpen(false)} 
-          books={state.books} 
-          activeBookId={state.activeBookId} 
-          lastSession={state.lastSession} 
-          onSelectBook={handleSelectBook} 
+          isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} books={state.books} activeBookId={state.activeBookId} lastSession={state.lastSession} 
+          onSelectBook={(id) => { handlePause(); setState(p => ({ ...p, activeBookId: id, currentOffset: 0 })); setActiveTab('reader'); }} 
           onDeleteBook={id => setState(p => ({ ...p, books: p.books.filter(b => b.id !== id), activeBookId: p.activeBookId === id ? undefined : p.activeBookId }))} 
-          onSelectChapter={handleSelectChapter} 
-          onDeleteChapter={handleDeleteChapter}
-          theme={state.theme} 
-          onAddBook={handleAddBook}
-          googleClientId={state.googleClientId}
+          onSelectChapter={(bid, cid, offset) => { handlePause(); setState(p => ({ ...p, activeBookId: bid, books: p.books.map(b => b.id === bid ? { ...b, currentChapterId: cid } : b), currentOffset: offset ?? 0 })); setActiveTab('reader'); setIsSidebarOpen(false); }} 
+          onDeleteChapter={handleDeleteChapter} theme={state.theme} onAddBook={handleAddBook} googleClientId={state.googleClientId}
         />
         <main className={`flex-1 flex flex-col min-w-0 shadow-2xl relative transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-900' : state.theme === Theme.SEPIA ? 'bg-[#efe6d5]' : 'bg-white'}`}>
           <header className={`h-16 border-b flex items-center justify-between px-4 lg:px-8 z-10 sticky top-0 transition-colors duration-300 ${state.theme === Theme.DARK ? 'border-slate-800 bg-slate-900/80 backdrop-blur-md' : state.theme === Theme.SEPIA ? 'border-[#d8ccb6] bg-[#efe6d5]/90 backdrop-blur-md' : 'border-black/5 bg-white/90 backdrop-blur-md'}`}>
@@ -518,28 +397,29 @@ const App: React.FC = () => {
                   </div>
                </div>
              )}
-             {activeTab === 'reader' ? (activeBook ? (activeBook.currentChapterId ? (<Reader chapter={activeChapterMetadata || null} rules={activeBook.rules} currentOffset={state.currentOffset} theme={state.theme} debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset} highlightMode={activeBook.settings.highlightMode} onBackToChapters={() => handleSelectBook(activeBook.id)} onAddChapter={() => setIsAddChapterOpen(true)} readerSettings={state.readerSettings} />) : (<ChapterFolderView book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)} onOpenChapter={(id) => handleSelectChapter(activeBook.id, id)} onToggleFavorite={() => {}} onUpdateChapterTitle={(cid, nt) => handleUpdateChapterTitle(activeBook.id, cid, nt)} onDeleteChapter={(cid) => handleDeleteChapter(activeBook.id, cid)} onRefreshDriveFolder={() => handleRescanDriveFolder(activeBook.id)} />)) : (<div className="h-full flex flex-col items-center justify-center font-black tracking-widest text-lg opacity-40 uppercase">Select a book to begin</div>)) : activeTab === 'rules' ? (
+             {activeTab === 'reader' ? (activeBook ? (activeBook.currentChapterId ? (<Reader chapter={activeChapterMetadata || null} rules={activeBook.rules} currentOffset={state.currentOffset} theme={state.theme} debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset} highlightMode={activeBook.settings.highlightMode} onBackToChapters={() => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, currentChapterId: undefined } : b) }))} onAddChapter={() => setIsAddChapterOpen(true)} readerSettings={state.readerSettings} />) : (<ChapterFolderView book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)} onOpenChapter={(id) => setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, currentChapterId: id } : b), currentOffset: 0 }))} onToggleFavorite={() => {}} onUpdateChapterTitle={(cid, nt) => handleUpdateChapterTitle(activeBook.id, cid, nt)} onDeleteChapter={(cid) => handleDeleteChapter(activeBook.id, cid)} onRefreshDriveFolder={() => {}} onUpdateChapter={handleUpdateChapter} />)) : (<div className="h-full flex flex-col items-center justify-center font-black tracking-widest text-lg opacity-40 uppercase">Select a book to begin</div>)) : activeTab === 'rules' ? (
                <RuleManager 
                  rules={activeBook?.rules || []} 
                  theme={state.theme} 
-                 onAddRule={r => handleRuleOperation('add', r)} 
-                 onUpdateRule={r => handleRuleOperation('update', r)} 
-                 onDeleteRule={id => handleRuleOperation('delete', { id } as Rule)} 
-                 onImportRules={nr => handleRuleOperation('import', undefined, nr)}
+                 onAddRule={r => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: [...b.rules, r] } : b) }))} 
+                 onUpdateRule={r => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: b.rules.map(old => old.id === r.id ? r : old) } : b) }))} 
+                 onDeleteRule={id => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: b.rules.filter(r => r.id !== id) } : b) }))} 
+                 onImportRules={nr => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: nr } : b) }))}
                  selectedVoice={(activeBook?.settings.useBookSettings && activeBook.settings.selectedVoiceName) ? activeBook.settings.selectedVoiceName : state.selectedVoiceName || ''}
                  playbackSpeed={(activeBook?.settings.useBookSettings && activeBook.settings.playbackSpeed) ? activeBook.settings.playbackSpeed : state.playbackSpeed}
                />
-             ) : (<Settings settings={state.readerSettings} onUpdate={s => setState(p => ({ ...p, readerSettings: { ...p.readerSettings, ...s } }))} theme={state.theme} keepAwake={state.keepAwake} onSetKeepAwake={v => setState(p => ({ ...p, keepAwake: v }))} onCheckForUpdates={() => window.location.reload()} isCloudLinked={!!state.driveToken} onLinkCloud={handleLinkCloud} onSyncNow={() => handleSync(true)} isSyncing={isSyncing} googleClientId={state.googleClientId} onUpdateGoogleClientId={id => setState(p => ({ ...p, googleClientId: id }))} onClearAuth={() => setState(p => ({ ...p, driveToken: undefined }))} />)}
+             ) : (<Settings settings={state.readerSettings} onUpdate={s => setState(p => ({ ...p, readerSettings: { ...p.readerSettings, ...s } }))} theme={state.theme} keepAwake={state.keepAwake} onSetKeepAwake={v => setState(p => ({ ...p, keepAwake: v }))} onCheckForUpdates={() => window.location.reload()} isCloudLinked={!!state.driveToken} onLinkCloud={async () => { const t = await authenticateDrive(state.googleClientId); setState(p => ({ ...p, driveToken: t })); }} onSyncNow={() => handleSync(true)} isSyncing={isSyncing} googleClientId={state.googleClientId} onUpdateGoogleClientId={id => setState(p => ({ ...p, googleClientId: id }))} onClearAuth={() => setState(p => ({ ...p, driveToken: undefined }))} />)}
           </div>
           {activeChapterMetadata && activeTab === 'reader' && (
             <Player 
               isPlaying={isPlaying} onPlay={handlePlay} onPause={handlePause} onStop={handlePause} onNext={() => {}} onPrev={() => {}} onSeek={d => handleJumpToOffset(state.currentOffset + d)}
-              speed={(activeBook?.settings.useBookSettings && activeBook.settings.playbackSpeed) ? activeBook.settings.playbackSpeed : state.playbackSpeed} onSpeedChange={handleSpeedChange}
-              selectedVoice={(activeBook?.settings.useBookSettings && activeBook.settings.selectedVoiceName) ? activeBook.settings.selectedVoiceName : state.selectedVoiceName || ''} onVoiceChange={handleVoiceChange}
+              speed={(activeBook?.settings.useBookSettings && activeBook.settings.playbackSpeed) ? activeBook.settings.playbackSpeed : state.playbackSpeed} onSpeedChange={s => setState(prev => prev.books.find(b => b.id === prev.activeBookId)?.settings.useBookSettings ? { ...prev, books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, settings: { ...b.settings, playbackSpeed: s } } : b) } : { ...prev, playbackSpeed: s })}
+              selectedVoice={(activeBook?.settings.useBookSettings && activeBook.settings.selectedVoiceName) ? activeBook.settings.selectedVoiceName : state.selectedVoiceName || ''} onVoiceChange={v => setState(prev => prev.books.find(b => b.id === prev.activeBookId)?.settings.useBookSettings ? { ...prev, books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, settings: { ...b.settings, selectedVoiceName: v } } : b) } : { ...prev, selectedVoiceName: v })}
               theme={state.theme} onThemeChange={() => {}} progress={state.currentOffset} totalLength={applyRules(activeChapterText, activeBook?.rules || []).length} wordCount={activeChapterMetadata.wordCount} onSeekToOffset={handleJumpToOffset}
               sleepTimer={sleepTimerSeconds} onSetSleepTimer={setSleepTimerSeconds} stopAfterChapter={stopAfterChapter} onSetStopAfterChapter={setStopAfterChapter}
-              useBookSettings={activeBook?.settings.useBookSettings || false} onSetUseBookSettings={v => { handlePause(); setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, settings: { ...b.settings, useBookSettings: v } } : b) })); }}
+              useBookSettings={activeBook?.settings.useBookSettings || false} onSetUseBookSettings={v => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, settings: { ...b.settings, useBookSettings: v } } : b) }))}
               highlightMode={activeBook?.settings.highlightMode || HighlightMode.WORD} onSetHighlightMode={m => setState(p => ({ ...p, books: p.books.map(b => b.id === b.id ? { ...b, settings: { ...b.settings, highlightMode: m } } : b) }))}
+              playbackCurrentTime={audioCurrentTime} playbackDuration={audioDuration}
             />
           )}
         </main>

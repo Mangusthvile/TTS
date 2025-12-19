@@ -1,5 +1,6 @@
 import { Rule, RuleType } from '../types';
 import { synthesizeChunk } from './cloudTtsService';
+import { getAudioFromCache, saveAudioToCache, generateAudioKey } from './audioCache';
 
 export function applyRules(text: string, rules: Rule[]): string {
   let processedText = text;
@@ -43,29 +44,34 @@ export interface NextSegment {
   chapterTitle: string;
 }
 
+export interface PlaybackMetadata {
+  currentTime: number;
+  duration: number;
+  charOffset: number;
+}
+
 class SpeechController {
   private synth: SpeechSynthesis;
   private audio: HTMLAudioElement;
   private currentChunks: SpeechChunk[] = [];
   private currentChunkIndex: number = -1;
-  private timer: number | null = null;
+  private rafId: number | null = null;
   
   private onEndCallback: (() => void) | null = null;
-  private globalBoundaryCallback: ((offset: number, charIndex: number, chunkIdx: number) => void) | null = null;
+  private syncCallback: ((meta: PlaybackMetadata) => void) | null = null;
   
   private rate: number = 1.0;
   private voiceName: string = '';
   private sessionToken: number = 0;
   private getNextSegment: (() => Promise<NextSegment | null>) | null = null;
   
-  // Defensive access to environment variables to prevent crash if import.meta or env is missing
-  private isCloudEnabled: boolean = !!(typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_TTS_ENDPOINT);
+  // Flag to detect if we should use Cloud TTS
+  private isCloudEnabled: boolean = true;
 
   constructor() {
     this.synth = window.speechSynthesis;
     this.audio = new Audio();
     this.setupAudioListeners();
-    this.setupMediaSession();
   }
 
   private setupAudioListeners() {
@@ -75,69 +81,46 @@ class SpeechController {
     });
 
     this.audio.addEventListener('play', () => {
-      this.startTracking();
-      this.updateMediaSessionState();
+      this.startSyncLoop();
     });
 
     this.audio.addEventListener('pause', () => {
-      this.stopTracking();
-      this.updateMediaSessionState();
-    });
-
-    this.audio.addEventListener('error', (e) => {
-      console.error("Audio error, fallback to WebSpeech:", e);
-      this.isCloudEnabled = false;
-      this.playNextChunk();
+      this.stopSyncLoop();
     });
   }
 
-  private setupMediaSession() {
-    if ('mediaSession' in navigator) {
-      navigator.mediaSession.setActionHandler('play', () => this.resume());
-      navigator.mediaSession.setActionHandler('pause', () => this.pause());
-      navigator.mediaSession.setActionHandler('stop', () => this.stop());
-    }
-  }
-
-  private updateMediaSessionState() {
-    if ('mediaSession' in navigator) {
-      navigator.mediaSession.playbackState = this.audio.paused ? 'paused' : 'playing';
-      if ((navigator as any).mediaSession.setPositionState && this.audio.duration) {
-        try {
-          (navigator as any).mediaSession.setPositionState({
-            duration: this.audio.duration,
-            playbackRate: this.audio.playbackRate,
-            position: this.audio.currentTime,
-          });
-        } catch (e) {}
-      }
-    }
-  }
-
-  private startTracking() {
-    this.stopTracking();
-    this.timer = window.setInterval(() => {
-      if (this.globalBoundaryCallback && this.currentChunkIndex >= 0) {
+  private startSyncLoop() {
+    const sync = () => {
+      if (this.syncCallback && this.currentChunkIndex >= 0) {
         const chunk = this.currentChunks[this.currentChunkIndex];
-        if (!chunk || !this.audio.duration) return;
-        
-        const ratio = this.audio.currentTime / this.audio.duration;
-        const charOffset = Math.floor(chunk.text.length * ratio);
-        this.globalBoundaryCallback(chunk.startOffset + charOffset, charOffset, this.currentChunkIndex);
+        if (chunk && this.audio.duration && !this.audio.paused) {
+          const ratio = this.audio.currentTime / this.audio.duration;
+          const charOffset = Math.floor(chunk.text.length * ratio);
+          const totalGlobalOffset = chunk.startOffset + charOffset;
+          
+          this.syncCallback({
+            currentTime: this.audio.currentTime,
+            duration: this.audio.duration,
+            charOffset: totalGlobalOffset
+          });
+        }
       }
-    }, 120);
+      this.rafId = requestAnimationFrame(sync);
+    };
+    this.stopSyncLoop();
+    this.rafId = requestAnimationFrame(sync);
   }
 
-  private stopTracking() {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
+  private stopSyncLoop() {
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
     }
   }
 
   private createChunks(text: string): SpeechChunk[] {
     const chunks: SpeechChunk[] = [];
-    const MAX = this.isCloudEnabled ? 5000 : 800;
+    const MAX = 4800; 
     const parts = text.split(/([.!?\n]\s*)/);
     let current = "";
     let start = 0;
@@ -161,52 +144,36 @@ class SpeechController {
     rate: number, 
     startOffset: number, 
     onEnd: () => void, 
-    onBoundary?: (offset: number, charIndex: number, chunkIdx: number) => void,
-    getNextSegment?: () => Promise<NextSegment | null>,
-    bookTitle?: string,
-    chapterTitle?: string
+    onSync?: (meta: PlaybackMetadata) => void,
+    getNextSegment?: () => Promise<NextSegment | null>
   ) {
     this.sessionToken++;
     this.stop();
     
     this.onEndCallback = onEnd;
-    this.globalBoundaryCallback = onBoundary || null;
+    this.syncCallback = onSync || null;
     this.rate = rate;
     this.voiceName = voiceName;
     this.getNextSegment = getNextSegment || null;
 
-    if ('mediaSession' in navigator && window.MediaMetadata) {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: chapterTitle || "Talevox",
-        artist: bookTitle || "TTS Reader",
-        artwork: [{ src: 'https://cdn-icons-png.flaticon.com/512/3145/3145761.png', sizes: '512x512', type: 'image/png' }]
-      });
-    }
-
     this.currentChunks = this.createChunks(text);
-    
-    // Find starting chunk
     const idx = this.currentChunks.findIndex(c => c.startOffset + c.text.length > startOffset);
     this.currentChunkIndex = idx !== -1 ? idx : 0;
 
     this.playNextChunk(startOffset);
   }
 
-  /**
-   * Specialized seek that avoids a full re-fetch if we are already in the correct chunk.
-   */
   seekToOffset(offset: number) {
     if (this.currentChunks.length === 0) return;
     const idx = this.currentChunks.findIndex(c => c.startOffset + c.text.length > offset);
     if (idx === -1) return;
 
-    if (this.isCloudEnabled && idx === this.currentChunkIndex && this.audio.src && this.audio.duration) {
+    if (idx === this.currentChunkIndex && this.audio.src && this.audio.duration) {
       const chunk = this.currentChunks[idx];
       const relative = offset - chunk.startOffset;
       const ratio = Math.max(0, Math.min(1, relative / chunk.text.length));
       this.audio.currentTime = ratio * this.audio.duration;
     } else {
-      // Different chunk or legacy mode, full restart required
       this.currentChunkIndex = idx;
       this.playNextChunk(offset);
     }
@@ -216,10 +183,6 @@ class SpeechController {
     const session = this.sessionToken;
 
     if (this.currentChunkIndex >= this.currentChunks.length) {
-      if (document.hidden) {
-        this.pause(); // Do not advance chapters if the app is minimized
-        return;
-      }
       if (this.getNextSegment) {
         const next = await this.getNextSegment();
         if (next && this.sessionToken === session) {
@@ -236,79 +199,67 @@ class SpeechController {
 
     const chunk = this.currentChunks[this.currentChunkIndex];
     
-    if (this.isCloudEnabled) {
-      try {
+    try {
+      const cacheKey = generateAudioKey(chunk.text, this.voiceName, this.rate);
+      const cachedBlob = await getAudioFromCache(cacheKey);
+      let audioUrl = "";
+
+      if (cachedBlob) {
+        audioUrl = URL.createObjectURL(cachedBlob);
+      } else {
         const result = await synthesizeChunk(chunk.text, this.voiceName, this.rate);
         if (this.sessionToken !== session) return;
+        audioUrl = result.audioUrl;
         
-        this.audio.src = result.audioUrl;
-        
-        if (initialOffsetInChunk !== undefined) {
-          const relative = initialOffsetInChunk - chunk.startOffset;
-          const ratio = Math.max(0, Math.min(1, relative / chunk.text.length));
-          
-          this.audio.onloadedmetadata = () => {
-            if (this.sessionToken === session) {
-                this.audio.currentTime = ratio * this.audio.duration;
-                this.audio.play().catch(() => {});
-            }
-            this.audio.onloadedmetadata = null;
-          };
-        } else {
+        // Persist to cache
+        fetch(audioUrl).then(r => r.blob()).then(blob => {
+          saveAudioToCache(cacheKey, blob);
+        });
+      }
+
+      this.audio.src = audioUrl;
+      this.audio.playbackRate = 1.0; // Audio is pre-rendered at correct rate usually, or we can use playbackRate
+
+      const onLoaded = () => {
+        if (this.sessionToken === session) {
+          if (initialOffsetInChunk !== undefined) {
+            const relative = initialOffsetInChunk - chunk.startOffset;
+            const ratio = Math.max(0, Math.min(1, relative / chunk.text.length));
+            this.audio.currentTime = ratio * this.audio.duration;
+          }
           this.audio.play().catch(() => {});
         }
-      } catch (err) {
-        console.warn("Cloud TTS failed, falling back to WebSpeech:", err);
-        this.isCloudEnabled = false;
-        this.playNextChunk(initialOffsetInChunk);
-      }
-    } else {
-      const utterance = new SpeechSynthesisUtterance(chunk.text);
-      const voices = this.synth.getVoices();
-      utterance.voice = voices.find(v => v.name === this.voiceName) || voices[0];
-      utterance.rate = this.rate;
-
-      utterance.onboundary = (event) => {
-        if (this.sessionToken === session && this.globalBoundaryCallback) {
-          this.globalBoundaryCallback(chunk.startOffset + event.charIndex, event.charIndex, this.currentChunkIndex);
-        }
+        this.audio.removeEventListener('loadedmetadata', onLoaded);
       };
 
-      utterance.onend = () => {
-        if (this.sessionToken === session) {
-          this.currentChunkIndex++;
-          this.playNextChunk();
-        }
-      };
-
-      this.synth.speak(utterance);
+      this.audio.addEventListener('loadedmetadata', onLoaded);
+    } catch (err) {
+      console.error("Audio playback failed, falling back to Web Speech:", err);
+      // Optional: Add Web Speech fallback logic here if desired
     }
   }
 
   pause() {
-    if (this.isCloudEnabled) this.audio.pause();
-    else this.synth.pause();
+    this.audio.pause();
   }
 
   resume() {
-    if (this.isCloudEnabled) this.audio.play().catch(() => {});
-    else this.synth.resume();
+    this.audio.play().catch(() => {});
   }
 
   stop() {
     this.sessionToken++;
-    this.stopTracking();
+    this.stopSyncLoop();
     this.audio.pause();
     if (this.audio.src) {
       URL.revokeObjectURL(this.audio.src);
       this.audio.src = "";
     }
     this.synth.cancel();
-    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none';
   }
 
   get isPaused() {
-    return this.isCloudEnabled ? this.audio.paused : this.synth.paused;
+    return this.audio.paused;
   }
 }
 

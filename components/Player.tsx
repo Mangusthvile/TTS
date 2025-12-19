@@ -1,5 +1,4 @@
-
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Play, Pause, SkipBack, SkipForward, FastForward, Rewind, Clock, Type, AlignLeft, Sparkles, Repeat } from 'lucide-react';
 import { Theme, HighlightMode } from '../types';
 
@@ -29,6 +28,8 @@ interface PlayerProps {
   onSetUseBookSettings: (v: boolean) => void;
   highlightMode: HighlightMode;
   onSetHighlightMode: (v: HighlightMode) => void;
+  playbackCurrentTime?: number;
+  playbackDuration?: number;
 }
 
 const formatTime = (seconds: number) => {
@@ -43,10 +44,17 @@ const Player: React.FC<PlayerProps> = ({
   theme, progress, totalLength, wordCount, onSeekToOffset,
   sleepTimer, onSetSleepTimer, stopAfterChapter, onSetStopAfterChapter,
   useBookSettings, onSetUseBookSettings, highlightMode, onSetHighlightMode,
-  onNext, onPrev, onSeek
+  onNext, onPrev, onSeek, playbackCurrentTime, playbackDuration
 }) => {
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [showSleepMenu, setShowSleepMenu] = useState(false);
+  
+  // High-precision time display using real audio metadata if available
+  const totalSecondsEstimate = useMemo(() => Math.max(1, (wordCount / (170 * speed)) * 60), [wordCount, speed]);
+  const elapsedSecondsEstimate = useMemo(() => totalSecondsEstimate * (progress / Math.max(1, totalLength)), [totalSecondsEstimate, progress, totalLength]);
+
+  const displayTime = playbackCurrentTime !== undefined && isPlaying ? formatTime(playbackCurrentTime) : formatTime(elapsedSecondsEstimate);
+  const displayTotal = playbackDuration !== undefined && isPlaying && playbackDuration > 0 ? formatTime(playbackDuration) : formatTime(totalSecondsEstimate);
 
   useEffect(() => {
     const loadVoices = () => {
@@ -60,22 +68,15 @@ const Player: React.FC<PlayerProps> = ({
   }, [selectedVoice, onVoiceChange]);
 
   const progressPercent = totalLength > 0 ? (progress / totalLength) * 100 : 0;
-  const totalSeconds = Math.max(1, (wordCount / (170 * speed)) * 60);
-  const elapsedSeconds = totalSeconds * (progress / Math.max(1, totalLength));
 
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
   const accentBg = isDark ? 'bg-indigo-500' : isSepia ? 'bg-[#9c6644]' : 'bg-indigo-600';
 
-  const handleSpeedChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (isPlaying) onPause();
-    onSpeedChange(parseFloat(e.target.value));
-  };
-
   return (
     <div className={`border-t transition-colors duration-500 relative z-20 ${isDark ? 'bg-slate-900 border-slate-800 text-slate-100' : isSepia ? 'bg-[#efe6d5] border-[#d8ccb6] text-[#3c2f25]' : 'bg-white border-black/10 text-black'}`}>
       <div className="flex items-center gap-4 px-4 lg:px-8 pt-4">
-        <span className="text-[11px] font-black font-mono opacity-60">{formatTime(elapsedSeconds)}</span>
+        <span className="text-[11px] font-black font-mono opacity-60 min-w-[40px]">{displayTime}</span>
         <div 
           className={`flex-1 h-1.5 rounded-full cursor-pointer relative ${isDark ? 'bg-slate-800' : 'bg-black/5'}`}
           onClick={e => {
@@ -83,9 +84,9 @@ const Player: React.FC<PlayerProps> = ({
             onSeekToOffset(Math.floor(totalLength * ((e.clientX - rect.left) / rect.width)));
           }}
         >
-          <div className={`h-full rounded-full ${accentBg} transition-all duration-300 shadow-sm`} style={{ width: `${progressPercent}%` }} />
+          <div className={`h-full rounded-full ${accentBg} transition-all duration-75 shadow-sm`} style={{ width: `${progressPercent}%` }} />
         </div>
-        <span className="text-[11px] font-black font-mono opacity-60">{formatTime(totalSeconds)}</span>
+        <span className="text-[11px] font-black font-mono opacity-60 min-w-[40px]">{displayTotal}</span>
       </div>
 
       <div className="max-w-7xl mx-auto px-4 lg:px-8 py-4 lg:py-6 flex flex-col gap-6">
@@ -95,7 +96,7 @@ const Player: React.FC<PlayerProps> = ({
               <span className="text-[10px] font-black uppercase tracking-widest opacity-60">Speed</span>
               <div className="flex items-center gap-2">
                 <button onClick={() => onSetUseBookSettings(!useBookSettings)} className={`px-2.5 py-1 rounded-lg text-[10px] font-black border transition-all ${useBookSettings ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-black/5 text-inherit opacity-60'}`}>{useBookSettings ? 'Book' : 'Global'}</button>
-                <input type="range" min="0.5" max="3.0" step="0.1" value={speed} onChange={handleSpeedChange} className="h-1.5 w-16 accent-indigo-600" />
+                <input type="range" min="0.5" max="3.0" step="0.1" value={speed} onChange={e => onSpeedChange(parseFloat(e.target.value))} className="h-1.5 w-16 accent-indigo-600" />
                 <span className="text-xs font-black min-w-[20px]">{speed}x</span>
               </div>
             </div>

@@ -44,7 +44,6 @@ export interface Rule {
   priority: number;
   enabled: boolean;
   phoneticHint?: string;
-  /** @deprecated use matchCase instead */
   caseMode?: CaseMode;
 }
 
@@ -56,11 +55,12 @@ export interface Chapter {
   filename: string;
   content: string;
   wordCount: number;
-  progress: number; // character offset
-  progressTotalLength?: number; // total text length at time of progress
+  progress: number; 
+  progressTotalLength?: number;
   isFavorite?: boolean;
   isCompleted?: boolean;
   driveId?: string;
+  hasCachedAudio?: boolean; // New: Tracks if Cloud TTS audio is generated and cached
 }
 
 export interface BookSettings {
@@ -74,7 +74,7 @@ export interface ReaderSettings {
   fontFamily: string;
   fontSizePx: number;
   lineHeight: number;
-  paragraphSpacing: number; // 1 for compact, 2 for wide
+  paragraphSpacing: number;
 }
 
 export interface Book {

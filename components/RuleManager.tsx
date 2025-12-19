@@ -70,6 +70,7 @@ const RuleManager: React.FC<RuleManagerProps> = ({
     const testProcessed = applyRules(testText, [...rules, ruleToTest]);
     
     setIsTesting(true);
+    // Fix: Removed extra arguments "Test Rule" and "Preview" to match the speak signature (Expected 5-7 arguments)
     speechController.speak(
       testProcessed,
       selectedVoice,
@@ -77,9 +78,7 @@ const RuleManager: React.FC<RuleManagerProps> = ({
       0,
       () => setIsTesting(false),
       undefined,
-      undefined,
-      "Test Rule",
-      "Preview"
+      undefined
     );
   };
 
