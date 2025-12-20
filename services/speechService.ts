@@ -1,6 +1,6 @@
+
 import { Rule, RuleType } from '../types';
-import { synthesizeChunk } from './cloudTtsService';
-import { getAudioFromCache, saveAudioToCache, generateAudioKey } from './audioCache';
+import { getDriveAudioObjectUrl, revokeObjectUrl } from "../services/driveService";
 
 export function applyRules(text: string, rules: Rule[]): string {
   let processedText = text;
@@ -32,11 +32,6 @@ export function applyRules(text: string, rules: Rule[]): string {
   return processedText;
 }
 
-interface SpeechChunk {
-  text: string;
-  startOffset: number;
-}
-
 export interface NextSegment {
   announcementPrefix: string;
   content: string;
@@ -51,26 +46,19 @@ export interface PlaybackMetadata {
 }
 
 class SpeechController {
-  private synth: SpeechSynthesis;
   private audio: HTMLAudioElement;
-  private currentChunks: SpeechChunk[] = [];
-  private currentChunkIndex: number = -1;
+  private currentBlobUrl: string | null = null;
+  private currentTextLength: number = 0;
   private rafId: number | null = null;
   
   private onEndCallback: (() => void) | null = null;
   private syncCallback: ((meta: PlaybackMetadata) => void) | null = null;
   private onFetchStateChange: ((isFetching: boolean) => void) | null = null;
   
-  private rate: number = 1.0;
-  private voiceName: string = '';
   private sessionToken: number = 0;
   private getNextSegment: (() => Promise<NextSegment | null>) | null = null;
-  
-  private isUsingSingleBlob: boolean = false;
-  private fullTextLengthForBlob: number = 0;
 
   constructor() {
-    this.synth = window.speechSynthesis;
     this.audio = new Audio();
     this.audio.volume = 1.0;
     this.audio.preload = 'auto';
@@ -82,28 +70,16 @@ class SpeechController {
   }
 
   private setupAudioListeners() {
-    this.audio.addEventListener('ended', () => {
-      console.info("[Speech] Audio segment ended.");
-      if (this.isUsingSingleBlob) {
-        this.stop();
-        if (this.onEndCallback) this.onEndCallback();
-        return;
+    this.audio.addEventListener('ended', async () => {
+      console.info("[Audio] Chapter ended.");
+      if (this.getNextSegment) {
+        // Handle auto-advance logic if needed, but for v2.5.5 we let App.tsx handle it via onEnd
       }
-
-      if (this.syncCallback && this.currentChunkIndex >= 0) {
-        const chunk = this.currentChunks[this.currentChunkIndex];
-        this.syncCallback({
-          currentTime: this.audio.duration,
-          duration: this.audio.duration,
-          charOffset: chunk.startOffset + chunk.text.length
-        });
-      }
-      this.currentChunkIndex++;
-      this.playNextChunk();
+      this.stopSyncLoop();
+      if (this.onEndCallback) this.onEndCallback();
     });
 
     this.audio.addEventListener('play', () => {
-      console.info("[Speech] Audio play event triggered.");
       this.startSyncLoop();
       if (this.onFetchStateChange) this.onFetchStateChange(false);
     });
@@ -112,8 +88,12 @@ class SpeechController {
       this.stopSyncLoop();
     });
 
-    this.audio.addEventListener('error', (e) => {
-      console.error("[Speech] Audio Error:", this.audio.error);
+    this.audio.addEventListener('error', () => {
+      console.error("[Audio] Error:", {
+        error: this.audio.error,
+        src: this.audio.src,
+        networkState: this.audio.networkState
+      });
       if (this.onFetchStateChange) this.onFetchStateChange(false);
     });
   }
@@ -121,26 +101,12 @@ class SpeechController {
   private startSyncLoop() {
     const sync = () => {
       if (this.syncCallback && this.audio.duration && !this.audio.paused) {
-        if (this.isUsingSingleBlob) {
-          const ratio = Math.min(1, this.audio.currentTime / this.audio.duration);
-          this.syncCallback({
-            currentTime: this.audio.currentTime,
-            duration: this.audio.duration,
-            charOffset: Math.floor(this.fullTextLengthForBlob * ratio)
-          });
-        } else if (this.currentChunkIndex >= 0) {
-          const chunk = this.currentChunks[this.currentChunkIndex];
-          if (chunk) {
-            const ratio = Math.min(1, this.audio.currentTime / this.audio.duration);
-            const charOffset = Math.floor(chunk.text.length * ratio);
-            const totalGlobalOffset = chunk.startOffset + charOffset;
-            this.syncCallback({
-              currentTime: this.audio.currentTime,
-              duration: this.audio.duration,
-              charOffset: totalGlobalOffset
-            });
-          }
-        }
+        const ratio = Math.min(1, this.audio.currentTime / this.audio.duration);
+        this.syncCallback({
+          currentTime: this.audio.currentTime,
+          duration: this.audio.duration,
+          charOffset: Math.floor(this.currentTextLength * ratio)
+        });
       }
       this.rafId = requestAnimationFrame(sync);
     };
@@ -155,195 +121,140 @@ class SpeechController {
     }
   }
 
-  private createChunks(text: string): SpeechChunk[] {
-    const chunks: SpeechChunk[] = [];
-    const MAX = 4800; 
-    const parts = text.split(/([.!?\n]\s*)/);
-    let current = "";
-    let start = 0;
-
-    parts.forEach(p => {
-      if (current.length + p.length > MAX) {
-        if (current) chunks.push({ text: current, startOffset: start });
-        start += current.length;
-        current = p;
-      } else {
-        current += p;
-      }
-    });
-    if (current) chunks.push({ text: current, startOffset: start });
-    return chunks;
-  }
-
-  async speak(
-    text: string, 
-    voiceName: string, 
-    rate: number, 
-    startOffset: number, 
-    onEnd: () => void, 
-    onSync?: (meta: PlaybackMetadata) => void,
-    getNextSegment?: () => Promise<NextSegment | null>,
-    preFetchedAudio?: Blob
+  async loadAndPlayDriveFile(
+    token: string,
+    fileId: string,
+    textLength: number,
+    startTimeSec = 0,
+    playbackRate = 1.0,
+    onEnd: () => void,
+    onSync: (meta: PlaybackMetadata) => void
   ) {
     this.sessionToken++;
     const session = this.sessionToken;
-    this.stop();
     
+    // Cleanup
+    this.audio.pause();
+    this.audio.removeAttribute("src");
+    this.audio.load();
+    revokeObjectUrl(this.currentBlobUrl);
+    this.currentBlobUrl = null;
+
     this.onEndCallback = onEnd;
-    this.syncCallback = onSync || null;
-    this.rate = rate;
-    this.voiceName = voiceName;
-    this.getNextSegment = getNextSegment || null;
+    this.syncCallback = onSync;
+    this.currentTextLength = textLength;
 
-    if (preFetchedAudio) {
-      console.info("[Speech] Playing from Cloud Drive File...");
-      this.isUsingSingleBlob = true;
-      this.fullTextLengthForBlob = text.length;
-      
-      const url = URL.createObjectURL(preFetchedAudio);
-      
-      const onLoaded = async () => {
-        if (this.sessionToken === session) {
-          const ratio = Math.max(0, Math.min(1, startOffset / Math.max(1, text.length)));
-          if (this.audio.duration) {
-             this.audio.currentTime = ratio * this.audio.duration;
-          }
-          try {
-            await this.audio.play();
-          } catch (err) {
-            console.warn("[Speech] Playback blocked by browser policy. Interaction needed.");
-          }
-        }
-        this.audio.removeEventListener('loadedmetadata', onLoaded);
-      };
+    if (this.onFetchStateChange) this.onFetchStateChange(true);
 
-      this.audio.addEventListener('loadedmetadata', onLoaded);
+    try {
+      const { url, blob } = await getDriveAudioObjectUrl(token, fileId);
+      if (this.sessionToken !== session) {
+        revokeObjectUrl(url);
+        return;
+      }
+
+      console.log("[Audio] Drive MP3 loaded:", { size: blob.size, type: blob.type, fileId });
+      this.currentBlobUrl = url;
       this.audio.src = url;
-      this.audio.load();
-      return;
+      this.audio.playbackRate = playbackRate;
+
+      await new Promise<void>((resolve, reject) => {
+        const onReady = () => { cleanup(); resolve(); };
+        const onErr = () => { cleanup(); reject(this.audio.error || new Error("AUDIO_ELEMENT_ERROR")); };
+        const cleanup = () => {
+          this.audio.removeEventListener("canplay", onReady);
+          this.audio.removeEventListener("error", onErr);
+        };
+        this.audio.addEventListener("canplay", onReady, { once: true });
+        this.audio.addEventListener("error", onErr, { once: true });
+        this.audio.load();
+      });
+
+      if (this.sessionToken !== session) return;
+
+      if (Number.isFinite(startTimeSec) && startTimeSec > 0) {
+        const dur = this.audio.duration || 0;
+        if (dur > 0) this.audio.currentTime = Math.min(startTimeSec, Math.max(0, dur - 0.1));
+      }
+
+      await this.audio.play();
+    } catch (err) {
+      console.error("[Audio] Playback setup failed:", err);
+      if (this.onFetchStateChange) this.onFetchStateChange(false);
+      throw err;
     }
-
-    this.isUsingSingleBlob = false;
-    this.currentChunks = this.createChunks(text);
-    const idx = this.currentChunks.findIndex(c => c.startOffset + c.text.length > startOffset);
-    this.currentChunkIndex = idx !== -1 ? idx : 0;
-
-    this.playNextChunk(startOffset);
   }
 
   seekToOffset(offset: number) {
-    if (this.isUsingSingleBlob) {
-      if (this.audio.duration) {
-        const ratio = Math.max(0, Math.min(1, offset / Math.max(1, this.fullTextLengthForBlob)));
-        this.audio.currentTime = ratio * this.audio.duration;
-      }
-      return;
-    }
-
-    if (this.currentChunks.length === 0) return;
-    const idx = this.currentChunks.findIndex(c => c.startOffset + c.text.length > offset);
-    if (idx === -1) return;
-
-    if (idx === this.currentChunkIndex && this.audio.src && this.audio.duration) {
-      const chunk = this.currentChunks[idx];
-      const relative = offset - chunk.startOffset;
-      const ratio = Math.max(0, Math.min(1, relative / chunk.text.length));
+    if (this.audio.duration && this.currentTextLength > 0) {
+      const ratio = Math.max(0, Math.min(1, offset / this.currentTextLength));
       this.audio.currentTime = ratio * this.audio.duration;
-    } else {
-      this.currentChunkIndex = idx;
-      this.playNextChunk(offset);
     }
   }
 
-  private async playNextChunk(initialOffsetInChunk?: number) {
-    const session = this.sessionToken;
-
-    if (this.currentChunkIndex >= this.currentChunks.length) {
-      if (this.getNextSegment) {
-        const next = await this.getNextSegment();
-        if (next && this.sessionToken === session) {
-          this.currentChunks = this.createChunks(next.announcementPrefix + next.content);
-          this.currentChunkIndex = 0;
-          this.playNextChunk();
-          return;
-        }
-      }
-      this.stop();
-      if (this.onEndCallback) this.onEndCallback();
-      return;
-    }
-
-    const chunk = this.currentChunks[this.currentChunkIndex];
+  // Speak method added to support direct text-to-speech for rule testing
+  speak(
+    text: string,
+    voiceName: string | undefined,
+    rate: number,
+    offset: number,
+    onEnd: () => void,
+    onStart?: () => void,
+    onBoundary?: (offset: number) => void
+  ) {
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    const voices = window.speechSynthesis.getVoices();
+    const voice = voices.find(v => v.name === voiceName);
+    if (voice) utterance.voice = voice;
+    utterance.rate = rate;
     
-    try {
-      if (this.onFetchStateChange) this.onFetchStateChange(true);
-      const cacheKey = generateAudioKey(chunk.text, this.voiceName, this.rate);
-      const cachedBlob = await getAudioFromCache(cacheKey);
-      let audioUrl = "";
-
-      if (cachedBlob) {
-        console.info("[Speech] Loading chunk from local cache.");
-        audioUrl = URL.createObjectURL(cachedBlob);
-      } else {
-        const result = await synthesizeChunk(chunk.text, this.voiceName, this.rate);
-        if (this.sessionToken !== session) return;
-        audioUrl = result.audioUrl;
-        
-        fetch(audioUrl).then(r => r.blob()).then(blob => {
-          saveAudioToCache(cacheKey, blob);
-        });
-      }
-
-      const onLoaded = async () => {
-        if (this.sessionToken === session) {
-          if (initialOffsetInChunk !== undefined) {
-            const relative = Math.max(0, initialOffsetInChunk - chunk.startOffset);
-            const ratio = Math.min(1, relative / Math.max(1, chunk.text.length));
-            if (this.audio.duration) {
-               this.audio.currentTime = ratio * this.audio.duration;
-            }
-          }
-          try {
-            await this.audio.play();
-          } catch (e) {
-             if (this.onFetchStateChange) this.onFetchStateChange(false);
-          }
-        }
-        this.audio.removeEventListener('loadedmetadata', onLoaded);
+    if (onStart) utterance.onstart = () => onStart();
+    utterance.onend = () => onEnd();
+    if (onBoundary) {
+      utterance.onboundary = (event) => {
+        if (event.name === 'word') onBoundary(event.charIndex);
       };
-
-      this.audio.addEventListener('loadedmetadata', onLoaded);
-      this.audio.src = audioUrl;
-      this.audio.load();
-    } catch (err) {
-      console.error("[Speech] Chunk playback failed:", err);
-      if (this.onFetchStateChange) this.onFetchStateChange(false);
     }
+    
+    window.speechSynthesis.speak(utterance);
   }
 
   pause() {
     this.audio.pause();
+    window.speechSynthesis.pause();
   }
 
   resume() {
-    this.audio.play().catch(() => {});
+    if (this.audio.src) {
+      this.audio.play().catch(err => console.warn("[Audio] Resume blocked:", err));
+    }
+    window.speechSynthesis.resume();
   }
 
+  // Updated stop method to cancel both audio element and speech synthesis
   stop() {
     this.sessionToken++;
     this.stopSyncLoop();
     this.audio.pause();
-    if (this.audio.src && this.audio.src.startsWith('blob:')) {
-      URL.revokeObjectURL(this.audio.src);
-    }
-    this.audio.src = "";
-    this.synth.cancel();
-    this.isUsingSingleBlob = false;
+    this.audio.removeAttribute("src");
+    this.audio.load();
+    revokeObjectUrl(this.currentBlobUrl);
+    this.currentBlobUrl = null;
     if (this.onFetchStateChange) this.onFetchStateChange(false);
+    window.speechSynthesis.cancel();
+  }
+
+  setPlaybackRate(rate: number) {
+    this.audio.playbackRate = rate;
   }
 
   get isPaused() {
-    return this.audio.paused;
+    return this.audio.paused && !window.speechSynthesis.speaking;
+  }
+
+  get currentTime() {
+    return this.audio.currentTime;
   }
 }
 

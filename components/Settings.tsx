@@ -47,7 +47,7 @@ const Settings: React.FC<SettingsProps> = ({
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
           <div>
             <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
-            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.5.4</p>
+            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.5.5</p>
           </div>
           <button 
             onClick={onCheckForUpdates}
@@ -146,7 +146,7 @@ const Settings: React.FC<SettingsProps> = ({
           </div>
         </div>
 
-        {/* Font Picker */}
+        {/* Typography */}
         <div className={`p-5 sm:p-8 rounded-[1.5rem] sm:rounded-[2.5rem] border shadow-sm ${cardBg}`}>
           <label className={labelClass}>Typography</label>
           <div className="grid grid-cols-2 gap-3 sm:gap-4">
@@ -167,28 +167,8 @@ const Settings: React.FC<SettingsProps> = ({
           </div>
         </div>
 
-        {/* Sliders Group */}
-        <div className={`p-5 sm:p-8 rounded-[1.5rem] sm:rounded-[2.5rem] border shadow-sm space-y-8 sm:space-y-10 ${cardBg}`}>
-          <div>
-            <div className="flex justify-between items-center mb-4 sm:mb-5">
-              <label className={labelClass}>Font Size</label>
-              <span className={`text-sm font-black ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`}>{settings.fontSizePx}px</span>
-            </div>
-            <div className="flex items-center gap-4 sm:gap-6">
-              <button onClick={() => onUpdate({ fontSizePx: Math.max(12, settings.fontSizePx - 2) })} className={`p-3 rounded-xl transition-colors ${controlBg} ${textClass}`}><Minus className="w-5 h-5" /></button>
-              <input 
-                type="range" min="12" max="48" step="1"
-                value={settings.fontSizePx}
-                onChange={(e) => onUpdate({ fontSizePx: parseInt(e.target.value) })}
-                className="flex-1 h-2 bg-indigo-600/20 rounded-full accent-indigo-600 cursor-pointer"
-              />
-              <button onClick={() => onUpdate({ fontSizePx: Math.min(48, settings.fontSizePx + 2) })} className={`p-3 rounded-xl transition-colors ${controlBg} ${textClass}`}><Plus className="w-5 h-5" /></button>
-            </div>
-          </div>
-        </div>
-
         <div className="text-center font-black uppercase tracking-[0.4em] text-[9px] sm:text-[11px] pt-8 sm:pt-12 opacity-30">
-          VoxLib Engine v2.5.4
+          VoxLib Engine v2.5.5
         </div>
       </div>
     </div>

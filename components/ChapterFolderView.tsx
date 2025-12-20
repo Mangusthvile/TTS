@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Book, Theme, StorageBackend, Chapter } from '../types';
-import { LayoutGrid, List, AlignJustify, Plus, Star, Folder, CheckCircle2, Download, Edit2, Check, RefreshCw, Trash2, Headphones, Loader2, Zap, Cloud, ExternalLink } from 'lucide-react';
+import { LayoutGrid, List, AlignJustify, Plus, Star, Folder, CheckCircle2, Download, Edit2, Check, RefreshCw, Trash2, Headphones, Loader2, Zap, Cloud, ExternalLink, AlertTriangle } from 'lucide-react';
 import { synthesizeChunk } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache } from '../services/audioCache';
 import { uploadToDrive } from '../services/driveService';
@@ -50,6 +50,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     return [...(book.chapters || [])].sort((a, b) => a.index - b.index);
   }, [book.chapters]);
 
+  const currentSignature = useMemo(() => {
+    const voice = book.settings.selectedVoiceName || 'default';
+    const rulesHash = book.rules.length + "_" + book.rules.filter(r => r.enabled).length;
+    return `${voice}_${rulesHash}`;
+  }, [book.settings.selectedVoiceName, book.rules]);
+
   const handleStartEdit = (e: React.MouseEvent, chapterId: string, currentTitle: string) => {
     e.stopPropagation();
     setEditingChapterId(chapterId);
@@ -66,17 +72,16 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const migrateChapterAudioToDrive = async (chapter: Chapter) => {
     const rawVoice = book.settings.selectedVoiceName;
-    const speed = book.settings.playbackSpeed || 1.0;
+    const speed = 1.0; // Generation always at 1.0 for v2.5.5
     
     const MAX = 4800;
     const textChunks = [];
-    for (let i = 0; i < chapter.content.length; i += MAX) {
-      textChunks.push(chapter.content.substring(i, i + MAX));
+    const content = chapter.content;
+    for (let i = 0; i < content.length; i += MAX) {
+      textChunks.push(content.substring(i, i + MAX));
     }
 
     const audioBlobs: Blob[] = [];
-
-    console.info(`[Migrate] Processing "${chapter.title}" into ${textChunks.length} chunks...`);
 
     for (const chunkText of textChunks) {
       const cacheKey = generateAudioKey(chunkText, rawVoice || '', speed);
@@ -93,11 +98,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
     if (book.backend === StorageBackend.DRIVE && driveToken && audioBlobs.length > 0) {
       const combinedBlob = new Blob(audioBlobs, { type: 'audio/mpeg' });
-      const safeTitle = chapter.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-      const audioFilename = `${chapter.index.toString().padStart(3, '0')}_${safeTitle}.mp3`;
+      const audioFilename = `${chapter.index.toString().padStart(3, '0')}.mp3`;
       
-      console.info(`[Migrate] Uploading consolidated MP3: ${audioFilename} (${combinedBlob.size} bytes)`);
-
       try {
         const audioDriveId = await uploadToDrive(
           driveToken, 
@@ -107,10 +109,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           chapter.audioDriveId,
           'audio/mpeg'
         );
-        console.info(`[Migrate] Upload successful! Drive ID: ${audioDriveId}`);
         return audioDriveId;
       } catch (err) {
-        console.warn("Drive sync failed for chapter:", chapter.title, err);
+        console.warn("Drive sync failed:", err);
       }
     }
     return undefined;
@@ -124,45 +125,19 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     try {
       const audioDriveId = await migrateChapterAudioToDrive(chapter);
       if (onUpdateChapter) {
-        onUpdateChapter({ ...chapter, hasCachedAudio: true, audioDriveId });
+        onUpdateChapter({ ...chapter, audioDriveId, audioSignature: currentSignature });
       }
     } catch (err) {
-      alert("Audio sync failed: " + err);
+      alert("Audio generation failed: " + err);
     } finally {
-      setSynthesizingId(null);
-    }
-  };
-
-  const handleSynthesizeAll = async (silent: boolean = false) => {
-    if (isBatchSynthesizing || !!synthesizingId) return;
-    if (!silent && !confirm(`This will consolidate all local audio into MP3s and upload them to your Google Drive folder for this book. Continue?`)) return;
-    
-    setIsBatchSynthesizing(true);
-    try {
-      for (const chapter of chapters) {
-        if (!chapter.audioDriveId) {
-          setSynthesizingId(chapter.id);
-          const audioDriveId = await migrateChapterAudioToDrive(chapter);
-          if (onUpdateChapter) {
-            onUpdateChapter({ ...chapter, hasCachedAudio: true, audioDriveId });
-          }
-        }
-      }
-      if (!silent) alert("Migration complete! You can now check your Google Drive folder to see the generated MP3s.");
-    } catch (err) {
-      if (!silent) alert("Batch migration failed: " + err);
-    } finally {
-      setIsBatchSynthesizing(false);
       setSynthesizingId(null);
     }
   };
 
   const renderRow = (c: Chapter) => {
-    const idx = String(c.index).padStart(3, '0');
-    const words = c.wordCount ? Number(c.wordCount).toLocaleString() : '0';
-    const percent = c.progressTotalLength ? Math.min(100, Math.round((c.progress / c.progressTotalLength) * 100)) : 0;
     const isEditing = editingChapterId === c.id;
     const isSynthesizing = synthesizingId === c.id;
+    const isStale = c.audioDriveId && c.audioSignature !== currentSignature;
     
     return (
       <div
@@ -171,8 +146,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         className={`grid grid-cols-[40px_1fr_60px] sm:grid-cols-[60px_1fr_100px_100px_180px] items-center px-4 sm:px-6 py-4 cursor-pointer select-none border-b last:border-0 transition-colors ${isDark ? 'hover:bg-white/5 border-slate-800' : 'hover:bg-black/5 border-black/5'} ${c.isCompleted ? 'opacity-60' : ''}`}
       >
         <div className={`font-mono text-[10px] sm:text-xs font-black flex items-center gap-2 ${textSecondary}`}>
-          {c.isCompleted && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 hidden sm:block" />}
-          {idx}
+          {c.isCompleted ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" /> : String(c.index).padStart(3, '0')}
         </div>
         
         <div className="flex items-center gap-4 min-w-0 mr-2 sm:mr-4">
@@ -194,31 +168,34 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           ) : (
             <div className="flex items-center gap-3 min-w-0">
               <div className={`truncate font-black text-xs sm:text-sm ${c.isCompleted ? 'line-through decoration-indigo-500/40' : ''}`}>{c.title}</div>
-              {c.hasCachedAudio && <span title="Audio cached locally"><Headphones className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" /></span>}
-              {c.audioDriveId && <span title="Stored on Drive"><Cloud className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" /></span>}
+              {c.audioDriveId ? (
+                isStale ? (
+                  <span title="Audio is stale (Rules or Voice changed)"><AlertTriangle className="w-3.5 h-3.5 text-amber-500" /></span>
+                ) : (
+                  <span title="Audio ready on Drive"><Cloud className="w-3.5 h-3.5 text-emerald-500" /></span>
+                )
+              ) : <span title="No audio generated"><AlertTriangle className="w-3.5 h-3.5 text-slate-400 opacity-50" /></span>}
             </div>
           )}
         </div>
 
-        <div className={`text-[10px] sm:text-xs font-black text-right hidden sm:block ${textSecondary}`}>{words} words</div>
+        <div className={`text-[10px] sm:text-xs font-black text-right hidden sm:block ${textSecondary}`}>{c.wordCount?.toLocaleString()} words</div>
         
         <div className="text-right px-4">
-          <span className={`text-[9px] sm:text-[10px] font-black px-2 py-0.5 sm:px-2.5 sm:py-1 rounded-full whitespace-nowrap ${percent >= 100 ? 'bg-emerald-500/20 text-emerald-600' : 'bg-indigo-500/15 text-indigo-500'}`}>
-            {percent}%
+          <span className={`text-[9px] sm:text-[10px] font-black px-2 py-0.5 sm:px-2.5 sm:py-1 rounded-full whitespace-nowrap ${c.isCompleted ? 'bg-emerald-500/20 text-emerald-600' : 'bg-indigo-500/15 text-indigo-500'}`}>
+            {Math.round((c.progress / (c.progressTotalLength || 1)) * 100)}%
           </span>
         </div>
 
         <div className="flex justify-end items-center gap-2 hidden sm:flex">
-          {!isEditing && (
-            <button
-              onClick={(e) => handleSynthesize(e, c)}
-              disabled={isSynthesizing || isBatchSynthesizing}
-              className={`p-2 rounded-xl border transition-all ${controlBg} ${isSynthesizing ? 'opacity-100 text-indigo-600 ring-1 ring-indigo-600' : 'opacity-40 hover:opacity-100 hover:text-indigo-500'}`}
-              title={c.audioDriveId ? "Refresh Drive Audio" : "Migrate local audio to Drive"}
-            >
-              {isSynthesizing ? <Loader2 className="w-4 h-4 animate-spin" /> : (c.audioDriveId ? <CheckCircle2 className="w-4 h-4 text-emerald-500" /> : <RefreshCw className="w-4 h-4" />)}
-            </button>
-          )}
+          <button
+            onClick={(e) => handleSynthesize(e, c)}
+            disabled={isSynthesizing || isBatchSynthesizing}
+            className={`p-2 rounded-xl border transition-all ${controlBg} ${isSynthesizing ? 'opacity-100 text-indigo-600 ring-1 ring-indigo-600' : 'opacity-40 hover:opacity-100 hover:text-indigo-500'}`}
+            title={c.audioDriveId ? (isStale ? "Audio Stale: Regenerate" : "Refresh Drive Audio") : "Generate Audio"}
+          >
+            {isSynthesizing ? <Loader2 className="w-4 h-4 animate-spin" /> : (isStale ? <RefreshCw className="w-4 h-4 text-amber-500" /> : <RefreshCw className="w-4 h-4" />)}
+          </button>
           {!isEditing && (
             <button
               onClick={(e) => handleStartEdit(e, c.id, c.title)}
@@ -229,20 +206,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             </button>
           )}
           <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggleFavorite(c.id);
-            }}
-            className={`p-2 rounded-xl border transition-all ${controlBg} ${c.isFavorite ? 'opacity-100 text-amber-500 border-amber-500/30 ring-1 ring-amber-500/20' : 'opacity-40 hover:opacity-100'}`}
-          >
-            <Star className={`w-4 h-4 ${c.isFavorite ? 'fill-current' : ''}`} />
-          </button>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onDeleteChapter(c.id);
-            }}
-            className={`p-2 rounded-xl border transition-all ${controlBg} opacity-40 hover:opacity-100 hover:text-red-600 hover:border-red-500/30`}
+            onClick={(e) => { e.stopPropagation(); onDeleteChapter(c.id); }}
+            className={`p-2 rounded-xl border transition-all ${controlBg} opacity-40 hover:opacity-100 hover:text-red-600`}
             title="Delete Chapter"
           >
             <Trash2 className="w-4 h-4" />
@@ -262,88 +227,23 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             </div>
             <div className="min-w-0">
               <div className={`text-[9px] sm:text-[11px] font-black uppercase tracking-widest ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`}>Library Collection</div>
-              <div className="flex items-center gap-2">
-                <div className="text-xl sm:text-2xl font-black tracking-tight truncate leading-none mt-1">{book.title}</div>
-                {book.backend === StorageBackend.DRIVE && book.driveFolderId && (
-                  <a 
-                    href={`https://drive.google.com/drive/folders/${book.driveFolderId}`} 
-                    target="_blank" 
-                    rel="noreferrer"
-                    className="mt-1 p-1.5 rounded-lg hover:bg-black/5 text-slate-400 hover:text-indigo-600 transition-all"
-                    title="View Folder on Google Drive"
-                  >
-                    <ExternalLink className="w-4 h-4" />
-                  </a>
-                )}
-              </div>
+              <div className="text-xl sm:text-2xl font-black tracking-tight truncate leading-none mt-1">{book.title}</div>
             </div>
           </div>
 
           <div className="flex items-center flex-wrap gap-2 sm:gap-3">
-            <button
-              onClick={() => handleSynthesizeAll(false)}
-              disabled={isBatchSynthesizing || !!synthesizingId}
-              title="Consolidate all local audio into MP3s and upload them to your Google Drive collection"
-              className={`px-3 py-2 rounded-xl border text-[10px] font-black flex items-center gap-1.5 shadow-sm transition-all ${isBatchSynthesizing ? 'bg-indigo-600 text-white animate-pulse' : controlBg + ' ' + textPrimary + ' hover:border-indigo-500 hover:text-indigo-500'}`}
+             <button
+              onClick={onAddChapter}
+              className="px-5 py-2.5 rounded-xl text-[10px] sm:text-[11px] font-black flex items-center gap-2 bg-indigo-600 text-white shadow-lg shadow-indigo-600/20 hover:scale-105 transition-all"
             >
-              {isBatchSynthesizing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
-              <span className="hidden sm:inline">Migrate & Sync All Audio to Drive</span>
-              <span className="sm:hidden">Sync Audio</span>
+              <Plus className="w-3.5 h-3.5" />
+              Import Chapter
             </button>
-
-            <button
-              onClick={() => {
-                chapters.forEach((chapter, i) => {
-                  setTimeout(() => {
-                    const blob = new Blob([chapter.content], { type: 'text/plain' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    const safeTitle = chapter.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-                    a.download = `${chapter.index.toString().padStart(3, '0')}_${safeTitle}.txt`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                  }, i * 300);
-                });
-              }}
-              title="Download all chapters as .txt files"
-              className={`px-3 py-2 rounded-xl border text-[10px] font-black flex items-center gap-1.5 shadow-sm ${controlBg} ${textPrimary}`}
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Export .TXT</span>
-              <span className="sm:hidden">Export</span>
-            </button>
-
-            {book.backend === StorageBackend.DRIVE && onRefreshDriveFolder && (
-               <button
-                 onClick={async () => {
-                   onRefreshDriveFolder();
-                 }}
-                 disabled={isBatchSynthesizing}
-                 title="Force Re-scan Folder"
-                 className={`px-3 py-2 rounded-xl border text-[10px] font-black flex items-center gap-1.5 shadow-sm ${controlBg} ${textPrimary} ${isBatchSynthesizing ? 'opacity-50' : 'hover:border-indigo-500'}`}
-               >
-                 <RefreshCw className={`w-3.5 h-3.5 ${isBatchSynthesizing ? 'animate-spin' : ''}`} />
-                 <span className="hidden sm:inline">Refresh Collection</span>
-                 <span className="sm:hidden">Refresh</span>
-               </button>
-            )}
-
             <div className={`flex items-center gap-1 p-1 rounded-xl border shadow-sm ${controlBg}`}>
               <button onClick={() => setViewMode('details')} className={`p-1.5 sm:p-2 rounded-lg transition-all ${viewMode === 'details' ? (isDark ? 'bg-white/10' : 'bg-black/10') : 'opacity-60'}`}><AlignJustify className="w-3.5 h-3.5 sm:w-4 sm:h-4" /></button>
               <button onClick={() => setViewMode('list')} className={`p-1.5 sm:p-2 rounded-lg transition-all ${viewMode === 'list' ? (isDark ? 'bg-white/10' : 'bg-black/10') : 'opacity-60'}`}><List className="w-3.5 h-3.5 sm:w-4 sm:h-4" /></button>
               <button onClick={() => setViewMode('grid')} className={`p-1.5 sm:p-2 rounded-lg transition-all ${viewMode === 'grid' ? (isDark ? 'bg-white/10' : 'bg-black/10') : 'opacity-60'}`}><LayoutGrid className="w-3.5 h-3.5 sm:w-4 sm:h-4" /></button>
             </div>
-
-            <button
-              onClick={onAddChapter}
-              className="px-5 py-2.5 rounded-xl text-[10px] sm:text-[11px] font-black flex items-center gap-2 bg-indigo-600 text-white shadow-lg shadow-indigo-600/20 hover:scale-105 active:scale-95 transition-all"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              Import Chapter
-            </button>
           </div>
         </div>
       </div>
@@ -353,40 +253,17 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           {chapters.length === 0 ? (
             <div className="p-12 sm:p-16 text-center">
               <div className={`text-lg font-black ${textPrimary}`}>Empty Collection</div>
-              <div className={`text-xs sm:text-sm font-bold mt-2 ${textSecondary}`}>Add chapters or Refresh to get started.</div>
             </div>
-          ) : viewMode === 'details' ? (
+          ) : (
             <div>
               <div className={`grid grid-cols-[40px_1fr_60px] sm:grid-cols-[60px_1fr_100px_100px_180px] px-4 sm:px-6 py-4 text-[9px] sm:text-[11px] font-black uppercase tracking-widest border-b ${isDark ? 'border-slate-800 bg-slate-950/40 text-indigo-400' : 'border-black/5 bg-black/5 text-indigo-600'}`}>
-                <div>Index</div>
-                <div>Name</div>
-                <div className="text-right hidden sm:block">Words</div>
+                <div>Status</div>
+                <div>Chapter Name</div>
+                <div className="text-right hidden sm:block">Length</div>
                 <div className="text-right px-4">Prog.</div>
                 <div className="text-right hidden sm:block">Actions</div>
               </div>
               <div className={`divide-y ${isDark ? 'divide-slate-800' : 'divide-white/5'}`}>{chapters.map(renderRow)}</div>
-            </div>
-          ) : (
-            <div className="p-4 sm:p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {chapters.map((c) => {
-                const percent = c.progressTotalLength ? Math.min(100, Math.round((c.progress / c.progressTotalLength) * 100)) : 0;
-                return (
-                  <div key={c.id} className="relative group">
-                    <button onClick={() => onOpenChapter(c.id)} className={`w-full text-left p-5 sm:p-6 rounded-2xl sm:rounded-3xl border transition-all ${controlBg} ${isDark ? 'hover:bg-slate-800 hover:border-indigo-600/30' : 'hover:bg-black/5 hover:border-indigo-600/30'} ${c.isCompleted ? 'opacity-60' : ''}`}>
-                      <div className="flex justify-between items-start mb-3 sm:mb-4">
-                        <div className={`text-[11px] sm:text-[12px] font-mono font-black flex items-center gap-1.5 ${textSecondary}`}>#{String(c.index).padStart(3, '0')}</div>
-                        <div className="flex items-center gap-2">
-                           {c.hasCachedAudio && <span title="Audio cached locally"><Headphones className="w-3.5 h-3.5 text-indigo-500" /></span>}
-                           {c.audioDriveId && <span title="Stored on Drive"><Cloud className="w-3.5 h-3.5 text-emerald-500" /></span>}
-                           {percent > 0 && <div className={`text-[9px] font-black px-2 py-0.5 rounded-full ${isDark ? 'bg-indigo-600/30' : 'bg-indigo-600/15'} text-indigo-500`}>{percent}%</div>}
-                        </div>
-                      </div>
-                      <div className={`text-sm sm:text-base font-black leading-tight line-clamp-2 ${textPrimary} ${c.isCompleted ? 'line-through' : ''}`}>{c.title}</div>
-                      <div className={`mt-4 text-[9px] sm:text-[11px] font-black uppercase tracking-wider ${textSecondary}`}>{c.wordCount ? Number(c.wordCount).toLocaleString() : '0'} Words</div>
-                    </button>
-                  </div>
-                );
-              })}
             </div>
           )}
         </div>

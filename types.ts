@@ -60,7 +60,8 @@ export interface Chapter {
   isFavorite?: boolean;
   isCompleted?: boolean;
   driveId?: string;
-  audioDriveId?: string; // New: Tracks the remote MP3 file ID
+  audioDriveId?: string;
+  audioSignature?: string; // v2.5.5: hash(voice + rulesHash + textLength)
   hasCachedAudio?: boolean;
 }
 

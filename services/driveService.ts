@@ -213,3 +213,20 @@ export async function createDriveFolder(token: string, name: string): Promise<st
   const data = await response.json();
   return data.id;
 }
+
+export function revokeObjectUrl(url: string | null | undefined) {
+  if (!url) return;
+  try { URL.revokeObjectURL(url); } catch {}
+}
+
+export async function getDriveAudioObjectUrl(
+  token: string,
+  fileId: string
+): Promise<{ url: string; blob: Blob }> {
+  if (!fileId || !fileId.trim()) throw new Error("MISSING_FILE_ID");
+  const blob = await fetchDriveBinary(token, fileId);
+  if (!blob || blob.size === 0) throw new Error("EMPTY_AUDIO_BLOB");
+  const url = URL.createObjectURL(blob);
+  if (!url) throw new Error("FAILED_CREATE_OBJECT_URL");
+  return { url, blob };
+}
