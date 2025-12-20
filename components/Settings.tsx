@@ -47,7 +47,7 @@ const Settings: React.FC<SettingsProps> = ({
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
           <div>
             <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
-            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.5.5</p>
+            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.5.6</p>
           </div>
           <button 
             onClick={onCheckForUpdates}
@@ -74,9 +74,6 @@ const Settings: React.FC<SettingsProps> = ({
                   placeholder="...apps.googleusercontent.com"
                   className={`w-full px-4 py-3 rounded-xl border-none outline-none font-mono text-[16px] ${isDark ? 'bg-slate-950 text-white' : 'bg-slate-50 text-black'}`}
                 />
-                <p className="text-[9px] font-bold opacity-40 leading-relaxed">
-                   Authorized Origin: <span className="text-indigo-500 select-all font-mono">{window.location.origin}</span>
-                </p>
              </div>
 
              <div className="flex flex-col gap-6 pt-4 border-t border-black/5 lg:flex-row lg:items-center lg:justify-between">
@@ -105,7 +102,6 @@ const Settings: React.FC<SettingsProps> = ({
                         <button 
                           onClick={onClearAuth}
                           className={`p-3 rounded-xl border transition-all ${isDark ? 'bg-slate-800 text-slate-400 hover:text-red-500' : 'bg-white text-slate-400 hover:text-red-600'}`}
-                          title="Unlink Account"
                         >
                            <LogOut className="w-4 h-4" />
                         </button>
@@ -126,23 +122,37 @@ const Settings: React.FC<SettingsProps> = ({
 
         {/* System Settings */}
         <div className={`p-5 sm:p-8 rounded-[1.5rem] sm:rounded-[2.5rem] border shadow-sm space-y-6 ${cardBg}`}>
-          <label className={labelClass}>System</label>
+          <label className={labelClass}>Reader Experience</label>
           
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <Smartphone className={`w-5 h-5 ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`} />
-              <div>
-                <div className={`text-sm font-black ${textClass}`}>Keep screen awake</div>
-                <div className="text-[10px] font-bold opacity-60">Prevents dimming during playback</div>
+          <div className="space-y-6">
+            <div className="space-y-4">
+              <div className="flex justify-between items-center">
+                <span className={`text-sm font-black ${textClass}`}>Font Size</span>
+                <span className="text-xs font-mono font-black opacity-60">{settings.fontSizePx}px</span>
               </div>
+              <input 
+                type="range" min="16" max="40" step="1" 
+                value={settings.fontSizePx} 
+                onChange={e => onUpdate({ fontSizePx: parseInt(e.target.value) })}
+                className="w-full h-1.5 accent-indigo-600 rounded-full cursor-pointer"
+              />
             </div>
-            <button 
-              disabled={!isWakeLockSupported}
-              onClick={() => onSetKeepAwake(!keepAwake)}
-              className={`w-14 h-7 rounded-full transition-colors relative ${!isWakeLockSupported ? 'opacity-30' : ''} ${keepAwake ? 'bg-indigo-600' : 'bg-slate-300'}`}
-            >
-              <div className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-all ${keepAwake ? 'left-8' : 'left-1'}`} />
-            </button>
+
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <Smartphone className={`w-5 h-5 ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`} />
+                <div>
+                  <div className={`text-sm font-black ${textClass}`}>Keep screen awake</div>
+                </div>
+              </div>
+              <button 
+                disabled={!isWakeLockSupported}
+                onClick={() => onSetKeepAwake(!keepAwake)}
+                className={`w-14 h-7 rounded-full transition-colors relative ${!isWakeLockSupported ? 'opacity-30' : ''} ${keepAwake ? 'bg-indigo-600' : 'bg-slate-300'}`}
+              >
+                <div className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-all ${keepAwake ? 'left-8' : 'left-1'}`} />
+              </button>
+            </div>
           </div>
         </div>
 
@@ -168,7 +178,7 @@ const Settings: React.FC<SettingsProps> = ({
         </div>
 
         <div className="text-center font-black uppercase tracking-[0.4em] text-[9px] sm:text-[11px] pt-8 sm:pt-12 opacity-30">
-          VoxLib Engine v2.5.5
+          VoxLib Engine v2.5.6
         </div>
       </div>
     </div>

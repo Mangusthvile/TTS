@@ -1,11 +1,20 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { Book, Theme, StorageBackend, Chapter } from '../types';
-import { LayoutGrid, List, AlignJustify, Plus, Star, Folder, CheckCircle2, Download, Edit2, Check, RefreshCw, Trash2, Headphones, Loader2, Zap, Cloud, ExternalLink, AlertTriangle } from 'lucide-react';
-import { synthesizeChunk } from '../services/cloudTtsService';
+import { LayoutGrid, List, AlignJustify, Plus, Star, Folder, CheckCircle2, Download, Edit2, Check, RefreshCw, Trash2, Headphones, Loader2, Zap, Cloud, ExternalLink, AlertTriangle, X } from 'lucide-react';
+import { synthesizeChunk, sanitizeVoiceForCloud } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache } from '../services/audioCache';
 import { uploadToDrive } from '../services/driveService';
 
 type ViewMode = 'details' | 'list' | 'grid';
+
+const CLOUD_VOICES = [
+  { id: 'en-US-Standard-C', name: 'Standard Female (US)' },
+  { id: 'en-US-Standard-D', name: 'Standard Male (US)' },
+  { id: 'en-US-Wavenet-D', name: 'Premium Male (US)' },
+  { id: 'en-US-Wavenet-C', name: 'Premium Female (US)' },
+  { id: 'en-GB-Wavenet-B', name: 'Premium Male (UK)' },
+  { id: 'en-GB-Wavenet-A', name: 'Premium Female (UK)' },
+];
 
 interface ChapterFolderViewProps {
   book: Book;
@@ -17,6 +26,7 @@ interface ChapterFolderViewProps {
   onDeleteChapter: (chapterId: string) => void;
   onRefreshDriveFolder?: () => void;
   onUpdateChapter?: (chapter: Chapter) => void;
+  onUpdateBookSettings?: (settings: any) => void;
   driveToken?: string;
 }
 
@@ -30,13 +40,16 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   onDeleteChapter,
   onRefreshDriveFolder,
   onUpdateChapter,
+  onUpdateBookSettings,
   driveToken
 }) => {
   const [viewMode, setViewMode] = useState<ViewMode>('details');
   const [editingChapterId, setEditingChapterId] = useState<string | null>(null);
   const [synthesizingId, setSynthesizingId] = useState<string | null>(null);
   const [isBatchSynthesizing, setIsBatchSynthesizing] = useState(false);
+  const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
   const [tempTitle, setTempTitle] = useState('');
+  const [showVoiceModal, setShowVoiceModal] = useState<{ chapterId?: string } | null>(null);
 
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
@@ -51,10 +64,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   }, [book.chapters]);
 
   const currentSignature = useMemo(() => {
-    const voice = book.settings.selectedVoiceName || 'default';
+    const voice = book.settings.defaultVoiceId || 'default';
     const rulesHash = book.rules.length + "_" + book.rules.filter(r => r.enabled).length;
     return `${voice}_${rulesHash}`;
-  }, [book.settings.selectedVoiceName, book.rules]);
+  }, [book.settings.defaultVoiceId, book.rules]);
 
   const handleStartEdit = (e: React.MouseEvent, chapterId: string, currentTitle: string) => {
     e.stopPropagation();
@@ -70,9 +83,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     setEditingChapterId(null);
   };
 
-  const migrateChapterAudioToDrive = async (chapter: Chapter) => {
-    const rawVoice = book.settings.selectedVoiceName;
-    const speed = 1.0; // Generation always at 1.0 for v2.5.5
+  const migrateChapterAudioToDrive = async (chapter: Chapter, voiceToUse?: string) => {
+    const voice = voiceToUse || book.settings.defaultVoiceId || 'en-US-Standard-C';
+    const speed = 1.0; 
     
     const MAX = 4800;
     const textChunks = [];
@@ -84,12 +97,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     const audioBlobs: Blob[] = [];
 
     for (const chunkText of textChunks) {
-      const cacheKey = generateAudioKey(chunkText, rawVoice || '', speed);
+      const cacheKey = generateAudioKey(chunkText, voice, speed);
       const existing = await getAudioFromCache(cacheKey);
       if (existing) {
         audioBlobs.push(existing);
       } else {
-        const res = await synthesizeChunk(chunkText, rawVoice || '', speed);
+        const res = await synthesizeChunk(chunkText, voice, speed);
         const blob = await fetch(res.audioUrl).then(r => r.blob());
         await saveAudioToCache(cacheKey, blob);
         audioBlobs.push(blob);
@@ -117,20 +130,65 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     return undefined;
   };
 
-  const handleSynthesize = async (e: React.MouseEvent, chapter: Chapter) => {
-    e.stopPropagation();
-    if (!!synthesizingId || isBatchSynthesizing) return;
-    setSynthesizingId(chapter.id);
-    
-    try {
-      const audioDriveId = await migrateChapterAudioToDrive(chapter);
-      if (onUpdateChapter) {
-        onUpdateChapter({ ...chapter, audioDriveId, audioSignature: currentSignature });
+  const handleRunGeneration = async (voiceId: string, chapterId?: string) => {
+    if (onUpdateBookSettings && !book.settings.defaultVoiceId) {
+      onUpdateBookSettings({ ...book.settings, defaultVoiceId: voiceId });
+    }
+
+    setShowVoiceModal(null);
+
+    if (chapterId) {
+      const chapter = chapters.find(c => c.id === chapterId);
+      if (!chapter) return;
+      setSynthesizingId(chapterId);
+      try {
+        const audioDriveId = await migrateChapterAudioToDrive(chapter, voiceId);
+        if (onUpdateChapter) {
+          onUpdateChapter({ ...chapter, audioDriveId, audioSignature: currentSignature });
+        }
+      } catch (err) {
+        alert("Audio generation failed: " + err);
+      } finally {
+        setSynthesizingId(null);
       }
-    } catch (err) {
-      alert("Audio generation failed: " + err);
-    } finally {
-      setSynthesizingId(null);
+    } else {
+      // Bulk process
+      const missing = chapters.filter(c => !c.audioDriveId);
+      if (missing.length === 0) return;
+
+      setIsBatchSynthesizing(true);
+      setBatchProgress({ current: 0, total: missing.length });
+
+      for (let i = 0; i < missing.length; i++) {
+        setBatchProgress({ current: i + 1, total: missing.length });
+        const chapter = missing[i];
+        try {
+          const audioDriveId = await migrateChapterAudioToDrive(chapter, voiceId);
+          if (onUpdateChapter) {
+            onUpdateChapter({ ...chapter, audioDriveId, audioSignature: currentSignature });
+          }
+        } catch (e) {
+          console.error("Batch fail for ch", chapter.index, e);
+        }
+      }
+      setIsBatchSynthesizing(false);
+    }
+  };
+
+  const handleSynthesizeClick = (e: React.MouseEvent, chapter: Chapter) => {
+    e.stopPropagation();
+    if (book.settings.defaultVoiceId) {
+      handleRunGeneration(book.settings.defaultVoiceId, chapter.id);
+    } else {
+      setShowVoiceModal({ chapterId: chapter.id });
+    }
+  };
+
+  const handleBulkClick = () => {
+    if (book.settings.defaultVoiceId) {
+      handleRunGeneration(book.settings.defaultVoiceId);
+    } else {
+      setShowVoiceModal({});
     }
   };
 
@@ -174,7 +232,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                 ) : (
                   <span title="Audio ready on Drive"><Cloud className="w-3.5 h-3.5 text-emerald-500" /></span>
                 )
-              ) : <span title="No audio generated"><AlertTriangle className="w-3.5 h-3.5 text-slate-400 opacity-50" /></span>}
+              ) : (isSynthesizing ? <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-500" /> : <span title="No audio generated"><AlertTriangle className="w-3.5 h-3.5 text-slate-400 opacity-50" /></span>)}
             </div>
           )}
         </div>
@@ -189,7 +247,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
         <div className="flex justify-end items-center gap-2 hidden sm:flex">
           <button
-            onClick={(e) => handleSynthesize(e, c)}
+            onClick={(e) => handleSynthesizeClick(e, c)}
             disabled={isSynthesizing || isBatchSynthesizing}
             className={`p-2 rounded-xl border transition-all ${controlBg} ${isSynthesizing ? 'opacity-100 text-indigo-600 ring-1 ring-indigo-600' : 'opacity-40 hover:opacity-100 hover:text-indigo-500'}`}
             title={c.audioDriveId ? (isStale ? "Audio Stale: Regenerate" : "Refresh Drive Audio") : "Generate Audio"}
@@ -219,6 +277,31 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   return (
     <div className={`h-full min-h-0 flex flex-col ${isDark ? 'bg-slate-900 text-slate-100' : isSepia ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
+      {/* Voice Selection Modal */}
+      {showVoiceModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className={`w-full max-w-md rounded-3xl shadow-2xl p-8 space-y-6 ${isDark ? 'bg-slate-900 border border-slate-800' : 'bg-white border border-black/5'}`}>
+            <div className="flex justify-between items-center">
+              <h3 className="text-xl font-black tracking-tight">Select Cloud Voice</h3>
+              <button onClick={() => setShowVoiceModal(null)} className="p-2 opacity-60 hover:opacity-100"><X className="w-5 h-5" /></button>
+            </div>
+            <p className="text-sm font-bold opacity-60">This voice will be used for generation and remembered as the default for this book.</p>
+            <div className="space-y-2">
+              {CLOUD_VOICES.map(v => (
+                <button
+                  key={v.id}
+                  onClick={() => handleRunGeneration(v.id, showVoiceModal.chapterId)}
+                  className={`w-full p-4 rounded-xl border-2 text-left font-black text-sm transition-all flex justify-between items-center ${isDark ? 'border-slate-800 hover:border-indigo-600 bg-slate-950/40' : 'border-slate-100 hover:border-indigo-600 bg-slate-50'}`}
+                >
+                  {v.name}
+                  < Headphones className="w-4 h-4 opacity-40" />
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="px-4 sm:px-8 pt-6 sm:pt-8">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
           <div className="flex items-center gap-4 min-w-0">
@@ -232,6 +315,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           </div>
 
           <div className="flex items-center flex-wrap gap-2 sm:gap-3">
+             <button
+              onClick={handleBulkClick}
+              disabled={isBatchSynthesizing}
+              className={`px-5 py-2.5 rounded-xl text-[10px] sm:text-[11px] font-black flex items-center gap-2 border transition-all ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-black/10 shadow-sm'}`}
+            >
+              {isBatchSynthesizing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Headphones className="w-3.5 h-3.5" />}
+              {isBatchSynthesizing ? `Syncing ${batchProgress.current}/${batchProgress.total}...` : 'Convert Missing Audio'}
+            </button>
              <button
               onClick={onAddChapter}
               className="px-5 py-2.5 rounded-xl text-[10px] sm:text-[11px] font-black flex items-center gap-2 bg-indigo-600 text-white shadow-lg shadow-indigo-600/20 hover:scale-105 transition-all"

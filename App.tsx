@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, ReaderSettings, RuleType, Rule } from './types';
 import Library from './components/Library';
@@ -11,6 +10,8 @@ import ChapterFolderView from './components/ChapterFolderView';
 import { speechController, applyRules } from './services/speechService';
 import { authenticateDrive, fetchDriveFile, uploadToDrive, deleteDriveFile, findFileSync, listFilesInFolder, fetchDriveBinary } from './services/driveService';
 import { saveChapterToFile, deleteChapterFile } from './services/fileService';
+import { synthesizeChunk } from './services/cloudTtsService';
+import { saveAudioToCache, generateAudioKey, getAudioFromCache } from './services/audioCache';
 import { BookText, Zap, Sun, Coffee, Moon, X, Settings as SettingsIcon, Menu, RefreshCw, Loader2, Cloud, Volume2 } from 'lucide-react';
 
 const SYNC_FILENAME = 'talevox_sync_manifest.json';
@@ -116,7 +117,13 @@ const App: React.FC = () => {
     }));
   }, []);
 
-  // Method to update chapter title in state
+  const handleUpdateBookSettings = useCallback((settings: any) => {
+     setState(prev => ({
+        ...prev,
+        books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, settings: { ...b.settings, ...settings } } : b)
+     }));
+  }, []);
+
   const handleUpdateChapterTitle = useCallback((bookId: string, chapterId: string, newTitle: string) => {
     setState(prev => ({
       ...prev,
@@ -127,7 +134,6 @@ const App: React.FC = () => {
     }));
   }, []);
 
-  // Unified method to handle chapter deletion across different storage backends
   const handleDeleteChapter = useCallback(async (bookId: string, chapterId: string) => {
     const book = stateRef.current.books.find(b => b.id === bookId);
     const chapter = book?.chapters.find(c => c.id === chapterId);
@@ -214,25 +220,6 @@ const App: React.FC = () => {
         currentSettings = { ...currentSettings, ...remoteData.readerSettings };
       }
 
-      for (const book of currentBooks) {
-        if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
-          try {
-            const files = await listFilesInFolder(state.driveToken, book.driveFolderId);
-            book.chapters.forEach(chapter => {
-              if (!chapter.audioDriveId) {
-                const idxStr = chapter.index.toString().padStart(3, '0');
-                const matchingAudio = files.find(f => f.name.startsWith(idxStr) && f.name.endsWith('.mp3'));
-                if (matchingAudio) {
-                  chapter.audioDriveId = matchingAudio.id;
-                }
-              }
-            });
-          } catch (e) {
-            console.warn(`Failed to scan folder for book ${book.title}:`, e);
-          }
-        }
-      }
-
       setState(prev => ({ ...prev, books: currentBooks, readerSettings: currentSettings }));
       const manifestContent = JSON.stringify({
         books: currentBooks.map(({ directoryHandle, ...b }) => b),
@@ -303,8 +290,6 @@ const App: React.FC = () => {
     const speed = (activeBook.settings.useBookSettings && activeBook.settings.playbackSpeed) ? activeBook.settings.playbackSpeed : state.playbackSpeed;
     
     setIsPlaying(true);
-    
-    // Estimate start time based on character offset
     const estimatedTime = (state.currentOffset / Math.max(1, text.length)) * audioDuration;
 
     try {
@@ -315,6 +300,8 @@ const App: React.FC = () => {
         estimatedTime,
         speed,
         () => {
+           console.log("[Status] ended -> mark finished", { chapterId: activeChapterMetadata.id, duration: audioDuration });
+           updateChapterProgress(activeBook.id, activeChapterMetadata.id, text.length, text.length, true);
            if (stopAfterChapter) setIsPlaying(false);
            else handleNextChapter();
         },
@@ -328,28 +315,7 @@ const App: React.FC = () => {
       setIsPlaying(false);
       alert("Playback failed: " + err);
     }
-  }, [activeBook, activeChapterMetadata, activeChapterText, state.playbackSpeed, state.currentOffset, state.driveToken, audioDuration, stopAfterChapter, handleNextChapter]);
-
-  // Update speed in real-time
-  useEffect(() => {
-    const speed = (activeBook?.settings.useBookSettings && activeBook.settings.playbackSpeed) ? activeBook.settings.playbackSpeed : state.playbackSpeed;
-    speechController.setPlaybackRate(speed);
-  }, [state.playbackSpeed, activeBook?.settings]);
-
-  const handleAddBook = async (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string, driveFolderName?: string) => {
-    const newBook: Book = {
-      id: crypto.randomUUID(),
-      title,
-      chapters: [],
-      rules: [],
-      backend,
-      directoryHandle,
-      driveFolderId,
-      driveFolderName,
-      settings: { useBookSettings: false, highlightMode: HighlightMode.WORD }
-    };
-    setState(prev => ({ ...prev, books: [...prev.books, newBook], activeBookId: newBook.id }));
-  };
+  }, [activeBook, activeChapterMetadata, activeChapterText, state.playbackSpeed, state.currentOffset, state.driveToken, audioDuration, stopAfterChapter, handleNextChapter, updateChapterProgress]);
 
   const handleChapterExtracted = async (data: { title: string; content: string; url: string; index: number }) => {
     if (!activeBook) return;
@@ -374,12 +340,36 @@ const App: React.FC = () => {
       ...prev,
       books: prev.books.map(b => b.id === prev.activeBookId ? {
         ...b,
-        currentChapterId: newChapter.id,
         chapters: [...b.chapters, { ...newChapter, driveId }].sort((a, b) => a.index - b.index)
       } : b)
     }));
+
     setIsAddChapterOpen(false);
     setActiveTab('reader');
+
+    // Auto-generate audio background if default voice is set
+    if (activeBook.settings.defaultVoiceId && state.driveToken && activeBook.backend === StorageBackend.DRIVE) {
+       console.info("[Audio] Auto-generating chapter audio...");
+       const MAX = 4800;
+       const textChunks = [];
+       const content = newChapter.content;
+       for (let i = 0; i < content.length; i += MAX) { textChunks.push(content.substring(i, i + MAX)); }
+       const blobs = [];
+       for (const t of textChunks) {
+          const res = await synthesizeChunk(t, activeBook.settings.defaultVoiceId, 1.0);
+          blobs.push(await fetch(res.audioUrl).then(r => r.blob()));
+       }
+       const combined = new Blob(blobs, { type: 'audio/mpeg' });
+       const adid = await uploadToDrive(state.driveToken, activeBook.driveFolderId!, `${newChapter.index.toString().padStart(3, '0')}.mp3`, combined, undefined, 'audio/mpeg');
+       
+       setState(prev => ({
+          ...prev,
+          books: prev.books.map(b => b.id === prev.activeBookId ? {
+             ...b,
+             chapters: b.chapters.map(c => c.id === newChapter.id ? { ...c, audioDriveId: adid } : c)
+          } : b)
+       }));
+    }
   };
 
   return (
@@ -387,10 +377,13 @@ const App: React.FC = () => {
       <div className="flex flex-1 overflow-hidden relative">
         <Library 
           isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} books={state.books} activeBookId={state.activeBookId} lastSession={state.lastSession} 
-          onSelectBook={(id) => { speechController.stop(); setIsPlaying(false); setState(p => ({ ...p, activeBookId: id, currentOffset: 0 })); setActiveTab('reader'); }} 
+          onSelectBook={(id) => { speechController.stop(); setIsPlaying(false); setState(p => ({ ...p, activeBookId: id, currentOffset: 0, books: p.books.map(b => b.id === id ? { ...b, currentChapterId: undefined } : b) })); setActiveTab('reader'); }} 
           onDeleteBook={id => setState(p => ({ ...p, books: p.books.filter(b => b.id !== id), activeBookId: p.activeBookId === id ? undefined : p.activeBookId }))} 
           onSelectChapter={(bid, cid, offset) => { speechController.stop(); setIsPlaying(false); setState(p => ({ ...p, activeBookId: bid, books: p.books.map(b => b.id === bid ? { ...b, currentChapterId: cid } : b), currentOffset: offset ?? 0 })); setActiveTab('reader'); setIsSidebarOpen(false); }} 
-          onDeleteChapter={handleDeleteChapter} theme={state.theme} onAddBook={handleAddBook} googleClientId={state.googleClientId}
+          onDeleteChapter={handleDeleteChapter} theme={state.theme} onAddBook={async (t, b, d, dfid, dfn) => {
+            const newBook: Book = { id: crypto.randomUUID(), title: t, chapters: [], rules: [], backend: b, directoryHandle: d, driveFolderId: dfid, driveFolderName: dfn, settings: { useBookSettings: false, highlightMode: HighlightMode.WORD } };
+            setState(prev => ({ ...prev, books: [...prev.books, newBook], activeBookId: newBook.id }));
+          }} googleClientId={state.googleClientId}
         />
         <main className={`flex-1 flex flex-col min-w-0 shadow-2xl relative transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-900' : state.theme === Theme.SEPIA ? 'bg-[#efe6d5]' : 'bg-white'}`}>
           <header className={`h-16 border-b flex items-center justify-between px-4 lg:px-8 z-10 sticky top-0 transition-colors duration-300 ${state.theme === Theme.DARK ? 'border-slate-800 bg-slate-900/80 backdrop-blur-md' : state.theme === Theme.SEPIA ? 'border-[#d8ccb6] bg-[#efe6d5]/90 backdrop-blur-md' : 'border-black/5 bg-white/90 backdrop-blur-md'}`}>
@@ -425,24 +418,15 @@ const App: React.FC = () => {
                   </div>
                </div>
              )}
-             {activeTab === 'reader' ? (activeBook ? (activeBook.currentChapterId ? (<Reader chapter={activeChapterMetadata || null} rules={activeBook.rules} currentOffset={state.currentOffset} theme={state.theme} debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset} highlightMode={activeBook.settings.highlightMode} onBackToChapters={() => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, currentChapterId: undefined } : b) }))} onAddChapter={() => setIsAddChapterOpen(true)} readerSettings={state.readerSettings} />) : (<ChapterFolderView book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)} onOpenChapter={(id) => setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, currentChapterId: id } : b), currentOffset: 0 }))} onToggleFavorite={() => {}} onUpdateChapterTitle={(cid, nt) => handleUpdateChapterTitle(activeBook.id, cid, nt)} onDeleteChapter={(cid) => handleDeleteChapter(activeBook.id, cid)} onRefreshDriveFolder={() => {}} onUpdateChapter={handleUpdateChapter} driveToken={state.driveToken} />)) : (<div className="h-full flex flex-col items-center justify-center font-black tracking-widest text-lg opacity-40 uppercase">Select a book to begin</div>)) : activeTab === 'rules' ? (
-               <RuleManager 
-                 rules={activeBook?.rules || []} 
-                 theme={state.theme} 
-                 onAddRule={r => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: [...b.rules, r] } : b) }))} 
-                 onUpdateRule={r => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: b.rules.map(old => old.id === r.id ? r : old) } : b) }))} 
-                 onDeleteRule={id => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: b.rules.filter(r => r.id !== id) } : b) }))} 
-                 onImportRules={nr => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: nr } : b) }))}
-                 selectedVoice={(activeBook?.settings.useBookSettings && activeBook.settings.selectedVoiceName) ? activeBook.settings.selectedVoiceName : state.selectedVoiceName || ''}
-                 playbackSpeed={(activeBook?.settings.useBookSettings && activeBook.settings.playbackSpeed) ? activeBook.settings.playbackSpeed : state.playbackSpeed}
-               />
+             {activeTab === 'reader' ? (activeBook ? (activeBook.currentChapterId ? (<Reader chapter={activeChapterMetadata || null} rules={activeBook.rules} currentOffset={state.currentOffset} theme={state.theme} debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset} highlightMode={activeBook.settings.highlightMode} onBackToChapters={() => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, currentChapterId: undefined } : b) }))} onAddChapter={() => setIsAddChapterOpen(true)} readerSettings={state.readerSettings} />) : (<ChapterFolderView book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)} onOpenChapter={(id) => setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, currentChapterId: id } : b), currentOffset: 0 }))} onToggleFavorite={() => {}} onUpdateChapterTitle={(cid, nt) => handleUpdateChapterTitle(activeBook.id, cid, nt)} onDeleteChapter={(cid) => handleDeleteChapter(activeBook.id, cid)} onRefreshDriveFolder={() => {}} onUpdateChapter={handleUpdateChapter} onUpdateBookSettings={handleUpdateBookSettings} driveToken={state.driveToken} />)) : (<div className="h-full flex flex-col items-center justify-center font-black tracking-widest text-lg opacity-40 uppercase">Select a book to begin</div>)) : activeTab === 'rules' ? (
+               <RuleManager rules={activeBook?.rules || []} theme={state.theme} onAddRule={r => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: [...b.rules, r] } : b) }))} onUpdateRule={r => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: b.rules.map(old => old.id === r.id ? r : old) } : b) }))} onDeleteRule={id => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: b.rules.filter(r => r.id !== id) } : b) }))} onImportRules={nr => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: nr } : b) }))} selectedVoice={(activeBook?.settings.useBookSettings && activeBook.settings.selectedVoiceName) ? activeBook.settings.selectedVoiceName : state.selectedVoiceName || ''} playbackSpeed={(activeBook?.settings.useBookSettings && activeBook.settings.playbackSpeed) ? activeBook.settings.playbackSpeed : state.playbackSpeed} />
              ) : (<Settings settings={state.readerSettings} onUpdate={s => setState(p => ({ ...p, readerSettings: { ...p.readerSettings, ...s } }))} theme={state.theme} keepAwake={state.keepAwake} onSetKeepAwake={v => setState(p => ({ ...p, keepAwake: v }))} onCheckForUpdates={() => window.location.reload()} isCloudLinked={!!state.driveToken} onLinkCloud={async () => { const t = await authenticateDrive(state.googleClientId); setState(p => ({ ...p, driveToken: t })); }} onSyncNow={() => handleSync(true)} isSyncing={isSyncing} googleClientId={state.googleClientId} onUpdateGoogleClientId={id => setState(p => ({ ...p, googleClientId: id }))} onClearAuth={() => setState(p => ({ ...p, driveToken: undefined }))} />)}
           </div>
           {activeChapterMetadata && activeTab === 'reader' && (
             <Player 
               isPlaying={isPlaying} onPlay={handlePlay} onPause={handlePause} onStop={() => { speechController.stop(); setIsPlaying(false); }} onNext={handleNextChapter} onPrev={() => {}} onSeek={d => handleJumpToOffset(state.currentOffset + d)}
               speed={(activeBook?.settings.useBookSettings && activeBook.settings.playbackSpeed) ? activeBook.settings.playbackSpeed : state.playbackSpeed} onSpeedChange={s => setState(prev => prev.books.find(b => b.id === prev.activeBookId)?.settings.useBookSettings ? { ...prev, books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, settings: { ...b.settings, playbackSpeed: s } } : b) } : { ...prev, playbackSpeed: s })}
-              selectedVoice={(activeBook?.settings.useBookSettings && activeBook.settings.selectedVoiceName) ? activeBook.settings.selectedVoiceName : state.selectedVoiceName || ''} onVoiceChange={v => setState(prev => prev.books.find(b => b.id === prev.activeBookId)?.settings.useBookSettings ? { ...prev, books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, settings: { ...b.settings, selectedVoiceName: v } } : b) } : { ...prev, selectedVoiceName: v })}
+              selectedVoice={activeBook?.settings.defaultVoiceId || ''} onVoiceChange={() => {}}
               theme={state.theme} onThemeChange={() => {}} progress={state.currentOffset} totalLength={applyRules(activeChapterText, activeBook?.rules || []).length} wordCount={activeChapterMetadata.wordCount} onSeekToOffset={handleJumpToOffset}
               sleepTimer={sleepTimerSeconds} onSetSleepTimer={setSleepTimerSeconds} stopAfterChapter={stopAfterChapter} onSetStopAfterChapter={setStopAfterChapter}
               useBookSettings={activeBook?.settings.useBookSettings || false} onSetUseBookSettings={v => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, settings: { ...b.settings, useBookSettings: v } } : b) }))}

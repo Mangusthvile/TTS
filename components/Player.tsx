@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Play, Pause, SkipBack, SkipForward, FastForward, Rewind, Clock, Type, AlignLeft, Sparkles, Repeat, Loader2 } from 'lucide-react';
 import { Theme, HighlightMode } from '../types';
+import { speechController } from '../services/speechService';
 
 interface PlayerProps {
   isPlaying: boolean;
@@ -47,7 +48,6 @@ const Player: React.FC<PlayerProps> = ({
   useBookSettings, onSetUseBookSettings, highlightMode, onSetHighlightMode,
   onNext, onPrev, onSeek, playbackCurrentTime, playbackDuration, isFetching
 }) => {
-  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [showSleepMenu, setShowSleepMenu] = useState(false);
   
   const totalSecondsEstimate = useMemo(() => Math.max(1, (wordCount / (170 * speed)) * 60), [wordCount, speed]);
@@ -67,16 +67,10 @@ const Player: React.FC<PlayerProps> = ({
     return formatTime(totalSecondsEstimate);
   }, [playbackDuration, isPlaying, totalSecondsEstimate]);
 
-  useEffect(() => {
-    const loadVoices = () => {
-      const v = window.speechSynthesis.getVoices();
-      const finalVoices = v.filter(v => v.lang.includes('en')).length > 0 ? v.filter(v => v.lang.includes('en')) : v;
-      setVoices(finalVoices);
-      if (!selectedVoice && finalVoices.length > 0) onVoiceChange(finalVoices[0].name);
-    };
-    loadVoices();
-    window.speechSynthesis.onvoiceschanged = loadVoices;
-  }, [selectedVoice, onVoiceChange]);
+  const handleSpeedChange = (newSpeed: number) => {
+    onSpeedChange(newSpeed);
+    speechController.setPlaybackRate(newSpeed);
+  };
 
   const progressPercent = totalLength > 0 ? (progress / totalLength) * 100 : 0;
 
@@ -107,7 +101,7 @@ const Player: React.FC<PlayerProps> = ({
               <span className="text-[10px] font-black uppercase tracking-widest opacity-60">Speed</span>
               <div className="flex items-center gap-2">
                 <button onClick={() => onSetUseBookSettings(!useBookSettings)} className={`px-2.5 py-1 rounded-lg text-[10px] font-black border transition-all ${useBookSettings ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-black/5 text-inherit opacity-60'}`}>{useBookSettings ? 'Book' : 'Global'}</button>
-                <input type="range" min="0.5" max="3.0" step="0.1" value={speed} onChange={e => onSpeedChange(parseFloat(e.target.value))} className="h-1.5 w-16 accent-indigo-600" />
+                <input type="range" min="0.5" max="3.0" step="0.1" value={speed} onChange={e => handleSpeedChange(parseFloat(e.target.value))} className="h-1.5 w-16 accent-indigo-600" />
                 <span className="text-xs font-black min-w-[20px]">{speed}x</span>
               </div>
             </div>
@@ -119,12 +113,7 @@ const Player: React.FC<PlayerProps> = ({
                 ))}
               </div>
             </div>
-            <div className="flex flex-col gap-1.5">
-              <span className="text-[10px] font-black uppercase tracking-widest opacity-60">Voice</span>
-              <select value={selectedVoice} onChange={e => onVoiceChange(e.target.value)} className="text-[11px] font-black bg-transparent outline-none max-w-[140px] truncate cursor-pointer">
-                {voices.map(v => <option key={v.name} value={v.name} className={isDark ? 'bg-slate-800 text-slate-100' : 'bg-white text-black'}>{v.name}</option>)}
-              </select>
-            </div>
+            {/* Voice selection removed from Player v2.5.6 */}
           </div>
 
           <div className="flex items-center gap-4 lg:gap-8 order-first lg:order-none">

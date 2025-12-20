@@ -68,6 +68,7 @@ export interface Chapter {
 export interface BookSettings {
   playbackSpeed?: number;
   selectedVoiceName?: string;
+  defaultVoiceId?: string; // Added in v2.5.6
   useBookSettings: boolean;
   highlightMode: HighlightMode;
 }

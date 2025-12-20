@@ -1,4 +1,3 @@
-
 import { Rule, RuleType } from '../types';
 import { getDriveAudioObjectUrl, revokeObjectUrl } from "../services/driveService";
 
@@ -50,13 +49,13 @@ class SpeechController {
   private currentBlobUrl: string | null = null;
   private currentTextLength: number = 0;
   private rafId: number | null = null;
+  private requestedSpeed: number = 1.0;
   
   private onEndCallback: (() => void) | null = null;
   private syncCallback: ((meta: PlaybackMetadata) => void) | null = null;
   private onFetchStateChange: ((isFetching: boolean) => void) | null = null;
   
   private sessionToken: number = 0;
-  private getNextSegment: (() => Promise<NextSegment | null>) | null = null;
 
   constructor() {
     this.audio = new Audio();
@@ -72,9 +71,6 @@ class SpeechController {
   private setupAudioListeners() {
     this.audio.addEventListener('ended', async () => {
       console.info("[Audio] Chapter ended.");
-      if (this.getNextSegment) {
-        // Handle auto-advance logic if needed, but for v2.5.5 we let App.tsx handle it via onEnd
-      }
       this.stopSyncLoop();
       if (this.onEndCallback) this.onEndCallback();
     });
@@ -132,6 +128,7 @@ class SpeechController {
   ) {
     this.sessionToken++;
     const session = this.sessionToken;
+    this.requestedSpeed = playbackRate;
     
     // Cleanup
     this.audio.pause();
@@ -156,7 +153,6 @@ class SpeechController {
       console.log("[Audio] Drive MP3 loaded:", { size: blob.size, type: blob.type, fileId });
       this.currentBlobUrl = url;
       this.audio.src = url;
-      this.audio.playbackRate = playbackRate;
 
       await new Promise<void>((resolve, reject) => {
         const onReady = () => { cleanup(); resolve(); };
@@ -171,6 +167,10 @@ class SpeechController {
       });
 
       if (this.sessionToken !== session) return;
+
+      // Apply speed strictly after load
+      this.audio.playbackRate = this.requestedSpeed;
+      console.log("[Audio] playbackRate applied:", this.audio.playbackRate);
 
       if (Number.isFinite(startTimeSec) && startTimeSec > 0) {
         const dur = this.audio.duration || 0;
@@ -192,7 +192,6 @@ class SpeechController {
     }
   }
 
-  // Speak method added to support direct text-to-speech for rule testing
   speak(
     text: string,
     voiceName: string | undefined,
@@ -202,6 +201,7 @@ class SpeechController {
     onStart?: () => void,
     onBoundary?: (offset: number) => void
   ) {
+    // Only used for testing rules
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
     const voices = window.speechSynthesis.getVoices();
@@ -227,12 +227,12 @@ class SpeechController {
 
   resume() {
     if (this.audio.src) {
+      this.audio.playbackRate = this.requestedSpeed;
       this.audio.play().catch(err => console.warn("[Audio] Resume blocked:", err));
     }
     window.speechSynthesis.resume();
   }
 
-  // Updated stop method to cancel both audio element and speech synthesis
   stop() {
     this.sessionToken++;
     this.stopSyncLoop();
@@ -246,7 +246,10 @@ class SpeechController {
   }
 
   setPlaybackRate(rate: number) {
-    this.audio.playbackRate = rate;
+    this.requestedSpeed = rate;
+    if (this.audio.src) {
+      this.audio.playbackRate = rate;
+    }
   }
 
   get isPaused() {
