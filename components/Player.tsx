@@ -50,29 +50,33 @@ const Player: React.FC<PlayerProps> = ({
 }) => {
   const [showSleepMenu, setShowSleepMenu] = useState(false);
   
-  const totalSecondsEstimate = useMemo(() => Math.max(1, (wordCount / (170 * speed)) * 60), [wordCount, speed]);
-  
+  // Real duration adjusted by speed
   const displayTime = useMemo(() => {
-    if (isPlaying && playbackCurrentTime !== undefined && playbackCurrentTime > 0) {
-      return formatTime(playbackCurrentTime);
+    if (playbackCurrentTime !== undefined && playbackCurrentTime > 0) {
+      return formatTime(playbackCurrentTime / speed);
     }
-    const ratio = Math.max(0, Math.min(1, progress / Math.max(1, totalLength)));
-    return formatTime(totalSecondsEstimate * ratio);
-  }, [playbackCurrentTime, isPlaying, progress, totalLength, totalSecondsEstimate]);
+    return "0:00";
+  }, [playbackCurrentTime, speed]);
 
   const displayTotal = useMemo(() => {
-    if (isPlaying && playbackDuration !== undefined && playbackDuration > 0) {
-      return formatTime(playbackDuration);
+    if (playbackDuration !== undefined && playbackDuration > 0) {
+      return formatTime(playbackDuration / speed);
     }
-    return formatTime(totalSecondsEstimate);
-  }, [playbackDuration, isPlaying, totalSecondsEstimate]);
+    // Fallback estimate only if metadata hasn't loaded yet
+    return formatTime((wordCount / (170 * speed)) * 60);
+  }, [playbackDuration, wordCount, speed]);
 
   const handleSpeedChange = (newSpeed: number) => {
     onSpeedChange(newSpeed);
     speechController.setPlaybackRate(newSpeed);
   };
 
-  const progressPercent = totalLength > 0 ? (progress / totalLength) * 100 : 0;
+  const progressPercent = useMemo(() => {
+    if (playbackDuration && playbackCurrentTime !== undefined) {
+      return (playbackCurrentTime / playbackDuration) * 100;
+    }
+    return totalLength > 0 ? (progress / totalLength) * 100 : 0;
+  }, [playbackDuration, playbackCurrentTime, progress, totalLength]);
 
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
@@ -113,7 +117,6 @@ const Player: React.FC<PlayerProps> = ({
                 ))}
               </div>
             </div>
-            {/* Voice selection removed from Player v2.5.6 */}
           </div>
 
           <div className="flex items-center gap-4 lg:gap-8 order-first lg:order-none">
@@ -138,7 +141,7 @@ const Player: React.FC<PlayerProps> = ({
           </div>
 
           <div className="hidden lg:flex items-center gap-4 relative">
-            <button onClick={() => setShowSleepMenu(!showSleepMenu)} className={`flex items-center gap-2 px-5 py-2.5 rounded-xl border text-xs font-black shadow-sm transition-all ${sleepTimer || stopAfterChapter ? 'bg-indigo-600 text-white' : 'opacity-60'}`}><Clock className="w-4 h-4" /> {sleepTimer ? formatTime(sleepTimer) : 'Sleep'}</button>
+            <button onClick={() => setShowSleepMenu(!showSleepMenu)} className={`flex items-center gap-2 px-5 py-2.5 rounded-xl border text-xs font-black shadow-sm transition-all ${sleepTimer || stopAfterChapter ? 'bg-indigo-600 text-white' : 'opacity-60'}`}><Clock className="w-4 h-4" /> {sleepTimer ? formatTime(sleepTimer / speed) : 'Sleep'}</button>
             {showSleepMenu && (
               <div className={`absolute bottom-full mb-3 right-0 w-56 rounded-2xl border shadow-2xl p-2 z-[60] ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-black/10'}`}>
                 {[15, 30, 60].map(m => <button key={m} onClick={() => { onSetSleepTimer(m * 60); setShowSleepMenu(false); }} className={`w-full text-left px-3 py-2.5 text-[13px] font-bold rounded-xl ${isDark ? 'hover:bg-slate-700' : 'hover:bg-black/5'}`}>{m} Minutes</button>)}

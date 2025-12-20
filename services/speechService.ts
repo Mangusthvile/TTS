@@ -31,13 +31,6 @@ export function applyRules(text: string, rules: Rule[]): string {
   return processedText;
 }
 
-export interface NextSegment {
-  announcementPrefix: string;
-  content: string;
-  bookTitle: string;
-  chapterTitle: string;
-}
-
 export interface PlaybackMetadata {
   currentTime: number;
   duration: number;
@@ -69,10 +62,13 @@ class SpeechController {
   }
 
   private setupAudioListeners() {
-    this.audio.addEventListener('ended', async () => {
-      console.info("[Audio] Chapter ended.");
+    this.audio.addEventListener('ended', () => {
+      console.info("[AudioEngine] Playback ended.");
       this.stopSyncLoop();
-      if (this.onEndCallback) this.onEndCallback();
+      if (this.onEndCallback) {
+         // Fire callback asynchronously to avoid stack issues during state transitions
+         setTimeout(() => this.onEndCallback?.(), 0);
+      }
     });
 
     this.audio.addEventListener('play', () => {
@@ -85,7 +81,7 @@ class SpeechController {
     });
 
     this.audio.addEventListener('error', () => {
-      console.error("[Audio] Error:", {
+      console.error("[AudioEngine] Error:", {
         error: this.audio.error,
         src: this.audio.src,
         networkState: this.audio.networkState
@@ -130,7 +126,6 @@ class SpeechController {
     const session = this.sessionToken;
     this.requestedSpeed = playbackRate;
     
-    // Cleanup
     this.audio.pause();
     this.audio.removeAttribute("src");
     this.audio.load();
@@ -150,7 +145,7 @@ class SpeechController {
         return;
       }
 
-      console.log("[Audio] Drive MP3 loaded:", { size: blob.size, type: blob.type, fileId });
+      console.log("[AudioEngine] Drive MP3 loaded:", { size: blob.size, fileId });
       this.currentBlobUrl = url;
       this.audio.src = url;
 
@@ -168,9 +163,7 @@ class SpeechController {
 
       if (this.sessionToken !== session) return;
 
-      // Apply speed strictly after load
       this.audio.playbackRate = this.requestedSpeed;
-      console.log("[Audio] playbackRate applied:", this.audio.playbackRate);
 
       if (Number.isFinite(startTimeSec) && startTimeSec > 0) {
         const dur = this.audio.duration || 0;
@@ -179,7 +172,7 @@ class SpeechController {
 
       await this.audio.play();
     } catch (err) {
-      console.error("[Audio] Playback setup failed:", err);
+      console.error("[AudioEngine] Playback failed:", err);
       if (this.onFetchStateChange) this.onFetchStateChange(false);
       throw err;
     }
@@ -197,26 +190,15 @@ class SpeechController {
     voiceName: string | undefined,
     rate: number,
     offset: number,
-    onEnd: () => void,
-    onStart?: () => void,
-    onBoundary?: (offset: number) => void
+    onEnd: () => void
   ) {
-    // Only used for testing rules
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
     const voices = window.speechSynthesis.getVoices();
     const voice = voices.find(v => v.name === voiceName);
     if (voice) utterance.voice = voice;
     utterance.rate = rate;
-    
-    if (onStart) utterance.onstart = () => onStart();
     utterance.onend = () => onEnd();
-    if (onBoundary) {
-      utterance.onboundary = (event) => {
-        if (event.name === 'word') onBoundary(event.charIndex);
-      };
-    }
-    
     window.speechSynthesis.speak(utterance);
   }
 
@@ -228,7 +210,7 @@ class SpeechController {
   resume() {
     if (this.audio.src) {
       this.audio.playbackRate = this.requestedSpeed;
-      this.audio.play().catch(err => console.warn("[Audio] Resume blocked:", err));
+      this.audio.play().catch(err => console.warn("[AudioEngine] Resume blocked:", err));
     }
     window.speechSynthesis.resume();
   }

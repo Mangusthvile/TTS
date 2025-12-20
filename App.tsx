@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, ReaderSettings, RuleType, Rule } from './types';
 import Library from './components/Library';
@@ -117,13 +118,8 @@ const App: React.FC = () => {
     }));
   }, []);
 
-  const handleUpdateBookSettings = useCallback((settings: any) => {
-     setState(prev => ({
-        ...prev,
-        books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, settings: { ...b.settings, ...settings } } : b)
-     }));
-  }, []);
-
+  // Fix: Implemented missing handleUpdateChapterTitle
+  // Updates the title of a specific chapter within state
   const handleUpdateChapterTitle = useCallback((bookId: string, chapterId: string, newTitle: string) => {
     setState(prev => ({
       ...prev,
@@ -134,31 +130,40 @@ const App: React.FC = () => {
     }));
   }, []);
 
+  // Fix: Implemented missing handleDeleteChapter to resolve signature mismatch and redundancy
+  // Centralized chapter deletion logic with Drive cleanup and state updates
   const handleDeleteChapter = useCallback(async (bookId: string, chapterId: string) => {
     const book = stateRef.current.books.find(b => b.id === bookId);
-    const chapter = book?.chapters.find(c => c.id === chapterId);
-    if (!book || !chapter) return;
-
-    if (window.confirm(`Delete chapter "${chapter.title}"?`)) {
-      try {
-        if (book.backend === StorageBackend.DRIVE && stateRef.current.driveToken) {
-          await deleteDriveFile(stateRef.current.driveToken, chapter.driveId!);
-        } else if (book.backend === StorageBackend.LOCAL && book.directoryHandle) {
-          await deleteChapterFile(book.directoryHandle, chapter.filename);
+    if (!book) return;
+    
+    if (confirm(`Delete chapter?`)) {
+      if (book.backend === StorageBackend.DRIVE && stateRef.current.driveToken) {
+        const ch = book.chapters.find(c => c.id === chapterId);
+        if (ch?.driveId) {
+          try {
+            await deleteDriveFile(stateRef.current.driveToken, ch.driveId);
+          } catch (e) {
+            console.error("Failed to delete drive file", e);
+          }
         }
-        
-        setState(prev => ({
-          ...prev,
-          books: prev.books.map(b => b.id === bookId ? {
-            ...b,
-            chapters: b.chapters.filter(c => c.id !== chapterId),
-            currentChapterId: b.currentChapterId === chapterId ? undefined : b.currentChapterId
-          } : b)
-        }));
-      } catch (err) {
-        alert("Delete failed: " + err);
       }
+      
+      setState(prev => ({
+        ...prev,
+        books: prev.books.map(b => b.id === bookId ? {
+          ...b,
+          chapters: b.chapters.filter(c => c.id !== chapterId),
+          currentChapterId: b.currentChapterId === chapterId ? undefined : b.currentChapterId
+        } : b)
+      }));
     }
+  }, []);
+
+  const handleUpdateBookSettings = useCallback((settings: any) => {
+     setState(prev => ({
+        ...prev,
+        books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, settings: { ...b.settings, ...settings } } : b)
+     }));
   }, []);
 
   const updateChapterProgress = useCallback((bookId: string, chapterId: string, offset: number, total: number, completed: boolean = false) => {
@@ -235,8 +240,6 @@ const App: React.FC = () => {
     }
   }, [state.driveToken]);
 
-  useEffect(() => { if (state.driveToken) handleSync(); }, [state.driveToken]);
-
   const loadChapterContent = useCallback(async (bookId: string, chapterId: string) => {
     const book = stateRef.current.books.find(b => b.id === bookId);
     const chapter = book?.chapters.find(c => c.id === chapterId);
@@ -261,49 +264,60 @@ const App: React.FC = () => {
     if (state.activeBookId && activeBook?.currentChapterId) loadChapterContent(state.activeBookId, activeBook.currentChapterId);
   }, [state.activeBookId, activeBook?.currentChapterId, loadChapterContent]);
 
-  const handleNextChapter = useCallback(async () => {
-    if (!activeBook) return;
-    const currentIdx = activeBook.chapters.findIndex(c => c.id === activeBook.currentChapterId);
-    if (currentIdx < activeBook.chapters.length - 1) {
-      const next = activeBook.chapters[currentIdx + 1];
+  const handleNextChapter = useCallback(async (auto = false) => {
+    const book = stateRef.current.books.find(b => b.id === stateRef.current.activeBookId);
+    if (!book) return;
+    const currentIdx = book.chapters.findIndex(c => c.id === book.currentChapterId);
+    if (currentIdx < book.chapters.length - 1) {
+      const next = book.chapters[currentIdx + 1];
       setTransitionToast({ number: next.index, title: next.title });
       setTimeout(() => setTransitionToast(null), 3500);
+      
       setState(prev => ({
         ...prev, 
-        books: prev.books.map(b => b.id === activeBook.id ? { ...b, currentChapterId: next.id } : b),
+        books: prev.books.map(b => b.id === book.id ? { ...b, currentChapterId: next.id } : b),
         currentOffset: 0
       }));
+
+      console.log("[Autoplay] Advancing to next chapter", { nextIdx: next.index, auto });
     } else {
       setIsPlaying(false);
     }
-  }, [activeBook]);
+  }, []);
 
   const handlePlay = useCallback(async () => {
-    if (!activeBook || !activeChapterMetadata || !activeChapterMetadata.audioDriveId || !state.driveToken) {
-      if (activeChapterMetadata && !activeChapterMetadata.audioDriveId) {
-        alert("This chapter has no audio generated yet. Go to Chapter List to generate.");
-      }
-      return;
+    const book = stateRef.current.books.find(b => b.id === stateRef.current.activeBookId);
+    if (!book || !book.currentChapterId || !stateRef.current.driveToken) return;
+    
+    const chapter = book.chapters.find(c => c.id === book.currentChapterId);
+    if (!chapter || !chapter.audioDriveId) {
+       alert("This chapter has no audio generated yet.");
+       setIsPlaying(false);
+       return;
     }
     
-    const text = applyRules(activeChapterText, activeBook.rules);
-    const speed = (activeBook.settings.useBookSettings && activeBook.settings.playbackSpeed) ? activeBook.settings.playbackSpeed : state.playbackSpeed;
+    const text = applyRules(activeChapterText, book.rules);
+    const speed = (book.settings.useBookSettings && book.settings.playbackSpeed) ? book.settings.playbackSpeed : stateRef.current.playbackSpeed;
     
     setIsPlaying(true);
-    const estimatedTime = (state.currentOffset / Math.max(1, text.length)) * audioDuration;
+    // Use offset ratio to estimate start time if not currently playing
+    const estimatedTime = (stateRef.current.currentOffset / Math.max(1, text.length)) * audioDuration;
 
     try {
       await speechController.loadAndPlayDriveFile(
-        state.driveToken,
-        activeChapterMetadata.audioDriveId,
+        stateRef.current.driveToken,
+        chapter.audioDriveId,
         text.length,
         estimatedTime,
         speed,
         () => {
-           console.log("[Status] ended -> mark finished", { chapterId: activeChapterMetadata.id, duration: audioDuration });
-           updateChapterProgress(activeBook.id, activeChapterMetadata.id, text.length, text.length, true);
-           if (stopAfterChapter) setIsPlaying(false);
-           else handleNextChapter();
+           console.log("[Autoplay] Chapter ended event received", { stopAfterChapter });
+           updateChapterProgress(book.id, chapter.id, text.length, text.length, true);
+           if (stopAfterChapter) {
+             setIsPlaying(false);
+           } else {
+             handleNextChapter(true);
+           }
         },
         (meta) => {
            setState(prev => ({ ...prev, currentOffset: meta.charOffset }));
@@ -313,9 +327,20 @@ const App: React.FC = () => {
       );
     } catch (err) {
       setIsPlaying(false);
-      alert("Playback failed: " + err);
+      if (err instanceof Error && err.name === 'NotAllowedError') {
+        setTransitionToast({ number: 0, title: "Tap Play to continue" });
+      } else {
+        console.error("Playback failed:", err);
+      }
     }
-  }, [activeBook, activeChapterMetadata, activeChapterText, state.playbackSpeed, state.currentOffset, state.driveToken, audioDuration, stopAfterChapter, handleNextChapter, updateChapterProgress]);
+  }, [activeChapterText, audioDuration, stopAfterChapter, handleNextChapter, updateChapterProgress]);
+
+  // Restart playback when chapter ID changes during isPlaying (Autoplay)
+  useEffect(() => {
+     if (isPlaying && activeChapterMetadata?.audioDriveId && activeChapterText) {
+        handlePlay();
+     }
+  }, [activeBook?.currentChapterId]);
 
   const handleChapterExtracted = async (data: { title: string; content: string; url: string; index: number }) => {
     if (!activeBook) return;
@@ -347,7 +372,6 @@ const App: React.FC = () => {
     setIsAddChapterOpen(false);
     setActiveTab('reader');
 
-    // Auto-generate audio background if default voice is set
     if (activeBook.settings.defaultVoiceId && state.driveToken && activeBook.backend === StorageBackend.DRIVE) {
        console.info("[Audio] Auto-generating chapter audio...");
        const MAX = 4800;
@@ -377,10 +401,23 @@ const App: React.FC = () => {
       <div className="flex flex-1 overflow-hidden relative">
         <Library 
           isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} books={state.books} activeBookId={state.activeBookId} lastSession={state.lastSession} 
-          onSelectBook={(id) => { speechController.stop(); setIsPlaying(false); setState(p => ({ ...p, activeBookId: id, currentOffset: 0, books: p.books.map(b => b.id === id ? { ...b, currentChapterId: undefined } : b) })); setActiveTab('reader'); }} 
+          onSelectBook={(id) => { 
+            speechController.stop(); 
+            setIsPlaying(false); 
+            setState(p => ({ ...p, activeBookId: id, currentOffset: 0, books: p.books.map(b => b.id === id ? { ...b, currentChapterId: undefined } : b) })); 
+            setActiveTab('reader'); 
+          }} 
           onDeleteBook={id => setState(p => ({ ...p, books: p.books.filter(b => b.id !== id), activeBookId: p.activeBookId === id ? undefined : p.activeBookId }))} 
-          onSelectChapter={(bid, cid, offset) => { speechController.stop(); setIsPlaying(false); setState(p => ({ ...p, activeBookId: bid, books: p.books.map(b => b.id === bid ? { ...b, currentChapterId: cid } : b), currentOffset: offset ?? 0 })); setActiveTab('reader'); setIsSidebarOpen(false); }} 
-          onDeleteChapter={handleDeleteChapter} theme={state.theme} onAddBook={async (t, b, d, dfid, dfn) => {
+          onSelectChapter={(bid, cid, offset) => { 
+            speechController.stop(); 
+            setIsPlaying(false); 
+            setState(p => ({ ...p, activeBookId: bid, books: p.books.map(b => b.id === bid ? { ...b, currentChapterId: cid } : b), currentOffset: offset ?? 0 })); 
+            setActiveTab('reader'); 
+            setIsSidebarOpen(false); 
+          }} 
+          // Fix: Passing handleDeleteChapter to Library's onDeleteChapter prop
+          onDeleteChapter={handleDeleteChapter} 
+          theme={state.theme} onAddBook={async (t, b, d, dfid, dfn) => {
             const newBook: Book = { id: crypto.randomUUID(), title: t, chapters: [], rules: [], backend: b, directoryHandle: d, driveFolderId: dfid, driveFolderName: dfn, settings: { useBookSettings: false, highlightMode: HighlightMode.WORD } };
             setState(prev => ({ ...prev, books: [...prev.books, newBook], activeBookId: newBook.id }));
           }} googleClientId={state.googleClientId}
@@ -418,13 +455,17 @@ const App: React.FC = () => {
                   </div>
                </div>
              )}
-             {activeTab === 'reader' ? (activeBook ? (activeBook.currentChapterId ? (<Reader chapter={activeChapterMetadata || null} rules={activeBook.rules} currentOffset={state.currentOffset} theme={state.theme} debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset} highlightMode={activeBook.settings.highlightMode} onBackToChapters={() => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, currentChapterId: undefined } : b) }))} onAddChapter={() => setIsAddChapterOpen(true)} readerSettings={state.readerSettings} />) : (<ChapterFolderView book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)} onOpenChapter={(id) => setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, currentChapterId: id } : b), currentOffset: 0 }))} onToggleFavorite={() => {}} onUpdateChapterTitle={(cid, nt) => handleUpdateChapterTitle(activeBook.id, cid, nt)} onDeleteChapter={(cid) => handleDeleteChapter(activeBook.id, cid)} onRefreshDriveFolder={() => {}} onUpdateChapter={handleUpdateChapter} onUpdateBookSettings={handleUpdateBookSettings} driveToken={state.driveToken} />)) : (<div className="h-full flex flex-col items-center justify-center font-black tracking-widest text-lg opacity-40 uppercase">Select a book to begin</div>)) : activeTab === 'rules' ? (
+             {activeTab === 'reader' ? (activeBook ? (activeBook.currentChapterId ? (<Reader chapter={activeChapterMetadata || null} rules={activeBook.rules} currentOffset={state.currentOffset} theme={state.theme} debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset} highlightMode={activeBook.settings.highlightMode} onBackToChapters={() => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, currentChapterId: undefined } : b) }))} onAddChapter={() => setIsAddChapterOpen(true)} readerSettings={state.readerSettings} />) : (<ChapterFolderView book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)} onOpenChapter={(id) => setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, currentChapterId: id } : b), currentOffset: 0 }))} onToggleFavorite={() => {}} 
+             // Fix: correctly passing handleUpdateChapterTitle and handleDeleteChapter with activeBook scoping
+             onUpdateChapterTitle={(cid, nt) => handleUpdateChapterTitle(activeBook.id, cid, nt)} 
+             onDeleteChapter={(cid) => handleDeleteChapter(activeBook.id, cid)} 
+             onRefreshDriveFolder={() => {}} onUpdateChapter={handleUpdateChapter} onUpdateBookSettings={handleUpdateBookSettings} driveToken={state.driveToken} />)) : (<div className="h-full flex flex-col items-center justify-center font-black tracking-widest text-lg opacity-40 uppercase">Select a book to begin</div>)) : activeTab === 'rules' ? (
                <RuleManager rules={activeBook?.rules || []} theme={state.theme} onAddRule={r => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: [...b.rules, r] } : b) }))} onUpdateRule={r => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: b.rules.map(old => old.id === r.id ? r : old) } : b) }))} onDeleteRule={id => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: b.rules.filter(r => r.id !== id) } : b) }))} onImportRules={nr => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: nr } : b) }))} selectedVoice={(activeBook?.settings.useBookSettings && activeBook.settings.selectedVoiceName) ? activeBook.settings.selectedVoiceName : state.selectedVoiceName || ''} playbackSpeed={(activeBook?.settings.useBookSettings && activeBook.settings.playbackSpeed) ? activeBook.settings.playbackSpeed : state.playbackSpeed} />
              ) : (<Settings settings={state.readerSettings} onUpdate={s => setState(p => ({ ...p, readerSettings: { ...p.readerSettings, ...s } }))} theme={state.theme} keepAwake={state.keepAwake} onSetKeepAwake={v => setState(p => ({ ...p, keepAwake: v }))} onCheckForUpdates={() => window.location.reload()} isCloudLinked={!!state.driveToken} onLinkCloud={async () => { const t = await authenticateDrive(state.googleClientId); setState(p => ({ ...p, driveToken: t })); }} onSyncNow={() => handleSync(true)} isSyncing={isSyncing} googleClientId={state.googleClientId} onUpdateGoogleClientId={id => setState(p => ({ ...p, googleClientId: id }))} onClearAuth={() => setState(p => ({ ...p, driveToken: undefined }))} />)}
           </div>
           {activeChapterMetadata && activeTab === 'reader' && (
             <Player 
-              isPlaying={isPlaying} onPlay={handlePlay} onPause={handlePause} onStop={() => { speechController.stop(); setIsPlaying(false); }} onNext={handleNextChapter} onPrev={() => {}} onSeek={d => handleJumpToOffset(state.currentOffset + d)}
+              isPlaying={isPlaying} onPlay={handlePlay} onPause={handlePause} onStop={() => { speechController.stop(); setIsPlaying(false); }} onNext={() => handleNextChapter()} onPrev={() => {}} onSeek={d => handleJumpToOffset(state.currentOffset + d)}
               speed={(activeBook?.settings.useBookSettings && activeBook.settings.playbackSpeed) ? activeBook.settings.playbackSpeed : state.playbackSpeed} onSpeedChange={s => setState(prev => prev.books.find(b => b.id === prev.activeBookId)?.settings.useBookSettings ? { ...prev, books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, settings: { ...b.settings, playbackSpeed: s } } : b) } : { ...prev, playbackSpeed: s })}
               selectedVoice={activeBook?.settings.defaultVoiceId || ''} onVoiceChange={() => {}}
               theme={state.theme} onThemeChange={() => {}} progress={state.currentOffset} totalLength={applyRules(activeChapterText, activeBook?.rules || []).length} wordCount={activeChapterMetadata.wordCount} onSeekToOffset={handleJumpToOffset}
@@ -441,7 +482,7 @@ const App: React.FC = () => {
         <div className="fixed bottom-32 left-1/2 -translate-x-1/2 z-[100] toast-animate">
           <div className="bg-indigo-600 text-white px-8 py-4 rounded-2xl shadow-2xl font-black text-sm flex items-center gap-4">
             <RefreshCw className="w-5 h-5 animate-spin" />
-            Chapter {transitionToast.number}: {transitionToast.title}
+            {transitionToast.number > 0 ? `Chapter ${transitionToast.number}: ${transitionToast.title}` : transitionToast.title}
           </div>
         </div>
       )}

@@ -49,12 +49,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [isBatchSynthesizing, setIsBatchSynthesizing] = useState(false);
   const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
   const [tempTitle, setTempTitle] = useState('');
-  const [showVoiceModal, setShowVoiceModal] = useState<{ chapterId?: string } | null>(null);
+  const [showVoiceModal, setShowVoiceModal] = useState<{ chapterId?: string; isBulk?: boolean } | null>(null);
+  const [rememberAsDefault, setRememberAsDefault] = useState(true);
 
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
 
-  const cardBg = isDark ? 'bg-slate-800 border-slate-700' : isSepia ? 'bg-[#efe6d5] border-[#d8ccb6]' : 'bg-white border-black/10';
+  const cardBg = isDark ? 'bg-slate-800 border-slate-700' : isSepia ? 'bg-[#f4ecd8] border-[#d8ccb6]' : 'bg-white border-black/10';
   const controlBg = isDark ? 'bg-slate-950/40 border-slate-800' : isSepia ? 'bg-[#efe6d5] border-[#d8ccb6]' : 'bg-white border-black/5';
   const textPrimary = isDark ? 'text-slate-100' : isSepia ? 'text-[#3c2f25]' : 'text-black';
   const textSecondary = isDark ? 'text-slate-400' : isSepia ? 'text-[#3c2f25]/70' : 'text-slate-600';
@@ -131,7 +132,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   };
 
   const handleRunGeneration = async (voiceId: string, chapterId?: string) => {
-    if (onUpdateBookSettings && !book.settings.defaultVoiceId) {
+    if (onUpdateBookSettings && (rememberAsDefault || !book.settings.defaultVoiceId)) {
       onUpdateBookSettings({ ...book.settings, defaultVoiceId: voiceId });
     }
 
@@ -144,7 +145,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       try {
         const audioDriveId = await migrateChapterAudioToDrive(chapter, voiceId);
         if (onUpdateChapter) {
-          onUpdateChapter({ ...chapter, audioDriveId, audioSignature: currentSignature });
+          onUpdateChapter({ ...chapter, audioDriveId, audioSignature: `${voiceId}_${book.rules.length}_${book.rules.filter(r => r.enabled).length}` });
         }
       } catch (err) {
         alert("Audio generation failed: " + err);
@@ -165,7 +166,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         try {
           const audioDriveId = await migrateChapterAudioToDrive(chapter, voiceId);
           if (onUpdateChapter) {
-            onUpdateChapter({ ...chapter, audioDriveId, audioSignature: currentSignature });
+            onUpdateChapter({ ...chapter, audioDriveId, audioSignature: `${voiceId}_${book.rules.length}_${book.rules.filter(r => r.enabled).length}` });
           }
         } catch (e) {
           console.error("Batch fail for ch", chapter.index, e);
@@ -177,19 +178,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const handleSynthesizeClick = (e: React.MouseEvent, chapter: Chapter) => {
     e.stopPropagation();
-    if (book.settings.defaultVoiceId) {
-      handleRunGeneration(book.settings.defaultVoiceId, chapter.id);
-    } else {
-      setShowVoiceModal({ chapterId: chapter.id });
-    }
+    setRememberAsDefault(false); // Default to NO for per-chapter
+    setShowVoiceModal({ chapterId: chapter.id });
   };
 
   const handleBulkClick = () => {
-    if (book.settings.defaultVoiceId) {
-      handleRunGeneration(book.settings.defaultVoiceId);
-    } else {
-      setShowVoiceModal({});
-    }
+    setRememberAsDefault(true); // Default to YES for bulk
+    setShowVoiceModal({ isBulk: true });
   };
 
   const renderRow = (c: Chapter) => {
@@ -285,8 +280,20 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               <h3 className="text-xl font-black tracking-tight">Select Cloud Voice</h3>
               <button onClick={() => setShowVoiceModal(null)} className="p-2 opacity-60 hover:opacity-100"><X className="w-5 h-5" /></button>
             </div>
-            <p className="text-sm font-bold opacity-60">This voice will be used for generation and remembered as the default for this book.</p>
-            <div className="space-y-2">
+            <p className="text-sm font-bold opacity-60">This voice will be used for this generation run.</p>
+            
+            <div className="flex items-center gap-3 p-3 bg-black/5 rounded-xl">
+               <input 
+                 type="checkbox" 
+                 id="rememberDefault" 
+                 checked={rememberAsDefault} 
+                 onChange={e => setRememberAsDefault(e.target.checked)}
+                 className="w-4 h-4 accent-indigo-600"
+               />
+               <label htmlFor="rememberDefault" className="text-xs font-black uppercase tracking-tight opacity-70 cursor-pointer">Set as book default</label>
+            </div>
+
+            <div className="space-y-2 max-h-[40vh] overflow-y-auto pr-1">
               {CLOUD_VOICES.map(v => (
                 <button
                   key={v.id}
