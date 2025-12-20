@@ -72,7 +72,8 @@ class SpeechController {
   constructor() {
     this.synth = window.speechSynthesis;
     this.audio = new Audio();
-    this.audio.volume = 1.0; // Ensure full volume
+    this.audio.volume = 1.0;
+    this.audio.preload = 'auto';
     this.setupAudioListeners();
   }
 
@@ -82,6 +83,7 @@ class SpeechController {
 
   private setupAudioListeners() {
     this.audio.addEventListener('ended', () => {
+      console.info("[Speech] Audio segment ended.");
       if (this.isUsingSingleBlob) {
         this.stop();
         if (this.onEndCallback) this.onEndCallback();
@@ -101,7 +103,7 @@ class SpeechController {
     });
 
     this.audio.addEventListener('play', () => {
-      console.info("[Audio] Playback started.");
+      console.info("[Speech] Audio play event triggered.");
       this.startSyncLoop();
       if (this.onFetchStateChange) this.onFetchStateChange(false);
     });
@@ -111,7 +113,7 @@ class SpeechController {
     });
 
     this.audio.addEventListener('error', (e) => {
-      console.error("[Audio] Element error code:", this.audio.error?.code, "Message:", this.audio.error?.message);
+      console.error("[Speech] Audio Error:", this.audio.error);
       if (this.onFetchStateChange) this.onFetchStateChange(false);
     });
   }
@@ -194,29 +196,30 @@ class SpeechController {
     this.getNextSegment = getNextSegment || null;
 
     if (preFetchedAudio) {
-      console.info("[Audio] Starting playback from pre-fetched cloud Blob.");
+      console.info("[Speech] Playing from Cloud Drive File...");
       this.isUsingSingleBlob = true;
       this.fullTextLengthForBlob = text.length;
       
       const url = URL.createObjectURL(preFetchedAudio);
-      this.audio.src = url;
-      this.audio.load();
       
-      const onLoaded = () => {
+      const onLoaded = async () => {
         if (this.sessionToken === session) {
           const ratio = Math.max(0, Math.min(1, startOffset / Math.max(1, text.length)));
           if (this.audio.duration) {
              this.audio.currentTime = ratio * this.audio.duration;
           }
-          this.audio.play().catch(err => {
-            console.error("[Audio] Playback block:", err);
-            // Fallback: request user gesture if first attempt failed
-            alert("Tap the screen to enable audio.");
-          });
+          try {
+            await this.audio.play();
+          } catch (err) {
+            console.warn("[Speech] Playback blocked by browser policy. Interaction needed.");
+          }
         }
         this.audio.removeEventListener('loadedmetadata', onLoaded);
       };
+
       this.audio.addEventListener('loadedmetadata', onLoaded);
+      this.audio.src = url;
+      this.audio.load();
       return;
     }
 
@@ -279,7 +282,7 @@ class SpeechController {
       let audioUrl = "";
 
       if (cachedBlob) {
-        console.info("[Audio] Using cached chunk.");
+        console.info("[Speech] Loading chunk from local cache.");
         audioUrl = URL.createObjectURL(cachedBlob);
       } else {
         const result = await synthesizeChunk(chunk.text, this.voiceName, this.rate);
@@ -291,10 +294,7 @@ class SpeechController {
         });
       }
 
-      this.audio.src = audioUrl;
-      this.audio.load();
-
-      const onLoaded = () => {
+      const onLoaded = async () => {
         if (this.sessionToken === session) {
           if (initialOffsetInChunk !== undefined) {
             const relative = Math.max(0, initialOffsetInChunk - chunk.startOffset);
@@ -303,16 +303,20 @@ class SpeechController {
                this.audio.currentTime = ratio * this.audio.duration;
             }
           }
-          this.audio.play().catch(() => {
+          try {
+            await this.audio.play();
+          } catch (e) {
              if (this.onFetchStateChange) this.onFetchStateChange(false);
-          });
+          }
         }
         this.audio.removeEventListener('loadedmetadata', onLoaded);
       };
 
       this.audio.addEventListener('loadedmetadata', onLoaded);
+      this.audio.src = audioUrl;
+      this.audio.load();
     } catch (err) {
-      console.error("[Audio] Chunk logic failure:", err);
+      console.error("[Speech] Chunk playback failed:", err);
       if (this.onFetchStateChange) this.onFetchStateChange(false);
     }
   }

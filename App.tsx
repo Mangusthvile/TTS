@@ -301,7 +301,6 @@ const App: React.FC = () => {
     
     let audioBlob: Blob | undefined;
     
-    // v2.5.2 Check if cloud audio exists and fetch it for direct playback
     if (activeBook.backend === StorageBackend.DRIVE && activeChapterMetadata.audioDriveId && state.driveToken) {
       setIsFetchingAudio(true);
       try {
@@ -391,10 +390,12 @@ const App: React.FC = () => {
       ...prev,
       books: prev.books.map(b => b.id === prev.activeBookId ? {
         ...b,
+        currentChapterId: newChapter.id, // Auto-select new chapter
         chapters: [...b.chapters, { ...newChapter, driveId }].sort((a, b) => a.index - b.index)
       } : b)
     }));
     setIsAddChapterOpen(false);
+    setActiveTab('reader'); // Auto-switch to reader
   };
 
   return (

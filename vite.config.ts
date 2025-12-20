@@ -12,7 +12,7 @@ export default defineConfig({
       manifest: {
         name: 'Talevox: Intelligent Reader',
         short_name: 'Talevox',
-        description: 'AI-Powered Intelligent TTS Reader',
+        description: 'AI-Powered Intelligent TTS Reader with Web Content Extraction',
         theme_color: '#4f46e5',
         background_color: '#0f172a',
         display: 'standalone',
@@ -34,7 +34,7 @@ export default defineConfig({
   ],
   define: {
     'process.env': {},
-    __APP_VERSION__: JSON.stringify('2.5.1'),
+    __APP_VERSION__: JSON.stringify('2.6.0'),
   },
   server: {
     port: 3000
