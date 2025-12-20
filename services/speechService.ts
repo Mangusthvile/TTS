@@ -59,6 +59,7 @@ class SpeechController {
   
   private onEndCallback: (() => void) | null = null;
   private syncCallback: ((meta: PlaybackMetadata) => void) | null = null;
+  private onFetchStateChange: ((isFetching: boolean) => void) | null = null;
   
   private rate: number = 1.0;
   private voiceName: string = '';
@@ -71,7 +72,12 @@ class SpeechController {
   constructor() {
     this.synth = window.speechSynthesis;
     this.audio = new Audio();
+    this.audio.volume = 1.0; // Ensure full volume
     this.setupAudioListeners();
+  }
+
+  setFetchStateListener(cb: (isFetching: boolean) => void) {
+    this.onFetchStateChange = cb;
   }
 
   private setupAudioListeners() {
@@ -95,7 +101,9 @@ class SpeechController {
     });
 
     this.audio.addEventListener('play', () => {
+      console.info("[Audio] Playback started.");
       this.startSyncLoop();
+      if (this.onFetchStateChange) this.onFetchStateChange(false);
     });
 
     this.audio.addEventListener('pause', () => {
@@ -103,7 +111,8 @@ class SpeechController {
     });
 
     this.audio.addEventListener('error', (e) => {
-      console.error("Audio element error:", this.audio.error);
+      console.error("[Audio] Element error code:", this.audio.error?.code, "Message:", this.audio.error?.message);
+      if (this.onFetchStateChange) this.onFetchStateChange(false);
     });
   }
 
@@ -164,9 +173,6 @@ class SpeechController {
     return chunks;
   }
 
-  /**
-   * Enhanced speak function that accepts a direct Audio Blob (from Drive)
-   */
   async speak(
     text: string, 
     voiceName: string, 
@@ -188,10 +194,13 @@ class SpeechController {
     this.getNextSegment = getNextSegment || null;
 
     if (preFetchedAudio) {
+      console.info("[Audio] Starting playback from pre-fetched cloud Blob.");
       this.isUsingSingleBlob = true;
       this.fullTextLengthForBlob = text.length;
+      
       const url = URL.createObjectURL(preFetchedAudio);
       this.audio.src = url;
+      this.audio.load();
       
       const onLoaded = () => {
         if (this.sessionToken === session) {
@@ -200,7 +209,9 @@ class SpeechController {
              this.audio.currentTime = ratio * this.audio.duration;
           }
           this.audio.play().catch(err => {
-            console.warn("Playback prevented. User interaction required?", err);
+            console.error("[Audio] Playback block:", err);
+            // Fallback: request user gesture if first attempt failed
+            alert("Tap the screen to enable audio.");
           });
         }
         this.audio.removeEventListener('loadedmetadata', onLoaded);
@@ -262,11 +273,13 @@ class SpeechController {
     const chunk = this.currentChunks[this.currentChunkIndex];
     
     try {
+      if (this.onFetchStateChange) this.onFetchStateChange(true);
       const cacheKey = generateAudioKey(chunk.text, this.voiceName, this.rate);
       const cachedBlob = await getAudioFromCache(cacheKey);
       let audioUrl = "";
 
       if (cachedBlob) {
+        console.info("[Audio] Using cached chunk.");
         audioUrl = URL.createObjectURL(cachedBlob);
       } else {
         const result = await synthesizeChunk(chunk.text, this.voiceName, this.rate);
@@ -279,6 +292,7 @@ class SpeechController {
       }
 
       this.audio.src = audioUrl;
+      this.audio.load();
 
       const onLoaded = () => {
         if (this.sessionToken === session) {
@@ -289,14 +303,17 @@ class SpeechController {
                this.audio.currentTime = ratio * this.audio.duration;
             }
           }
-          this.audio.play().catch(() => {});
+          this.audio.play().catch(() => {
+             if (this.onFetchStateChange) this.onFetchStateChange(false);
+          });
         }
         this.audio.removeEventListener('loadedmetadata', onLoaded);
       };
 
       this.audio.addEventListener('loadedmetadata', onLoaded);
     } catch (err) {
-      console.error("Perfect sync failed, chunk fallback:", err);
+      console.error("[Audio] Chunk logic failure:", err);
+      if (this.onFetchStateChange) this.onFetchStateChange(false);
     }
   }
 
@@ -318,6 +335,7 @@ class SpeechController {
     this.audio.src = "";
     this.synth.cancel();
     this.isUsingSingleBlob = false;
+    if (this.onFetchStateChange) this.onFetchStateChange(false);
   }
 
   get isPaused() {

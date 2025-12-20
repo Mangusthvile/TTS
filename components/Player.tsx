@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Play, Pause, SkipBack, SkipForward, FastForward, Rewind, Clock, Type, AlignLeft, Sparkles, Repeat } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, FastForward, Rewind, Clock, Type, AlignLeft, Sparkles, Repeat, Loader2 } from 'lucide-react';
 import { Theme, HighlightMode } from '../types';
 
 interface PlayerProps {
@@ -30,6 +30,7 @@ interface PlayerProps {
   onSetHighlightMode: (v: HighlightMode) => void;
   playbackCurrentTime?: number;
   playbackDuration?: number;
+  isFetching?: boolean;
 }
 
 const formatTime = (seconds: number) => {
@@ -44,21 +45,17 @@ const Player: React.FC<PlayerProps> = ({
   theme, progress, totalLength, wordCount, onSeekToOffset,
   sleepTimer, onSetSleepTimer, stopAfterChapter, onSetStopAfterChapter,
   useBookSettings, onSetUseBookSettings, highlightMode, onSetHighlightMode,
-  onNext, onPrev, onSeek, playbackCurrentTime, playbackDuration
+  onNext, onPrev, onSeek, playbackCurrentTime, playbackDuration, isFetching
 }) => {
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [showSleepMenu, setShowSleepMenu] = useState(false);
   
-  // High-precision sync clock logic:
-  // We use the word-count estimate as a baseline when audio metadata hasn't loaded yet.
   const totalSecondsEstimate = useMemo(() => Math.max(1, (wordCount / (170 * speed)) * 60), [wordCount, speed]);
   
   const displayTime = useMemo(() => {
-    // If audio is actively playing and provides high-res time, use it.
     if (isPlaying && playbackCurrentTime !== undefined && playbackCurrentTime > 0) {
       return formatTime(playbackCurrentTime);
     }
-    // Otherwise, interpolate based on the character progress ratio
     const ratio = Math.max(0, Math.min(1, progress / Math.max(1, totalLength)));
     return formatTime(totalSecondsEstimate * ratio);
   }, [playbackCurrentTime, isPlaying, progress, totalLength, totalSecondsEstimate]);
@@ -133,7 +130,20 @@ const Player: React.FC<PlayerProps> = ({
           <div className="flex items-center gap-4 lg:gap-8 order-first lg:order-none">
             <button onClick={onPrev} className="p-2 hover:scale-110 transition-transform"><SkipBack className="w-6 h-6 lg:w-8 lg:h-8" /></button>
             <button onClick={() => onSeek(-500)} className="p-2 hover:scale-110 transition-transform opacity-60"><Rewind className="w-5 h-5 lg:w-6 lg:h-6" /></button>
-            <button onClick={isPlaying ? onPause : onPlay} className={`w-14 h-14 lg:w-16 lg:h-16 text-white rounded-full flex items-center justify-center shadow-xl ${accentBg} transition-all active:scale-90 hover:scale-105`}><Play className={`w-7 h-7 fill-current ${isPlaying ? 'hidden' : 'block ml-1'}`} /><Pause className={`w-7 h-7 fill-current ${isPlaying ? 'block' : 'hidden'}`} /></button>
+            <button 
+              disabled={isFetching}
+              onClick={isPlaying ? onPause : onPlay} 
+              className={`w-14 h-14 lg:w-16 lg:h-16 text-white rounded-full flex items-center justify-center shadow-xl ${accentBg} transition-all active:scale-90 hover:scale-105 disabled:opacity-50`}
+            >
+              {isFetching ? (
+                <Loader2 className="w-7 h-7 animate-spin" />
+              ) : (
+                <>
+                  <Play className={`w-7 h-7 fill-current ${isPlaying ? 'hidden' : 'block ml-1'}`} />
+                  <Pause className={`w-7 h-7 fill-current ${isPlaying ? 'block' : 'hidden'}`} />
+                </>
+              )}
+            </button>
             <button onClick={() => onSeek(500)} className="p-2 hover:scale-110 transition-transform opacity-60"><FastForward className="w-5 h-5 lg:w-6 lg:h-6" /></button>
             <button onClick={onNext} className="p-2 hover:scale-110 transition-transform"><SkipForward className="w-6 h-6 lg:w-8 lg:h-8" /></button>
           </div>

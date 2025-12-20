@@ -74,6 +74,13 @@ const App: React.FC = () => {
     return activeBook.chapters.find(c => c.id === activeBook.currentChapterId) || null;
   }, [activeBook]);
 
+  // Hook speechController fetching state to UI
+  useEffect(() => {
+    speechController.setFetchStateListener((fetching) => {
+      setIsFetchingAudio(fetching);
+    });
+  }, []);
+
   const saveCurrentState = useCallback(() => {
     const s = stateRef.current;
     const { driveToken, books, ...rest } = s;
@@ -424,7 +431,7 @@ const App: React.FC = () => {
           </header>
           <div className="flex-1 overflow-y-auto relative">
              {isLoadingChapter && (<div className="absolute inset-0 flex items-center justify-center bg-inherit z-[5] animate-in fade-in duration-300"><div className="flex flex-col items-center gap-4"><Loader2 className="w-10 h-10 text-indigo-600 animate-spin" /><span className="text-xs font-black uppercase tracking-widest opacity-40">Processing...</span></div></div>)}
-             {isFetchingAudio && (<div className="absolute inset-0 flex items-center justify-center bg-inherit/60 z-30 animate-in fade-in duration-300 backdrop-blur-sm"><div className="flex flex-col items-center gap-4 bg-indigo-600 text-white p-8 rounded-3xl shadow-2xl"><Volume2 className="w-10 h-10 animate-bounce" /><span className="text-xs font-black uppercase tracking-widest">Pulling audio from Drive...</span></div></div>)}
+             {(isFetchingAudio || isLoadingChapter) && (<div className="absolute inset-0 flex items-center justify-center bg-inherit/60 z-30 animate-in fade-in duration-300 backdrop-blur-sm"><div className="flex flex-col items-center gap-4 bg-indigo-600 text-white p-8 rounded-3xl shadow-2xl"><Volume2 className="w-10 h-10 animate-bounce" /><span className="text-xs font-black uppercase tracking-widest">Loading Audio Data...</span></div></div>)}
              {isAddChapterOpen && (
                <div className="absolute inset-0 z-20 overflow-y-auto p-4 lg:p-12 animate-in slide-in-from-bottom-8 duration-500">
                   <div className="max-w-4xl mx-auto relative">
@@ -456,6 +463,7 @@ const App: React.FC = () => {
               useBookSettings={activeBook?.settings.useBookSettings || false} onSetUseBookSettings={v => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, settings: { ...b.settings, useBookSettings: v } } : b) }))}
               highlightMode={activeBook?.settings.highlightMode || HighlightMode.WORD} onSetHighlightMode={m => setState(p => ({ ...p, books: p.books.map(b => b.id === b.id ? { ...b, settings: { ...b.settings, highlightMode: m } } : b) }))}
               playbackCurrentTime={audioCurrentTime} playbackDuration={audioDuration}
+              isFetching={isFetchingAudio}
             />
           )}
         </main>
