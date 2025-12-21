@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { ReaderSettings, Theme } from '../types';
-import { Type, AlignJustify, MoveVertical, Minus, Plus, RefreshCw, Smartphone, MonitorOff, AlertTriangle, Cloud, CloudOff, Loader2, Key, LogOut } from 'lucide-react';
+import { Type, AlignJustify, MoveVertical, Minus, Plus, RefreshCw, Smartphone, MonitorOff, AlertTriangle, Cloud, CloudOff, Loader2, Key, LogOut, Save } from 'lucide-react';
 
 interface SettingsProps {
   settings: ReaderSettings;
@@ -17,12 +17,15 @@ interface SettingsProps {
   googleClientId?: string;
   onUpdateGoogleClientId?: (id: string) => void;
   onClearAuth?: () => void;
+  onSaveState?: () => void;
+  lastSavedAt?: number;
 }
 
 const Settings: React.FC<SettingsProps> = ({ 
   settings, onUpdate, theme, keepAwake, onSetKeepAwake, onCheckForUpdates,
   isCloudLinked, onLinkCloud, onSyncNow, isSyncing,
-  googleClientId, onUpdateGoogleClientId, onClearAuth
+  googleClientId, onUpdateGoogleClientId, onClearAuth,
+  onSaveState, lastSavedAt
 }) => {
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
@@ -47,7 +50,7 @@ const Settings: React.FC<SettingsProps> = ({
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
           <div>
             <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
-            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.5.12</p>
+            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.6.1</p>
           </div>
           <button 
             onClick={onCheckForUpdates}
@@ -58,7 +61,10 @@ const Settings: React.FC<SettingsProps> = ({
         </div>
 
         <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm space-y-6 ${cardBg}`}>
-          <label className={labelClass}>Cloud Synchronization</label>
+          <div className="flex items-center justify-between">
+            <label className={labelClass}>Cloud Synchronization</label>
+            {lastSavedAt && <span className="text-[10px] font-black uppercase tracking-widest opacity-40">Last saved: {new Date(lastSavedAt).toLocaleTimeString()}</span>}
+          </div>
           <div className="space-y-4">
              <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2 mb-1">
@@ -80,14 +86,17 @@ const Settings: React.FC<SettingsProps> = ({
                    </div>
                    <div className="min-w-0">
                       <div className={`text-sm font-black ${textClass}`}>{isCloudLinked ? 'Library Linked' : 'Offline Mode'}</div>
-                      <div className="text-[10px] font-bold opacity-60 truncate">{isCloudLinked ? 'Syncing to Google Drive' : 'Sync libraries across devices'}</div>
+                      <div className="text-[10px] font-bold opacity-60 truncate">{isCloudLinked ? 'Syncs via snapshot' : 'Sync libraries across devices'}</div>
                    </div>
                 </div>
                 <div className="flex items-center gap-2 w-full sm:w-auto">
+                   <button onClick={onSaveState} className="p-3 rounded-xl border border-emerald-500/30 text-emerald-500 hover:bg-emerald-500/10 transition-all" title="Freeze Snapshot">
+                      <Save className="w-4 h-4" />
+                   </button>
                    {isCloudLinked ? (
                       <>
                         <button onClick={onSyncNow} disabled={isSyncing} className="flex-1 sm:flex-none px-6 py-3 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 hover:scale-105 transition-all">
-                           {isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} Sync
+                           {isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} Sync Saved
                         </button>
                         <button onClick={onClearAuth} className={`p-3 rounded-xl border transition-all ${isDark ? 'bg-slate-800 text-slate-400' : 'bg-white text-slate-400'}`}><LogOut className="w-4 h-4" /></button>
                       </>
@@ -130,7 +139,7 @@ const Settings: React.FC<SettingsProps> = ({
             ))}
           </div>
         </div>
-        <div className="text-center font-black uppercase tracking-[0.4em] text-[9px] sm:text-[11px] pt-8 sm:pt-12 opacity-30">VoxLib Engine v2.5.12</div>
+        <div className="text-center font-black uppercase tracking-[0.4em] text-[9px] sm:text-[11px] pt-8 sm:pt-12 opacity-30">VoxLib Engine v2.6.1</div>
       </div>
     </div>
   );

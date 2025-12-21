@@ -104,6 +104,20 @@ export interface Book {
   settings: BookSettings;
 }
 
+export interface SavedSnapshot {
+  version: "v1";
+  savedAt: number;
+  state: {
+    books: Book[];
+    readerSettings: ReaderSettings;
+    activeBookId?: string;
+    playbackSpeed: number;
+    selectedVoiceName?: string;
+    theme: Theme;
+    progressStore: any; // talevox_progress_v4 data
+  };
+}
+
 export interface AppState {
   books: Book[];
   activeBookId?: string;
@@ -121,4 +135,5 @@ export interface AppState {
     chapterId: string;
     offset: number;
   };
+  lastSavedAt?: number;
 }

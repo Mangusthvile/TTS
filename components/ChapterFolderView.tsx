@@ -5,6 +5,7 @@ import { LayoutGrid, List, AlignJustify, Plus, Star, Folder, CheckCircle2, Downl
 import { synthesizeChunk, sanitizeVoiceForCloud } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache } from '../services/audioCache';
 import { uploadToDrive } from '../services/driveService';
+import { PROGRESS_STORE_V4 } from '../services/speechService';
 
 type ViewMode = 'details' | 'list' | 'grid';
 
@@ -52,7 +53,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const chapters = useMemo(() => [...(book.chapters || [])].sort((a, b) => a.index - b.index), [book.chapters]);
 
-  // v2.5.12 Signature forcing regeneration for the new intro-offset sync map
+  // v2.6.0: Fetch progress from V4 store for display
+  const progressData = useMemo(() => {
+    const store = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
+    return store[book.id] || {};
+  }, [book.id, chapters]); // chapters as trigger for UI updates
+
   const currentSignature = useMemo(() => {
     const voice = book.settings.defaultVoiceId || 'default';
     const rulesHash = book.rules.length + "_" + book.rules.filter(r => r.enabled).length;
@@ -112,14 +118,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     const voice = voiceToUse || book.settings.defaultVoiceId || 'en-US-Standard-C';
     const speed = 1.0; 
     
-    // v2.5.12: Intro and Content are synthesized and measured separately
     const introText = `Chapter ${chapter.index}. ${chapter.title}. `;
     const contentText = chapter.content;
     const prefixLen = introText.length;
 
     const allBlobs: Blob[] = [];
     
-    // 1. Synthesize and Measure Intro
     const introCacheKey = generateAudioKey(introText, voice, speed);
     let introBlobOrNull = await getAudioFromCache(introCacheKey);
     if (!introBlobOrNull) {
@@ -133,7 +137,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     const introDurSec = await getHighPrecisionDuration(introBlob);
     allBlobs.push(introBlob);
 
-    // 2. Synthesize and Measure Content Chunks
     const textChunks = splitIntoSemanticChunks(contentText, 1500);
     const chunkMap: AudioChunkMetadata[] = [];
     
@@ -221,9 +224,15 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     const status = getChapterStaleStatus(c);
     const isStale = status === 'stale';
     const isReady = status === 'ready';
+    
+    // v2.6.0 display progress from V4 store
+    const saved = progressData[c.id];
+    const isActuallyCompleted = saved?.completed || false;
+    const displayPercent = saved?.percent !== undefined ? Math.floor(saved.percent * 100) : 0;
+
     return (
-      <div key={c.id} onClick={() => !isEditing && onOpenChapter(c.id)} className={`grid grid-cols-[40px_1fr_60px] sm:grid-cols-[60px_1fr_100px_100px_180px] items-center px-4 sm:px-6 py-4 cursor-pointer border-b last:border-0 transition-colors ${isDark ? 'hover:bg-white/5 border-slate-800' : 'hover:bg-black/5 border-black/5'} ${c.isCompleted ? 'opacity-60' : ''}`}>
-        <div className={`font-mono text-[10px] sm:text-xs font-black flex items-center gap-2 ${textSecondary}`}>{c.isCompleted ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" /> : String(c.index).padStart(3, '0')}</div>
+      <div key={c.id} onClick={() => !isEditing && onOpenChapter(c.id)} className={`grid grid-cols-[40px_1fr_60px] sm:grid-cols-[60px_1fr_100px_100px_180px] items-center px-4 sm:px-6 py-4 cursor-pointer border-b last:border-0 transition-colors ${isDark ? 'hover:bg-white/5 border-slate-800' : 'hover:bg-black/5 border-black/5'} ${isActuallyCompleted ? 'opacity-60' : ''}`}>
+        <div className={`font-mono text-[10px] sm:text-xs font-black flex items-center gap-2 ${textSecondary}`}>{isActuallyCompleted ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" /> : String(c.index).padStart(3, '0')}</div>
         <div className="flex items-center gap-4 min-w-0 mr-2">
           {isEditing ? (
             <div className="flex-1 flex items-center gap-2" onClick={e => e.stopPropagation()}>
@@ -232,14 +241,16 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             </div>
           ) : (
             <div className="flex items-center gap-3 min-w-0">
-              <div className={`truncate font-black text-xs sm:text-sm ${c.isCompleted ? 'line-through decoration-indigo-500/40' : ''}`}>{c.title}</div>
+              <div className={`truncate font-black text-xs sm:text-sm ${isActuallyCompleted ? 'line-through decoration-indigo-500/40' : ''}`}>{c.title}</div>
               {isReady ? <Cloud className="w-3.5 h-3.5 text-emerald-500" /> : isStale ? <AlertTriangle className="w-3.5 h-3.5 text-amber-500" /> : isSynthesizing ? <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-500" /> : <AlertTriangle className="w-3.5 h-3.5 text-slate-400 opacity-50" />}
             </div>
           )}
         </div>
         <div className={`text-[10px] sm:text-xs font-black text-right hidden sm:block ${textSecondary}`}>{c.wordCount?.toLocaleString()} words</div>
         <div className="text-right px-4">
-          <span className={`text-[9px] sm:text-[10px] font-black px-2 py-0.5 rounded-full ${c.isCompleted ? 'bg-emerald-500/20 text-emerald-600' : 'bg-indigo-500/15 text-indigo-500'}`}>{Math.round((c.progress / (c.progressTotalLength || 1)) * 100)}%</span>
+          <span className={`text-[9px] sm:text-[10px] font-black px-2 py-0.5 rounded-full ${isActuallyCompleted ? 'bg-emerald-500/20 text-emerald-600' : 'bg-indigo-500/15 text-indigo-500'}`}>
+            {isActuallyCompleted ? 'Completed' : `${displayPercent}%`}
+          </span>
         </div>
         <div className="flex justify-end items-center gap-2 hidden sm:flex">
           <button onClick={(e) => { e.stopPropagation(); setRememberAsDefault(false); setShowVoiceModal({ chapterId: c.id }); }} disabled={isSynthesizing || isBatchSynthesizing} className={`p-2 rounded-xl border transition-all ${controlBg} ${isSynthesizing ? 'text-indigo-600 ring-1' : 'opacity-40 hover:opacity-100'}`} title="Regenerate Sync Audio">{isSynthesizing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className={`w-4 h-4 ${isStale ? 'text-amber-500' : ''}`} />}</button>

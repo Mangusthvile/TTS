@@ -2,6 +2,8 @@
 import { Rule, RuleType, AudioChunkMetadata } from '../types';
 import { getDriveAudioObjectUrl, revokeObjectUrl } from "../services/driveService";
 
+export const PROGRESS_STORE_V4 = 'talevox_progress_v4';
+
 export function applyRules(text: string, rules: Rule[]): string {
   let processedText = text;
   const activeRules = [...rules]
@@ -42,7 +44,7 @@ class SpeechController {
   private audio: HTMLAudioElement;
   private currentBlobUrl: string | null = null;
   private currentTextLength: number = 0;
-  private currentIntroDurSec: number = 0; // v2.5.12
+  private currentIntroDurSec: number = 0;
   private currentChunkMap: AudioChunkMetadata[] | null = null;
   private rafId: number | null = null;
   private requestedSpeed: number = 1.0;
@@ -53,6 +55,7 @@ class SpeechController {
   
   private sessionToken: number = 0;
   private context: { bookId: string; chapterId: string } | null = null;
+  private lastSaveTime: number = 0;
 
   constructor() {
     this.audio = new Audio();
@@ -61,37 +64,106 @@ class SpeechController {
     this.setupAudioListeners();
   }
 
+  // Fix: Added missing public method to set the fetch state listener
+  public setFetchStateListener(cb: (isFetching: boolean) => void) {
+    this.onFetchStateChange = cb;
+  }
+
   setContext(ctx: { bookId: string; chapterId: string } | null) {
+    // Save current before switching to ensure old context is persisted
+    if (this.context && (this.context.chapterId !== ctx?.chapterId)) {
+      this.saveProgress();
+    }
     this.context = ctx;
     console.debug("[AudioEngine] Context updated:", ctx);
   }
 
-  setFetchStateListener(cb: (isFetching: boolean) => void) {
-    this.onFetchStateChange = cb;
-  }
-
   private setupAudioListeners() {
-    this.audio.addEventListener('ended', () => {
+    this.audio.onended = () => {
       console.info("[AudioEngine] Playback ended.");
+      this.saveProgress(true);
       this.stopSyncLoop();
       if (this.onEndCallback) {
          setTimeout(() => this.onEndCallback?.(), 0);
       }
-    });
+    };
 
-    this.audio.addEventListener('play', () => {
+    this.audio.onplay = () => {
       this.startSyncLoop();
       if (this.onFetchStateChange) this.onFetchStateChange(false);
-    });
+    };
 
-    this.audio.addEventListener('pause', () => {
+    this.audio.onpause = () => {
+      this.saveProgress();
       this.stopSyncLoop();
-    });
+    };
 
-    this.audio.addEventListener('error', () => {
+    this.audio.ontimeupdate = () => {
+      const now = Date.now();
+      // Throttle saves while playing to once per second
+      if (now - this.lastSaveTime > 1000) {
+        this.saveProgress();
+      }
+    };
+
+    this.audio.onseeking = () => this.saveProgress();
+    this.audio.onseeked = () => this.saveProgress();
+
+    this.audio.onerror = () => {
       console.error("[AudioEngine] Error:", this.audio.error);
       if (this.onFetchStateChange) this.onFetchStateChange(false);
+    };
+
+    // Global listeners for abrupt navigation or app hiding
+    window.addEventListener('beforeunload', () => this.saveProgress());
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') this.saveProgress();
     });
+  }
+
+  public saveProgress(completed: boolean = false) {
+    if (!this.context || !this.context.bookId || !this.context.chapterId) return;
+    
+    const curTime = this.audio.currentTime;
+    const duration = isFinite(this.audio.duration) && this.audio.duration > 0 ? this.audio.duration : 0;
+    
+    // Only save if we have a valid duration or we are marking as complete
+    if (duration === 0 && !completed) return;
+
+    const finalTime = completed ? duration : Math.min(curTime, duration || Infinity);
+    const percent = duration > 0 ? Math.min(1, Math.max(0, finalTime / duration)) : (completed ? 1 : 0);
+
+    const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
+    const store = storeRaw ? JSON.parse(storeRaw) : {};
+    
+    if (!store[this.context.bookId]) store[this.context.bookId] = {};
+    
+    const existing = store[this.context.bookId][this.context.chapterId];
+    const finalDur = duration > 0 ? duration : (existing?.durationSec || 0);
+
+    const progressUpdate = {
+      timeSec: finalTime,
+      durationSec: finalDur,
+      percent: percent,
+      completed: completed || existing?.completed || false,
+      updatedAt: Date.now()
+    };
+
+    store[this.context.bookId][this.context.chapterId] = progressUpdate;
+
+    localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(store));
+    this.lastSaveTime = Date.now();
+
+    console.log("[Progress] save", { 
+      bookId: this.context.bookId,
+      chapterId: this.context.chapterId, 
+      timeSec: finalTime.toFixed(2), 
+      dur: finalDur.toFixed(2),
+      percent: (percent * 100).toFixed(1) + "%", 
+      completed 
+    });
+
+    window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: this.context }));
   }
 
   private startSyncLoop() {
@@ -114,16 +186,9 @@ class SpeechController {
 
   private getOffsetFromTime(t: number): number {
     const duration = this.audio.duration || 1;
-    
-    // v2.5.12: Intro Offset Logic
-    // If we are still in the intro phase, the content offset is 0.
-    if (t < this.currentIntroDurSec) {
-      return 0;
-    }
-
+    if (t < this.currentIntroDurSec) return 0;
     const contentTime = t - this.currentIntroDurSec;
 
-    // v2.5.10: Precision Mapping (Now content-relative)
     if (this.currentChunkMap && this.currentChunkMap.length > 0) {
       const mapTotalDur = this.currentChunkMap.reduce((acc, c) => acc + c.durSec, 0);
       const totalContentDur = Math.max(0.1, duration - this.currentIntroDurSec);
@@ -141,7 +206,6 @@ class SpeechController {
       }
     }
 
-    // Fallback: Linear mapping across content portion
     const contentPortion = Math.max(0.001, duration - this.currentIntroDurSec);
     const ratio = Math.min(1, contentTime / contentPortion);
     return Math.max(0, Math.floor(this.currentTextLength * ratio));
@@ -171,7 +235,7 @@ class SpeechController {
     this.onEndCallback = onEnd;
     this.syncCallback = onSync;
     this.currentTextLength = totalContentChars;
-    this.currentIntroDurSec = introDurSec; // v2.5.12
+    this.currentIntroDurSec = introDurSec;
     this.currentChunkMap = chunkMap || null;
 
     if (this.onFetchStateChange) this.onFetchStateChange(true);
@@ -201,9 +265,23 @@ class SpeechController {
       if (this.sessionToken !== session) return;
 
       this.audio.playbackRate = this.requestedSpeed;
-      if (startTimeSec > 0) {
+      
+      // Determine resume time from V4 store (Source of Truth)
+      const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
+      const store = storeRaw ? JSON.parse(storeRaw) : {};
+      const saved = this.context ? store[this.context.bookId]?.[this.context.chapterId] : null;
+      
+      console.log("[Progress] load", { 
+        bookId: this.context?.bookId, 
+        chapterId: this.context?.chapterId, 
+        saved 
+      });
+
+      const resumeTime = saved?.timeSec ?? startTimeSec;
+      if (resumeTime > 0) {
         const dur = this.audio.duration || 0;
-        this.audio.currentTime = Math.min(startTimeSec, Math.max(0, dur - 0.1));
+        // Resume slightly before to avoid truncation issues
+        this.audio.currentTime = Math.min(resumeTime, Math.max(0, dur - 0.25));
       }
 
       await this.audio.play();
@@ -218,7 +296,6 @@ class SpeechController {
     const duration = this.audio.duration;
     if (!duration || this.currentTextLength <= 0) return;
     
-    // v2.5.12: Precise Seeking with Intro Offset
     if (this.currentChunkMap && this.currentChunkMap.length > 0) {
       const mapTotalDur = this.currentChunkMap.reduce((acc, c) => acc + c.durSec, 0);
       const totalContentDur = Math.max(0.1, duration - this.currentIntroDurSec);
@@ -236,7 +313,6 @@ class SpeechController {
       }
     }
 
-    // Fallback: Linear
     const contentPortion = Math.max(0.001, duration - this.currentIntroDurSec);
     const ratio = Math.max(0, Math.min(1, offset / this.currentTextLength));
     this.audio.currentTime = this.currentIntroDurSec + (ratio * contentPortion);
@@ -293,6 +369,7 @@ class SpeechController {
     window.speechSynthesis.resume(); 
   }
   stop() {
+    this.saveProgress();
     this.sessionToken++;
     this.stopSyncLoop();
     this.audio.pause();
