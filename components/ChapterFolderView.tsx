@@ -1,4 +1,3 @@
-
 import React, { useMemo, useState, useEffect } from 'react';
 import { Book, Theme, StorageBackend, Chapter, AudioChunkMetadata } from '../types';
 import { LayoutGrid, List, AlignJustify, Plus, Folder, CheckCircle2, Edit2, Check, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X } from 'lucide-react';
@@ -39,7 +38,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const VIEW_MODE_KEY = `talevox:viewMode:${book.id}`;
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     const saved = localStorage.getItem(VIEW_MODE_KEY);
-    return (saved === 'details' || saved === 'list' || saved === 'grid') ? saved : 'details';
+    return (saved === 'details' || saved === 'list' || saved === 'grid') ? (saved as ViewMode) : 'details';
   });
 
   useEffect(() => {
@@ -118,7 +117,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     const introDurSec = await getHighPrecisionDuration(introBlob);
     allBlobs.push(introBlob);
 
-    // Simple chunking for logic placeholder
     const textChunks = [contentText];
     const chunkMap: AudioChunkMetadata[] = [];
     
@@ -197,7 +195,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     setEditingChapterId(null); 
   };
 
-  // Helper to render the status icon
   const renderStatusIcon = (c: Chapter) => {
     const status = getChapterStaleStatus(c);
     if (status === 'ready') return <Cloud className="w-3.5 h-3.5 text-emerald-500" title="Audio ready on Drive" />;
@@ -206,7 +203,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     return <AlertTriangle className="w-3.5 h-3.5 text-slate-400 opacity-50" title="No audio generated" />;
   };
 
-  // 1. Table/Details View
   const renderRow = (c: Chapter) => {
     const isEditing = editingChapterId === c.id;
     const saved = progressData[c.id];
@@ -236,15 +232,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           </span>
         </div>
         <div className="flex justify-end items-center gap-2 hidden sm:flex">
-          <button onClick={(e) => { e.stopPropagation(); setRememberAsDefault(false); setShowVoiceModal({ chapterId: c.id }); }} disabled={!!synthesizingId || isBatchSynthesizing} className={`p-2 rounded-xl border transition-all ${controlBg} opacity-40 hover:opacity-100`} title="Regenerate Sync Audio"><RefreshCw className="w-4 h-4" /></button>
-          {!isEditing && <button onClick={(e) => { e.stopPropagation(); setEditingChapterId(c.id); setTempTitle(c.title); }} className={`p-2 rounded-xl border transition-all ${controlBg} opacity-40 hover:opacity-100`}><Edit2 className="w-4 h-4" /></button>}
-          <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete chapter?')) onDeleteChapter(c.id); }} className={`p-2 rounded-xl border transition-all ${controlBg} opacity-40 hover:opacity-100 hover:text-red-600`}><Trash2 className="w-4 h-4" /></button>
+          <button onClick={(e) => { e.stopPropagation(); setRememberAsDefault(false); setShowVoiceModal({ chapterId: c.id }); }} disabled={!!synthesizingId || isBatchSynthesizing} className={`p-2 rounded-xl border transition-all ${controlBg} opacity-40 hover:opacity-100 relative z-20 cursor-pointer`} title="Regenerate Sync Audio"><RefreshCw className="w-4 h-4" /></button>
+          {!isEditing && <button onClick={(e) => { e.stopPropagation(); setEditingChapterId(c.id); setTempTitle(c.title); }} className={`p-2 rounded-xl border transition-all ${controlBg} opacity-40 hover:opacity-100 relative z-20 cursor-pointer`}><Edit2 className="w-4 h-4" /></button>}
+          <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete chapter?')) onDeleteChapter(c.id); }} className={`p-2 rounded-xl border transition-all ${controlBg} opacity-40 hover:opacity-100 hover:text-red-600 relative z-20 cursor-pointer`}><Trash2 className="w-4 h-4" /></button>
         </div>
       </div>
     );
   };
 
-  // 2. Compact View
   const renderListItem = (c: Chapter) => {
     const saved = progressData[c.id];
     const isActuallyCompleted = saved?.completed || false;
@@ -256,13 +251,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         <div className="flex items-center gap-3">
           {renderStatusIcon(c)}
           <span className="text-[10px] font-black text-indigo-500 w-8 text-right">{displayPercent}%</span>
-          <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete chapter?')) onDeleteChapter(c.id); }} className="p-1 opacity-0 group-hover:opacity-100 hover:text-red-500"><Trash2 className="w-3 h-3" /></button>
+          <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete chapter?')) onDeleteChapter(c.id); }} className="p-1 opacity-0 group-hover:opacity-100 hover:text-red-500 relative z-20 cursor-pointer"><Trash2 className="w-3 h-3" /></button>
         </div>
       </div>
     );
   };
 
-  // 3. Grid View
   const renderGridItem = (c: Chapter) => {
     const saved = progressData[c.id];
     const isActuallyCompleted = saved?.completed || false;
@@ -282,7 +276,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           </div>
           <div className="text-[10px] font-black text-indigo-600">{displayPercent}%</div>
         </div>
-        <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete chapter?')) onDeleteChapter(c.id); }} className="absolute -top-2 -right-2 p-1.5 bg-red-500 text-white rounded-full shadow-lg opacity-0 group-hover:opacity-100 transition-all scale-75 hover:scale-100"><Trash2 className="w-3.5 h-3.5" /></button>
+        <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete chapter?')) onDeleteChapter(c.id); }} className="absolute -top-2 -right-2 p-1.5 bg-red-500 text-white rounded-full shadow-lg opacity-0 group-hover:opacity-100 transition-all scale-75 hover:scale-100 relative z-30 cursor-pointer"><Trash2 className="w-3.5 h-3.5" /></button>
       </div>
     );
   };
@@ -311,7 +305,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           </div>
         </div>
       )}
-      <div className="px-4 sm:px-8 pt-6 sm:pt-8 flex-shrink-0">
+      <div className="px-4 sm:px-8 pt-6 sm:pt-8 flex-shrink-0 relative z-10">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
           <div className="flex items-center gap-4 min-w-0">
             <div className={`p-3.5 sm:p-4 rounded-[1.2rem] border shadow-sm ${cardBg}`}><Folder className="w-5 h-5 sm:w-6 sm:h-6 text-indigo-600" /></div>
@@ -320,13 +314,37 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               <div className="text-xl sm:text-2xl font-black tracking-tight truncate mt-1">{book.title}</div>
             </div>
           </div>
-          <div className="flex items-center flex-wrap gap-2 sm:gap-3 relative z-10">
-             <button type="button" onClick={() => { setRememberAsDefault(true); setShowVoiceModal({ isBulk: true }); }} disabled={isBatchSynthesizing} className={`px-5 py-2.5 rounded-xl text-[10px] sm:text-[11px] font-black flex items-center gap-2 border transition-all ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-black/10 shadow-sm'} hover:scale-105 active:scale-95`}>{isBatchSynthesizing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Headphones className="w-3.5 h-3.5" />}{isBatchSynthesizing ? `Syncing ${batchProgress.current}/${batchProgress.total}...` : 'Sync Missing Audio'}</button>
-             <button type="button" onClick={onAddChapter} className="px-5 py-2.5 rounded-xl text-[10px] sm:text-[11px] font-black flex items-center gap-2 bg-indigo-600 text-white shadow-lg hover:scale-105 transition-all active:scale-95"><Plus className="w-3.5 h-3.5" />Import Chapter</button>
-             <div className={`flex items-center gap-1 p-1 rounded-xl border shadow-sm ${controlBg}`}>
-              <button type="button" onClick={() => setViewMode('details')} aria-label="Table View" className={`p-2 rounded-lg transition-all ${viewMode === 'details' ? (isDark ? 'bg-indigo-600 text-white' : 'bg-indigo-600 text-white shadow-md') : 'opacity-60 hover:bg-black/5'}`}><AlignJustify className="w-4 h-4" /></button>
-              <button type="button" onClick={() => setViewMode('list')} aria-label="Compact View" className={`p-2 rounded-lg transition-all ${viewMode === 'list' ? (isDark ? 'bg-indigo-600 text-white' : 'bg-indigo-600 text-white shadow-md') : 'opacity-60 hover:bg-black/5'}`}><List className="w-4 h-4" /></button>
-              <button type="button" onClick={() => setViewMode('grid')} aria-label="Grid View" className={`p-2 rounded-lg transition-all ${viewMode === 'grid' ? (isDark ? 'bg-indigo-600 text-white' : 'bg-indigo-600 text-white shadow-md') : 'opacity-60 hover:bg-black/5'}`}><LayoutGrid className="w-4 h-4" /></button>
+          <div className="flex items-center flex-wrap gap-2 sm:gap-3 relative z-20">
+             <button type="button" onClick={() => { setRememberAsDefault(true); setShowVoiceModal({ isBulk: true }); }} disabled={isBatchSynthesizing} className={`px-5 py-2.5 rounded-xl text-[10px] sm:text-[11px] font-black flex items-center gap-2 border transition-all ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-black/10 shadow-sm'} hover:scale-105 active:scale-95 cursor-pointer`}>{isBatchSynthesizing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Headphones className="w-3.5 h-3.5" />}{isBatchSynthesizing ? `Syncing ${batchProgress.current}/${batchProgress.total}...` : 'Sync Missing Audio'}</button>
+             <button type="button" onClick={onAddChapter} className="px-5 py-2.5 rounded-xl text-[10px] sm:text-[11px] font-black flex items-center gap-2 bg-indigo-600 text-white shadow-lg hover:scale-105 transition-all active:scale-95 cursor-pointer"><Plus className="w-3.5 h-3.5" />Import Chapter</button>
+             <div className={`flex items-center gap-1 p-1 rounded-xl border shadow-sm ${controlBg} relative z-30`}>
+              <button 
+                type="button" 
+                onClick={(e) => { e.stopPropagation(); setViewMode('details'); }} 
+                aria-pressed={viewMode === 'details'}
+                aria-label="Table View" 
+                className={`p-2.5 rounded-lg transition-all cursor-pointer ${viewMode === 'details' ? 'bg-indigo-600 text-white shadow-md' : 'opacity-60 hover:bg-black/5'}`}
+              >
+                <AlignJustify className="w-4 h-4" />
+              </button>
+              <button 
+                type="button" 
+                onClick={(e) => { e.stopPropagation(); setViewMode('list'); }} 
+                aria-pressed={viewMode === 'list'}
+                aria-label="Compact View" 
+                className={`p-2.5 rounded-lg transition-all cursor-pointer ${viewMode === 'list' ? 'bg-indigo-600 text-white shadow-md' : 'opacity-60 hover:bg-black/5'}`}
+              >
+                <List className="w-4 h-4" />
+              </button>
+              <button 
+                type="button" 
+                onClick={(e) => { e.stopPropagation(); setViewMode('grid'); }} 
+                aria-pressed={viewMode === 'grid'}
+                aria-label="Grid View" 
+                className={`p-2.5 rounded-lg transition-all cursor-pointer ${viewMode === 'grid' ? 'bg-indigo-600 text-white shadow-md' : 'opacity-60 hover:bg-black/5'}`}
+              >
+                <LayoutGrid className="w-4 h-4" />
+              </button>
             </div>
           </div>
         </div>
