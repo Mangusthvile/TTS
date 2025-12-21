@@ -7,12 +7,10 @@ import { openFolderPicker, authenticateDrive } from '../services/driveService';
 interface LibraryProps {
   books: Book[];
   activeBookId?: string;
-  // Fix: changed offset to offsetChars to match AppState definition
   lastSession?: { bookId: string; chapterId: string; offsetChars: number };
   onSelectBook: (id: string) => void;
   onAddBook: (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string, driveFolderName?: string) => Promise<void>;
   onDeleteBook: (id: string) => void;
-  // Fix: changed offset to offsetChars to match AppState definition
   onSelectChapter: (bookId: string, chapterId: string, offsetChars?: number) => void;
   onDeleteChapter: (bookId: string, chapterId: string) => void;
   theme: Theme;
@@ -101,7 +99,6 @@ const Library: React.FC<LibraryProps> = ({
         <div className="flex-1 overflow-y-auto px-3 sm:px-4 pb-6 space-y-3">
           {lastChapter && lastBook && (
             <div 
-              // Fix: changed offset to offsetChars
               onClick={() => { onSelectChapter(lastBook.id, lastChapter.id, lastSession!.offsetChars); onClose?.(); }}
               className="p-4 sm:p-5 rounded-2xl sm:rounded-3xl bg-indigo-600 text-white shadow-xl cursor-pointer hover:scale-[1.01] transition-all group overflow-hidden relative mb-4"
             >
@@ -201,7 +198,6 @@ const Library: React.FC<LibraryProps> = ({
                         return (
                           <div 
                             key={chapter.id}
-                            // Fix: added bid and cid, but note that 3rd arg is offsetChars
                             onClick={() => { onSelectChapter(book.id, chapter.id); onClose?.(); }}
                             className={`flex items-center justify-between px-3 py-2.5 rounded-lg cursor-pointer transition-all text-[10px] sm:text-[11px] font-black uppercase tracking-tight group/chap ${isCurrent ? 'bg-indigo-600 text-white shadow-md' : 'opacity-60 hover:opacity-100 hover:bg-black/5'}`}
                           >
