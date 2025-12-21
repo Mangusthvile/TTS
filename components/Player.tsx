@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { Play, Pause, SkipBack, SkipForward, FastForward, Rewind, Clock, Type, AlignLeft, Sparkles, Repeat, Loader2 } from 'lucide-react';
 import { Theme, HighlightMode } from '../types';
@@ -17,8 +18,8 @@ interface PlayerProps {
   onVoiceChange: (voice: string) => void;
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
-  progress: number;
-  totalLength: number;
+  progressChars: number; 
+  totalLengthChars: number; 
   wordCount: number;
   onSeekToOffset: (offset: number) => void;
   sleepTimer: number | null;
@@ -32,6 +33,7 @@ interface PlayerProps {
   playbackCurrentTime?: number;
   playbackDuration?: number;
   isFetching?: boolean;
+  onSeekToTime?: (seconds: number) => void;
 }
 
 const formatTime = (seconds: number) => {
@@ -43,14 +45,14 @@ const formatTime = (seconds: number) => {
 
 const Player: React.FC<PlayerProps> = ({
   isPlaying, onPlay, onPause, speed, onSpeedChange, selectedVoice, onVoiceChange,
-  theme, progress, totalLength, wordCount, onSeekToOffset,
+  theme, progressChars, totalLengthChars, wordCount, onSeekToOffset,
   sleepTimer, onSetSleepTimer, stopAfterChapter, onSetStopAfterChapter,
   useBookSettings, onSetUseBookSettings, highlightMode, onSetHighlightMode,
-  onNext, onPrev, onSeek, playbackCurrentTime, playbackDuration, isFetching
+  onNext, onPrev, onSeek, playbackCurrentTime, playbackDuration, isFetching,
+  onSeekToTime
 }) => {
   const [showSleepMenu, setShowSleepMenu] = useState(false);
   
-  // Real duration adjusted by speed
   const displayTime = useMemo(() => {
     if (playbackCurrentTime !== undefined && playbackCurrentTime > 0) {
       return formatTime(playbackCurrentTime / speed);
@@ -62,7 +64,6 @@ const Player: React.FC<PlayerProps> = ({
     if (playbackDuration !== undefined && playbackDuration > 0) {
       return formatTime(playbackDuration / speed);
     }
-    // Fallback estimate only if metadata hasn't loaded yet
     return formatTime((wordCount / (170 * speed)) * 60);
   }, [playbackDuration, wordCount, speed]);
 
@@ -72,11 +73,24 @@ const Player: React.FC<PlayerProps> = ({
   };
 
   const progressPercent = useMemo(() => {
-    if (playbackDuration && playbackCurrentTime !== undefined) {
+    // Mandate for v2.6.2: Favor time-based progress for the bar UI
+    if (playbackDuration && playbackDuration > 0 && playbackCurrentTime !== undefined) {
       return (playbackCurrentTime / playbackDuration) * 100;
     }
-    return totalLength > 0 ? (progress / totalLength) * 100 : 0;
-  }, [playbackDuration, playbackCurrentTime, progress, totalLength]);
+    // Fallback to characters if audio duration is unknown
+    return totalLengthChars > 0 ? (progressChars / totalLengthChars) * 100 : 0;
+  }, [playbackDuration, playbackCurrentTime, progressChars, totalLengthChars]);
+
+  const handleProgressClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const ratio = (e.clientX - rect.left) / rect.width;
+    
+    if (playbackDuration && onSeekToTime) {
+      onSeekToTime(ratio * playbackDuration);
+    } else {
+      onSeekToOffset(Math.floor(totalLengthChars * ratio));
+    }
+  };
 
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
@@ -88,10 +102,7 @@ const Player: React.FC<PlayerProps> = ({
         <span className="text-[11px] font-black font-mono opacity-60 min-w-[40px] text-left">{displayTime}</span>
         <div 
           className={`flex-1 h-1.5 rounded-full cursor-pointer relative ${isDark ? 'bg-slate-800' : 'bg-black/5'}`}
-          onClick={e => {
-            const rect = e.currentTarget.getBoundingClientRect();
-            onSeekToOffset(Math.floor(totalLength * ((e.clientX - rect.left) / rect.width)));
-          }}
+          onClick={handleProgressClick}
         >
           <div className={`h-full rounded-full ${accentBg} transition-all duration-75 shadow-sm`} style={{ width: `${progressPercent}%` }} />
         </div>

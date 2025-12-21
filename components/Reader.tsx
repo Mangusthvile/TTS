@@ -1,3 +1,4 @@
+
 import React, { useEffect, useRef, useMemo } from 'react';
 import { Chapter, Rule, Theme, HighlightMode, ReaderSettings } from '../types';
 import { applyRules } from '../services/speechService';
@@ -6,7 +7,7 @@ import { Bug, FolderOpen, Plus } from 'lucide-react';
 interface ReaderProps {
   chapter: Chapter | null;
   rules: Rule[];
-  currentOffset: number;
+  currentOffsetChars: number; 
   theme: Theme;
   debugMode: boolean;
   onToggleDebug: () => void;
@@ -18,7 +19,7 @@ interface ReaderProps {
 }
 
 const Reader: React.FC<ReaderProps> = ({ 
-  chapter, rules, currentOffset, theme, debugMode, onToggleDebug, onJumpToOffset, 
+  chapter, rules, currentOffsetChars, theme, debugMode, onToggleDebug, onJumpToOffset, 
   onBackToChapters, onAddChapter, highlightMode, readerSettings
 }) => {
   const activeWordRef = useRef<HTMLSpanElement>(null);
@@ -78,7 +79,7 @@ const Reader: React.FC<ReaderProps> = ({
         lastScrollTime.current = now;
       }
     }
-  }, [currentOffset]);
+  }, [currentOffsetChars]);
 
   const triggerJump = () => {
     const selection = window.getSelection();
@@ -98,7 +99,6 @@ const Reader: React.FC<ReaderProps> = ({
   const handlePointerUp = (e: React.PointerEvent) => {
     const now = Date.now();
     if (now - lastTapTime.current < 300) {
-      // Small timeout to ensure selection is processed by OS
       setTimeout(triggerJump, 0);
       lastTapTime.current = 0;
     } else {
@@ -116,10 +116,10 @@ const Reader: React.FC<ReaderProps> = ({
   }, [theme]);
 
   const renderContent = () => {
-    const activeWord = segments.words.find(s => currentOffset >= s.start && currentOffset < s.end) || 
-                      segments.words.find(s => s.start >= currentOffset);
-    const activeSentence = segments.sentences.find(s => currentOffset >= s.start && currentOffset < s.end) || 
-                          segments.sentences.find(s => s.start >= currentOffset);
+    const activeWord = segments.words.find(s => currentOffsetChars >= s.start && currentOffsetChars < s.end) || 
+                      segments.words.find(s => s.start >= currentOffsetChars);
+    const activeSentence = segments.sentences.find(s => currentOffsetChars >= s.start && currentOffsetChars < s.end) || 
+                          segments.sentences.find(s => s.start >= currentOffsetChars);
 
     const transitionClass = "transition-all duration-150 ease-out rounded px-0.5";
 

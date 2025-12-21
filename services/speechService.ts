@@ -64,13 +64,21 @@ class SpeechController {
     this.setupAudioListeners();
   }
 
-  // Fix: Added missing public method to set the fetch state listener
   public setFetchStateListener(cb: (isFetching: boolean) => void) {
     this.onFetchStateChange = cb;
   }
 
+  /**
+   * Warm up metadata for the current chapter so offsets can be calculated correctly 
+   * even before playback starts (v2.6.2).
+   */
+  public updateMetadata(textLen: number, introDurSec: number, chunkMap: AudioChunkMetadata[]) {
+    this.currentTextLength = textLen;
+    this.currentIntroDurSec = introDurSec;
+    this.currentChunkMap = chunkMap || null;
+  }
+
   setContext(ctx: { bookId: string; chapterId: string } | null) {
-    // Save current before switching to ensure old context is persisted
     if (this.context && (this.context.chapterId !== ctx?.chapterId)) {
       this.saveProgress();
     }
@@ -100,7 +108,6 @@ class SpeechController {
 
     this.audio.ontimeupdate = () => {
       const now = Date.now();
-      // Throttle saves while playing to once per second
       if (now - this.lastSaveTime > 1000) {
         this.saveProgress();
       }
@@ -114,7 +121,6 @@ class SpeechController {
       if (this.onFetchStateChange) this.onFetchStateChange(false);
     };
 
-    // Global listeners for abrupt navigation or app hiding
     window.addEventListener('beforeunload', () => this.saveProgress());
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') this.saveProgress();
@@ -127,7 +133,6 @@ class SpeechController {
     const curTime = this.audio.currentTime;
     const duration = isFinite(this.audio.duration) && this.audio.duration > 0 ? this.audio.duration : 0;
     
-    // Only save if we have a valid duration or we are marking as complete
     if (duration === 0 && !completed) return;
 
     const finalTime = completed ? duration : Math.min(curTime, duration || Infinity);
@@ -150,18 +155,8 @@ class SpeechController {
     };
 
     store[this.context.bookId][this.context.chapterId] = progressUpdate;
-
     localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(store));
     this.lastSaveTime = Date.now();
-
-    console.log("[Progress] save", { 
-      bookId: this.context.bookId,
-      chapterId: this.context.chapterId, 
-      timeSec: finalTime.toFixed(2), 
-      dur: finalDur.toFixed(2),
-      percent: (percent * 100).toFixed(1) + "%", 
-      completed 
-    });
 
     window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: this.context }));
   }
@@ -170,7 +165,7 @@ class SpeechController {
     const sync = () => {
       if (this.syncCallback && this.audio.duration && !this.audio.paused) {
         const t = this.audio.currentTime;
-        const charOffset = this.getOffsetFromTime(t);
+        const charOffset = this.getOffsetFromTime(t, this.audio.duration);
         
         this.syncCallback({
           currentTime: t,
@@ -184,9 +179,13 @@ class SpeechController {
     this.rafId = requestAnimationFrame(sync);
   }
 
-  private getOffsetFromTime(t: number): number {
-    const duration = this.audio.duration || 1;
-    if (t < this.currentIntroDurSec) return 0;
+  /**
+   * High-precision mapping from seconds to character offset (v2.6.2).
+   */
+  public getOffsetFromTime(t: number, dur?: number): number {
+    const duration = dur || this.audio.duration || 0;
+    if (duration === 0 || t < this.currentIntroDurSec) return 0;
+    
     const contentTime = t - this.currentIntroDurSec;
 
     if (this.currentChunkMap && this.currentChunkMap.length > 0) {
@@ -198,7 +197,7 @@ class SpeechController {
       for (const chunk of this.currentChunkMap) {
         const scaledDur = chunk.durSec * scale;
         if (contentTime >= cumulativeTime && contentTime < cumulativeTime + scaledDur) {
-          const withinRatio = (contentTime - cumulativeTime) / scaledDur;
+          const withinRatio = (contentTime - cumulativeTime) / Math.max(0.001, scaledDur);
           const contentPos = chunk.startChar + (chunk.endChar - chunk.startChar) * withinRatio;
           return Math.max(0, Math.floor(contentPos));
         }
@@ -266,21 +265,13 @@ class SpeechController {
 
       this.audio.playbackRate = this.requestedSpeed;
       
-      // Determine resume time from V4 store (Source of Truth)
       const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
       const store = storeRaw ? JSON.parse(storeRaw) : {};
       const saved = this.context ? store[this.context.bookId]?.[this.context.chapterId] : null;
       
-      console.log("[Progress] load", { 
-        bookId: this.context?.bookId, 
-        chapterId: this.context?.chapterId, 
-        saved 
-      });
-
       const resumeTime = saved?.timeSec ?? startTimeSec;
       if (resumeTime > 0) {
         const dur = this.audio.duration || 0;
-        // Resume slightly before to avoid truncation issues
         this.audio.currentTime = Math.min(resumeTime, Math.max(0, dur - 0.25));
       }
 
@@ -292,10 +283,27 @@ class SpeechController {
     }
   }
 
-  seekToOffset(offset: number) {
+  public seekToTime(seconds: number) {
+    if (!isFinite(seconds) || seconds < 0) return;
+    const duration = this.audio.duration;
+    if (duration > 0) {
+      const target = Math.min(seconds, duration);
+      this.audio.currentTime = target;
+      if (this.syncCallback) {
+        this.syncCallback({
+          currentTime: target,
+          duration: duration,
+          charOffset: this.getOffsetFromTime(target, duration)
+        });
+      }
+    }
+  }
+
+  public seekToOffset(offset: number) {
     const duration = this.audio.duration;
     if (!duration || this.currentTextLength <= 0) return;
     
+    let targetTime = 0;
     if (this.currentChunkMap && this.currentChunkMap.length > 0) {
       const mapTotalDur = this.currentChunkMap.reduce((acc, c) => acc + c.durSec, 0);
       const totalContentDur = Math.max(0.1, duration - this.currentIntroDurSec);
@@ -306,41 +314,21 @@ class SpeechController {
         if (offset >= chunk.startChar && offset <= chunk.endChar) {
           const withinRatio = (offset - chunk.startChar) / Math.max(1, chunk.endChar - chunk.startChar);
           const timeInContent = cumulativeTime + (withinRatio * chunk.durSec * scale);
-          this.audio.currentTime = this.currentIntroDurSec + timeInContent;
-          return;
+          targetTime = this.currentIntroDurSec + timeInContent;
+          break;
         }
         cumulativeTime += chunk.durSec * scale;
       }
+    } else {
+      const contentPortion = Math.max(0.001, duration - this.currentIntroDurSec);
+      const ratio = Math.max(0, Math.min(1, offset / this.currentTextLength));
+      targetTime = this.currentIntroDurSec + (ratio * contentPortion);
     }
 
-    const contentPortion = Math.max(0.001, duration - this.currentIntroDurSec);
-    const ratio = Math.max(0, Math.min(1, offset / this.currentTextLength));
-    this.audio.currentTime = this.currentIntroDurSec + (ratio * contentPortion);
-  }
-
-  getTimeFromOffset(offset: number): number {
-    const duration = this.audio.duration || 0;
-    if (duration === 0) return 0;
-    
-    if (this.currentChunkMap && this.currentChunkMap.length > 0) {
-      const mapTotalDur = this.currentChunkMap.reduce((acc, c) => acc + c.durSec, 0);
-      const totalContentDur = Math.max(0.1, duration - this.currentIntroDurSec);
-      const scale = totalContentDur / Math.max(0.1, mapTotalDur);
-      
-      let cumulativeTime = 0;
-      for (const chunk of this.currentChunkMap) {
-        if (offset >= chunk.startChar && offset <= chunk.endChar) {
-          const withinRatio = (offset - chunk.startChar) / Math.max(1, chunk.endChar - chunk.startChar);
-          const timeInContent = cumulativeTime + (withinRatio * chunk.durSec * scale);
-          return this.currentIntroDurSec + timeInContent;
-        }
-        cumulativeTime += chunk.durSec * scale;
-      }
+    this.audio.currentTime = targetTime;
+    if (this.syncCallback) {
+      this.syncCallback({ currentTime: targetTime, duration, charOffset: offset });
     }
-    
-    const contentPortion = Math.max(0.001, duration - this.currentIntroDurSec);
-    const ratio = Math.max(0, Math.min(1, offset / Math.max(1, this.currentTextLength)));
-    return this.currentIntroDurSec + (ratio * contentPortion);
   }
 
   private stopSyncLoop() {

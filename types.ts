@@ -68,17 +68,17 @@ export interface Chapter {
   isCompleted?: boolean;
   driveId?: string;
   audioDriveId?: string;
-  audioSignature?: string; // v2.5.5: hash(voice + rulesHash + textLength)
-  audioPrefixLen?: number; // v2.5.9: Length of intro prefix chars
-  audioIntroDurSec?: number; // v2.5.12: Actual duration of intro speech in seconds
-  audioChunkMap?: AudioChunkMetadata[]; // v2.5.10: Per-chunk duration map
+  audioSignature?: string; 
+  audioPrefixLen?: number; 
+  audioIntroDurSec?: number; 
+  audioChunkMap?: AudioChunkMetadata[]; 
   hasCachedAudio?: boolean;
 }
 
 export interface BookSettings {
   playbackSpeed?: number;
   selectedVoiceName?: string;
-  defaultVoiceId?: string; // Added in v2.5.6
+  defaultVoiceId?: string; 
   useBookSettings: boolean;
   highlightMode: HighlightMode;
 }
@@ -114,7 +114,7 @@ export interface SavedSnapshot {
     playbackSpeed: number;
     selectedVoiceName?: string;
     theme: Theme;
-    progressStore: any; // talevox_progress_v4 data
+    progressStore: any;
   };
 }
 
@@ -124,7 +124,7 @@ export interface AppState {
   playbackSpeed: number;
   selectedVoiceName?: string;
   theme: Theme;
-  currentOffset: number;
+  currentOffsetChars: number; // Character index only (v2.6.2)
   debugMode: boolean;
   readerSettings: ReaderSettings;
   driveToken?: string;
@@ -133,7 +133,7 @@ export interface AppState {
   lastSession?: {
     bookId: string;
     chapterId: string;
-    offset: number;
+    offsetChars: number;
   };
   lastSavedAt?: number;
 }
