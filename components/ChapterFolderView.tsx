@@ -197,10 +197,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const renderStatusIcon = (c: Chapter) => {
     const status = getChapterStaleStatus(c);
-    if (status === 'ready') return <Cloud className="w-3.5 h-3.5 text-emerald-500" title="Audio ready on Drive" />;
-    if (status === 'stale') return <AlertTriangle className="w-3.5 h-3.5 text-amber-500" title="Audio out of sync (re-generate)" />;
+    if (status === 'ready') return <span title="Audio ready on Drive"><Cloud className="w-3.5 h-3.5 text-emerald-500" /></span>;
+    if (status === 'stale') return <span title="Audio out of sync (re-generate)"><AlertTriangle className="w-3.5 h-3.5 text-amber-500" /></span>;
     if (synthesizingId === c.id) return <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-500" />;
-    return <AlertTriangle className="w-3.5 h-3.5 text-slate-400 opacity-50" title="No audio generated" />;
+    return <span title="No audio generated"><AlertTriangle className="w-3.5 h-3.5 text-slate-400 opacity-50" /></span>;
   };
 
   const renderRow = (c: Chapter) => {
@@ -315,7 +315,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             </div>
           </div>
           <div className="flex items-center flex-wrap gap-2 sm:gap-3 relative z-20">
-             <button type="button" onClick={() => { setRememberAsDefault(true); setShowVoiceModal({ isBulk: true }); }} disabled={isBatchSynthesizing} className={`px-5 py-2.5 rounded-xl text-[10px] sm:text-[11px] font-black flex items-center gap-2 border transition-all ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-black/10 shadow-sm'} hover:scale-105 active:scale-95 cursor-pointer`}>{isBatchSynthesizing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Headphones className="w-3.5 h-3.5" />}{isBatchSynthesizing ? `Syncing ${batchProgress.current}/${batchProgress.total}...` : 'Sync Missing Audio'}</button>
+             <button type="button" onClick={() => { setRememberAsDefault(true); setShowVoiceModal({ isBulk: true }); }} disabled={isBatchSynthesizing} className={`px-5 py-2.5 rounded-xl text-[10px] sm:text-[11px] font-black flex items-center gap-2 border transition-all ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-black/10 shadow-sm'} hover:scale-105 active:scale-95 cursor-pointer`}>{isBatchSynthesizing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Headphones className="w-4 h-4" />}{isBatchSynthesizing ? `Syncing ${batchProgress.current}/${batchProgress.total}...` : 'Sync Missing Audio'}</button>
              <button type="button" onClick={onAddChapter} className="px-5 py-2.5 rounded-xl text-[10px] sm:text-[11px] font-black flex items-center gap-2 bg-indigo-600 text-white shadow-lg hover:scale-105 transition-all active:scale-95 cursor-pointer"><Plus className="w-3.5 h-3.5" />Import Chapter</button>
              <div className={`flex items-center gap-1 p-1 rounded-xl border shadow-sm ${controlBg} relative z-30`}>
               <button 
