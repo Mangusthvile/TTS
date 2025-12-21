@@ -27,7 +27,11 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm cache clean --force
+      - name: Clean npm cache (fix EINTEGRITY)
+        run: |
+          npm cache clean --force
+          rm -rf ~/.npm/_cacache
+          rm -rf ~/.npm/_logs
       - run: npm ci
       - run: npm run build
       - uses: actions/upload-pages-artifact@v3
