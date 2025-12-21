@@ -123,16 +123,27 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     let currentPos = 0;
     for (const chunkText of textChunks) {
       const cacheKey = generateAudioKey(chunkText, voice, speed);
-      let blob = await getAudioFromCache(cacheKey);
+      let blobOrNull = await getAudioFromCache(cacheKey);
       
-      if (!blob) {
+      if (!blobOrNull) {
         const res = await synthesizeChunk(chunkText, voice, speed);
-        blob = await fetch(res.audioUrl).then(r => r.blob());
-        await saveAudioToCache(cacheKey, blob);
+        blobOrNull = await fetch(res.audioUrl).then(r => r.blob());
+        
+        if (blobOrNull) {
+           await saveAudioToCache(cacheKey, blobOrNull);
+        }
       }
 
-      const dur = await getHighPrecisionDuration(blob);
-      audioBlobs.push(blob);
+      if (!blobOrNull) {
+        console.error("[Audio] Generation/download returned null Blob. Aborting to satisfy strict TS.");
+        return;
+      }
+
+      // v2.5.11: Non-null alias to satisfy strict TS
+      const audioBlob: Blob = blobOrNull;
+
+      const dur = await getHighPrecisionDuration(audioBlob);
+      audioBlobs.push(audioBlob);
       chunkMap.push({
         startChar: currentPos,
         endChar: currentPos + chunkText.length,
