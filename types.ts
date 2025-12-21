@@ -69,8 +69,9 @@ export interface Chapter {
   driveId?: string;
   audioDriveId?: string;
   audioSignature?: string; // v2.5.5: hash(voice + rulesHash + textLength)
-  audioPrefixLen?: number; // v2.5.9: Length of intro prefix (Chapter X. Title. )
-  audioChunkMap?: AudioChunkMetadata[]; // v2.5.10: Per-chunk duration map for perfect sync
+  audioPrefixLen?: number; // v2.5.9: Length of intro prefix chars
+  audioIntroDurSec?: number; // v2.5.12: Actual duration of intro speech in seconds
+  audioChunkMap?: AudioChunkMetadata[]; // v2.5.10: Per-chunk duration map
   hasCachedAudio?: boolean;
 }
 

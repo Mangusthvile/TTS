@@ -52,11 +52,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const chapters = useMemo(() => [...(book.chapters || [])].sort((a, b) => a.index - b.index), [book.chapters]);
 
-  // v2.5.10 Signature forcing regeneration for the new sync map
+  // v2.5.12 Signature forcing regeneration for the new intro-offset sync map
   const currentSignature = useMemo(() => {
     const voice = book.settings.defaultVoiceId || 'default';
     const rulesHash = book.rules.length + "_" + book.rules.filter(r => r.enabled).length;
-    return `${voice}_${rulesHash}_v3`; 
+    return `${voice}_${rulesHash}_v4`; 
   }, [book.settings.defaultVoiceId, book.rules]);
 
   const getChapterStaleStatus = (c: Chapter) => {
@@ -65,7 +65,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     const introStr = `Chapter ${c.index}. ${c.title}. `;
     const introStale = c.audioPrefixLen !== introStr.length;
     const mapMissing = !c.audioChunkMap || c.audioChunkMap.length === 0;
-    return (baseStale || introStale || mapMissing) ? 'stale' : 'ready';
+    const durMissing = c.audioIntroDurSec === undefined;
+    return (baseStale || introStale || mapMissing || durMissing) ? 'stale' : 'ready';
   };
 
   const splitIntoSemanticChunks = (text: string, maxLen: number) => {
@@ -111,16 +112,32 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     const voice = voiceToUse || book.settings.defaultVoiceId || 'en-US-Standard-C';
     const speed = 1.0; 
     
-    const intro = `Chapter ${chapter.index}. ${chapter.title}. `;
-    const spokenText = intro + chapter.content;
-    const prefixLen = intro.length;
+    // v2.5.12: Intro and Content are synthesized and measured separately
+    const introText = `Chapter ${chapter.index}. ${chapter.title}. `;
+    const contentText = chapter.content;
+    const prefixLen = introText.length;
 
-    // v2.5.10: Use semantic chunking for tighter sync
-    const textChunks = splitIntoSemanticChunks(spokenText, 1500);
-    const audioBlobs: Blob[] = [];
+    const allBlobs: Blob[] = [];
+    
+    // 1. Synthesize and Measure Intro
+    const introCacheKey = generateAudioKey(introText, voice, speed);
+    let introBlobOrNull = await getAudioFromCache(introCacheKey);
+    if (!introBlobOrNull) {
+      const res = await synthesizeChunk(introText, voice, speed);
+      introBlobOrNull = await fetch(res.audioUrl).then(r => r.blob());
+      if (introBlobOrNull) await saveAudioToCache(introCacheKey, introBlobOrNull);
+    }
+    if (!introBlobOrNull) throw new Error("INTRO_GEN_FAIL");
+    
+    const introBlob: Blob = introBlobOrNull;
+    const introDurSec = await getHighPrecisionDuration(introBlob);
+    allBlobs.push(introBlob);
+
+    // 2. Synthesize and Measure Content Chunks
+    const textChunks = splitIntoSemanticChunks(contentText, 1500);
     const chunkMap: AudioChunkMetadata[] = [];
     
-    let currentPos = 0;
+    let currentPosInContent = 0;
     for (const chunkText of textChunks) {
       const cacheKey = generateAudioKey(chunkText, voice, speed);
       let blobOrNull = await getAudioFromCache(cacheKey);
@@ -128,35 +145,31 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       if (!blobOrNull) {
         const res = await synthesizeChunk(chunkText, voice, speed);
         blobOrNull = await fetch(res.audioUrl).then(r => r.blob());
-        
-        if (blobOrNull) {
-           await saveAudioToCache(cacheKey, blobOrNull);
-        }
+        if (blobOrNull) await saveAudioToCache(cacheKey, blobOrNull);
       }
 
       if (!blobOrNull) {
-        console.error("[Audio] Generation/download returned null Blob. Aborting to satisfy strict TS.");
-        return;
+        console.error("[Audio] Content generation returned null Blob.");
+        continue;
       }
 
-      // v2.5.11: Non-null alias to satisfy strict TS
       const audioBlob: Blob = blobOrNull;
-
       const dur = await getHighPrecisionDuration(audioBlob);
-      audioBlobs.push(audioBlob);
+      allBlobs.push(audioBlob);
+      
       chunkMap.push({
-        startChar: currentPos,
-        endChar: currentPos + chunkText.length,
+        startChar: currentPosInContent,
+        endChar: currentPosInContent + chunkText.length,
         durSec: dur
       });
-      currentPos += chunkText.length;
+      currentPosInContent += chunkText.length;
     }
 
-    if (book.backend === StorageBackend.DRIVE && driveToken && audioBlobs.length > 0) {
-      const combinedBlob = new Blob(audioBlobs, { type: 'audio/mpeg' });
+    if (book.backend === StorageBackend.DRIVE && driveToken && allBlobs.length > 0) {
+      const combinedBlob = new Blob(allBlobs, { type: 'audio/mpeg' });
       const filename = `${chapter.index.toString().padStart(3, '0')}.mp3`;
       const audioDriveId = await uploadToDrive(driveToken, book.driveFolderId!, filename, combinedBlob, chapter.audioDriveId, 'audio/mpeg');
-      return { audioDriveId, prefixLen, chunkMap };
+      return { audioDriveId, prefixLen, introDurSec, chunkMap };
     }
     return undefined;
   };
@@ -176,7 +189,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         if (onUpdateChapter && res) {
           onUpdateChapter({ 
             ...chapter, audioDriveId: res.audioDriveId, audioPrefixLen: res.prefixLen, 
-            audioChunkMap: res.chunkMap, audioSignature: currentSignature 
+            audioIntroDurSec: res.introDurSec, audioChunkMap: res.chunkMap, audioSignature: currentSignature 
           });
         }
       } catch (err) { alert("Generation failed: " + err); } finally { setSynthesizingId(null); }
@@ -193,7 +206,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           if (onUpdateChapter && res) {
             onUpdateChapter({ 
               ...chapter, audioDriveId: res.audioDriveId, audioPrefixLen: res.prefixLen, 
-              audioChunkMap: res.chunkMap, audioSignature: currentSignature 
+              audioIntroDurSec: res.introDurSec, audioChunkMap: res.chunkMap, audioSignature: currentSignature 
             });
           }
         } catch (e) { console.error("Batch fail:", e); }

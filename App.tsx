@@ -143,8 +143,6 @@ const App: React.FC = () => {
     }
   }, [activeBook, activeChapterText, updateChapterProgress, persistProgress]);
 
-  // Fix: Implemented handleChapterExtracted to process output from the Extractor component.
-  // It handles persistence and updating the app state with the new chapter.
   const handleChapterExtracted = useCallback(async (data: { title: string; content: string; url: string; index: number }) => {
     const activeBookId = stateRef.current.activeBookId;
     if (!activeBookId) return;
@@ -230,19 +228,19 @@ const App: React.FC = () => {
     const store = JSON.parse(localStorage.getItem(PROGRESS_STORE_KEY) || '{}');
     const saved = store[book.id]?.[chapter.id];
     setIsPlaying(true);
+    
     const startOffset = stateRef.current.currentOffset;
-    const prefixLen = chapter.audioPrefixLen || 0;
-    const totalChars = prefixLen + text.length;
+    const contentChars = text.length;
+    const introDur = chapter.audioIntroDurSec || 0; // v2.5.12
 
     let startTime = saved?.timeSec ?? 0;
-    // v2.5.10: Use engine helper for accurate start time from offset if significantly different
     if (Math.abs(startOffset - (saved?.offset ?? 0)) > 5) {
        startTime = speechController.getTimeFromOffset(startOffset);
     }
 
     try {
       await speechController.loadAndPlayDriveFile(
-        stateRef.current.driveToken, chapter.audioDriveId, totalChars, prefixLen, chapter.audioChunkMap, startTime, speed,
+        stateRef.current.driveToken, chapter.audioDriveId, contentChars, introDur, chapter.audioChunkMap, startTime, speed,
         () => {
            updateChapterProgress(book.id, chapter.id, text.length, text.length, true);
            persistProgress(book.id, chapter.id, text.length, speechController.duration || 0);

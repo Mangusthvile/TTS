@@ -42,7 +42,7 @@ class SpeechController {
   private audio: HTMLAudioElement;
   private currentBlobUrl: string | null = null;
   private currentTextLength: number = 0;
-  private currentPrefixLength: number = 0;
+  private currentIntroDurSec: number = 0; // v2.5.12
   private currentChunkMap: AudioChunkMetadata[] | null = null;
   private rafId: number | null = null;
   private requestedSpeed: number = 1.0;
@@ -115,33 +115,43 @@ class SpeechController {
   private getOffsetFromTime(t: number): number {
     const duration = this.audio.duration || 1;
     
-    // v2.5.10: Precision Mapping
+    // v2.5.12: Intro Offset Logic
+    // If we are still in the intro phase, the content offset is 0.
+    if (t < this.currentIntroDurSec) {
+      return 0;
+    }
+
+    const contentTime = t - this.currentIntroDurSec;
+
+    // v2.5.10: Precision Mapping (Now content-relative)
     if (this.currentChunkMap && this.currentChunkMap.length > 0) {
       const mapTotalDur = this.currentChunkMap.reduce((acc, c) => acc + c.durSec, 0);
-      const scale = duration / Math.max(0.1, mapTotalDur);
+      const totalContentDur = Math.max(0.1, duration - this.currentIntroDurSec);
+      const scale = totalContentDur / Math.max(0.1, mapTotalDur);
       
       let cumulativeTime = 0;
       for (const chunk of this.currentChunkMap) {
         const scaledDur = chunk.durSec * scale;
-        if (t >= cumulativeTime && t < cumulativeTime + scaledDur) {
-          const withinRatio = (t - cumulativeTime) / scaledDur;
-          const rawPos = chunk.startChar + (chunk.endChar - chunk.startChar) * withinRatio;
-          return Math.max(0, Math.floor(rawPos) - this.currentPrefixLength);
+        if (contentTime >= cumulativeTime && contentTime < cumulativeTime + scaledDur) {
+          const withinRatio = (contentTime - cumulativeTime) / scaledDur;
+          const contentPos = chunk.startChar + (chunk.endChar - chunk.startChar) * withinRatio;
+          return Math.max(0, Math.floor(contentPos));
         }
         cumulativeTime += scaledDur;
       }
     }
 
-    // Fallback: Linear
-    const ratio = Math.min(1, t / duration);
-    return Math.max(0, Math.floor(this.currentTextLength * ratio) - this.currentPrefixLength);
+    // Fallback: Linear mapping across content portion
+    const contentPortion = Math.max(0.001, duration - this.currentIntroDurSec);
+    const ratio = Math.min(1, contentTime / contentPortion);
+    return Math.max(0, Math.floor(this.currentTextLength * ratio));
   }
 
   async loadAndPlayDriveFile(
     token: string,
     fileId: string,
-    totalTextLength: number,
-    prefixLength: number,
+    totalContentChars: number,
+    introDurSec: number,
     chunkMap: AudioChunkMetadata[] | undefined,
     startTimeSec = 0,
     playbackRate = 1.0,
@@ -160,8 +170,8 @@ class SpeechController {
 
     this.onEndCallback = onEnd;
     this.syncCallback = onSync;
-    this.currentTextLength = totalTextLength;
-    this.currentPrefixLength = prefixLength;
+    this.currentTextLength = totalContentChars;
+    this.currentIntroDurSec = introDurSec; // v2.5.12
     this.currentChunkMap = chunkMap || null;
 
     if (this.onFetchStateChange) this.onFetchStateChange(true);
@@ -208,18 +218,18 @@ class SpeechController {
     const duration = this.audio.duration;
     if (!duration || this.currentTextLength <= 0) return;
     
-    const rawTargetChar = this.currentPrefixLength + offset;
-
-    // v2.5.10: Precision Seeking
+    // v2.5.12: Precise Seeking with Intro Offset
     if (this.currentChunkMap && this.currentChunkMap.length > 0) {
       const mapTotalDur = this.currentChunkMap.reduce((acc, c) => acc + c.durSec, 0);
-      const scale = duration / Math.max(0.1, mapTotalDur);
+      const totalContentDur = Math.max(0.1, duration - this.currentIntroDurSec);
+      const scale = totalContentDur / Math.max(0.1, mapTotalDur);
       
       let cumulativeTime = 0;
       for (const chunk of this.currentChunkMap) {
-        if (rawTargetChar >= chunk.startChar && rawTargetChar <= chunk.endChar) {
-          const withinRatio = (rawTargetChar - chunk.startChar) / Math.max(1, chunk.endChar - chunk.startChar);
-          this.audio.currentTime = cumulativeTime + (withinRatio * chunk.durSec * scale);
+        if (offset >= chunk.startChar && offset <= chunk.endChar) {
+          const withinRatio = (offset - chunk.startChar) / Math.max(1, chunk.endChar - chunk.startChar);
+          const timeInContent = cumulativeTime + (withinRatio * chunk.durSec * scale);
+          this.audio.currentTime = this.currentIntroDurSec + timeInContent;
           return;
         }
         cumulativeTime += chunk.durSec * scale;
@@ -227,32 +237,34 @@ class SpeechController {
     }
 
     // Fallback: Linear
-    const ratio = Math.max(0, Math.min(1, rawTargetChar / this.currentTextLength));
-    this.audio.currentTime = ratio * duration;
+    const contentPortion = Math.max(0.001, duration - this.currentIntroDurSec);
+    const ratio = Math.max(0, Math.min(1, offset / this.currentTextLength));
+    this.audio.currentTime = this.currentIntroDurSec + (ratio * contentPortion);
   }
 
   getTimeFromOffset(offset: number): number {
     const duration = this.audio.duration || 0;
     if (duration === 0) return 0;
     
-    const rawTargetChar = this.currentPrefixLength + offset;
-
     if (this.currentChunkMap && this.currentChunkMap.length > 0) {
       const mapTotalDur = this.currentChunkMap.reduce((acc, c) => acc + c.durSec, 0);
-      const scale = duration / Math.max(0.1, mapTotalDur);
+      const totalContentDur = Math.max(0.1, duration - this.currentIntroDurSec);
+      const scale = totalContentDur / Math.max(0.1, mapTotalDur);
       
       let cumulativeTime = 0;
       for (const chunk of this.currentChunkMap) {
-        if (rawTargetChar >= chunk.startChar && rawTargetChar <= chunk.endChar) {
-          const withinRatio = (rawTargetChar - chunk.startChar) / Math.max(1, chunk.endChar - chunk.startChar);
-          return cumulativeTime + (withinRatio * chunk.durSec * scale);
+        if (offset >= chunk.startChar && offset <= chunk.endChar) {
+          const withinRatio = (offset - chunk.startChar) / Math.max(1, chunk.endChar - chunk.startChar);
+          const timeInContent = cumulativeTime + (withinRatio * chunk.durSec * scale);
+          return this.currentIntroDurSec + timeInContent;
         }
         cumulativeTime += chunk.durSec * scale;
       }
     }
     
-    const ratio = Math.max(0, Math.min(1, rawTargetChar / Math.max(1, this.currentTextLength)));
-    return ratio * duration;
+    const contentPortion = Math.max(0.001, duration - this.currentIntroDurSec);
+    const ratio = Math.max(0, Math.min(1, offset / Math.max(1, this.currentTextLength)));
+    return this.currentIntroDurSec + (ratio * contentPortion);
   }
 
   private stopSyncLoop() {
