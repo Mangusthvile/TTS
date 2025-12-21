@@ -2,8 +2,16 @@
 /**
  * Talevox Google Drive Service
  * Handles authentication and file synchronization with official Google Picker integration.
- * Ensure openFolderPicker is CALLED FROM A SYNCHRONOUS GESTURE for mobile PWA support.
  */
+
+export function buildMp3Name(chapterIndex: number, title: string) {
+  const safe = (title || "untitled")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 60);
+  return `${chapterIndex}_${safe}.mp3`;
+}
 
 export async function authenticateDrive(explicitClientId?: string): Promise<string> {
   const CLIENT_ID = (explicitClientId?.trim()) || ((import.meta as any).env?.VITE_GOOGLE_CLIENT_ID) || 'YOUR_CLIENT_ID_HERE.apps.googleusercontent.com';
@@ -37,9 +45,6 @@ export async function authenticateDrive(explicitClientId?: string): Promise<stri
   });
 }
 
-/**
- * MANDATORY: Call this directly in an onClick handler to avoid popup blockers on Mobile PWA.
- */
 export async function openFolderPicker(token: string): Promise<{id: string, name: string} | null> {
   const apiKey = (import.meta as any).env?.VITE_GOOGLE_API_KEY;
   if (!apiKey) throw new Error("Missing VITE_GOOGLE_API_KEY");
@@ -51,7 +56,6 @@ export async function openFolderPicker(token: string): Promise<{id: string, name
     gapi.load('picker', async () => {
       const google = (window as any).google;
       if (!google.picker) {
-        // Retry a few times if the namespace is late
         let retries = 0;
         while (!google.picker && retries < 10) {
           await new Promise(r => setTimeout(r, 100));
@@ -100,7 +104,7 @@ async function getErrorFromResponse(response: Response, fallbackPrefix: string):
   return new Error(`${details || fallbackPrefix} (HTTP ${response.status})`);
 }
 
-export async function listFilesInFolder(token: string, folderId: string): Promise<{id: string, name: string}[]> {
+export async function listFilesInFolder(token: string, folderId: string): Promise<{id: string, name: string, mimeType: string}[]> {
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, mimeType)&orderBy=name&pageSize=1000&includeItemsFromAllDrives=true&supportsAllDrives=true`;
   const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
@@ -143,9 +147,6 @@ export async function deleteDriveFile(token: string, fileId: string): Promise<vo
   if (!response.ok && response.status !== 404) throw await getErrorFromResponse(response, 'DELETE_FAILED');
 }
 
-/**
- * Uploads a file (text or binary Blob) using multipart/related for safe metadata + data packaging.
- */
 export async function uploadToDrive(
   token: string, 
   folderId: string | null, 
@@ -171,7 +172,6 @@ export async function uploadToDrive(
     
   const footer = '\r\n--' + boundary + '--';
 
-  // Construct binary payload safely
   const encoder = new TextEncoder();
   const metadataBuffer = encoder.encode(metadataPart);
   const mediaHeaderBuffer = encoder.encode(mediaHeader);
