@@ -39,7 +39,6 @@ const Settings: React.FC<SettingsProps> = ({
   ];
 
   const controlBg = isDark ? 'bg-slate-950/40 border-slate-800' : isSepia ? 'bg-[#efe6d5] border-[#d8ccb6]' : 'bg-white border-black/5';
-
   const isWakeLockSupported = 'wakeLock' in navigator;
 
   return (
@@ -48,7 +47,7 @@ const Settings: React.FC<SettingsProps> = ({
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
           <div>
             <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
-            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.5.9</p>
+            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.5.10</p>
           </div>
           <button 
             onClick={onCheckForUpdates}
@@ -58,10 +57,8 @@ const Settings: React.FC<SettingsProps> = ({
           </button>
         </div>
 
-        {/* Cloud Sync */}
-        <div className={`p-5 sm:p-8 rounded-[1.5rem] sm:rounded-[2.5rem] border shadow-sm space-y-6 ${cardBg}`}>
+        <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm space-y-6 ${cardBg}`}>
           <label className={labelClass}>Cloud Synchronization</label>
-
           <div className="space-y-4">
              <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2 mb-1">
@@ -76,7 +73,6 @@ const Settings: React.FC<SettingsProps> = ({
                   className={`w-full px-4 py-3 rounded-xl border-none outline-none font-mono text-[16px] ${isDark ? 'bg-slate-950 text-white' : 'bg-slate-50 text-black'}`}
                 />
              </div>
-
              <div className="flex flex-col gap-6 pt-4 border-t border-black/5 lg:flex-row lg:items-center lg:justify-between">
                 <div className="flex items-center gap-4 min-w-0">
                    <div className={`p-3.5 sm:p-4 rounded-2xl flex-shrink-0 ${isCloudLinked ? 'bg-indigo-600 text-white' : 'bg-black/5 text-slate-400'}`}>
@@ -84,103 +80,57 @@ const Settings: React.FC<SettingsProps> = ({
                    </div>
                    <div className="min-w-0">
                       <div className={`text-sm font-black ${textClass}`}>{isCloudLinked ? 'Library Linked' : 'Offline Mode'}</div>
-                      <div className="text-[10px] font-bold opacity-60 truncate">
-                         {isCloudLinked ? 'Syncing to Google Drive' : 'Sync libraries across devices'}
-                      </div>
+                      <div className="text-[10px] font-bold opacity-60 truncate">{isCloudLinked ? 'Syncing to Google Drive' : 'Sync libraries across devices'}</div>
                    </div>
                 </div>
                 <div className="flex items-center gap-2 w-full sm:w-auto">
                    {isCloudLinked ? (
                       <>
-                        <button 
-                          onClick={onSyncNow}
-                          disabled={isSyncing}
-                          className="flex-1 sm:flex-none px-6 py-3 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 hover:scale-105 transition-all disabled:opacity-50"
-                        >
-                           {isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                           Sync
+                        <button onClick={onSyncNow} disabled={isSyncing} className="flex-1 sm:flex-none px-6 py-3 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 hover:scale-105 transition-all">
+                           {isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} Sync
                         </button>
-                        <button 
-                          onClick={onClearAuth}
-                          className={`p-3 rounded-xl border transition-all ${isDark ? 'bg-slate-800 text-slate-400 hover:text-red-500' : 'bg-white text-slate-400 hover:text-red-600'}`}
-                        >
-                           <LogOut className="w-4 h-4" />
-                        </button>
+                        <button onClick={onClearAuth} className={`p-3 rounded-xl border transition-all ${isDark ? 'bg-slate-800 text-slate-400' : 'bg-white text-slate-400'}`}><LogOut className="w-4 h-4" /></button>
                       </>
-                   ) : (
-                      <button 
-                        onClick={onLinkCloud}
-                        className="w-full sm:w-auto px-8 py-4 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 hover:scale-105 transition-all"
-                      >
-                         <Cloud className="w-3.5 h-3.5" />
-                         Link Account
-                      </button>
-                   )}
+                   ) : <button onClick={onLinkCloud} className="w-full sm:w-auto px-8 py-4 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 hover:scale-105 transition-all"><Cloud className="w-3.5 h-3.5" /> Link Account</button>}
                 </div>
              </div>
           </div>
         </div>
 
-        {/* System Settings */}
-        <div className={`p-5 sm:p-8 rounded-[1.5rem] sm:rounded-[2.5rem] border shadow-sm space-y-6 ${cardBg}`}>
+        <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm space-y-6 ${cardBg}`}>
           <label className={labelClass}>Reader Experience</label>
-          
           <div className="space-y-6">
             <div className="space-y-4">
               <div className="flex justify-between items-center">
                 <span className={`text-sm font-black ${textClass}`}>Font Size</span>
                 <span className="text-xs font-mono font-black opacity-60">{settings.fontSizePx}px</span>
               </div>
-              <input 
-                type="range" min="16" max="40" step="1" 
-                value={settings.fontSizePx} 
-                onChange={e => onUpdate({ fontSizePx: parseInt(e.target.value) })}
-                className="w-full h-1.5 accent-indigo-600 rounded-full cursor-pointer"
-              />
+              <input type="range" min="16" max="40" value={settings.fontSizePx} onChange={e => onUpdate({ fontSizePx: parseInt(e.target.value) })} className="w-full h-1.5 accent-indigo-600 rounded-full cursor-pointer" />
             </div>
-
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <Smartphone className={`w-5 h-5 ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`} />
-                <div>
-                  <div className={`text-sm font-black ${textClass}`}>Keep screen awake</div>
-                </div>
+                <div className={`text-sm font-black ${textClass}`}>Keep screen awake</div>
               </div>
-              <button 
-                disabled={!isWakeLockSupported}
-                onClick={() => onSetKeepAwake(!keepAwake)}
-                className={`w-14 h-7 rounded-full transition-colors relative ${!isWakeLockSupported ? 'opacity-30' : ''} ${keepAwake ? 'bg-indigo-600' : 'bg-slate-300'}`}
-              >
+              <button disabled={!isWakeLockSupported} onClick={() => onSetKeepAwake(!keepAwake)} className={`w-14 h-7 rounded-full transition-colors relative ${!isWakeLockSupported ? 'opacity-30' : ''} ${keepAwake ? 'bg-indigo-600' : 'bg-slate-300'}`}>
                 <div className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-all ${keepAwake ? 'left-8' : 'left-1'}`} />
               </button>
             </div>
           </div>
         </div>
 
-        {/* Typography */}
-        <div className={`p-5 sm:p-8 rounded-[1.5rem] sm:rounded-[2.5rem] border shadow-sm ${cardBg}`}>
+        <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm ${cardBg}`}>
           <label className={labelClass}>Typography</label>
           <div className="grid grid-cols-2 gap-3 sm:gap-4">
             {fonts.map((f) => (
-              <button
-                key={f.name}
-                onClick={() => onUpdate({ fontFamily: f.font })}
-                className={`p-4 sm:p-6 rounded-2xl border text-left transition-all hover:scale-[1.02] flex flex-col items-center justify-center text-center ${
-                  settings.fontFamily === f.font
-                    ? 'border-indigo-600 bg-indigo-600/5 ring-1 ring-indigo-600 text-indigo-600'
-                    : `border-transparent ${controlBg} ${textClass}`
-                }`}
-              >
+              <button key={f.name} onClick={() => onUpdate({ fontFamily: f.font })} className={`p-4 sm:p-6 rounded-2xl border text-left transition-all flex flex-col items-center justify-center text-center ${settings.fontFamily === f.font ? 'border-indigo-600 bg-indigo-600/5 ring-1 text-indigo-600' : `border-transparent ${controlBg} ${textClass}`}`}>
                 <div style={{ fontFamily: f.font }} className="text-2xl sm:text-3xl mb-1 sm:mb-2">Aa</div>
                 <div className="text-[9px] sm:text-[11px] font-black uppercase tracking-tight">{f.name}</div>
               </button>
             ))}
           </div>
         </div>
-
-        <div className="text-center font-black uppercase tracking-[0.4em] text-[9px] sm:text-[11px] pt-8 sm:pt-12 opacity-30">
-          VoxLib Engine v2.5.9
-        </div>
+        <div className="text-center font-black uppercase tracking-[0.4em] text-[9px] sm:text-[11px] pt-8 sm:pt-12 opacity-30">VoxLib Engine v2.5.10</div>
       </div>
     </div>
   );

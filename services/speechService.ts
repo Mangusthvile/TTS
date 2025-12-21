@@ -1,5 +1,5 @@
 
-import { Rule, RuleType } from '../types';
+import { Rule, RuleType, AudioChunkMetadata } from '../types';
 import { getDriveAudioObjectUrl, revokeObjectUrl } from "../services/driveService";
 
 export function applyRules(text: string, rules: Rule[]): string {
@@ -43,6 +43,7 @@ class SpeechController {
   private currentBlobUrl: string | null = null;
   private currentTextLength: number = 0;
   private currentPrefixLength: number = 0;
+  private currentChunkMap: AudioChunkMetadata[] | null = null;
   private rafId: number | null = null;
   private requestedSpeed: number = 1.0;
   
@@ -74,7 +75,6 @@ class SpeechController {
       console.info("[AudioEngine] Playback ended.");
       this.stopSyncLoop();
       if (this.onEndCallback) {
-         // Fire callback asynchronously to avoid stack issues during state transitions
          setTimeout(() => this.onEndCallback?.(), 0);
       }
     });
@@ -89,11 +89,7 @@ class SpeechController {
     });
 
     this.audio.addEventListener('error', () => {
-      console.error("[AudioEngine] Error:", {
-        error: this.audio.error,
-        src: this.audio.src,
-        networkState: this.audio.networkState
-      });
+      console.error("[AudioEngine] Error:", this.audio.error);
       if (this.onFetchStateChange) this.onFetchStateChange(false);
     });
   }
@@ -101,18 +97,13 @@ class SpeechController {
   private startSyncLoop() {
     const sync = () => {
       if (this.syncCallback && this.audio.duration && !this.audio.paused) {
-        const ratio = Math.min(1, this.audio.currentTime / this.audio.duration);
-        const totalChars = this.currentTextLength;
-        const prefixChars = this.currentPrefixLength;
-        const rawCharPos = Math.floor(totalChars * ratio);
-        
-        // Offset is strictly content-based. Clamp intro portion to 0.
-        const contentOffset = Math.max(0, rawCharPos - prefixChars);
+        const t = this.audio.currentTime;
+        const charOffset = this.getOffsetFromTime(t);
         
         this.syncCallback({
-          currentTime: this.audio.currentTime,
+          currentTime: t,
           duration: this.audio.duration,
-          charOffset: contentOffset
+          charOffset: charOffset
         });
       }
       this.rafId = requestAnimationFrame(sync);
@@ -121,11 +112,29 @@ class SpeechController {
     this.rafId = requestAnimationFrame(sync);
   }
 
-  private stopSyncLoop() {
-    if (this.rafId !== null) {
-      cancelAnimationFrame(this.rafId);
-      this.rafId = null;
+  private getOffsetFromTime(t: number): number {
+    const duration = this.audio.duration || 1;
+    
+    // v2.5.10: Precision Mapping
+    if (this.currentChunkMap && this.currentChunkMap.length > 0) {
+      const mapTotalDur = this.currentChunkMap.reduce((acc, c) => acc + c.durSec, 0);
+      const scale = duration / Math.max(0.1, mapTotalDur);
+      
+      let cumulativeTime = 0;
+      for (const chunk of this.currentChunkMap) {
+        const scaledDur = chunk.durSec * scale;
+        if (t >= cumulativeTime && t < cumulativeTime + scaledDur) {
+          const withinRatio = (t - cumulativeTime) / scaledDur;
+          const rawPos = chunk.startChar + (chunk.endChar - chunk.startChar) * withinRatio;
+          return Math.max(0, Math.floor(rawPos) - this.currentPrefixLength);
+        }
+        cumulativeTime += scaledDur;
+      }
     }
+
+    // Fallback: Linear
+    const ratio = Math.min(1, t / duration);
+    return Math.max(0, Math.floor(this.currentTextLength * ratio) - this.currentPrefixLength);
   }
 
   async loadAndPlayDriveFile(
@@ -133,6 +142,7 @@ class SpeechController {
     fileId: string,
     totalTextLength: number,
     prefixLength: number,
+    chunkMap: AudioChunkMetadata[] | undefined,
     startTimeSec = 0,
     playbackRate = 1.0,
     onEnd: () => void,
@@ -152,23 +162,23 @@ class SpeechController {
     this.syncCallback = onSync;
     this.currentTextLength = totalTextLength;
     this.currentPrefixLength = prefixLength;
+    this.currentChunkMap = chunkMap || null;
 
     if (this.onFetchStateChange) this.onFetchStateChange(true);
 
     try {
-      const { url, blob } = await getDriveAudioObjectUrl(token, fileId);
+      const { url } = await getDriveAudioObjectUrl(token, fileId);
       if (this.sessionToken !== session) {
         revokeObjectUrl(url);
         return;
       }
 
-      console.log("[AudioEngine] Drive MP3 loaded:", { size: blob.size, fileId });
       this.currentBlobUrl = url;
       this.audio.src = url;
 
       await new Promise<void>((resolve, reject) => {
         const onReady = () => { cleanup(); resolve(); };
-        const onErr = () => { cleanup(); reject(this.audio.error || new Error("AUDIO_ELEMENT_ERROR")); };
+        const onErr = () => { cleanup(); reject(this.audio.error || new Error("AUDIO_LOAD_ERROR")); };
         const cleanup = () => {
           this.audio.removeEventListener("canplay", onReady);
           this.audio.removeEventListener("error", onErr);
@@ -181,13 +191,9 @@ class SpeechController {
       if (this.sessionToken !== session) return;
 
       this.audio.playbackRate = this.requestedSpeed;
-
-      if (Number.isFinite(startTimeSec) && startTimeSec > 0) {
+      if (startTimeSec > 0) {
         const dur = this.audio.duration || 0;
-        if (dur > 0) {
-          this.audio.currentTime = Math.min(startTimeSec, Math.max(0, dur - 0.1));
-          console.debug("[AudioEngine] Resuming at time:", this.audio.currentTime);
-        }
+        this.audio.currentTime = Math.min(startTimeSec, Math.max(0, dur - 0.1));
       }
 
       await this.audio.play();
@@ -199,45 +205,81 @@ class SpeechController {
   }
 
   seekToOffset(offset: number) {
-    if (this.audio.duration && this.currentTextLength > 0) {
-      const totalChars = this.currentTextLength;
-      const prefixChars = this.currentPrefixLength;
-      const seekTargetChar = prefixChars + offset;
-      const ratio = Math.max(0, Math.min(1, seekTargetChar / totalChars));
-      this.audio.currentTime = ratio * this.audio.duration;
+    const duration = this.audio.duration;
+    if (!duration || this.currentTextLength <= 0) return;
+    
+    const rawTargetChar = this.currentPrefixLength + offset;
+
+    // v2.5.10: Precision Seeking
+    if (this.currentChunkMap && this.currentChunkMap.length > 0) {
+      const mapTotalDur = this.currentChunkMap.reduce((acc, c) => acc + c.durSec, 0);
+      const scale = duration / Math.max(0.1, mapTotalDur);
+      
+      let cumulativeTime = 0;
+      for (const chunk of this.currentChunkMap) {
+        if (rawTargetChar >= chunk.startChar && rawTargetChar <= chunk.endChar) {
+          const withinRatio = (rawTargetChar - chunk.startChar) / Math.max(1, chunk.endChar - chunk.startChar);
+          this.audio.currentTime = cumulativeTime + (withinRatio * chunk.durSec * scale);
+          return;
+        }
+        cumulativeTime += chunk.durSec * scale;
+      }
+    }
+
+    // Fallback: Linear
+    const ratio = Math.max(0, Math.min(1, rawTargetChar / this.currentTextLength));
+    this.audio.currentTime = ratio * duration;
+  }
+
+  getTimeFromOffset(offset: number): number {
+    const duration = this.audio.duration || 0;
+    if (duration === 0) return 0;
+    
+    const rawTargetChar = this.currentPrefixLength + offset;
+
+    if (this.currentChunkMap && this.currentChunkMap.length > 0) {
+      const mapTotalDur = this.currentChunkMap.reduce((acc, c) => acc + c.durSec, 0);
+      const scale = duration / Math.max(0.1, mapTotalDur);
+      
+      let cumulativeTime = 0;
+      for (const chunk of this.currentChunkMap) {
+        if (rawTargetChar >= chunk.startChar && rawTargetChar <= chunk.endChar) {
+          const withinRatio = (rawTargetChar - chunk.startChar) / Math.max(1, chunk.endChar - chunk.startChar);
+          return cumulativeTime + (withinRatio * chunk.durSec * scale);
+        }
+        cumulativeTime += chunk.durSec * scale;
+      }
+    }
+    
+    const ratio = Math.max(0, Math.min(1, rawTargetChar / Math.max(1, this.currentTextLength)));
+    return ratio * duration;
+  }
+
+  private stopSyncLoop() {
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
     }
   }
 
-  speak(
-    text: string,
-    voiceName: string | undefined,
-    rate: number,
-    offset: number,
-    onEnd: () => void
-  ) {
+  speak(text: string, voiceName: string | undefined, rate: number, offset: number, onEnd: () => void) {
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
-    const voices = window.speechSynthesis.getVoices();
-    const voice = voices.find(v => v.name === voiceName);
+    const voice = window.speechSynthesis.getVoices().find(v => v.name === voiceName);
     if (voice) utterance.voice = voice;
     utterance.rate = rate;
     utterance.onend = () => onEnd();
     window.speechSynthesis.speak(utterance);
   }
 
-  pause() {
-    this.audio.pause();
-    window.speechSynthesis.pause();
-  }
-
-  resume() {
+  pause() { this.audio.pause(); window.speechSynthesis.pause(); }
+  resume() { 
     if (this.audio.src) {
       this.audio.playbackRate = this.requestedSpeed;
-      this.audio.play().catch(err => console.warn("[AudioEngine] Resume blocked:", err));
+      this.audio.play().catch(() => {});
     }
-    window.speechSynthesis.resume();
+    window.speechSynthesis.resume(); 
   }
-
   stop() {
     this.sessionToken++;
     this.stopSyncLoop();
@@ -249,25 +291,10 @@ class SpeechController {
     if (this.onFetchStateChange) this.onFetchStateChange(false);
     window.speechSynthesis.cancel();
   }
-
-  setPlaybackRate(rate: number) {
-    this.requestedSpeed = rate;
-    if (this.audio.src) {
-      this.audio.playbackRate = rate;
-    }
-  }
-
-  get isPaused() {
-    return this.audio.paused && !window.speechSynthesis.speaking;
-  }
-
-  get currentTime() {
-    return this.audio.currentTime;
-  }
-
-  get duration() {
-    return this.audio.duration;
-  }
+  setPlaybackRate(rate: number) { this.requestedSpeed = rate; if (this.audio.src) this.audio.playbackRate = rate; }
+  get isPaused() { return this.audio.paused && !window.speechSynthesis.speaking; }
+  get currentTime() { return this.audio.currentTime; }
+  get duration() { return this.audio.duration; }
 }
 
 export const speechController = new SpeechController();

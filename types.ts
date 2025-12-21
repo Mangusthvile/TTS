@@ -48,6 +48,12 @@ export interface Rule {
   caseMode?: CaseMode;
 }
 
+export interface AudioChunkMetadata {
+  startChar: number;
+  endChar: number;
+  durSec: number;
+}
+
 export interface Chapter {
   id: string;
   index: number;
@@ -64,6 +70,7 @@ export interface Chapter {
   audioDriveId?: string;
   audioSignature?: string; // v2.5.5: hash(voice + rulesHash + textLength)
   audioPrefixLen?: number; // v2.5.9: Length of intro prefix (Chapter X. Title. )
+  audioChunkMap?: AudioChunkMetadata[]; // v2.5.10: Per-chunk duration map for perfect sync
   hasCachedAudio?: boolean;
 }
 
