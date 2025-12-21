@@ -2,7 +2,7 @@
 {
   "name": "talevox-tts",
   "private": true,
-  "version": "2.6.2",
+  "version": "2.6.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@google/genai": "^1.34.0",
-    "lucide-react": "^0.561.0",
+    "lucide-react": "^0.562.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3"
   },

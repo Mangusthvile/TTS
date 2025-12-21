@@ -26,6 +26,7 @@ const Reader: React.FC<ReaderProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const lastScrollTime = useRef<number>(0);
   const lastTapTime = useRef<number>(0);
+  const lastTapPos = useRef<{x: number, y: number} | null>(null);
 
   const speakText = useMemo(() => {
     if (!chapter) return "";
@@ -66,12 +67,12 @@ const Reader: React.FC<ReaderProps> = ({
 
   useEffect(() => {
     const now = Date.now();
-    if (activeWordRef.current && containerRef.current && now - lastScrollTime.current > 100) {
+    if (activeWordRef.current && containerRef.current && now - lastScrollTime.current > 150) {
       const el = activeWordRef.current;
       const container = containerRef.current;
       const rect = el.getBoundingClientRect();
       const containerRect = container.getBoundingClientRect();
-      const threshold = containerRect.height * 0.3;
+      const threshold = containerRect.height * 0.35;
       const isOutsideThreshold = rect.top < containerRect.top + threshold || rect.bottom > containerRect.bottom - threshold;
 
       if (isOutsideThreshold) {
@@ -90,19 +91,32 @@ const Reader: React.FC<ReaderProps> = ({
     if (!span) return;
     const baseOffset = parseInt((span as HTMLElement).dataset.base || '0', 10);
     const globalOffset = baseOffset + range.startOffset;
+    
+    // Find closest word boundary to jump to
     const target = segments.words.find(s => globalOffset >= s.start && globalOffset < s.end) || 
                    segments.words.find(s => s.start >= globalOffset);
     if (target) onJumpToOffset(target.start);
     selection.removeAllRanges();
   };
 
+  const handlePointerDown = (e: React.PointerEvent) => {
+    lastTapPos.current = { x: e.clientX, y: e.clientY };
+  };
+
   const handlePointerUp = (e: React.PointerEvent) => {
     const now = Date.now();
-    if (now - lastTapTime.current < 300) {
+    const pos = { x: e.clientX, y: e.clientY };
+    
+    // Check if the pointer moved significantly (ignore taps during scroll)
+    const dist = lastTapPos.current ? Math.hypot(pos.x - lastTapPos.current.x, pos.y - lastTapPos.current.y) : 0;
+    
+    if (dist < 10 && now - lastTapTime.current < 320) { // Slightly longer window for mobile
       setTimeout(triggerJump, 0);
       lastTapTime.current = 0;
-    } else {
+    } else if (dist < 10) {
       lastTapTime.current = now;
+    } else {
+      lastTapTime.current = 0;
     }
   };
 
@@ -116,10 +130,9 @@ const Reader: React.FC<ReaderProps> = ({
   }, [theme]);
 
   const renderContent = () => {
-    const activeWord = segments.words.find(s => currentOffsetChars >= s.start && currentOffsetChars < s.end) || 
-                      segments.words.find(s => s.start >= currentOffsetChars);
-    const activeSentence = segments.sentences.find(s => currentOffsetChars >= s.start && currentOffsetChars < s.end) || 
-                          segments.sentences.find(s => s.start >= currentOffsetChars);
+    // During intro offset=0, activeWord will be null or first word
+    const activeWord = segments.words.find(s => currentOffsetChars >= s.start && currentOffsetChars < s.end);
+    const activeSentence = segments.sentences.find(s => currentOffsetChars >= s.start && currentOffsetChars < s.end);
 
     const transitionClass = "transition-all duration-150 ease-out rounded px-0.5";
 
@@ -180,6 +193,7 @@ const Reader: React.FC<ReaderProps> = ({
       <div className={`absolute top-0 left-0 right-0 h-16 lg:h-24 z-10 pointer-events-none bg-gradient-to-b ${fadeColor} to-transparent`} />
       <div ref={containerRef} className="flex-1 overflow-y-auto px-4 lg:px-12 py-12 lg:py-24 scroll-smooth scrollbar-hide">
         <div 
+          onPointerDown={handlePointerDown}
           onPointerUp={handlePointerUp}
           style={containerStyles}
           className="max-w-[70ch] mx-auto pb-64 whitespace-pre-wrap select-text cursor-text font-medium leading-relaxed"
@@ -194,26 +208,26 @@ const Reader: React.FC<ReaderProps> = ({
                   <button 
                     onClick={onAddChapter} 
                     title="Quick Add Chapter"
-                    className={`p-2.5 rounded-xl transition-all ${theme === Theme.DARK ? 'bg-white/10 hover:bg-indigo-600 hover:text-white' : 'bg-black/5 hover:bg-indigo-600 hover:text-white'}`}
+                    className={`p-3 rounded-xl transition-all ${theme === Theme.DARK ? 'bg-white/10 hover:bg-indigo-600 hover:text-white' : 'bg-black/5 hover:bg-indigo-600 hover:text-white'}`}
                   >
-                    <Plus className="w-4 h-4" />
+                    <Plus className="w-5 h-5" />
                   </button>
                 )}
                 {onBackToChapters && (
                   <button 
                     onClick={onBackToChapters} 
                     title="Back to Collection"
-                    className={`p-2.5 rounded-xl transition-all ${theme === Theme.DARK ? 'bg-white/10 hover:bg-indigo-600 hover:text-white' : 'bg-black/5 hover:bg-indigo-600 hover:text-white'}`}
+                    className={`p-3 rounded-xl transition-all ${theme === Theme.DARK ? 'bg-white/10 hover:bg-indigo-600 hover:text-white' : 'bg-black/5 hover:bg-indigo-600 hover:text-white'}`}
                   >
-                    <FolderOpen className="w-4 h-4" />
+                    <FolderOpen className="w-5 h-5" />
                   </button>
                 )}
                 <button 
                   onClick={onToggleDebug} 
                   title="Debug Mode"
-                  className={`p-2.5 rounded-xl transition-all ${theme === Theme.DARK ? 'bg-white/10 hover:bg-white/20' : 'bg-black/5 hover:bg-black/10'}`}
+                  className={`p-3 rounded-xl transition-all ${theme === Theme.DARK ? 'bg-white/10 hover:bg-white/20' : 'bg-black/5 hover:bg-black/10'}`}
                 >
-                  <Bug className="w-4 h-4" />
+                  <Bug className="w-5 h-5" />
                 </button>
              </div>
           </div>

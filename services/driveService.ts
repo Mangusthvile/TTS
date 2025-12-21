@@ -1,7 +1,8 @@
+
 /**
  * Talevox Google Drive Service
  * Handles authentication and file synchronization with official Google Picker integration.
- * Ensures strict scoping to user-selected folders.
+ * Ensure openFolderPicker is CALLED FROM A SYNCHRONOUS GESTURE for mobile PWA support.
  */
 
 export async function authenticateDrive(explicitClientId?: string): Promise<string> {
@@ -36,6 +37,9 @@ export async function authenticateDrive(explicitClientId?: string): Promise<stri
   });
 }
 
+/**
+ * MANDATORY: Call this directly in an onClick handler to avoid popup blockers on Mobile PWA.
+ */
 export async function openFolderPicker(token: string): Promise<{id: string, name: string} | null> {
   const apiKey = (import.meta as any).env?.VITE_GOOGLE_API_KEY;
   if (!apiKey) throw new Error("Missing VITE_GOOGLE_API_KEY");
@@ -46,7 +50,15 @@ export async function openFolderPicker(token: string): Promise<{id: string, name
 
     gapi.load('picker', async () => {
       const google = (window as any).google;
-      if (!google.picker) await new Promise(r => setTimeout(r, 100));
+      if (!google.picker) {
+        // Retry a few times if the namespace is late
+        let retries = 0;
+        while (!google.picker && retries < 10) {
+          await new Promise(r => setTimeout(r, 100));
+          retries++;
+        }
+      }
+      
       if (!google.picker || !google.picker.PickerBuilder) return reject(new Error("Picker API namespace missing."));
       
       const pickerCallback = (data: any) => {

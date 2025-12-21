@@ -2,6 +2,15 @@
 import { Rule, RuleType, AudioChunkMetadata } from '../types';
 import { getDriveAudioObjectUrl, revokeObjectUrl } from "../services/driveService";
 
+/**
+ * MOBILE QA CHECKLIST v2.6.3:
+ * 1. Audio: playbackRate + defaultPlaybackRate set on every load + change.
+ * 2. Lifecycle: visibilitychange + pagehide + beforeunload all trigger saveProgress.
+ * 3. High-precision: Highlight mapping uses audio.currentTime strictly > introDurSec.
+ * 4. Touch: Reader double-tap uses move-threshold to distinguish from scroll.
+ * 5. PWA: Base path /TTS/ handles favicon/manifest correctly.
+ */
+
 export const PROGRESS_STORE_V4 = 'talevox_progress_v4';
 
 export function applyRules(text: string, rules: Rule[]): string {
@@ -68,10 +77,6 @@ class SpeechController {
     this.onFetchStateChange = cb;
   }
 
-  /**
-   * Warm up metadata for the current chapter so offsets can be calculated correctly 
-   * even before playback starts (v2.6.2).
-   */
   public updateMetadata(textLen: number, introDurSec: number, chunkMap: AudioChunkMetadata[]) {
     this.currentTextLength = textLen;
     this.currentIntroDurSec = introDurSec;
@@ -97,6 +102,8 @@ class SpeechController {
     };
 
     this.audio.onplay = () => {
+      // Mobile sync: some browsers reset speed on play
+      this.applyRequestedSpeed();
       this.startSyncLoop();
       if (this.onFetchStateChange) this.onFetchStateChange(false);
     };
@@ -108,7 +115,7 @@ class SpeechController {
 
     this.audio.ontimeupdate = () => {
       const now = Date.now();
-      if (now - this.lastSaveTime > 1000) {
+      if (now - this.lastSaveTime > 2000) { // Throttle slightly more for mobile battery
         this.saveProgress();
       }
     };
@@ -121,10 +128,18 @@ class SpeechController {
       if (this.onFetchStateChange) this.onFetchStateChange(false);
     };
 
+    // Mobile-hardened listeners
     window.addEventListener('beforeunload', () => this.saveProgress());
+    window.addEventListener('pagehide', () => this.saveProgress());
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') this.saveProgress();
     });
+  }
+
+  private applyRequestedSpeed() {
+    // Mobile browsers often need both set to stick
+    this.audio.defaultPlaybackRate = this.requestedSpeed;
+    this.audio.playbackRate = this.requestedSpeed;
   }
 
   public saveProgress(completed: boolean = false) {
@@ -179,11 +194,9 @@ class SpeechController {
     this.rafId = requestAnimationFrame(sync);
   }
 
-  /**
-   * High-precision mapping from seconds to character offset (v2.6.2).
-   */
   public getOffsetFromTime(t: number, dur?: number): number {
     const duration = dur || this.audio.duration || 0;
+    // Highlight is 0 during intro announcement
     if (duration === 0 || t < this.currentIntroDurSec) return 0;
     
     const contentTime = t - this.currentIntroDurSec;
@@ -251,7 +264,11 @@ class SpeechController {
 
       await new Promise<void>((resolve, reject) => {
         const onReady = () => { cleanup(); resolve(); };
-        const onErr = () => { cleanup(); reject(this.audio.error || new Error("AUDIO_LOAD_ERROR")); };
+        const onErr = () => { 
+          cleanup(); 
+          console.error("[AudioEngine] Load Error Detail:", this.audio.error);
+          reject(this.audio.error || new Error("AUDIO_LOAD_ERROR")); 
+        };
         const cleanup = () => {
           this.audio.removeEventListener("canplay", onReady);
           this.audio.removeEventListener("error", onErr);
@@ -263,7 +280,7 @@ class SpeechController {
 
       if (this.sessionToken !== session) return;
 
-      this.audio.playbackRate = this.requestedSpeed;
+      this.applyRequestedSpeed();
       
       const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
       const store = storeRaw ? JSON.parse(storeRaw) : {};
@@ -351,7 +368,7 @@ class SpeechController {
   pause() { this.audio.pause(); window.speechSynthesis.pause(); }
   resume() { 
     if (this.audio.src) {
-      this.audio.playbackRate = this.requestedSpeed;
+      this.applyRequestedSpeed();
       this.audio.play().catch(() => {});
     }
     window.speechSynthesis.resume(); 
@@ -368,7 +385,12 @@ class SpeechController {
     if (this.onFetchStateChange) this.onFetchStateChange(false);
     window.speechSynthesis.cancel();
   }
-  setPlaybackRate(rate: number) { this.requestedSpeed = rate; if (this.audio.src) this.audio.playbackRate = rate; }
+  setPlaybackRate(rate: number) { 
+    this.requestedSpeed = rate; 
+    if (this.audio.src) {
+      this.applyRequestedSpeed();
+    }
+  }
   get isPaused() { return this.audio.paused && !window.speechSynthesis.speaking; }
   get currentTime() { return this.audio.currentTime; }
   get duration() { return this.audio.duration; }
