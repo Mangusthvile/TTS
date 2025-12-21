@@ -1,3 +1,4 @@
+
 export enum CaseMode {
   EXACT = 'EXACT',
   IGNORE = 'IGNORE',
@@ -62,6 +63,7 @@ export interface Chapter {
   driveId?: string;
   audioDriveId?: string;
   audioSignature?: string; // v2.5.5: hash(voice + rulesHash + textLength)
+  audioPrefixLen?: number; // v2.5.9: Length of intro prefix (Chapter X. Title. )
   hasCachedAudio?: boolean;
 }
 

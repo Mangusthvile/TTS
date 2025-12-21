@@ -1,3 +1,4 @@
+
 import React, { useMemo, useState, useEffect } from 'react';
 import { Book, Theme, StorageBackend, Chapter } from '../types';
 import { LayoutGrid, List, AlignJustify, Plus, Star, Folder, CheckCircle2, Download, Edit2, Check, RefreshCw, Trash2, Headphones, Loader2, Zap, Cloud, ExternalLink, AlertTriangle, X } from 'lucide-react';
@@ -64,11 +65,22 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     return [...(book.chapters || [])].sort((a, b) => a.index - b.index);
   }, [book.chapters]);
 
+  // v2.5.9: Signature now includes title/index to detect when intro needs regeneration
   const currentSignature = useMemo(() => {
     const voice = book.settings.defaultVoiceId || 'default';
     const rulesHash = book.rules.length + "_" + book.rules.filter(r => r.enabled).length;
     return `${voice}_${rulesHash}`;
   }, [book.settings.defaultVoiceId, book.rules]);
+
+  // v2.5.9 specific stale check for intro metadata
+  const getChapterStaleStatus = (c: Chapter) => {
+    if (!c.audioDriveId) return 'none';
+    const baseStale = c.audioSignature !== currentSignature;
+    // intro stale check
+    const introStr = `Chapter ${c.index}. ${c.title}. `;
+    const introStale = c.audioPrefixLen !== introStr.length;
+    return (baseStale || introStale) ? 'stale' : 'ready';
+  };
 
   const handleStartEdit = (e: React.MouseEvent, chapterId: string, currentTitle: string) => {
     e.stopPropagation();
@@ -88,11 +100,15 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     const voice = voiceToUse || book.settings.defaultVoiceId || 'en-US-Standard-C';
     const speed = 1.0; 
     
+    // v2.5.9: Inject Intro Announcement
+    const announcementPrefix = `Chapter ${chapter.index}. ${chapter.title}. `;
+    const fullSpokenText = announcementPrefix + chapter.content;
+    const prefixLen = announcementPrefix.length;
+
     const MAX = 4800;
     const textChunks = [];
-    const content = chapter.content;
-    for (let i = 0; i < content.length; i += MAX) {
-      textChunks.push(content.substring(i, i + MAX));
+    for (let i = 0; i < fullSpokenText.length; i += MAX) {
+      textChunks.push(fullSpokenText.substring(i, i + MAX));
     }
 
     const audioBlobs: Blob[] = [];
@@ -123,7 +139,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           chapter.audioDriveId,
           'audio/mpeg'
         );
-        return audioDriveId;
+        return { audioDriveId, prefixLen };
       } catch (err) {
         console.warn("Drive sync failed:", err);
       }
@@ -143,9 +159,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       if (!chapter) return;
       setSynthesizingId(chapterId);
       try {
-        const audioDriveId = await migrateChapterAudioToDrive(chapter, voiceId);
-        if (onUpdateChapter) {
-          onUpdateChapter({ ...chapter, audioDriveId, audioSignature: `${voiceId}_${book.rules.length}_${book.rules.filter(r => r.enabled).length}` });
+        const result = await migrateChapterAudioToDrive(chapter, voiceId);
+        if (onUpdateChapter && result) {
+          onUpdateChapter({ 
+            ...chapter, 
+            audioDriveId: result.audioDriveId, 
+            audioPrefixLen: result.prefixLen,
+            audioSignature: `${voiceId}_${book.rules.length}_${book.rules.filter(r => r.enabled).length}` 
+          });
         }
       } catch (err) {
         alert("Audio generation failed: " + err);
@@ -154,7 +175,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       }
     } else {
       // Bulk process
-      const missing = chapters.filter(c => !c.audioDriveId);
+      const missing = chapters.filter(c => getChapterStaleStatus(c) !== 'ready');
       if (missing.length === 0) return;
 
       setIsBatchSynthesizing(true);
@@ -164,9 +185,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         setBatchProgress({ current: i + 1, total: missing.length });
         const chapter = missing[i];
         try {
-          const audioDriveId = await migrateChapterAudioToDrive(chapter, voiceId);
-          if (onUpdateChapter) {
-            onUpdateChapter({ ...chapter, audioDriveId, audioSignature: `${voiceId}_${book.rules.length}_${book.rules.filter(r => r.enabled).length}` });
+          const result = await migrateChapterAudioToDrive(chapter, voiceId);
+          if (onUpdateChapter && result) {
+            onUpdateChapter({ 
+              ...chapter, 
+              audioDriveId: result.audioDriveId, 
+              audioPrefixLen: result.prefixLen,
+              audioSignature: `${voiceId}_${book.rules.length}_${book.rules.filter(r => r.enabled).length}` 
+            });
           }
         } catch (e) {
           console.error("Batch fail for ch", chapter.index, e);
@@ -178,19 +204,21 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const handleSynthesizeClick = (e: React.MouseEvent, chapter: Chapter) => {
     e.stopPropagation();
-    setRememberAsDefault(false); // Default to NO for per-chapter
+    setRememberAsDefault(false); 
     setShowVoiceModal({ chapterId: chapter.id });
   };
 
   const handleBulkClick = () => {
-    setRememberAsDefault(true); // Default to YES for bulk
+    setRememberAsDefault(true);
     setShowVoiceModal({ isBulk: true });
   };
 
   const renderRow = (c: Chapter) => {
     const isEditing = editingChapterId === c.id;
     const isSynthesizing = synthesizingId === c.id;
-    const isStale = c.audioDriveId && c.audioSignature !== currentSignature;
+    const status = getChapterStaleStatus(c);
+    const isStale = status === 'stale';
+    const isReady = status === 'ready';
     
     return (
       <div
@@ -221,12 +249,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           ) : (
             <div className="flex items-center gap-3 min-w-0">
               <div className={`truncate font-black text-xs sm:text-sm ${c.isCompleted ? 'line-through decoration-indigo-500/40' : ''}`}>{c.title}</div>
-              {c.audioDriveId ? (
-                isStale ? (
-                  <span title="Audio is stale (Rules or Voice changed)"><AlertTriangle className="w-3.5 h-3.5 text-amber-500" /></span>
-                ) : (
+              {isReady ? (
                   <span title="Audio ready on Drive"><Cloud className="w-3.5 h-3.5 text-emerald-500" /></span>
-                )
+              ) : isStale ? (
+                  <span title="Audio is stale (Title, Rules or Voice changed)"><AlertTriangle className="w-3.5 h-3.5 text-amber-500" /></span>
               ) : (isSynthesizing ? <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-500" /> : <span title="No audio generated"><AlertTriangle className="w-3.5 h-3.5 text-slate-400 opacity-50" /></span>)}
             </div>
           )}
@@ -245,7 +271,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             onClick={(e) => handleSynthesizeClick(e, c)}
             disabled={isSynthesizing || isBatchSynthesizing}
             className={`p-2 rounded-xl border transition-all ${controlBg} ${isSynthesizing ? 'opacity-100 text-indigo-600 ring-1 ring-indigo-600' : 'opacity-40 hover:opacity-100 hover:text-indigo-500'}`}
-            title={c.audioDriveId ? (isStale ? "Audio Stale: Regenerate" : "Refresh Drive Audio") : "Generate Audio"}
+            title={isReady ? "Refresh Drive Audio" : isStale ? "Audio Stale: Regenerate Intro/Content" : "Generate Audio"}
           >
             {isSynthesizing ? <Loader2 className="w-4 h-4 animate-spin" /> : (isStale ? <RefreshCw className="w-4 h-4 text-amber-500" /> : <RefreshCw className="w-4 h-4" />)}
           </button>
@@ -280,30 +306,32 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               <h3 className="text-xl font-black tracking-tight">Select Cloud Voice</h3>
               <button onClick={() => setShowVoiceModal(null)} className="p-2 opacity-60 hover:opacity-100"><X className="w-5 h-5" /></button>
             </div>
-            <p className="text-sm font-bold opacity-60">This voice will be used for this generation run.</p>
-            
-            <div className="flex items-center gap-3 p-3 bg-black/5 rounded-xl">
-               <input 
-                 type="checkbox" 
-                 id="rememberDefault" 
-                 checked={rememberAsDefault} 
-                 onChange={e => setRememberAsDefault(e.target.checked)}
-                 className="w-4 h-4 accent-indigo-600"
-               />
-               <label htmlFor="rememberDefault" className="text-xs font-black uppercase tracking-tight opacity-70 cursor-pointer">Set as book default</label>
-            </div>
+            <div className="space-y-4">
+              <p className="text-sm font-bold opacity-60">This voice will be used for this generation run. Every chapter will begin with a spoken announcement of the title.</p>
+              
+              <div className="flex items-center gap-3 p-3 bg-black/5 rounded-xl">
+                <input 
+                  type="checkbox" 
+                  id="rememberDefault" 
+                  checked={rememberAsDefault} 
+                  onChange={e => setRememberAsDefault(e.target.checked)}
+                  className="w-4 h-4 accent-indigo-600"
+                />
+                <label htmlFor="rememberDefault" className="text-xs font-black uppercase tracking-tight opacity-70 cursor-pointer">Set as book default</label>
+              </div>
 
-            <div className="space-y-2 max-h-[40vh] overflow-y-auto pr-1">
-              {CLOUD_VOICES.map(v => (
-                <button
-                  key={v.id}
-                  onClick={() => handleRunGeneration(v.id, showVoiceModal.chapterId)}
-                  className={`w-full p-4 rounded-xl border-2 text-left font-black text-sm transition-all flex justify-between items-center ${isDark ? 'border-slate-800 hover:border-indigo-600 bg-slate-950/40' : 'border-slate-100 hover:border-indigo-600 bg-slate-50'}`}
-                >
-                  {v.name}
-                  < Headphones className="w-4 h-4 opacity-40" />
-                </button>
-              ))}
+              <div className="space-y-2 max-h-[40vh] overflow-y-auto pr-1">
+                {CLOUD_VOICES.map(v => (
+                  <button
+                    key={v.id}
+                    onClick={() => handleRunGeneration(v.id, showVoiceModal.chapterId)}
+                    className={`w-full p-4 rounded-xl border-2 text-left font-black text-sm transition-all flex justify-between items-center ${isDark ? 'border-slate-800 hover:border-indigo-600 bg-slate-950/40' : 'border-slate-100 hover:border-indigo-600 bg-slate-50'}`}
+                  >
+                    {v.name}
+                    < Headphones className="w-4 h-4 opacity-40" />
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         </div>

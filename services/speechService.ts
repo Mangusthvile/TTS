@@ -1,3 +1,4 @@
+
 import { Rule, RuleType } from '../types';
 import { getDriveAudioObjectUrl, revokeObjectUrl } from "../services/driveService";
 
@@ -41,6 +42,7 @@ class SpeechController {
   private audio: HTMLAudioElement;
   private currentBlobUrl: string | null = null;
   private currentTextLength: number = 0;
+  private currentPrefixLength: number = 0;
   private rafId: number | null = null;
   private requestedSpeed: number = 1.0;
   
@@ -49,12 +51,18 @@ class SpeechController {
   private onFetchStateChange: ((isFetching: boolean) => void) | null = null;
   
   private sessionToken: number = 0;
+  private context: { bookId: string; chapterId: string } | null = null;
 
   constructor() {
     this.audio = new Audio();
     this.audio.volume = 1.0;
     this.audio.preload = 'auto';
     this.setupAudioListeners();
+  }
+
+  setContext(ctx: { bookId: string; chapterId: string } | null) {
+    this.context = ctx;
+    console.debug("[AudioEngine] Context updated:", ctx);
   }
 
   setFetchStateListener(cb: (isFetching: boolean) => void) {
@@ -94,10 +102,17 @@ class SpeechController {
     const sync = () => {
       if (this.syncCallback && this.audio.duration && !this.audio.paused) {
         const ratio = Math.min(1, this.audio.currentTime / this.audio.duration);
+        const totalChars = this.currentTextLength;
+        const prefixChars = this.currentPrefixLength;
+        const rawCharPos = Math.floor(totalChars * ratio);
+        
+        // Offset is strictly content-based. Clamp intro portion to 0.
+        const contentOffset = Math.max(0, rawCharPos - prefixChars);
+        
         this.syncCallback({
           currentTime: this.audio.currentTime,
           duration: this.audio.duration,
-          charOffset: Math.floor(this.currentTextLength * ratio)
+          charOffset: contentOffset
         });
       }
       this.rafId = requestAnimationFrame(sync);
@@ -116,7 +131,8 @@ class SpeechController {
   async loadAndPlayDriveFile(
     token: string,
     fileId: string,
-    textLength: number,
+    totalTextLength: number,
+    prefixLength: number,
     startTimeSec = 0,
     playbackRate = 1.0,
     onEnd: () => void,
@@ -134,7 +150,8 @@ class SpeechController {
 
     this.onEndCallback = onEnd;
     this.syncCallback = onSync;
-    this.currentTextLength = textLength;
+    this.currentTextLength = totalTextLength;
+    this.currentPrefixLength = prefixLength;
 
     if (this.onFetchStateChange) this.onFetchStateChange(true);
 
@@ -167,7 +184,10 @@ class SpeechController {
 
       if (Number.isFinite(startTimeSec) && startTimeSec > 0) {
         const dur = this.audio.duration || 0;
-        if (dur > 0) this.audio.currentTime = Math.min(startTimeSec, Math.max(0, dur - 0.1));
+        if (dur > 0) {
+          this.audio.currentTime = Math.min(startTimeSec, Math.max(0, dur - 0.1));
+          console.debug("[AudioEngine] Resuming at time:", this.audio.currentTime);
+        }
       }
 
       await this.audio.play();
@@ -180,7 +200,10 @@ class SpeechController {
 
   seekToOffset(offset: number) {
     if (this.audio.duration && this.currentTextLength > 0) {
-      const ratio = Math.max(0, Math.min(1, offset / this.currentTextLength));
+      const totalChars = this.currentTextLength;
+      const prefixChars = this.currentPrefixLength;
+      const seekTargetChar = prefixChars + offset;
+      const ratio = Math.max(0, Math.min(1, seekTargetChar / totalChars));
       this.audio.currentTime = ratio * this.audio.duration;
     }
   }
@@ -240,6 +263,10 @@ class SpeechController {
 
   get currentTime() {
     return this.audio.currentTime;
+  }
+
+  get duration() {
+    return this.audio.duration;
   }
 }
 

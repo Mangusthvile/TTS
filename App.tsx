@@ -9,13 +9,13 @@ import Settings from './components/Settings';
 import Extractor from './components/Extractor';
 import ChapterFolderView from './components/ChapterFolderView';
 import { speechController, applyRules } from './services/speechService';
-import { authenticateDrive, fetchDriveFile, uploadToDrive, deleteDriveFile, findFileSync, listFilesInFolder, fetchDriveBinary } from './services/driveService';
-import { saveChapterToFile, deleteChapterFile } from './services/fileService';
+import { authenticateDrive, fetchDriveFile, uploadToDrive, deleteDriveFile, findFileSync } from './services/driveService';
+import { saveChapterToFile } from './services/fileService';
 import { synthesizeChunk } from './services/cloudTtsService';
-import { saveAudioToCache, generateAudioKey, getAudioFromCache } from './services/audioCache';
 import { BookText, Zap, Sun, Coffee, Moon, X, Settings as SettingsIcon, Menu, RefreshCw, Loader2, Cloud, Volume2 } from 'lucide-react';
 
 const SYNC_FILENAME = 'talevox_sync_manifest.json';
+const PROGRESS_STORE_KEY = 'talevox_progress_v2';
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(() => {
@@ -77,6 +77,26 @@ const App: React.FC = () => {
     return activeBook.chapters.find(c => c.id === activeBook.currentChapterId) || null;
   }, [activeBook]);
 
+  // Persist progress to independent store
+  const persistProgress = useCallback((bookId: string, chapterId: string, offset: number, timeSec: number) => {
+    if (!bookId || !chapterId) {
+       console.warn("[Progress] Missing IDs, cannot save", { bookId, chapterId });
+       return;
+    }
+    const storeRaw = localStorage.getItem(PROGRESS_STORE_KEY);
+    const store = storeRaw ? JSON.parse(storeRaw) : {};
+    if (!store[bookId]) store[bookId] = {};
+    
+    store[bookId][chapterId] = {
+      offset,
+      timeSec,
+      updatedAt: Date.now()
+    };
+    
+    localStorage.setItem(PROGRESS_STORE_KEY, JSON.stringify(store));
+    console.debug("[Progress] save", { bookId, chapterId, offset, timeSec });
+  }, []);
+
   useEffect(() => {
     speechController.setFetchStateListener((fetching) => {
       setIsFetchingAudio(fetching);
@@ -102,10 +122,28 @@ const App: React.FC = () => {
 
   useEffect(() => { saveCurrentState(); }, [state, saveCurrentState]);
 
+  // Persistence on window events
+  useEffect(() => {
+    const handleExit = () => {
+      if (stateRef.current.activeBookId && activeChapterMetadata?.id) {
+        persistProgress(stateRef.current.activeBookId, activeChapterMetadata.id, stateRef.current.currentOffset, speechController.currentTime);
+      }
+      saveCurrentState();
+    };
+    window.addEventListener('beforeunload', handleExit);
+    window.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') handleExit(); });
+    return () => {
+      window.removeEventListener('beforeunload', handleExit);
+    };
+  }, [activeChapterMetadata?.id, saveCurrentState, persistProgress]);
+
   const handlePause = useCallback(() => { 
     speechController.pause(); 
     setIsPlaying(false); 
-  }, []);
+    if (stateRef.current.activeBookId && activeChapterMetadata?.id) {
+      persistProgress(stateRef.current.activeBookId, activeChapterMetadata.id, stateRef.current.currentOffset, speechController.currentTime);
+    }
+  }, [activeChapterMetadata?.id, persistProgress]);
 
   const handleUpdateChapter = useCallback((chapter: Chapter) => {
     if (!stateRef.current.activeBookId) return;
@@ -118,8 +156,6 @@ const App: React.FC = () => {
     }));
   }, []);
 
-  // Fix: Implemented missing handleUpdateChapterTitle
-  // Updates the title of a specific chapter within state
   const handleUpdateChapterTitle = useCallback((bookId: string, chapterId: string, newTitle: string) => {
     setState(prev => ({
       ...prev,
@@ -130,8 +166,6 @@ const App: React.FC = () => {
     }));
   }, []);
 
-  // Fix: Implemented missing handleDeleteChapter to resolve signature mismatch and redundancy
-  // Centralized chapter deletion logic with Drive cleanup and state updates
   const handleDeleteChapter = useCallback(async (bookId: string, chapterId: string) => {
     const book = stateRef.current.books.find(b => b.id === bookId);
     if (!book) return;
@@ -190,8 +224,9 @@ const App: React.FC = () => {
     
     if (stateRef.current.activeBookId && activeBook?.currentChapterId) {
       updateChapterProgress(stateRef.current.activeBookId, activeBook.currentChapterId, boundedOffset, text.length, boundedOffset >= text.length * 0.98);
+      persistProgress(stateRef.current.activeBookId, activeBook.currentChapterId, boundedOffset, speechController.currentTime);
     }
-  }, [activeBook, activeChapterText, updateChapterProgress]);
+  }, [activeBook, activeChapterText, updateChapterProgress, persistProgress]);
 
   const handleSync = useCallback(async (manual = false) => {
     if (!state.driveToken) return;
@@ -253,8 +288,18 @@ const App: React.FC = () => {
         const fileHandle = await book.directoryHandle.getFileHandle(chapter.filename);
         content = await (await fileHandle.getFile()).text();
       } else content = chapter.content || "";
+
+      // Load progress from store
+      const storeRaw = localStorage.getItem(PROGRESS_STORE_KEY);
+      const store = storeRaw ? JSON.parse(storeRaw) : {};
+      const saved = store[bookId]?.[chapterId];
+      const startOffset = saved ? saved.offset : (chapter.progress || 0);
+
+      console.log("[Progress] load", { bookId, chapterId, offset: startOffset, saved });
+
       setActiveChapterText(content);
-      setState(prev => ({ ...prev, currentOffset: chapter.progress || 0 }));
+      setState(prev => ({ ...prev, currentOffset: startOffset }));
+      speechController.setContext({ bookId, chapterId });
     } catch (err) {
       alert(`Error loading chapter: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally { setIsLoadingChapter(false); }
@@ -267,6 +312,12 @@ const App: React.FC = () => {
   const handleNextChapter = useCallback(async (auto = false) => {
     const book = stateRef.current.books.find(b => b.id === stateRef.current.activeBookId);
     if (!book) return;
+    
+    // Save current before switching
+    if (activeChapterMetadata?.id) {
+       persistProgress(book.id, activeChapterMetadata.id, stateRef.current.currentOffset, speechController.currentTime);
+    }
+
     const currentIdx = book.chapters.findIndex(c => c.id === book.currentChapterId);
     if (currentIdx < book.chapters.length - 1) {
       const next = book.chapters[currentIdx + 1];
@@ -283,7 +334,7 @@ const App: React.FC = () => {
     } else {
       setIsPlaying(false);
     }
-  }, []);
+  }, [activeChapterMetadata?.id, persistProgress]);
 
   const handlePlay = useCallback(async () => {
     const book = stateRef.current.books.find(b => b.id === stateRef.current.activeBookId);
@@ -299,20 +350,38 @@ const App: React.FC = () => {
     const text = applyRules(activeChapterText, book.rules);
     const speed = (book.settings.useBookSettings && book.settings.playbackSpeed) ? book.settings.playbackSpeed : stateRef.current.playbackSpeed;
     
+    // Load fresh saved progress
+    const storeRaw = localStorage.getItem(PROGRESS_STORE_KEY);
+    const store = storeRaw ? JSON.parse(storeRaw) : {};
+    const saved = store[book.id]?.[chapter.id];
+
     setIsPlaying(true);
-    // Use offset ratio to estimate start time if not currently playing
-    const estimatedTime = (stateRef.current.currentOffset / Math.max(1, text.length)) * audioDuration;
+    
+    // Use saved timeSec if available, else estimate from offset
+    const startOffset = stateRef.current.currentOffset;
+    const prefixLen = chapter.audioPrefixLen || 0;
+    const totalCharsForAudio = prefixLen + text.length;
+
+    let startTime = saved?.timeSec ?? 0;
+    
+    // If currentOffset was moved manually (jumped), force estimate from offset
+    if (Math.abs(startOffset - (saved?.offset ?? 0)) > 5) {
+       const targetCharPos = prefixLen + startOffset;
+       startTime = (targetCharPos / Math.max(1, totalCharsForAudio)) * (audioDuration || 0);
+    }
 
     try {
       await speechController.loadAndPlayDriveFile(
         stateRef.current.driveToken,
         chapter.audioDriveId,
-        text.length,
-        estimatedTime,
+        totalCharsForAudio,
+        prefixLen,
+        startTime,
         speed,
         () => {
-           console.log("[Autoplay] Chapter ended event received", { stopAfterChapter });
+           console.log("[Autoplay] Chapter ended event received");
            updateChapterProgress(book.id, chapter.id, text.length, text.length, true);
+           persistProgress(book.id, chapter.id, text.length, speechController.duration || 0);
            if (stopAfterChapter) {
              setIsPlaying(false);
            } else {
@@ -323,6 +392,11 @@ const App: React.FC = () => {
            setState(prev => ({ ...prev, currentOffset: meta.charOffset }));
            setAudioCurrentTime(meta.currentTime);
            setAudioDuration(meta.duration);
+           
+           // Frequent persistence (every ~2 seconds based on raf loop throttle)
+           if (Math.floor(meta.currentTime) % 2 === 0) {
+              persistProgress(book.id, chapter.id, meta.charOffset, meta.currentTime);
+           }
         }
       );
     } catch (err) {
@@ -333,9 +407,8 @@ const App: React.FC = () => {
         console.error("Playback failed:", err);
       }
     }
-  }, [activeChapterText, audioDuration, stopAfterChapter, handleNextChapter, updateChapterProgress]);
+  }, [activeChapterText, audioDuration, stopAfterChapter, handleNextChapter, updateChapterProgress, persistProgress]);
 
-  // Restart playback when chapter ID changes during isPlaying (Autoplay)
   useEffect(() => {
      if (isPlaying && activeChapterMetadata?.audioDriveId && activeChapterText) {
         handlePlay();
@@ -371,29 +444,6 @@ const App: React.FC = () => {
 
     setIsAddChapterOpen(false);
     setActiveTab('reader');
-
-    if (activeBook.settings.defaultVoiceId && state.driveToken && activeBook.backend === StorageBackend.DRIVE) {
-       console.info("[Audio] Auto-generating chapter audio...");
-       const MAX = 4800;
-       const textChunks = [];
-       const content = newChapter.content;
-       for (let i = 0; i < content.length; i += MAX) { textChunks.push(content.substring(i, i + MAX)); }
-       const blobs = [];
-       for (const t of textChunks) {
-          const res = await synthesizeChunk(t, activeBook.settings.defaultVoiceId, 1.0);
-          blobs.push(await fetch(res.audioUrl).then(r => r.blob()));
-       }
-       const combined = new Blob(blobs, { type: 'audio/mpeg' });
-       const adid = await uploadToDrive(state.driveToken, activeBook.driveFolderId!, `${newChapter.index.toString().padStart(3, '0')}.mp3`, combined, undefined, 'audio/mpeg');
-       
-       setState(prev => ({
-          ...prev,
-          books: prev.books.map(b => b.id === prev.activeBookId ? {
-             ...b,
-             chapters: b.chapters.map(c => c.id === newChapter.id ? { ...c, audioDriveId: adid } : c)
-          } : b)
-       }));
-    }
   };
 
   return (
@@ -415,7 +465,6 @@ const App: React.FC = () => {
             setActiveTab('reader'); 
             setIsSidebarOpen(false); 
           }} 
-          // Fix: Passing handleDeleteChapter to Library's onDeleteChapter prop
           onDeleteChapter={handleDeleteChapter} 
           theme={state.theme} onAddBook={async (t, b, d, dfid, dfn) => {
             const newBook: Book = { id: crypto.randomUUID(), title: t, chapters: [], rules: [], backend: b, directoryHandle: d, driveFolderId: dfid, driveFolderName: dfn, settings: { useBookSettings: false, highlightMode: HighlightMode.WORD } };
@@ -456,7 +505,6 @@ const App: React.FC = () => {
                </div>
              )}
              {activeTab === 'reader' ? (activeBook ? (activeBook.currentChapterId ? (<Reader chapter={activeChapterMetadata || null} rules={activeBook.rules} currentOffset={state.currentOffset} theme={state.theme} debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset} highlightMode={activeBook.settings.highlightMode} onBackToChapters={() => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, currentChapterId: undefined } : b) }))} onAddChapter={() => setIsAddChapterOpen(true)} readerSettings={state.readerSettings} />) : (<ChapterFolderView book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)} onOpenChapter={(id) => setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, currentChapterId: id } : b), currentOffset: 0 }))} onToggleFavorite={() => {}} 
-             // Fix: correctly passing handleUpdateChapterTitle and handleDeleteChapter with activeBook scoping
              onUpdateChapterTitle={(cid, nt) => handleUpdateChapterTitle(activeBook.id, cid, nt)} 
              onDeleteChapter={(cid) => handleDeleteChapter(activeBook.id, cid)} 
              onRefreshDriveFolder={() => {}} onUpdateChapter={handleUpdateChapter} onUpdateBookSettings={handleUpdateBookSettings} driveToken={state.driveToken} />)) : (<div className="h-full flex flex-col items-center justify-center font-black tracking-widest text-lg opacity-40 uppercase">Select a book to begin</div>)) : activeTab === 'rules' ? (
