@@ -1,4 +1,3 @@
-
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
@@ -30,6 +29,11 @@ export default defineConfig({
             type: 'image/png'
           }
         ]
+      },
+      workbox: {
+        // Ensure cache is updated when version bumps
+        cacheId: 'talevox-v2.6.3',
+        cleanupOutdatedCaches: true
       }
     })
   ],

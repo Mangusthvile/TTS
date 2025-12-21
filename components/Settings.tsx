@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { ReaderSettings, Theme } from '../types';
 import { Type, AlignJustify, MoveVertical, Minus, Plus, RefreshCw, Smartphone, MonitorOff, AlertTriangle, Cloud, CloudOff, Loader2, Key, LogOut, Save } from 'lucide-react';
