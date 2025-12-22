@@ -1,6 +1,6 @@
 import React from 'react';
 import { ReaderSettings, Theme } from '../types';
-import { Type, AlignJustify, MoveVertical, Minus, Plus, RefreshCw, Smartphone, MonitorOff, AlertTriangle, Cloud, CloudOff, Loader2, Key, LogOut, Save, LogIn } from 'lucide-react';
+import { Type, AlignJustify, MoveVertical, Minus, Plus, RefreshCw, Smartphone, MonitorOff, AlertTriangle, Cloud, CloudOff, Loader2, Key, LogOut, Save, LogIn, Palette } from 'lucide-react';
 
 interface SettingsProps {
   settings: ReaderSettings;
@@ -41,6 +41,8 @@ const Settings: React.FC<SettingsProps> = ({
     { name: 'System Serif', font: "serif" },
   ];
 
+  const presetColors = ['#4f46e5', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#8b5cf6'];
+
   const controlBg = isDark ? 'bg-slate-950/40 border-slate-800' : isSepia ? 'bg-[#efe6d5] border-[#d8ccb6]' : 'bg-white border-black/5';
   const isWakeLockSupported = 'wakeLock' in navigator;
 
@@ -50,7 +52,7 @@ const Settings: React.FC<SettingsProps> = ({
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
           <div>
             <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
-            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.6.5</p>
+            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.6.6</p>
           </div>
           <button 
             onClick={onCheckForUpdates}
@@ -60,6 +62,7 @@ const Settings: React.FC<SettingsProps> = ({
           </button>
         </div>
 
+        {/* Cloud & Identity */}
         <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm space-y-6 ${cardBg}`}>
           <div className="flex items-center justify-between">
             <label className={labelClass}>Cloud Synchronization</label>
@@ -109,9 +112,11 @@ const Settings: React.FC<SettingsProps> = ({
           </div>
         </div>
 
+        {/* Visual Customization */}
         <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm space-y-6 ${cardBg}`}>
-          <label className={labelClass}>Reader Experience</label>
+          <label className={labelClass}>Visual Customization</label>
           <div className="space-y-6">
+            {/* Font Size */}
             <div className="space-y-4">
               <div className="flex justify-between items-center">
                 <span className={`text-sm font-black ${textClass}`}>Font Size</span>
@@ -119,7 +124,37 @@ const Settings: React.FC<SettingsProps> = ({
               </div>
               <input type="range" min="16" max="40" value={settings.fontSizePx} onChange={e => onUpdate({ fontSizePx: parseInt(e.target.value) })} className="w-full h-1.5 accent-indigo-600 rounded-full cursor-pointer" />
             </div>
-            <div className="flex items-center justify-between">
+
+            {/* Highlight Color */}
+            <div className="space-y-4">
+              <div className="flex justify-between items-center">
+                <div className="flex items-center gap-2">
+                  <Palette className={`w-5 h-5 ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`} />
+                  <span className={`text-sm font-black ${textClass}`}>Highlight Color</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input 
+                    type="color" 
+                    value={settings.highlightColor} 
+                    onChange={e => onUpdate({ highlightColor: e.target.value })}
+                    className="w-8 h-8 rounded-lg border-none bg-transparent cursor-pointer"
+                  />
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-3">
+                {presetColors.map(color => (
+                  <button 
+                    key={color} 
+                    onClick={() => onUpdate({ highlightColor: color })}
+                    className={`w-8 h-8 rounded-full border-2 transition-all ${settings.highlightColor === color ? 'border-white ring-2 ring-indigo-600 scale-110' : 'border-transparent opacity-60 hover:opacity-100'}`}
+                    style={{ backgroundColor: color }}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {/* Keep Awake */}
+            <div className="flex items-center justify-between border-t border-black/5 pt-4">
               <div className="flex items-center gap-3">
                 <Smartphone className={`w-5 h-5 ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`} />
                 <div className={`text-sm font-black ${textClass}`}>Keep screen awake</div>
@@ -131,6 +166,7 @@ const Settings: React.FC<SettingsProps> = ({
           </div>
         </div>
 
+        {/* Typography */}
         <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm ${cardBg}`}>
           <label className={labelClass}>Typography</label>
           <div className="grid grid-cols-2 gap-3 sm:gap-4">
@@ -142,7 +178,7 @@ const Settings: React.FC<SettingsProps> = ({
             ))}
           </div>
         </div>
-        <div className="text-center font-black uppercase tracking-[0.4em] text-[9px] sm:text-[11px] pt-8 sm:pt-12 opacity-30">VoxLib Engine v2.6.5</div>
+        <div className="text-center font-black uppercase tracking-[0.4em] text-[9px] sm:text-[11px] pt-8 sm:pt-12 opacity-30">VoxLib Engine v2.6.6</div>
       </div>
     </div>
   );

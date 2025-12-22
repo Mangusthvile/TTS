@@ -1,6 +1,5 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
-import { Play, Pause, SkipBack, SkipForward, FastForward, Rewind, Clock, Type, AlignLeft, Sparkles, Repeat, Loader2 } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, FastForward, Rewind, Clock, Type, AlignLeft, Sparkles, Repeat, Loader2, ChevronUp, ChevronDown, X, Settings as SettingsIcon } from 'lucide-react';
 import { Theme, HighlightMode } from '../types';
 import { speechController } from '../services/speechService';
 
@@ -52,6 +51,7 @@ const Player: React.FC<PlayerProps> = ({
   onSeekToTime
 }) => {
   const [showSleepMenu, setShowSleepMenu] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(false);
   
   const displayTime = useMemo(() => {
     if (playbackCurrentTime !== undefined && playbackCurrentTime > 0) {
@@ -73,11 +73,9 @@ const Player: React.FC<PlayerProps> = ({
   };
 
   const progressPercent = useMemo(() => {
-    // Mandate for v2.6.3: Favor time-based progress for the bar UI
     if (playbackDuration && playbackDuration > 0 && playbackCurrentTime !== undefined) {
       return (playbackCurrentTime / playbackDuration) * 100;
     }
-    // Fallback to characters if audio duration is unknown
     return totalLengthChars > 0 ? (progressChars / totalLengthChars) * 100 : 0;
   }, [playbackDuration, playbackCurrentTime, progressChars, totalLengthChars]);
 
@@ -97,7 +95,8 @@ const Player: React.FC<PlayerProps> = ({
   const accentBg = isDark ? 'bg-indigo-500' : isSepia ? 'bg-[#9c6644]' : 'bg-indigo-600';
 
   return (
-    <div className={`border-t transition-colors duration-500 relative z-20 ${isDark ? 'bg-slate-900 border-slate-800 text-slate-100' : isSepia ? 'bg-[#efe6d5] border-[#d8ccb6] text-[#3c2f25]' : 'bg-white border-black/10 text-black'}`}>
+    <div className={`border-t transition-all duration-300 relative z-20 ${isDark ? 'bg-slate-900 border-slate-800 text-slate-100' : isSepia ? 'bg-[#efe6d5] border-[#d8ccb6] text-[#3c2f25]' : 'bg-white border-black/10 text-black'}`}>
+      {/* Progress Bar & Time */}
       <div className="flex items-center gap-4 px-4 lg:px-8 pt-4">
         <span className="text-[11px] font-black font-mono opacity-60 min-w-[40px] text-left">{displayTime}</span>
         <div 
@@ -109,30 +108,21 @@ const Player: React.FC<PlayerProps> = ({
         <span className="text-[11px] font-black font-mono opacity-60 min-w-[40px] text-right">{displayTotal}</span>
       </div>
 
-      <div className="max-w-7xl mx-auto px-4 lg:px-8 py-4 lg:py-6 flex flex-col gap-6">
-        <div className="flex flex-col lg:flex-row items-center justify-between gap-6">
-          <div className="flex flex-wrap items-center justify-center lg:justify-start gap-4 lg:gap-8 w-full lg:w-auto">
-            <div className="flex flex-col gap-1.5">
-              <span className="text-[10px] font-black uppercase tracking-widest opacity-60 ml-0.5">Speed</span>
-              <div className="flex items-center gap-2">
-                <button onClick={() => onSetUseBookSettings(!useBookSettings)} className={`px-2.5 py-1.5 rounded-lg text-[10px] font-black border transition-all ${useBookSettings ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-black/5 text-inherit opacity-60'}`}>{useBookSettings ? 'Book' : 'Global'}</button>
-                <input type="range" min="0.5" max="3.0" step="0.1" value={speed} onChange={e => handleSpeedChange(parseFloat(e.target.value))} className="h-1.5 w-16 accent-indigo-600" />
-                <span className="text-xs font-black min-w-[20px]">{speed}x</span>
-              </div>
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <span className="text-[10px] font-black uppercase tracking-widest opacity-60 ml-0.5">Highlight</span>
-              <div className={`flex items-center p-1 rounded-xl gap-0.5 ${isDark ? 'bg-slate-950/40' : 'bg-black/5'}`}>
-                {[{ m: HighlightMode.WORD, i: Type }, { m: HighlightMode.SENTENCE, i: AlignLeft }, { m: HighlightMode.KARAOKE, i: Sparkles }].map(({ m, i: Icon }) => (
-                  <button key={m} onClick={() => onSetHighlightMode(m)} className={`p-2.5 rounded-lg transition-all ${highlightMode === m ? accentBg + ' text-white' : 'opacity-40 hover:opacity-100'}`}><Icon className="w-5 h-5" /></button>
-                ))}
-              </div>
-            </div>
-          </div>
+      <div className="max-w-7xl mx-auto px-4 lg:px-8 py-2 lg:py-6 flex flex-col gap-2">
+        {/* Core Controls: Always Visible */}
+        <div className="flex items-center justify-between w-full">
+          {/* Mobile Expanded Toggle */}
+          <button 
+            onClick={() => setIsExpanded(!isExpanded)}
+            className="p-3 lg:hidden hover:bg-black/5 rounded-xl transition-all"
+            title="Advanced Controls"
+          >
+            {isExpanded ? <ChevronDown className="w-6 h-6" /> : <SettingsIcon className="w-6 h-6" />}
+          </button>
 
-          <div className="flex items-center gap-4 lg:gap-8 order-first lg:order-none">
+          <div className="flex items-center gap-4 lg:gap-8">
             <button onClick={onPrev} className="p-3 hover:scale-110 transition-transform"><SkipBack className="w-7 h-7 lg:w-8 lg:h-8" /></button>
-            <button onClick={() => onSeek(-500)} className="p-3 hover:scale-110 transition-transform opacity-60"><Rewind className="w-6 h-6 lg:w-7 lg:h-7" /></button>
+            <button onClick={() => onSeek(-500)} className="hidden sm:block p-3 hover:scale-110 transition-transform opacity-60"><Rewind className="w-6 h-6 lg:w-7 lg:h-7" /></button>
             <button 
               disabled={isFetching}
               onClick={isPlaying ? onPause : onPlay} 
@@ -147,11 +137,11 @@ const Player: React.FC<PlayerProps> = ({
                 </>
               )}
             </button>
-            <button onClick={() => onSeek(500)} className="p-3 hover:scale-110 transition-transform opacity-60"><FastForward className="w-6 h-6 lg:w-7 lg:h-7" /></button>
+            <button onClick={() => onSeek(500)} className="hidden sm:block p-3 hover:scale-110 transition-transform opacity-60"><FastForward className="w-6 h-6 lg:w-7 lg:h-7" /></button>
             <button onClick={onNext} className="p-3 hover:scale-110 transition-transform"><SkipForward className="w-7 h-7 lg:w-8 lg:h-8" /></button>
           </div>
 
-          <div className="flex lg:flex items-center gap-4 relative">
+          <div className="hidden lg:flex items-center gap-4 relative">
             <button onClick={() => setShowSleepMenu(!showSleepMenu)} className={`flex items-center gap-2 px-5 py-3 rounded-xl border text-xs font-black shadow-sm transition-all ${sleepTimer || stopAfterChapter ? 'bg-indigo-600 text-white' : 'opacity-60'}`}><Clock className="w-4 h-4" /> {sleepTimer ? formatTime(sleepTimer / speed) : 'Sleep'}</button>
             {showSleepMenu && (
               <div className={`absolute bottom-full mb-3 right-0 w-56 rounded-2xl border shadow-2xl p-2 z-[60] ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-black/10'}`}>
@@ -160,6 +150,46 @@ const Player: React.FC<PlayerProps> = ({
                 <button onClick={() => { onSetStopAfterChapter(!stopAfterChapter); setShowSleepMenu(false); }} className={`w-full text-left px-3 py-3 text-[13px] font-black rounded-xl flex items-center justify-between ${stopAfterChapter ? 'text-indigo-500' : ''}`}>Stop after Chapter <Repeat className="w-3.5 h-3.5" /></button>
               </div>
             )}
+          </div>
+          
+          {/* Mobile placeholder to center icons */}
+          <div className="w-12 lg:hidden"></div>
+        </div>
+
+        {/* Expanded Settings Panel (Mobile Toggle / Desktop Always) */}
+        <div className={`${isExpanded ? 'flex' : 'hidden'} lg:flex flex-col lg:flex-row items-center justify-between gap-6 pb-4 lg:pb-0 animate-in slide-in-from-bottom-2`}>
+          <div className="flex flex-wrap items-center justify-center lg:justify-start gap-4 lg:gap-8 w-full lg:w-auto">
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[10px] font-black uppercase tracking-widest opacity-60 ml-0.5">Speed</span>
+              <div className="flex items-center gap-2">
+                <button onClick={() => onSetUseBookSettings(!useBookSettings)} className={`px-2.5 py-1.5 rounded-lg text-[10px] font-black border transition-all ${useBookSettings ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-black/5 text-inherit opacity-60'}`}>{useBookSettings ? 'Book' : 'Global'}</button>
+                <input type="range" min="0.5" max="3.0" step="0.1" value={speed} onChange={e => handleSpeedChange(parseFloat(e.target.value))} className="h-1.5 w-24 sm:w-16 accent-indigo-600" />
+                <span className="text-xs font-black min-w-[20px]">{speed}x</span>
+              </div>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[10px] font-black uppercase tracking-widest opacity-60 ml-0.5">Highlight</span>
+              <div className={`flex items-center p-1 rounded-xl gap-0.5 ${isDark ? 'bg-slate-950/40' : 'bg-black/5'}`}>
+                {[{ m: HighlightMode.WORD, i: Type }, { m: HighlightMode.SENTENCE, i: AlignLeft }, { m: HighlightMode.KARAOKE, i: Sparkles }].map(({ m, i: Icon }) => (
+                  <button key={m} onClick={() => onSetHighlightMode(m)} className={`p-2.5 rounded-lg transition-all ${highlightMode === m ? accentBg + ' text-white' : 'opacity-40 hover:opacity-100'}`}><Icon className="w-5 h-5" /></button>
+                ))}
+              </div>
+            </div>
+          </div>
+          
+          {/* Mobile-only Sleep Timer inside expanded panel */}
+          <div className="lg:hidden flex items-center gap-4 w-full">
+            <div className="flex-1 flex flex-col gap-1.5">
+              <span className="text-[10px] font-black uppercase tracking-widest opacity-60 ml-0.5">Sleep Timer</span>
+              <div className="flex gap-2">
+                {[15, 30].map(m => (
+                  <button key={m} onClick={() => onSetSleepTimer(m * 60)} className={`flex-1 py-2 rounded-xl border text-[10px] font-black ${sleepTimer === m * 60 ? 'bg-indigo-600 text-white' : 'opacity-60'}`}>{m}m</button>
+                ))}
+                <button onClick={() => onSetStopAfterChapter(!stopAfterChapter)} className={`flex-1 py-2 rounded-xl border text-[10px] font-black ${stopAfterChapter ? 'bg-indigo-600 text-white' : 'opacity-60'}`}>CH Stop</button>
+                {/* Fix: Import X from lucide-react to avoid 'Cannot find name X' error */}
+                {(sleepTimer || stopAfterChapter) && <button onClick={() => {onSetSleepTimer(null); onSetStopAfterChapter(false);}} className="px-3 py-2 text-red-500"><X className="w-4 h-4" /></button>}
+              </div>
+            </div>
           </div>
         </div>
       </div>

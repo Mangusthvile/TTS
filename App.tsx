@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, ReaderSettings, RuleType, Rule, SavedSnapshot } from './types';
 import Library from './components/Library';
@@ -47,7 +46,8 @@ const App: React.FC = () => {
         fontFamily: "'Source Serif 4', serif",
         fontSizePx: 20,
         lineHeight: 1.8,
-        paragraphSpacing: 1
+        paragraphSpacing: 1,
+        highlightColor: '#4f46e5'
       },
       driveToken: parsed.driveToken, // Legacy field, driveAuth handles tokens now
       googleClientId: parsed.googleClientId || (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID || '',
@@ -74,9 +74,14 @@ const App: React.FC = () => {
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
 
-  // Derived state values for currently active book and chapter
+  // Derive state values for currently active book and chapter
   const activeBook = useMemo(() => state.books.find(b => b.id === state.activeBookId), [state.books, state.activeBookId]);
   const activeChapterMetadata = useMemo(() => activeBook?.chapters.find(c => c.id === activeBook.currentChapterId), [activeBook]);
+
+  // Inject highlight color CSS variable
+  useEffect(() => {
+    document.documentElement.style.setProperty('--highlight-color', state.readerSettings.highlightColor);
+  }, [state.readerSettings.highlightColor]);
 
   // Init Drive Auth once GIS is loaded
   useEffect(() => {
@@ -138,7 +143,7 @@ const App: React.FC = () => {
     setState(prev => ({
       ...prev, 
       books: mergedBooks, 
-      readerSettings, 
+      readerSettings: readerSettings || prev.readerSettings, 
       activeBookId: activeBookId || prev.activeBookId, 
       playbackSpeed, 
       selectedVoiceName, 

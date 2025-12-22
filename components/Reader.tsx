@@ -1,4 +1,3 @@
-
 import React, { useEffect, useRef, useMemo } from 'react';
 import { Chapter, Rule, Theme, HighlightMode, ReaderSettings } from '../types';
 import { applyRules } from '../services/speechService';
@@ -18,66 +17,109 @@ interface ReaderProps {
   readerSettings: ReaderSettings;
 }
 
+// Memoized Word Component for stable rendering
+const Word = React.memo(({ text, start, end, isActive, highlightColor, isSentenceActive }: { text: string, start: number, end: number, isActive: boolean, highlightColor: string, isSentenceActive: boolean }) => {
+  const activeClass = isActive ? "bg-[var(--highlight-color)] text-white shadow-md" : "";
+  const sentenceClass = isSentenceActive && !isActive ? "bg-indigo-600/10 dark:bg-white/10" : "";
+  
+  return (
+    <span 
+      data-base={start} 
+      data-end={end}
+      className={`inline-block rounded px-0.5 transition-all duration-150 ease-out ${activeClass} ${sentenceClass}`}
+    >
+      {text}
+    </span>
+  );
+});
+
 const Reader: React.FC<ReaderProps> = ({ 
   chapter, rules, currentOffsetChars, theme, debugMode, onToggleDebug, onJumpToOffset, 
   onBackToChapters, onAddChapter, highlightMode, readerSettings
 }) => {
-  const activeWordRef = useRef<HTMLSpanElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const lastScrollTime = useRef<number>(0);
-  const lastTapTime = useRef<number>(0);
-  const lastTapPos = useRef<{x: number, y: number} | null>(null);
 
   const speakText = useMemo(() => {
     if (!chapter) return "";
     return applyRules(chapter.content, rules);
   }, [chapter, rules]);
 
+  // Pre-calculate segments and chunks of text for stable DOM
   const segments = useMemo(() => {
-    if (!speakText) return { words: [], sentences: [] };
+    if (!speakText) return { words: [], sentences: [], nodes: [] };
     
-    const words: {start: number, end: number}[] = [];
+    const words: {start: number, end: number, text: string}[] = [];
     const sentences: {start: number, end: number}[] = [];
 
+    // Fallback if Segmenter is missing
     if (!('Segmenter' in Intl)) {
       const wordRegex = /\w+/g;
       let m;
       while ((m = wordRegex.exec(speakText)) !== null) {
-        words.push({ start: m.index, end: wordRegex.lastIndex });
+        words.push({ start: m.index, end: wordRegex.lastIndex, text: m[0] });
       }
       const sentRegex = /[^.!?]+[.!?]*/g;
       while ((m = sentRegex.exec(speakText)) !== null) {
         sentences.push({ start: m.index, end: sentRegex.lastIndex });
       }
-      return { words, sentences };
+    } else {
+      const wordSegmenter = new (Intl as any).Segmenter('en', { granularity: 'word' });
+      for (const seg of wordSegmenter.segment(speakText)) {
+        if (seg.isWordLike) words.push({ start: seg.index, end: seg.index + seg.segment.length, text: seg.segment });
+      }
+      const sentSegmenter = new (Intl as any).Segmenter('en', { granularity: 'sentence' });
+      for (const seg of sentSegmenter.segment(speakText)) {
+        sentences.push({ start: seg.index, end: seg.index + seg.segment.length });
+      }
     }
 
-    const wordSegmenter = new (Intl as any).Segmenter('en', { granularity: 'word' });
-    for (const seg of wordSegmenter.segment(speakText)) {
-      if (seg.isWordLike) words.push({ start: seg.index, end: seg.index + seg.segment.length });
+    // Build static nodes for interleaved rendering (spans for words, text for spaces)
+    const nodes: React.ReactNode[] = [];
+    let lastIndex = 0;
+    
+    words.forEach((w, i) => {
+      // Add gap text
+      if (w.start > lastIndex) {
+        nodes.push(<span key={`gap-${lastIndex}`} data-base={lastIndex}>{speakText.substring(lastIndex, w.start)}</span>);
+      }
+      
+      nodes.push(
+        <WordWrapper 
+          key={`word-${w.start}`}
+          word={w}
+          currentOffset={currentOffsetChars}
+          highlightMode={highlightMode}
+          sentences={sentences}
+        />
+      );
+      
+      lastIndex = w.end;
+    });
+
+    // Add trailing text
+    if (lastIndex < speakText.length) {
+      nodes.push(<span key={`gap-end`} data-base={lastIndex}>{speakText.substring(lastIndex)}</span>);
     }
 
-    const sentSegmenter = new (Intl as any).Segmenter('en', { granularity: 'sentence' });
-    for (const seg of sentSegmenter.segment(speakText)) {
-      sentences.push({ start: seg.index, end: seg.index + seg.segment.length });
-    }
+    return { words, sentences, nodes };
+  }, [speakText, currentOffsetChars, highlightMode]);
 
-    return { words, sentences };
-  }, [speakText]);
-
+  // Auto-scroll logic
   useEffect(() => {
     const now = Date.now();
-    if (activeWordRef.current && containerRef.current && now - lastScrollTime.current > 150) {
-      const el = activeWordRef.current;
-      const container = containerRef.current;
-      const rect = el.getBoundingClientRect();
-      const containerRect = container.getBoundingClientRect();
-      const threshold = containerRect.height * 0.35;
-      const isOutsideThreshold = rect.top < containerRect.top + threshold || rect.bottom > containerRect.bottom - threshold;
+    if (containerRef.current && now - lastScrollTime.current > 150) {
+      const activeEl = containerRef.current.querySelector('[data-active="true"]');
+      if (activeEl) {
+        const rect = activeEl.getBoundingClientRect();
+        const containerRect = containerRef.current.getBoundingClientRect();
+        const threshold = containerRect.height * 0.35;
+        const isOutsideThreshold = rect.top < containerRect.top + threshold || rect.bottom > containerRect.bottom - threshold;
 
-      if (isOutsideThreshold) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        lastScrollTime.current = now;
+        if (isOutsideThreshold) {
+          activeEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          lastScrollTime.current = now;
+        }
       }
     }
   }, [currentOffsetChars]);
@@ -92,92 +134,10 @@ const Reader: React.FC<ReaderProps> = ({
     const baseOffset = parseInt((span as HTMLElement).dataset.base || '0', 10);
     const globalOffset = baseOffset + range.startOffset;
     
-    // Find closest word boundary to jump to
     const target = segments.words.find(s => globalOffset >= s.start && globalOffset < s.end) || 
                    segments.words.find(s => s.start >= globalOffset);
     if (target) onJumpToOffset(target.start);
     selection.removeAllRanges();
-  };
-
-  const handlePointerDown = (e: React.PointerEvent) => {
-    lastTapPos.current = { x: e.clientX, y: e.clientY };
-  };
-
-  const handlePointerUp = (e: React.PointerEvent) => {
-    const now = Date.now();
-    const pos = { x: e.clientX, y: e.clientY };
-    
-    // Check if the pointer moved significantly (ignore taps during scroll)
-    const dist = lastTapPos.current ? Math.hypot(pos.x - lastTapPos.current.x, pos.y - lastTapPos.current.y) : 0;
-    
-    if (dist < 10 && now - lastTapTime.current < 320) { // Slightly longer window for mobile
-      setTimeout(triggerJump, 0);
-      lastTapTime.current = 0;
-    } else if (dist < 10) {
-      lastTapTime.current = now;
-    } else {
-      lastTapTime.current = 0;
-    }
-  };
-
-  const highlightStyles = useMemo(() => {
-    const isDark = theme === Theme.DARK;
-    const isSepia = theme === Theme.SEPIA;
-    return {
-      word: isDark ? 'bg-indigo-500 text-white' : isSepia ? 'bg-[#9c6644] text-white' : 'bg-indigo-600 text-white',
-      sentence: isDark ? 'bg-white/10' : isSepia ? 'bg-black/10' : 'bg-indigo-600/10'
-    };
-  }, [theme]);
-
-  const renderContent = () => {
-    // During intro offset=0, activeWord will be null or first word
-    const activeWord = segments.words.find(s => currentOffsetChars >= s.start && currentOffsetChars < s.end);
-    const activeSentence = segments.sentences.find(s => currentOffsetChars >= s.start && currentOffsetChars < s.end);
-
-    const transitionClass = "transition-all duration-150 ease-out rounded px-0.5";
-
-    if (highlightMode === HighlightMode.SENTENCE && activeSentence) {
-      return (
-        <React.Fragment>
-          <span data-base="0">{speakText.substring(0, activeSentence.start)}</span>
-          <span data-base={activeSentence.start} className={`${highlightStyles.sentence} ${transitionClass} py-0.5`}>
-            {speakText.substring(activeSentence.start, activeSentence.end)}
-            <span ref={activeWordRef} className="invisible w-0" />
-          </span>
-          <span data-base={activeSentence.end}>{speakText.substring(activeSentence.end)}</span>
-        </React.Fragment>
-      );
-    }
-    
-    if (highlightMode === HighlightMode.KARAOKE && activeSentence && activeWord) {
-      return (
-        <React.Fragment>
-          <span data-base="0">{speakText.substring(0, activeSentence.start)}</span>
-          <span className={`${highlightStyles.sentence} ${transitionClass} py-0.5`} data-base={activeSentence.start}>
-            {speakText.substring(activeSentence.start, activeWord.start)}
-            <span ref={activeWordRef} className={`font-black ${highlightStyles.word} ${transitionClass} shadow-md`} data-base={activeWord.start}>
-              {speakText.substring(activeWord.start, activeWord.end)}
-            </span>
-            {speakText.substring(activeWord.end, activeSentence.end)}
-          </span>
-          <span data-base={activeSentence.end}>{speakText.substring(activeSentence.end)}</span>
-        </React.Fragment>
-      );
-    }
-
-    if (activeWord) {
-      return (
-        <React.Fragment>
-          <span data-base="0">{speakText.substring(0, activeWord.start)}</span>
-          <span ref={activeWordRef} data-base={activeWord.start} className={`font-black ${highlightStyles.word} ${transitionClass} shadow-md`}>
-            {speakText.substring(activeWord.start, activeWord.end)}
-          </span>
-          <span data-base={activeWord.end}>{speakText.substring(activeWord.end)}</span>
-        </React.Fragment>
-      );
-    }
-
-    return <span data-base="0">{speakText}</span>;
   };
 
   const containerStyles = {
@@ -191,10 +151,12 @@ const Reader: React.FC<ReaderProps> = ({
   return (
     <div className={`relative flex-1 flex flex-col min-h-0 overflow-hidden touch-manipulation ${theme === Theme.DARK ? 'text-slate-100' : theme === Theme.SEPIA ? 'text-[#3c2f25]' : 'text-black'}`}>
       <div className={`absolute top-0 left-0 right-0 h-16 lg:h-24 z-10 pointer-events-none bg-gradient-to-b ${fadeColor} to-transparent`} />
-      <div ref={containerRef} className="flex-1 overflow-y-auto px-4 lg:px-12 py-12 lg:py-24 scroll-smooth scrollbar-hide">
+      <div 
+        ref={containerRef} 
+        className="flex-1 overflow-y-auto px-4 lg:px-12 py-12 lg:py-24 scroll-smooth scrollbar-hide"
+        onDoubleClick={triggerJump}
+      >
         <div 
-          onPointerDown={handlePointerDown}
-          onPointerUp={handlePointerUp}
           style={containerStyles}
           className="max-w-[70ch] mx-auto pb-64 whitespace-pre-wrap select-text cursor-text font-medium leading-relaxed"
         >
@@ -205,34 +167,16 @@ const Reader: React.FC<ReaderProps> = ({
              </div>
              <div className="flex items-center gap-1">
                 {onAddChapter && (
-                  <button 
-                    onClick={onAddChapter} 
-                    title="Quick Add Chapter"
-                    className={`p-3 rounded-xl transition-all ${theme === Theme.DARK ? 'bg-white/10 hover:bg-indigo-600 hover:text-white' : 'bg-black/5 hover:bg-indigo-600 hover:text-white'}`}
-                  >
-                    <Plus className="w-5 h-5" />
-                  </button>
+                  <button onClick={onAddChapter} title="Quick Add Chapter" className={`p-3 rounded-xl transition-all ${theme === Theme.DARK ? 'bg-white/10 hover:bg-indigo-600 hover:text-white' : 'bg-black/5 hover:bg-indigo-600 hover:text-white'}`}><Plus className="w-5 h-5" /></button>
                 )}
                 {onBackToChapters && (
-                  <button 
-                    onClick={onBackToChapters} 
-                    title="Back to Collection"
-                    className={`p-3 rounded-xl transition-all ${theme === Theme.DARK ? 'bg-white/10 hover:bg-indigo-600 hover:text-white' : 'bg-black/5 hover:bg-indigo-600 hover:text-white'}`}
-                  >
-                    <FolderOpen className="w-5 h-5" />
-                  </button>
+                  <button onClick={onBackToChapters} title="Back to Collection" className={`p-3 rounded-xl transition-all ${theme === Theme.DARK ? 'bg-white/10 hover:bg-indigo-600 hover:text-white' : 'bg-black/5 hover:bg-indigo-600 hover:text-white'}`}><FolderOpen className="w-5 h-5" /></button>
                 )}
-                <button 
-                  onClick={onToggleDebug} 
-                  title="Debug Mode"
-                  className={`p-3 rounded-xl transition-all ${theme === Theme.DARK ? 'bg-white/10 hover:bg-white/20' : 'bg-black/5 hover:bg-black/10'}`}
-                >
-                  <Bug className="w-5 h-5" />
-                </button>
+                <button onClick={onToggleDebug} title="Debug Mode" className={`p-3 rounded-xl transition-all ${theme === Theme.DARK ? 'bg-white/10 hover:bg-white/20' : 'bg-black/5 hover:bg-black/10'}`}><Bug className="w-5 h-5" /></button>
              </div>
           </div>
           <div className={readerSettings.paragraphSpacing === 2 ? 'space-y-10' : 'space-y-2'}>
-            {renderContent()}
+            {segments.nodes}
           </div>
         </div>
       </div>
@@ -240,5 +184,34 @@ const Reader: React.FC<ReaderProps> = ({
     </div>
   );
 };
+
+// Helper component to decide highlight state for a word without re-calculating entire tree
+const WordWrapper = React.memo(({ word, currentOffset, highlightMode, sentences }: { word: any, currentOffset: number, highlightMode: HighlightMode, sentences: any[] }) => {
+  const isActive = currentOffset >= word.start && currentOffset < word.end;
+  let isSentenceActive = false;
+
+  if (highlightMode === HighlightMode.SENTENCE || highlightMode === HighlightMode.KARAOKE) {
+    const activeSent = sentences.find(s => currentOffset >= s.start && currentOffset < s.end);
+    if (activeSent && word.start >= activeSent.start && word.end <= activeSent.end) {
+      isSentenceActive = true;
+    }
+  }
+
+  const highlightClass = isActive ? "bg-[var(--highlight-color)] text-white shadow-md" : "";
+  const sentenceClass = (isSentenceActive && (highlightMode === HighlightMode.SENTENCE || (highlightMode === HighlightMode.KARAOKE && !isActive))) 
+    ? "bg-indigo-600/10 dark:bg-white/10" 
+    : "";
+
+  return (
+    <span 
+      data-base={word.start} 
+      data-active={isActive ? "true" : "false"}
+      className={`inline-block rounded px-0.5 transition-all duration-150 ease-out ${highlightClass} ${sentenceClass}`}
+      style={{ fontWeight: 'inherit' }} // Fix Issue 2: Ensure no weight changes
+    >
+      {word.text}
+    </span>
+  );
+});
 
 export default Reader;

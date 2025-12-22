@@ -88,6 +88,7 @@ export interface ReaderSettings {
   fontSizePx: number;
   lineHeight: number;
   paragraphSpacing: number;
+  highlightColor: string;
 }
 
 export interface Book {
