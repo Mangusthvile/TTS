@@ -1,7 +1,6 @@
-
 import React, { useMemo, useState, useEffect } from 'react';
 import { Book, Theme, StorageBackend, Chapter, AudioChunkMetadata } from '../types';
-import { LayoutGrid, List, AlignJustify, Plus, Folder, CheckCircle2, Edit2, Check, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X } from 'lucide-react';
+import { LayoutGrid, List, AlignJustify, Plus, Folder, CheckCircle2, Edit2, Check, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw } from 'lucide-react';
 import { synthesizeChunk } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache } from '../services/audioCache';
 import { uploadToDrive, listFilesInFolder, buildMp3Name } from '../services/driveService';
@@ -241,6 +240,26 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
   };
 
+  const handleRestart = (chapterId: string) => {
+    const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
+    const store = storeRaw ? JSON.parse(storeRaw) : {};
+    if (!store[book.id]) return;
+    
+    if (store[book.id][chapterId]) {
+      store[book.id][chapterId] = {
+        ...store[book.id][chapterId],
+        timeSec: 0,
+        percent: 0,
+        completed: false,
+        updatedAt: Date.now()
+      };
+      localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(store));
+      window.dispatchEvent(new CustomEvent('talevox_progress_updated', { 
+        detail: { bookId: book.id, chapterId: chapterId } 
+      }));
+    }
+  };
+
   const handleSaveEdit = () => { 
     if (editingChapterId && tempTitle.trim()) onUpdateChapterTitle(editingChapterId, tempTitle.trim()); 
     setEditingChapterId(null); 
@@ -278,9 +297,20 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         </div>
         <div className={`text-[10px] sm:text-xs font-black text-right hidden sm:block ${textSecondary}`}>{c.wordCount?.toLocaleString()} words</div>
         <div className="text-right px-4">
-          <span className={`text-[9px] sm:text-[10px] font-black px-2 py-0.5 rounded-full ${isActuallyCompleted ? 'bg-emerald-500/20 text-emerald-600' : 'bg-indigo-500/15 text-indigo-500'}`}>
-            {isActuallyCompleted ? 'Done' : `${displayPercent}%`}
-          </span>
+          <div className="flex flex-col items-end gap-1">
+            <span className={`text-[9px] sm:text-[10px] font-black px-2 py-0.5 rounded-full ${isActuallyCompleted ? 'bg-emerald-500/20 text-emerald-600' : 'bg-indigo-500/15 text-indigo-500'}`}>
+              {isActuallyCompleted ? 'Done' : `${displayPercent}%`}
+            </span>
+            {isActuallyCompleted && (
+              <button 
+                type="button"
+                onClick={(e) => { e.stopPropagation(); handleRestart(c.id); }} 
+                className={`flex items-center gap-1 text-[8px] font-black uppercase transition-all hover:opacity-100 ${isDark ? 'text-indigo-400 opacity-60' : 'text-indigo-600 opacity-70'}`}
+              >
+                <RotateCcw className="w-2.5 h-2.5" /> Restart
+              </button>
+            )}
+          </div>
         </div>
         <div className="flex justify-end items-center gap-2 hidden sm:flex">
           <button onClick={(e) => { e.stopPropagation(); setRememberAsDefault(false); setShowVoiceModal({ chapterId: c.id }); }} disabled={!!synthesizingId || isBatchSynthesizing} className={`p-2 rounded-xl border transition-all ${controlBg} opacity-40 hover:opacity-100 relative z-20 cursor-pointer`} title="Regenerate Sync Audio"><RefreshCw className="w-4 h-4" /></button>
@@ -301,7 +331,19 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         <div className="flex-1 truncate font-bold text-xs mr-4">{c.title}</div>
         <div className="flex items-center gap-3">
           {renderStatusIcon(c)}
-          <span className="text-[10px] font-black text-indigo-500 w-8 text-right">{displayPercent}%</span>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-black text-indigo-500 w-8 text-right">{displayPercent}%</span>
+            {isActuallyCompleted && (
+              <button 
+                type="button"
+                onClick={(e) => { e.stopPropagation(); handleRestart(c.id); }} 
+                className={`p-1 rounded bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20 transition-all`}
+                title="Restart Chapter"
+              >
+                <RotateCcw className="w-3 h-3" />
+              </button>
+            )}
+          </div>
           <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete chapter?')) onDeleteChapter(c.id); }} className="p-1 opacity-0 group-hover:opacity-100 hover:text-red-500 relative z-20 cursor-pointer"><Trash2 className="w-3 h-3" /></button>
         </div>
       </div>
@@ -313,7 +355,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     const isActuallyCompleted = saved?.completed || false;
     const displayPercent = saved?.percent !== undefined ? Math.floor(saved.percent * 100) : 0;
     return (
-      <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between h-32 relative group ${cardBg} ${isActuallyCompleted ? 'opacity-60' : ''} hover:shadow-lg`}>
+      <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between h-36 relative group ${cardBg} ${isActuallyCompleted ? 'opacity-60' : ''} hover:shadow-lg`}>
         <div className="flex justify-between items-start">
           <div className={`text-[10px] font-black uppercase tracking-tighter ${textSecondary}`}>CH {c.index}</div>
           {renderStatusIcon(c)}
@@ -321,11 +363,22 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         <div className="mt-2 flex-1">
           <div className="font-black text-sm line-clamp-2 leading-tight">{c.title}</div>
         </div>
-        <div className="mt-2 flex items-center justify-between">
-          <div className="h-1.5 flex-1 bg-black/5 rounded-full overflow-hidden mr-3">
-            <div className="h-full bg-indigo-600 transition-all" style={{ width: `${displayPercent}%` }} />
+        <div className="mt-2 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="h-1.5 flex-1 bg-black/5 rounded-full overflow-hidden mr-3">
+              <div className="h-full bg-indigo-600 transition-all" style={{ width: `${displayPercent}%` }} />
+            </div>
+            <div className="text-[10px] font-black text-indigo-600">{displayPercent}%</div>
           </div>
-          <div className="text-[10px] font-black text-indigo-600">{displayPercent}%</div>
+          {isActuallyCompleted && (
+            <button 
+              type="button"
+              onClick={(e) => { e.stopPropagation(); handleRestart(c.id); }} 
+              className={`w-full py-1.5 rounded-lg border-2 border-dashed flex items-center justify-center gap-2 text-[9px] font-black uppercase tracking-widest transition-all ${isDark ? 'border-slate-700 text-indigo-400 hover:border-indigo-600' : 'border-indigo-100 text-indigo-600 hover:border-indigo-600 hover:bg-indigo-50'}`}
+            >
+              <RotateCcw className="w-3 h-3" /> Restart Chapter
+            </button>
+          )}
         </div>
         <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete chapter?')) onDeleteChapter(c.id); }} className="absolute -top-2 -right-2 p-1.5 bg-red-500 text-white rounded-full shadow-lg opacity-0 group-hover:opacity-100 transition-all scale-75 hover:scale-100 relative z-30 cursor-pointer"><Trash2 className="w-3.5 h-3.5" /></button>
       </div>

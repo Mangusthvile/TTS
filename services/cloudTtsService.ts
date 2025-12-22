@@ -6,14 +6,18 @@ export interface CloudTtsResult {
 const DEFAULT_ENDPOINT = "https://talevox-tts-762195576430.us-south1.run.app";
 
 /**
- * Your server is throwing 413, so 4000 chars is too aggressive in practice once JSON + punctuation + encoding is involved.
- * This is a safer default. The adaptive retry below will still split further if needed.
+ * Google TTS enforces a 5000 BYTES limit (UTF-8).
+ * 4500 is a safe threshold to account for JSON encapsulation and metadata overhead.
  */
-const MAX_TTS_CHARS = 1800;
-const MIN_TTS_CHARS = 250; // smallest chunk we will try before giving up
+const MAX_TTS_BYTES = 4500;
+const MIN_TTS_BYTES = 600; // smallest chunk we will try before giving up
+
+const encoder = new TextEncoder();
+const byteLen = (s: string): number => encoder.encode(s).length;
 
 // --- Type helpers to keep TS + DOM Blob types happy ---
-type U8 = Uint8Array<ArrayBuffer>;
+// Fix: Uint8Array is not a generic type in standard TypeScript environments.
+type U8 = Uint8Array;
 
 function makeU8(len: number): U8 {
   // Force a real ArrayBuffer backing store
@@ -51,12 +55,12 @@ export function sanitizeVoiceForCloud(voiceName: string | undefined): string {
 }
 
 /**
- * Helper to split long text into safe-sized chunks for TTS service.
+ * Helper to split long text into safe-sized chunks for TTS service, based on byte length.
  */
-export function chunkTextForTTS(text: string, limit = MAX_TTS_CHARS): string[] {
+export function chunkTextForTTS(text: string, limitBytes = MAX_TTS_BYTES): string[] {
   const cleaned = (text ?? "").replace(/\r\n/g, "\n").trim();
   if (!cleaned) return [];
-  if (cleaned.length <= limit) return [cleaned];
+  if (byteLen(cleaned) <= limitBytes) return [cleaned];
 
   const chunks: string[] = [];
   let cur = "";
@@ -75,26 +79,31 @@ export function chunkTextForTTS(text: string, limit = MAX_TTS_CHARS): string[] {
     if (!p) continue;
 
     // if paragraph itself is too big, split by sentences
-    if (p.length > limit) {
-      // NOTE: lookbehind is fine in modern Chrome/Edge; if you ever need Safari support, we can rewrite this.
+    if (byteLen(p) > limitBytes) {
       const sentences = p.split(/(?<=[.!?。！？])\s+/);
 
       for (const s0 of sentences) {
         const s = s0.trim();
         if (!s) continue;
 
-        // if sentence still too big, hard slice
-        if (s.length > limit) {
+        // if sentence still too big, hard slice using character growth check
+        if (byteLen(s) > limitBytes) {
           push();
-          for (let i = 0; i < s.length; i += limit) {
-            chunks.push(s.slice(i, i + limit));
+          let start = 0;
+          for (let i = 1; i <= s.length; i++) {
+            const slice = s.substring(start, i);
+            if (byteLen(slice) > limitBytes) {
+              chunks.push(s.substring(start, i - 1).trim());
+              start = i - 1;
+            }
           }
+          cur = s.substring(start);
           continue;
         }
 
         const next = cur ? `${cur} ${s}` : s;
-        if (next.length > limit) push();
-        cur = cur ? `${cur} ${s}` : s;
+        if (byteLen(next) > limitBytes) push();
+        cur = cur ? (byteLen(cur) === 0 ? s : `${cur} ${s}`) : s;
       }
 
       push();
@@ -102,8 +111,8 @@ export function chunkTextForTTS(text: string, limit = MAX_TTS_CHARS): string[] {
     }
 
     const next = cur ? `${cur}\n\n${p}` : p;
-    if (next.length > limit) push();
-    cur = next;
+    if (byteLen(next) > limitBytes) push();
+    cur = cur ? (byteLen(cur) === 0 ? p : `${cur}\n\n${p}`) : p;
   }
 
   push();
@@ -165,7 +174,7 @@ function stripId3(u8in: Uint8Array): Uint8Array {
 
 /**
  * Split a chunk roughly in half, preferring a clean boundary.
- * This is used when the server returns 413.
+ * This is used when the server returns 413 or 500 TOO_LARGE.
  */
 function splitForRetry(text: string): [string, string] {
   const t = text.trim();
@@ -213,9 +222,12 @@ async function postTts(
     const errText = await response.text().catch(() => "");
     console.error("[TTS] Service responded with error:", response.status, errText);
 
-    // Surface 413 cleanly so we can retry-split.
-    if (response.status === 413) {
-      throw Object.assign(new Error("Cloud TTS Failed: 413"), { status: 413 });
+    // Surface 413 or 500 INVALID_ARGUMENT (oversize) cleanly so we can retry-split.
+    const isOversize = response.status === 413 || 
+      (response.status === 500 && errText.includes("longer than the limit of 5000 bytes"));
+
+    if (isOversize) {
+      throw Object.assign(new Error("Cloud TTS Failed: TOO_LARGE"), { status: 413, tooLarge: true });
     }
 
     throw Object.assign(new Error(`Cloud TTS Failed: ${response.status}`), {
@@ -235,7 +247,7 @@ async function postTts(
 }
 
 /**
- * Fetch a chunk, but if the server says 413, split and retry recursively.
+ * Fetch a chunk, but if the server says 413/500 TOO_LARGE, split and retry recursively.
  * Returns one-or-more MP3 segments (as Uint8Array) that should be concatenated.
  */
 async function synthesizeWithAdaptiveSplit(
@@ -257,11 +269,11 @@ async function synthesizeWithAdaptiveSplit(
     const bytes = await postTts(endpoint, t, cloudVoice, speakingRate);
     return [bytes];
   } catch (e: any) {
-    if (e?.status === 413) {
+    if (e?.status === 413 || e?.tooLarge === true) {
       // If we're already very small, give up with a clear error
-      if (t.length <= MIN_TTS_CHARS) {
+      if (byteLen(t) <= MIN_TTS_BYTES) {
         throw new Error(
-          `Cloud TTS: server still returned 413 even after splitting (chunk length=${t.length}).`
+          `Cloud TTS: server still returned TOO_LARGE even after splitting (chunk byte length=${byteLen(t)}).`
         );
       }
 
@@ -278,7 +290,7 @@ async function synthesizeWithAdaptiveSplit(
       }
 
       console.info(
-        `[TTS] 413 received. Splitting chunk (${t.length} chars) -> (${a.length} + ${b.length}) and retrying.`
+        `[TTS] TOO_LARGE received. Splitting chunk (${byteLen(t)} bytes) -> (${byteLen(a)} + ${byteLen(b)}) and retrying.`
       );
 
       return [
@@ -299,11 +311,11 @@ export async function synthesizeChunk(
   const endpoint = (import.meta as any).env?.VITE_TTS_ENDPOINT || DEFAULT_ENDPOINT;
   const cloudVoice = sanitizeVoiceForCloud(voiceName);
 
-  // initial chunking pass (safe default)
-  const chunks = chunkTextForTTS(text, MAX_TTS_CHARS);
+  // initial chunking pass (safe byte-based default)
+  const chunks = chunkTextForTTS(text, MAX_TTS_BYTES);
 
   if (chunks.length > 1) {
-    console.info(`[TTS] Text split into ${chunks.length} base chunks (limit=${MAX_TTS_CHARS}).`);
+    console.info(`[TTS] Text split into ${chunks.length} base chunks (byte limit=${MAX_TTS_BYTES}).`);
   }
 
   const audioParts: Uint8Array[] = [];
@@ -317,10 +329,11 @@ export async function synthesizeChunk(
       console.info(`[TTS] Requesting Synthesis base chunk ${i + 1}/${chunks.length}:`, {
         voice: cloudVoice,
         rate: speakingRate,
-        length: baseChunk.length,
+        lengthChars: baseChunk.length,
+        lengthBytes: byteLen(baseChunk)
       });
 
-      // adaptive split handles 413 automatically
+      // adaptive split handles 413 / 500-oversize automatically
       const segments = await synthesizeWithAdaptiveSplit(
         endpoint,
         baseChunk,
@@ -341,7 +354,7 @@ export async function synthesizeChunk(
 
     const mergedBytes = concatU8(audioParts);
 
-    // ✅ FIX: create Blob from a real ArrayBuffer slice (avoids TS BlobPart mismatch)
+    // Force creation of a real ArrayBuffer from the merged bytes
     const mp3Buffer = u8ToArrayBuffer(mergedBytes);
     const blob = new Blob([mp3Buffer], { type: "audio/mpeg" });
 
