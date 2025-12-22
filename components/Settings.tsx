@@ -1,6 +1,6 @@
 import React from 'react';
 import { ReaderSettings, Theme } from '../types';
-import { Type, AlignJustify, MoveVertical, Minus, Plus, RefreshCw, Smartphone, MonitorOff, AlertTriangle, Cloud, CloudOff, Loader2, Key, LogOut, Save } from 'lucide-react';
+import { Type, AlignJustify, MoveVertical, Minus, Plus, RefreshCw, Smartphone, MonitorOff, AlertTriangle, Cloud, CloudOff, Loader2, Key, LogOut, Save, LogIn } from 'lucide-react';
 
 interface SettingsProps {
   settings: ReaderSettings;
@@ -95,12 +95,15 @@ const Settings: React.FC<SettingsProps> = ({
                    </button>
                    {isCloudLinked ? (
                       <>
+                        <button onClick={onLinkCloud} title="Reconnect Account" className="p-3 rounded-xl border border-amber-500/30 text-amber-500 hover:bg-amber-500/10 transition-all">
+                           <LogIn className="w-4 h-4" />
+                        </button>
                         <button onClick={onSyncNow} disabled={isSyncing} className="flex-1 sm:flex-none px-6 py-3 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 hover:scale-105 transition-all">
                            {isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} Sync Saved
                         </button>
                         <button onClick={onClearAuth} className={`p-3 rounded-xl border transition-all ${isDark ? 'bg-slate-800 text-slate-400' : 'bg-white text-slate-400'}`}><LogOut className="w-4 h-4" /></button>
                       </>
-                   ) : <button onClick={onLinkCloud} className="w-full sm:w-auto px-8 py-4 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 hover:scale-105 transition-all"><Cloud className="w-3.5 h-3.5" /> Link Account</button>}
+                   ) : <button onClick={onLinkCloud} disabled={!googleClientId} className="w-full sm:w-auto px-8 py-4 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 hover:scale-105 transition-all disabled:opacity-50"><Cloud className="w-3.5 h-3.5" /> Link Account</button>}
                 </div>
              </div>
           </div>

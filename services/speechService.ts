@@ -253,7 +253,8 @@ class SpeechController {
     if (this.onFetchStateChange) this.onFetchStateChange(true);
 
     try {
-      const { url } = await getDriveAudioObjectUrl(token, fileId);
+      // Fix: getDriveAudioObjectUrl expects 1 argument (fileId), not 2.
+      const { url } = await getDriveAudioObjectUrl(fileId);
       if (this.sessionToken !== session) {
         revokeObjectUrl(url);
         return;

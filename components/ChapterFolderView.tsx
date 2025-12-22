@@ -119,7 +119,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     const introDurSec = await getHighPrecisionDuration(introBlob);
     allBlobs.push(introBlob);
 
-    // Using single chunk for simplicity, but maintaining chunkMap for high-precision highlight support
     const textChunks = [contentText];
     const chunkMap: AudioChunkMetadata[] = [];
     
@@ -143,18 +142,17 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       }
     }
 
-    if (book.backend === StorageBackend.DRIVE && driveToken && allBlobs.length > 0) {
+    if (book.backend === StorageBackend.DRIVE && book.driveFolderId && allBlobs.length > 0) {
       const combinedBlob = new Blob(allBlobs, { type: 'audio/mpeg' });
       const filename = buildMp3Name(chapter.index, chapter.title);
-      console.log(`[AudioGen] Uploading ${filename} to Drive folder ${book.driveFolderId}`);
-      const audioDriveId = await uploadToDrive(driveToken, book.driveFolderId!, filename, combinedBlob, chapter.audioDriveId, 'audio/mpeg');
+      const audioDriveId = await uploadToDrive(book.driveFolderId!, filename, combinedBlob, chapter.audioDriveId, 'audio/mpeg');
       return { audioDriveId, prefixLen, introDurSec, chunkMap };
     }
     return undefined;
   };
 
   const handleRunGeneration = async (voiceId: string, chapterId?: string) => {
-    if (!driveToken || !book.driveFolderId) {
+    if (!book.driveFolderId) {
        alert("Drive folder not linked. Please link a folder first in book settings.");
        return;
     }
@@ -176,15 +174,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             audioIntroDurSec: res.introDurSec, audioChunkMap: res.chunkMap, audioSignature: currentSignature 
           });
         }
-      } catch (err) { alert("Generation failed: " + err); } finally { setSynthesizingId(null); }
+      } catch (err: any) { alert("Generation failed: " + err.message); } finally { setSynthesizingId(null); }
     } else {
       setIsBatchSynthesizing(true);
       try {
-        // 1) List files in folder to find existing audio
-        console.log(`[SyncBulk] Listing files in folder: ${book.driveFolderId}`);
-        const driveFiles = await listFilesInFolder(driveToken, book.driveFolderId);
-        
-        // 2) Build MP3 Map (name -> id)
+        const driveFiles = await listFilesInFolder(book.driveFolderId);
         const mp3Map = new Map<string, string>();
         for (const f of driveFiles) {
           if (f.name?.toLowerCase().endsWith(".mp3") || f.mimeType?.startsWith("audio/")) {
@@ -192,27 +186,22 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           }
         }
 
-        // 3) Process chapters missing audio OR having existing audio on Drive but not in state
         const processingQueue: Chapter[] = [];
         for (const ch of chapters) {
           const expectedName = buildMp3Name(ch.index, ch.title);
           const driveId = mp3Map.get(expectedName);
           
           if (driveId && !ch.audioDriveId) {
-            // Already on Drive but not in local state - just update state (fast sync)
-            console.log(`[SyncBulk] Found existing file for Chapter ${ch.index}: ${expectedName}`);
             if (onUpdateChapter) {
               onUpdateChapter({ ...ch, audioDriveId: driveId, audioSignature: currentSignature });
             }
           } else if (!driveId) {
-            // Truly missing
             processingQueue.push(ch);
           }
         }
 
         setBatchProgress({ current: 0, total: processingQueue.length });
         
-        // 4) Sequential generation
         for (let i = 0; i < processingQueue.length; i++) {
           const chapter = processingQueue[i];
           setBatchProgress({ current: i + 1, total: processingQueue.length });
@@ -231,9 +220,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             setSynthesizingId(null);
           }
         }
-      } catch (err) {
+      } catch (err: any) {
         console.error("[SyncBulk] Critical failure:", err);
-        alert("Batch synchronization failed. Check console for details.");
+        alert("Batch synchronization failed: " + err.message);
       } finally {
         setIsBatchSynthesizing(false);
       }

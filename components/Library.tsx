@@ -1,8 +1,8 @@
-
 import React, { useState } from 'react';
 import { Book, Theme, StorageBackend } from '../types';
 import { BookOpen, Plus, Trash2, History, Cloud, Monitor, X, Database, Loader2, ChevronRight, CheckCircle2 } from 'lucide-react';
-import { openFolderPicker, authenticateDrive } from '../services/driveService';
+import { openFolderPicker } from '../services/driveService';
+import { getValidDriveToken } from '../services/driveAuth';
 
 interface LibraryProps {
   books: Book[];
@@ -61,13 +61,18 @@ const Library: React.FC<LibraryProps> = ({
     if (!newTitle.trim()) return;
     setIsProcessingAdd(true);
     try {
-      const token = await authenticateDrive(googleClientId);
-      const selected = await openFolderPicker(token);
+      // Ensure we have a token before trying to open the picker
+      await getValidDriveToken();
+      const selected = await openFolderPicker();
       if (selected) {
         handleAdd(StorageBackend.DRIVE, null, selected.id, selected.name);
       }
     } catch (e: any) {
-      alert("Drive Access Failed: " + e.message);
+      if (e.message === "Reconnect Google Drive") {
+        alert("Please connect your Google account in Settings first.");
+      } else {
+        alert("Drive Access Failed: " + e.message);
+      }
     } finally {
       setIsProcessingAdd(false);
     }
