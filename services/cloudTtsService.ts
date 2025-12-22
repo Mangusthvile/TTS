@@ -16,17 +16,16 @@ const encoder = new TextEncoder();
 const byteLen = (s: string): number => encoder.encode(s).length;
 
 // --- Type helpers to keep TS + DOM Blob types happy ---
-// Fix: Uint8Array is not a generic type in standard TypeScript environments.
 type U8 = Uint8Array;
 
 function makeU8(len: number): U8 {
   // Force a real ArrayBuffer backing store
-  return new Uint8Array(new ArrayBuffer(len)) as U8;
+  return new Uint8Array(new ArrayBuffer(len));
 }
 
 function toU8(u8: Uint8Array): U8 {
   // Ensure the returned typed array is definitely ArrayBuffer-backed
-  if (u8.buffer instanceof ArrayBuffer) return u8 as unknown as U8;
+  if (u8.buffer instanceof ArrayBuffer) return u8;
   const out = makeU8(u8.byteLength);
   out.set(u8);
   return out;
@@ -139,17 +138,13 @@ function concatU8(parts: Uint8Array[]): U8 {
 
 /**
  * Convert Uint8Array -> ArrayBuffer (real ArrayBuffer, exact range)
- * Works even if input is a view with byteOffset/byteLength.
+ * Guaranteed to return a REAL ArrayBuffer, avoiding SharedArrayBuffer/ArrayBufferLike issues (TS2322).
  */
 function u8ToArrayBuffer(u8: Uint8Array): ArrayBuffer {
-  // Always return a clean ArrayBuffer slice of the exact bytes
-  if (u8.buffer instanceof ArrayBuffer) {
-    return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
-  }
-  // SharedArrayBuffer (or other): copy into a fresh ArrayBuffer
-  const copy = makeU8(u8.byteLength);
-  copy.set(u8);
-  return copy.buffer;
+  // Always copy into a fresh ArrayBuffer to ensure it's not a SharedArrayBuffer.
+  const ab = new ArrayBuffer(u8.byteLength);
+  new Uint8Array(ab).set(u8);
+  return ab;
 }
 
 /**
@@ -354,7 +349,8 @@ export async function synthesizeChunk(
 
     const mergedBytes = concatU8(audioParts);
 
-    // Force creation of a real ArrayBuffer from the merged bytes
+    // IMPORTANT: must pass a REAL ArrayBuffer to Blob.
+    // Do not use mergedBytes.buffer directly (can be SharedArrayBuffer / ArrayBufferLike -> TS2322).
     const mp3Buffer = u8ToArrayBuffer(mergedBytes);
     const blob = new Blob([mp3Buffer], { type: "audio/mpeg" });
 
