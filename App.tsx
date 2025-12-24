@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, ReaderSettings, RuleType, Rule, SavedSnapshot, AudioStatus } from './types';
 import Library from './components/Library';
@@ -9,7 +10,8 @@ import Extractor from './components/Extractor';
 import ChapterFolderView from './components/ChapterFolderView';
 import ChapterSidebar from './components/ChapterSidebar';
 import { speechController, applyRules, PROGRESS_STORE_V4 } from './services/speechService';
-import { fetchDriveFile, uploadToDrive, deleteDriveFile, findFileSync, buildMp3Name } from './services/driveService';
+// Added fetchDriveBinary to the imports from driveService to fix the "Cannot find name 'fetchDriveBinary'" error.
+import { fetchDriveFile, fetchDriveBinary, uploadToDrive, deleteDriveFile, findFileSync, buildMp3Name, checkFileExists, createDriveFolder } from './services/driveService';
 import { initDriveAuth, getValidDriveToken, clearStoredToken } from './services/driveAuth';
 import { saveChapterToFile } from './services/fileService';
 import { synthesizeChunk } from './services/cloudTtsService';
@@ -64,7 +66,6 @@ const App: React.FC = () => {
   const [isChapterSidebarOpen, setIsChapterSidebarOpen] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoadingChapter, setIsLoadingChapter] = useState(false);
-  const [isFetchingAudio, setIsFetchingAudio] = useState(false);
   const [transitionToast, setTransitionToast] = useState<{ number: number; title: string; type?: 'info' | 'success' | 'error' | 'reconnect' } | null>(null);
   const [sleepTimerSeconds, setSleepTimerSeconds] = useState<number | null>(null);
   const [stopAfterChapter, setStopAfterChapter] = useState(false);
@@ -86,6 +87,40 @@ const App: React.FC = () => {
     if (state.googleClientId) initDriveAuth(state.googleClientId);
   }, [state.googleClientId]);
 
+  // Automated verify cloud files when entering collection
+  useEffect(() => {
+    if (activeTab === 'collection' && activeBook && activeBook.backend === StorageBackend.DRIVE) {
+      verifyCloudFiles();
+    }
+  }, [activeTab, state.activeBookId]);
+
+  const verifyCloudFiles = useCallback(async () => {
+    if (!activeBook || activeBook.backend !== StorageBackend.DRIVE || !activeBook.driveFolderId) return;
+    
+    setIsSyncing(true);
+    const updatedChapters = await Promise.all(activeBook.chapters.map(async (c) => {
+      let audioReady = false;
+      if (c.cloudAudioFileId) {
+        audioReady = await checkFileExists(c.cloudAudioFileId);
+      }
+      
+      // If we thought it was ready but file is gone, or if we have ID but status says failed
+      if (audioReady) {
+        return { ...c, audioStatus: AudioStatus.READY };
+      } else if (c.cloudAudioFileId) {
+        // ID exists but file is gone
+        return { ...c, cloudAudioFileId: undefined, audioStatus: AudioStatus.NONE };
+      }
+      return c;
+    }));
+
+    setState(prev => ({
+      ...prev,
+      books: prev.books.map(b => b.id === activeBook.id ? { ...b, chapters: updatedChapters } : b)
+    }));
+    setIsSyncing(false);
+  }, [activeBook]);
+
   const showToast = (title: string, number = 0, type: 'info' | 'success' | 'error' | 'reconnect' = 'info') => {
     setTransitionToast({ number, title, type });
     if (type !== 'reconnect') setTimeout(() => setTransitionToast(null), 3500);
@@ -102,8 +137,7 @@ const App: React.FC = () => {
     });
 
     const localProgress = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
-    // Fix: Using 'progressStore' from snapshot instead of undefined variable 'remote'
-    const finalProgress = { ...progressStore, ...localProgress }; // Simplified merge for spec
+    const finalProgress = { ...progressStore, ...localProgress };
 
     setState(prev => ({
       ...prev, 
@@ -179,22 +213,49 @@ const App: React.FC = () => {
     const introText = applyRules(rawIntro, book.rules);
     const contentText = applyRules(chapter.content, book.rules);
     const cacheKey = generateAudioKey(introText + contentText, voice, 1.0);
+    
+    // Step 1: Check local cache
     const cached = await getAudioFromCache(cacheKey);
     if (cached) {
-      updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, hasCachedAudio: true });
+      // If we are on Drive, upload cached audio to ensure it's there
+      if (book.backend === StorageBackend.DRIVE && book.driveFolderId && !chapter.cloudAudioFileId) {
+         updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.GENERATING });
+         try {
+           const audioName = buildMp3Name(chapter.index, chapter.title);
+           const driveFileId = await uploadToDrive(book.driveFolderId, audioName, cached, undefined, 'audio/mpeg');
+           updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, cloudAudioFileId: driveFileId, hasCachedAudio: true });
+         } catch(e) {
+           updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.FAILED });
+         }
+      } else {
+        updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, hasCachedAudio: true });
+      }
       return;
     }
 
+    // Step 2: Generate fresh audio
     updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.GENERATING });
     try {
       const res = await synthesizeChunk(introText + contentText, voice, 1.0);
       const audioBlob = await fetch(res.audioUrl).then(r => r.blob());
       await saveAudioToCache(cacheKey, audioBlob);
-      updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, hasCachedAudio: true });
+      
+      let cloudId = undefined;
+      if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
+         const audioName = buildMp3Name(chapter.index, chapter.title);
+         cloudId = await uploadToDrive(book.driveFolderId, audioName, audioBlob, undefined, 'audio/mpeg');
+      }
+
+      updateChapterAudio(bookId, chapterId, { 
+        audioStatus: AudioStatus.READY, 
+        hasCachedAudio: true, 
+        cloudAudioFileId: cloudId 
+      });
+      handleSaveState(true);
     } catch (e) {
       updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.FAILED });
     }
-  }, []);
+  }, [handleSaveState]);
 
   const updateChapterAudio = (bookId: string, chapterId: string, updates: Partial<Chapter>) => {
     setState(prev => ({
@@ -207,28 +268,51 @@ const App: React.FC = () => {
 
   const handleBulkAudioEnsure = useCallback(async () => {
     if (!activeBook) return;
-    showToast("Starting bulk generation...", 0, 'info');
+    showToast("Checking cloud audio...", 0, 'info');
     for (const chapter of activeBook.chapters) {
-      if (chapter.audioStatus !== AudioStatus.READY) {
+      const exists = chapter.cloudAudioFileId ? await checkFileExists(chapter.cloudAudioFileId) : false;
+      if (!exists) {
         await queueBackgroundTTS(activeBook.id, chapter.id);
       }
     }
-    showToast("Bulk generation finished", 0, 'success');
+    showToast("Audio processing complete", 0, 'success');
   }, [activeBook, queueBackgroundTTS]);
 
   const handleChapterExtracted = useCallback(async (data: { title: string; content: string; url: string; index: number }) => {
-    if (!stateRef.current.activeBookId) return;
+    const s = stateRef.current;
+    if (!s.activeBookId) return;
+    const book = s.books.find(b => b.id === s.activeBookId);
+    if (!book) return;
+
+    let cloudTextId = undefined;
+    if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
+      showToast("Uploading text to Drive...", 0, 'info');
+      try {
+        const txtName = `${data.index.toString().padStart(3, '0')}_${data.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.txt`;
+        cloudTextId = await uploadToDrive(book.driveFolderId, txtName, data.content, undefined, 'text/plain');
+      } catch (e) {
+        showToast("Drive Upload Failed", 0, 'error');
+      }
+    }
+
     const newChapter: Chapter = {
       id: crypto.randomUUID(), index: data.index, title: data.title, content: data.content,
       filename: `${data.index.toString().padStart(3, '0')}_${data.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.txt`,
-      wordCount: data.content.split(/\s+/).filter(Boolean).length, progress: 0, audioStatus: AudioStatus.PENDING
+      wordCount: data.content.split(/\s+/).filter(Boolean).length, 
+      progress: 0, 
+      progressChars: 0,
+      audioStatus: AudioStatus.PENDING,
+      cloudTextFileId: cloudTextId
     };
+
     setState(prev => ({
       ...prev,
       books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, chapters: [...b.chapters, newChapter].sort((a,b) => a.index-b.index) } : b)
     }));
+    
     setIsAddChapterOpen(false);
-    queueBackgroundTTS(stateRef.current.activeBookId, newChapter.id);
+    showToast("Chapter added. Starting TTS...", 0, 'success');
+    queueBackgroundTTS(s.activeBookId, newChapter.id);
   }, [queueBackgroundTTS]);
 
   const handlePlay = useCallback(async () => {
@@ -247,22 +331,39 @@ const App: React.FC = () => {
       const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
       const introText = applyRules(rawIntro, book.rules);
       const cacheKey = generateAudioKey(introText + text, voice, 1.0);
-      const cachedBlob = await getAudioFromCache(cacheKey);
+      let audioBlob = await getAudioFromCache(cacheKey);
 
-      if (cachedBlob) {
-        const url = URL.createObjectURL(cachedBlob);
+      // If not in local cache but we have a Drive ID, try to download it
+      if (!audioBlob && chapter.cloudAudioFileId) {
+        showToast("Downloading from Drive...", 0, 'info');
+        try {
+          audioBlob = await fetchDriveBinary(chapter.cloudAudioFileId);
+          await saveAudioToCache(cacheKey, audioBlob);
+        } catch(e) {
+          showToast("Drive download failed", 0, 'error');
+        }
+      }
+
+      if (audioBlob) {
+        const url = URL.createObjectURL(audioBlob);
+        speechController.setContext({ bookId: book.id, chapterId: chapter.id });
         speechController.loadAndPlayDriveFile('', 'LOCAL_ID', text.length, 0, undefined, 0, speed, 
           () => { if (stopAfterChapter) setIsPlaying(false); else handleNextChapter(); },
-          (meta) => { setAudioCurrentTime(meta.currentTime); setAudioDuration(meta.duration); setState(p => ({ ...p, currentOffsetChars: meta.charOffset })); },
+          (meta) => { 
+            setAudioCurrentTime(meta.currentTime); 
+            setAudioDuration(meta.duration); 
+            setState(p => ({ ...p, currentOffsetChars: meta.charOffset })); 
+          },
           url
         );
       } else {
         showToast("Audio generating...", 0, 'info');
         await queueBackgroundTTS(s.activeBookId!, chapter.id);
-        handlePlay();
+        // Playback will be manually triggered again or we can recursive-call
+        setTimeout(() => handlePlay(), 1000);
       }
     } catch (e) { setIsPlaying(false); showToast("Playback Error", 0, 'error'); }
-  }, [queueBackgroundTTS]);
+  }, [queueBackgroundTTS, stopAfterChapter]);
 
   const handleNextChapter = useCallback(() => {
     const b = activeBook; if (!b) return;
@@ -270,16 +371,32 @@ const App: React.FC = () => {
     if (idx < b.chapters.length - 1) {
       const next = b.chapters[idx + 1];
       setState(p => ({ ...p, books: p.books.map(bk => bk.id === b.id ? { ...bk, currentChapterId: next.id } : bk), currentOffsetChars: 0 }));
-    } else setIsPlaying(false);
-  }, [activeBook]);
+      setTimeout(() => handlePlay(), 100);
+    } else {
+      setIsPlaying(false);
+      showToast("Book Complete", 0, 'success');
+    }
+  }, [activeBook, handlePlay]);
 
   const handlePause = () => { speechController.pause(); setIsPlaying(false); };
   const handleSeekToTime = (t: number) => speechController.seekToTime(t);
   const handleJumpToOffset = (o: number) => speechController.seekToOffset(o);
 
+  // Sync state and progress every few changes
   useEffect(() => {
     localStorage.setItem('talevox_pro_v2', JSON.stringify({ ...state, books: state.books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined })) }));
   }, [state]);
+
+  // Listener for progress updates from speechController
+  useEffect(() => {
+    const handleProgUpdate = (e: any) => {
+      const { bookId, chapterId } = e.detail;
+      // We don't necessarily need to trigger a full React state update on every character move,
+      // but we should ensure it's saved locally. speechController.saveProgress already does this.
+    };
+    window.addEventListener('talevox_progress_updated', handleProgUpdate);
+    return () => window.removeEventListener('talevox_progress_updated', handleProgUpdate);
+  }, []);
 
   return (
     <div className={`flex flex-col h-screen overflow-hidden font-sans transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-950 text-slate-100' : state.theme === Theme.SEPIA ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>

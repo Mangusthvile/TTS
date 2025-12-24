@@ -77,7 +77,12 @@ export async function getValidDriveToken(opts?: { interactive?: boolean }): Prom
     tokenClient.callback = (resp: TokenResponse & { error?: string }) => {
       if (resp?.error) {
         clearStoredToken();
-        reject(new Error(resp.error));
+        // If we tried silently and failed, we don't reject yet if it was meant to be interactive
+        if (!opts?.interactive) {
+           reject(new Error(resp.error));
+        } else {
+           reject(new Error("Login required"));
+        }
         return;
       }
       accessToken = resp.access_token;
@@ -86,9 +91,13 @@ export async function getValidDriveToken(opts?: { interactive?: boolean }): Prom
       saveToStorage();
       resolve(accessToken!);
     };
-    // Use prompt: none for silent if possible, but Google often requires 'consent' or 'select_account'
-    // if a session isn't explicitly active.
-    tokenClient.requestAccessToken({ prompt: opts?.interactive ? "consent" : "" });
+    
+    // Attempt silent refresh first if not forced interactive
+    if (!opts?.interactive) {
+       tokenClient.requestAccessToken({ prompt: "" });
+    } else {
+       tokenClient.requestAccessToken({ prompt: "consent" });
+    }
   });
 }
 
@@ -96,7 +105,7 @@ export async function getValidDriveToken(opts?: { interactive?: boolean }): Prom
  * Wrapper for Drive API calls that handles Authorization and 401 retries.
  */
 export async function driveFetch(input: RequestInfo, init: RequestInit = {}): Promise<Response> {
-  // Pre-emptive refresh
+  // Pre-emptive refresh (silent)
   if (!isTokenValid()) {
     try { await getValidDriveToken({ interactive: false }); } catch(e) {}
   }
@@ -112,16 +121,12 @@ export async function driveFetch(input: RequestInfo, init: RequestInit = {}): Pr
   if (res.status === 401) {
     clearStoredToken();
     try {
+      // One retry attempt silent
       await getValidDriveToken({ interactive: false });
       res = await doFetch();
     } catch (e) {
       throw new Error("Reconnect Google Drive");
     }
-  }
-
-  if (res.status === 401) {
-    clearStoredToken();
-    throw new Error("Reconnect Google Drive");
   }
 
   return res;

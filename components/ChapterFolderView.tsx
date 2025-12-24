@@ -37,6 +37,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const textSecondary = isDark ? 'text-slate-400' : isSepia ? 'text-[#3c2f25]/70' : 'text-slate-600';
 
   const chapters = useMemo(() => [...(book.chapters || [])].sort((a, b) => a.index - b.index), [book.chapters]);
+  
   const progressData = useMemo(() => {
     const store = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
     return store[book.id] || {};
@@ -54,23 +55,24 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   };
 
   const renderAudioStatusIcon = (c: Chapter) => {
-    if (c.audioStatus === AudioStatus.READY) {
+    // Priority 1: Cloud/Drive file check
+    if (c.cloudAudioFileId) {
       return (
-        <span title="Audio ready" className="inline-flex items-center">
+        <span title="Audio verified on Google Drive" className="inline-flex items-center">
           <Cloud className="w-4 h-4 text-indigo-500" aria-label="Audio ready" role="img" />
         </span>
       );
     }
     if (c.audioStatus === AudioStatus.GENERATING) {
       return (
-        <span title="Generating..." className="inline-flex items-center">
+        <span title="Generating and Uploading..." className="inline-flex items-center">
           <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" aria-label="Generating..." role="img" />
         </span>
       );
     }
     return (
-      <span title="Audio missing — generate/sync needed" className="inline-flex items-center">
-        <AlertCircle className="w-4 h-4 text-amber-500" aria-label="Audio missing — generate/sync needed" role="img" />
+      <span title="Audio missing or not uploaded to Drive" className="inline-flex items-center">
+        <AlertTriangle className="w-4 h-4 text-amber-500" aria-label="Audio missing" role="img" />
       </span>
     );
   };
@@ -88,9 +90,18 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           return (
             <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`grid grid-cols-[40px_1fr_100px_100px] items-center px-6 py-4 cursor-pointer border-b last:border-0 transition-colors ${isDark ? 'hover:bg-white/5 border-slate-800' : 'hover:bg-black/5 border-black/5'} ${isCompleted ? 'opacity-50' : ''}`}>
               <div className={`font-mono text-xs font-black ${textSecondary}`}>{String(c.index).padStart(3, '0')}</div>
-              <div className="flex items-center gap-3 min-w-0 mr-4">
-                <div className="font-black text-sm truncate">{c.title}</div>
-                {renderAudioStatusIcon(c)}
+              <div className="flex flex-col gap-1 min-w-0 mr-4">
+                <div className="flex items-center gap-3">
+                  <div className="font-black text-sm truncate">{c.title}</div>
+                  {renderAudioStatusIcon(c)}
+                </div>
+                {/* Progress Bar Container */}
+                <div className={`h-1 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-700' : 'bg-black/5'}`}>
+                   <div 
+                     className={`h-full transition-all duration-500 ${isCompleted ? 'bg-emerald-500' : 'bg-indigo-500'}`} 
+                     style={{ width: `${percent}%` }}
+                   />
+                </div>
               </div>
               <div className="text-right px-4">
                 <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${isCompleted ? 'bg-emerald-500/20 text-emerald-600' : 'bg-indigo-500/15 text-indigo-500'}`}>{isCompleted ? 'Done' : `${percent}%`}</span>
@@ -108,29 +119,48 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const renderListView = () => (
     <div className="space-y-2">
-      {chapters.map(c => (
-        <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`flex items-center gap-4 p-4 rounded-2xl border cursor-pointer transition-all hover:translate-x-1 ${cardBg}`}>
-          <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-mono text-[10px] font-black ${isDark ? 'bg-slate-950 text-indigo-400' : 'bg-indigo-50 text-indigo-600'}`}>{c.index}</div>
-          <div className="flex-1 min-w-0 font-black text-sm truncate">{c.title}</div>
-          <div className="flex items-center gap-3">
-            {renderAudioStatusIcon(c)}
-            <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete?')) onDeleteChapter(c.id); }} className="p-2 opacity-40 hover:opacity-100 hover:text-red-500"><Trash2 className="w-4 h-4" /></button>
+      {chapters.map(c => {
+        const saved = progressData[c.id];
+        const percent = saved?.percent !== undefined ? Math.floor(saved.percent * 100) : 0;
+        return (
+          <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`flex flex-col gap-2 p-4 rounded-2xl border cursor-pointer transition-all hover:translate-x-1 ${cardBg}`}>
+            <div className="flex items-center gap-4">
+              <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-mono text-[10px] font-black ${isDark ? 'bg-slate-950 text-indigo-400' : 'bg-indigo-50 text-indigo-600'}`}>{c.index}</div>
+              <div className="flex-1 min-w-0 font-black text-sm truncate">{c.title}</div>
+              <div className="flex items-center gap-3">
+                <span className="text-[9px] font-black opacity-40 uppercase">{percent}%</span>
+                {renderAudioStatusIcon(c)}
+                <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete?')) onDeleteChapter(c.id); }} className="p-2 opacity-40 hover:opacity-100 hover:text-red-500"><Trash2 className="w-4 h-4" /></button>
+              </div>
+            </div>
+            <div className={`h-0.5 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-700' : 'bg-black/5'}`}>
+               <div className="h-full bg-indigo-500" style={{ width: `${percent}%` }} />
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 
   const renderGridView = () => (
     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-      {chapters.map(c => (
-        <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`aspect-square p-4 rounded-3xl border flex flex-col items-center justify-center text-center gap-2 cursor-pointer transition-all hover:scale-105 group relative ${cardBg}`}>
-          <div className="absolute top-3 right-3">{renderAudioStatusIcon(c)}</div>
-          <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-mono text-lg font-black mb-1 ${isDark ? 'bg-slate-950 text-indigo-400' : 'bg-indigo-50 text-indigo-600'}`}>{c.index}</div>
-          <div className="font-black text-xs line-clamp-2 leading-tight px-1">{c.title}</div>
-          <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete?')) onDeleteChapter(c.id); }} className="absolute bottom-2 right-2 p-2 opacity-0 group-hover:opacity-100 text-red-500 transition-opacity"><Trash2 className="w-3.5 h-3.5" /></button>
-        </div>
-      ))}
+      {chapters.map(c => {
+        const saved = progressData[c.id];
+        const percent = saved?.percent !== undefined ? Math.floor(saved.percent * 100) : 0;
+        return (
+          <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`aspect-square p-4 rounded-3xl border flex flex-col items-center justify-center text-center gap-2 cursor-pointer transition-all hover:scale-105 group relative ${cardBg}`}>
+            <div className="absolute top-3 right-3">{renderAudioStatusIcon(c)}</div>
+            <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-mono text-lg font-black mb-1 ${isDark ? 'bg-slate-950 text-indigo-400' : 'bg-indigo-50 text-indigo-600'}`}>{c.index}</div>
+            <div className="font-black text-xs line-clamp-2 leading-tight px-1">{c.title}</div>
+            <div className="mt-2 w-full px-4">
+               <div className={`h-1 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-700' : 'bg-black/5'}`}>
+                  <div className="h-full bg-indigo-500" style={{ width: `${percent}%` }} />
+               </div>
+            </div>
+            <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete?')) onDeleteChapter(c.id); }} className="absolute bottom-2 right-2 p-2 opacity-0 group-hover:opacity-100 text-red-500 transition-opacity"><Trash2 className="w-3.5 h-3.5" /></button>
+          </div>
+        );
+      })}
     </div>
   );
 
@@ -157,7 +187,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             <p className="text-xs font-bold opacity-60 uppercase tracking-widest mb-6">{book.chapters.length} Chapters • {book.backend} backend</p>
             <div className="flex flex-wrap gap-3">
               <button onClick={onAddChapter} className="px-6 py-3 bg-indigo-600 text-white rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-all flex items-center gap-2"><Plus className="w-4 h-4" /> Add Chapter</button>
-              <button onClick={onBulkAudioEnsure} className="px-6 py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center gap-2" title="Make sure all chapters have audio files"><Wand2 className="w-4 h-4" /> Ensure Audio</button>
+              <button onClick={onBulkAudioEnsure} className="px-6 py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center gap-2" title="Make sure all chapters have audio files on Drive"><Wand2 className="w-4 h-4" /> Ensure Audio</button>
             </div>
           </div>
         </div>

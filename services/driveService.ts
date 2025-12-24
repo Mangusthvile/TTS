@@ -1,3 +1,4 @@
+
 import { driveFetch, getValidDriveToken } from './driveAuth';
 
 /**
@@ -11,7 +12,20 @@ export function buildMp3Name(chapterIndex: number, title: string) {
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "")
     .slice(0, 60);
-  return `${chapterIndex}_${safe}.mp3`;
+  return `${chapterIndex.toString().padStart(3, '0')}_${safe}.mp3`;
+}
+
+export async function checkFileExists(fileId: string): Promise<boolean> {
+  if (!fileId) return false;
+  try {
+    const url = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,trashed&supportsAllDrives=true`;
+    const response = await driveFetch(url);
+    if (!response.ok) return false;
+    const data = await response.json();
+    return data && !data.trashed;
+  } catch (e) {
+    return false;
+  }
 }
 
 export async function openFolderPicker(): Promise<{id: string, name: string} | null> {
@@ -84,8 +98,10 @@ export async function listFilesInFolder(folderId: string): Promise<{id: string, 
   return data.files || [];
 }
 
-export async function findFileSync(name: string): Promise<string | null> {
-  const q = encodeURIComponent(`name = '${name}' and trashed = false`);
+export async function findFileSync(name: string, parentId?: string): Promise<string | null> {
+  let qStr = `name = '${name.replace(/'/g, "\\'")}' and trashed = false`;
+  if (parentId) qStr += ` and '${parentId}' in parents`;
+  const q = encodeURIComponent(qStr);
   const response = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)&includeItemsFromAllDrives=true&supportsAllDrives=true`);
   if (!response.ok) throw await getErrorFromResponse(response, 'DRIVE_FIND_ERROR');
   const data = await response.json();
@@ -171,16 +187,19 @@ export async function uploadToDrive(
 
   if (!response.ok) throw await getErrorFromResponse(response, 'UPLOAD_FAILED');
   const data = await response.json();
-  return data.id || existingFileId;
+  return data.id || existingFileId || '';
 }
 
-export async function createDriveFolder(name: string): Promise<string> {
+export async function createDriveFolder(name: string, parentId?: string): Promise<string> {
+  const metadata: any = { name, mimeType: 'application/vnd.google-apps.folder' };
+  if (parentId) metadata.parents = [parentId];
+
   const response = await driveFetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
     method: 'POST',
     headers: { 
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder' })
+    body: JSON.stringify(metadata)
   });
   if (!response.ok) throw await getErrorFromResponse(response, 'FOLDER_CREATION_FAILED');
   const data = await response.json();

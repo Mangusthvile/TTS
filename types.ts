@@ -70,12 +70,14 @@ export interface Chapter {
   filename: string;
   content: string;
   wordCount: number;
-  progress: number; 
+  progress: number; // progress as ratio 0..1
+  progressChars: number; // actual character offset
   progressTotalLength?: number;
   isFavorite?: boolean;
   isCompleted?: boolean;
-  driveId?: string;
-  audioDriveId?: string;
+  driveId?: string; // Legacy field for main file
+  cloudTextFileId?: string; // Google Drive ID for .txt
+  cloudAudioFileId?: string; // Google Drive ID for .mp3
   audioStatus?: AudioStatus;
   audioSignature?: string; 
   audioPrefixLen?: number; 
