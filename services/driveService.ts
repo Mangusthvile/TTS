@@ -15,6 +15,15 @@ export function buildMp3Name(chapterIndex: number, title: string) {
   return `${chapterIndex.toString().padStart(3, '0')}_${safe}.mp3`;
 }
 
+export function buildTextName(chapterIndex: number, title: string) {
+  const safe = (title || "untitled")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 60);
+  return `${chapterIndex.toString().padStart(3, '0')}_${safe}.txt`;
+}
+
 /**
  * Guarantees a real ArrayBuffer, preventing TS SharedArrayBuffer errors.
  */

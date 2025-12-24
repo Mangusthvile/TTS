@@ -94,6 +94,7 @@ export interface Chapter {
   audioIntroDurSec?: number; 
   audioChunkMap?: AudioChunkMetadata[]; 
   hasCachedAudio?: boolean;
+  hasTextOnDrive?: boolean; // New for integrity checks
 }
 
 export interface BookSettings {

@@ -1,11 +1,11 @@
 
-import React, { useMemo, useState, useEffect } from 'react';
-import { Book, Theme, StorageBackend, Chapter, AudioChunkMetadata, AudioStatus, CLOUD_VOICES } from '../types';
-import { LayoutGrid, List, AlignJustify, Plus, Folder, CheckCircle2, Edit2, Check, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Wand2, FileText, AlertCircle } from 'lucide-react';
+import React, { useMemo, useState, useEffect, useCallback } from 'react';
+import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES } from '../types';
+import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle } from 'lucide-react';
 import { PROGRESS_STORE_V4, applyRules } from '../services/speechService';
 import { synthesizeChunk } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache } from '../services/audioCache';
-import { uploadToDrive, listFilesInFolder, buildMp3Name, checkFileExists } from '../services/driveService';
+import { uploadToDrive, listFilesInFolder, buildMp3Name, buildTextName } from '../services/driveService';
 
 type ViewMode = 'details' | 'list' | 'grid';
 
@@ -20,11 +20,10 @@ interface ChapterFolderViewProps {
   onUpdateChapter: (chapter: Chapter) => void;
   onUpdateBookSettings?: (settings: any) => void;
   onBackToLibrary: () => void;
-  onBulkAudioEnsure?: () => void;
 }
 
 const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
-  book, theme, onAddChapter, onOpenChapter, onToggleFavorite, onUpdateChapterTitle, onDeleteChapter, onUpdateChapter, onUpdateBookSettings, onBackToLibrary
+  book, theme, onAddChapter, onOpenChapter, onUpdateChapterTitle, onDeleteChapter, onUpdateChapter, onUpdateBookSettings, onBackToLibrary
 }) => {
   const VIEW_MODE_KEY = `talevox:viewMode:${book.id}`;
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
@@ -37,23 +36,20 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [editingChapterId, setEditingChapterId] = useState<string | null>(null);
   const [tempTitle, setTempTitle] = useState('');
   const [synthesizingId, setSynthesizingId] = useState<string | null>(null);
-  const [isBatchSynthesizing, setIsBatchSynthesizing] = useState(false);
-  const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
-  const [showVoiceModal, setShowVoiceModal] = useState<{ chapterId?: string; isBulk?: boolean } | null>(null);
+  const [isCheckingDrive, setIsCheckingDrive] = useState(false);
+  const [showVoiceModal, setShowVoiceModal] = useState<{ chapterId?: string } | null>(null);
   const [rememberAsDefault, setRememberAsDefault] = useState(true);
 
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
   const cardBg = isDark ? 'bg-slate-800 border-slate-700' : isSepia ? 'bg-[#f4ecd8] border-[#d8ccb6]' : 'bg-white border-black/10';
-  const controlBg = isDark ? 'bg-slate-950/40 border-slate-800' : isSepia ? 'bg-[#efe6d5] border-[#d8ccb6]' : 'bg-white border-black/5';
-  const textPrimary = isDark ? 'text-slate-100' : isSepia ? 'text-[#3c2f25]' : 'text-black';
   const textSecondary = isDark ? 'text-slate-400' : isSepia ? 'text-[#3c2f25]/70' : 'text-slate-600';
 
   const chapters = useMemo(() => [...(book.chapters || [])].sort((a, b) => a.index - b.index), [book.chapters]);
   const progressData = useMemo(() => {
     const store = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
     return store[book.id] || {};
-  }, [book.id, chapters]);
+  }, [book.id]);
 
   const handleRestart = (chapterId: string) => {
     const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
@@ -65,6 +61,43 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: { bookId: book.id, chapterId: chapterId } }));
     }
   };
+
+  const handleCheckDriveIntegrity = useCallback(async () => {
+    if (!book.driveFolderId) return;
+    setIsCheckingDrive(true);
+    try {
+      const driveFiles = await listFilesInFolder(book.driveFolderId);
+      const fileMap = new Map(driveFiles.map(f => [f.name, f.id]));
+      
+      let missingText = 0;
+      let missingAudio = 0;
+
+      for (const chapter of chapters) {
+        const expectedTextName = buildTextName(chapter.index, chapter.title);
+        const expectedAudioName = buildMp3Name(chapter.index, chapter.title);
+        
+        const textId = fileMap.get(expectedTextName);
+        const audioId = fileMap.get(expectedAudioName);
+
+        if (!textId) missingText++;
+        if (!audioId) missingAudio++;
+
+        onUpdateChapter({
+          ...chapter,
+          cloudTextFileId: textId || chapter.cloudTextFileId,
+          cloudAudioFileId: audioId || chapter.cloudAudioFileId,
+          hasTextOnDrive: !!textId,
+          audioStatus: audioId ? AudioStatus.READY : AudioStatus.PENDING
+        });
+      }
+
+      alert(`Checked ${chapters.length} chapters:\n${missingText} missing text\n${missingAudio} missing audio`);
+    } catch (e: any) {
+      alert("Integrity check failed: " + e.message);
+    } finally {
+      setIsCheckingDrive(false);
+    }
+  }, [book.driveFolderId, chapters, onUpdateChapter]);
 
   const generateAudio = async (chapter: Chapter, voiceToUse?: string) => {
     const voice = voiceToUse || book.settings.defaultVoiceId || 'en-US-Standard-C';
@@ -87,9 +120,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         }
       }
 
-      if (!audioBlob) {
-        throw new Error("No audio blob available for storage.");
-      }
+      if (!audioBlob) throw new Error("No audio blob available");
 
       let cloudId = chapter.cloudAudioFileId || chapter.audioDriveId;
       if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
@@ -104,61 +135,19 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         hasCachedAudio: true
       });
     } catch (e) {
-      console.error(e);
       onUpdateChapter({ ...chapter, audioStatus: AudioStatus.FAILED });
     } finally {
       setSynthesizingId(null);
     }
   };
 
-  const handleRunBulkSync = async (voiceId: string) => {
-    if (!book.driveFolderId) return;
-    setIsBatchSynthesizing(true);
-    setShowVoiceModal(null);
-    if (onUpdateBookSettings && rememberAsDefault) {
-      onUpdateBookSettings({ ...book.settings, defaultVoiceId: voiceId });
-    }
-
-    try {
-      const driveFiles = await listFilesInFolder(book.driveFolderId);
-      const mp3Map = new Map(driveFiles.filter(f => f.name.endsWith('.mp3')).map(f => [f.name, f.id]));
-
-      const processingQueue = chapters.filter(c => {
-        const expectedName = buildMp3Name(c.index, c.title);
-        const driveId = mp3Map.get(expectedName);
-        if (driveId && !c.cloudAudioFileId) {
-          onUpdateChapter({ ...c, cloudAudioFileId: driveId, audioStatus: AudioStatus.READY });
-          return false;
-        }
-        return !driveId;
-      });
-
-      setBatchProgress({ current: 0, total: processingQueue.length });
-      for (let i = 0; i < processingQueue.length; i++) {
-        setBatchProgress({ current: i + 1, total: processingQueue.length });
-        await generateAudio(processingQueue[i], voiceId);
-      }
-    } finally {
-      setIsBatchSynthesizing(false);
-    }
-  };
-
   const handleVoiceSelect = (voiceId: string) => {
-    const isBulk = showVoiceModal?.isBulk;
     const chId = showVoiceModal?.chapterId;
-    
-    // 1. Persist choice if needed
     if (onUpdateBookSettings && rememberAsDefault) {
       onUpdateBookSettings({ ...book.settings, defaultVoiceId: voiceId });
     }
-
-    // 2. CLOSE MODAL IMMEDIATELY
     setShowVoiceModal(null);
-
-    // 3. Trigger background work
-    if (isBulk) {
-      handleRunBulkSync(voiceId);
-    } else if (chId) {
+    if (chId) {
       const chapter = chapters.find(c => c.id === chId);
       if (chapter) generateAudio(chapter, voiceId);
     }
@@ -168,22 +157,34 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     if (c.cloudAudioFileId || c.audioDriveId || c.audioStatus === AudioStatus.READY) {
       return (
         <span title="Audio ready on Google Drive" className="inline-flex items-center">
-          <Cloud className="w-4 h-4 text-emerald-500" aria-label="Audio ready" role="img" />
+          <Cloud className="w-4 h-4 text-emerald-500" />
         </span>
       );
     }
     if (synthesizingId === c.id || c.audioStatus === AudioStatus.GENERATING) {
       return (
         <span title="Generating and Uploading..." className="inline-flex items-center">
-          <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" aria-label="Generating..." role="img" />
+          <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />
         </span>
       );
     }
     return (
-      <span title="Audio missing — generate/sync needed" className="inline-flex items-center">
-        <AlertTriangle className="w-4 h-4 text-amber-500" aria-label="Audio missing" role="img" />
+      <span title="Audio missing" className="inline-flex items-center">
+        <AlertTriangle className="w-4 h-4 text-amber-500" />
       </span>
     );
+  };
+
+  const renderTextStatusIcon = (c: Chapter) => {
+    if (book.backend !== StorageBackend.DRIVE) return null;
+    if (c.hasTextOnDrive === false) {
+      return (
+        <span title="Source text missing from Drive" className="inline-flex items-center ml-2">
+           <FileX className="w-4 h-4 text-red-500" />
+        </span>
+      );
+    }
+    return null;
   };
 
   const renderDetailsView = () => (
@@ -208,7 +209,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                       <input autoFocus type="text" value={tempTitle} onChange={e => setTempTitle(e.target.value)} onBlur={() => { onUpdateChapterTitle(c.id, tempTitle); setEditingChapterId(null); }} className="px-2 py-1 rounded border text-sm font-bold w-full bg-inherit" />
                     </div>
                   ) : (
-                    <div className="font-black text-sm truncate">{c.title}</div>
+                    <div className="font-black text-sm truncate flex items-center">
+                      {c.title}
+                      {renderTextStatusIcon(c)}
+                    </div>
                   )}
                   {renderAudioStatusIcon(c)}
                 </div>
@@ -241,7 +245,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`flex flex-col gap-2 p-4 rounded-2xl border cursor-pointer transition-all hover:translate-x-1 ${cardBg}`}>
             <div className="flex items-center gap-4">
               <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-mono text-[10px] font-black ${isDark ? 'bg-slate-950 text-indigo-400' : 'bg-indigo-50 text-indigo-600'}`}>{c.index}</div>
-              <div className="flex-1 min-w-0 font-black text-sm truncate">{c.title}</div>
+              <div className="flex-1 min-w-0 font-black text-sm truncate flex items-center">
+                {c.title}
+                {renderTextStatusIcon(c)}
+              </div>
               <div className="flex items-center gap-3">
                 <span className="text-[9px] font-black opacity-40 uppercase">{percent}%</span>
                 {renderAudioStatusIcon(c)}
@@ -263,7 +270,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         const percent = saved?.percent !== undefined ? Math.floor(saved.percent * 100) : 0;
         return (
           <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`aspect-square p-4 rounded-3xl border flex flex-col items-center justify-center text-center gap-2 cursor-pointer transition-all hover:scale-105 group relative ${cardBg}`}>
-            <div className="absolute top-3 right-3">{renderAudioStatusIcon(c)}</div>
+            <div className="absolute top-3 right-3 flex gap-1">
+              {renderTextStatusIcon(c)}
+              {renderAudioStatusIcon(c)}
+            </div>
             <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-mono text-lg font-black mb-1 ${isDark ? 'bg-slate-950 text-indigo-400' : 'bg-indigo-50 text-indigo-600'}`}>{c.index}</div>
             <div className="font-black text-xs line-clamp-2 leading-tight px-1">{c.title}</div>
             <div className="mt-2 w-full px-4">
@@ -324,9 +334,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             <p className="text-xs font-bold opacity-60 uppercase tracking-widest mb-6">{book.chapters.length} Chapters • {book.backend} backend</p>
             <div className="flex flex-wrap gap-3">
               <button onClick={onAddChapter} className="px-6 py-3 bg-indigo-600 text-white rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-all flex items-center gap-2"><Plus className="w-4 h-4" /> Add Chapter</button>
-              <button onClick={() => { if (book.settings.defaultVoiceId) handleRunBulkSync(book.settings.defaultVoiceId); else setShowVoiceModal({ isBulk: true }); }} disabled={isBatchSynthesizing} className="px-6 py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center gap-2" title="Make sure all chapters have audio files on Drive">
-                {isBatchSynthesizing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />} 
-                {isBatchSynthesizing ? `Syncing ${batchProgress.current}/${batchProgress.total}` : 'Ensure Audio'}
+              <button onClick={handleCheckDriveIntegrity} disabled={isCheckingDrive} className="px-6 py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center gap-2" title="Check cloud text/audio integrity">
+                {isCheckingDrive ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />} 
+                {isCheckingDrive ? 'Checking Drive...' : 'Check Drive'}
               </button>
             </div>
           </div>

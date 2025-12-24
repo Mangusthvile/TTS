@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, ReaderSettings, RuleType, Rule, SavedSnapshot, AudioStatus, CLOUD_VOICES } from './types';
+import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES } from './types';
 import Library from './components/Library';
 import Reader from './components/Reader';
 import Player from './components/Player';
@@ -10,12 +10,12 @@ import Extractor from './components/Extractor';
 import ChapterFolderView from './components/ChapterFolderView';
 import ChapterSidebar from './components/ChapterSidebar';
 import { speechController, applyRules, PROGRESS_STORE_V4 } from './services/speechService';
-import { fetchDriveFile, fetchDriveBinary, uploadToDrive, deleteDriveFile, findFileSync, buildMp3Name, checkFileExists, createDriveFolder, listFilesInFolder } from './services/driveService';
+import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName } from './services/driveService';
 import { initDriveAuth, getValidDriveToken, clearStoredToken } from './services/driveAuth';
 import { saveChapterToFile } from './services/fileService';
 import { synthesizeChunk } from './services/cloudTtsService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
-import { BookText, Zap, Sun, Coffee, Moon, X, Settings as SettingsIcon, RefreshCw, Loader2, Cloud, Volume2, Save, AlertCircle, LogIn, Library as LibraryIcon, Menu } from 'lucide-react';
+import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu } from 'lucide-react';
 
 const STATE_FILENAME = 'talevox_state_v263.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
@@ -213,7 +213,6 @@ const App: React.FC = () => {
     const contentText = applyRules(chapter.content, book.rules);
     const cacheKey = generateAudioKey(introText + contentText, voice, 1.0);
     
-    // PART C: Prevent duplicate audio - Check Drive first
     if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
        const audioName = buildMp3Name(chapter.index, chapter.title);
        const driveId = await findFileSync(audioName, book.driveFolderId);
@@ -288,7 +287,6 @@ const App: React.FC = () => {
     const book = s.books.find(b => b.id === s.activeBookId);
     if (!book) return;
 
-    // Persist default if requested
     if (data.setAsDefault) {
       setState(prev => ({
         ...prev,
@@ -298,16 +296,16 @@ const App: React.FC = () => {
       }));
     }
 
-    const filename = `${data.index.toString().padStart(3, '0')}_${data.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.txt`;
+    const filename = buildTextName(data.index, data.title);
     const wordCount = data.content.split(/\s+/).filter(Boolean).length;
 
     let cloudTextId = undefined;
     if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
-      showToast("Uploading to Drive...", 0, 'info');
+      showToast("Uploading source text...", 0, 'info');
       try {
         cloudTextId = await uploadToDrive(book.driveFolderId, filename, data.content, undefined, 'text/plain');
       } catch (e) {
-        showToast("Drive Upload Failed", 0, 'error');
+        showToast("Cloud upload failed", 0, 'error');
       }
     }
 
@@ -320,7 +318,7 @@ const App: React.FC = () => {
         };
         await saveChapterToFile(book.directoryHandle, stub);
       } catch (e) {
-        showToast("Local Storage Failed", 0, 'error');
+        showToast("Local storage failed", 0, 'error');
       }
     }
 
@@ -328,7 +326,8 @@ const App: React.FC = () => {
       id: crypto.randomUUID(), index: data.index, title: data.title, content: data.content,
       filename, wordCount, progress: 0, progressChars: 0,
       audioStatus: AudioStatus.PENDING,
-      cloudTextFileId: cloudTextId
+      cloudTextFileId: cloudTextId,
+      hasTextOnDrive: !!cloudTextId
     };
 
     setState(prev => ({
@@ -339,7 +338,6 @@ const App: React.FC = () => {
     setIsAddChapterOpen(false);
     showToast("Chapter added", 0, 'success');
     
-    // PART B: Automatic generation using chosen voice
     queueBackgroundTTS(s.activeBookId, newChapter.id, data.voiceId);
   }, [queueBackgroundTTS]);
 

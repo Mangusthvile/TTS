@@ -1,6 +1,6 @@
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Plus, AlertCircle, Trash2, Sparkles, FileText, Type, Hash, Loader2, Wand2, Globe, Headphones, Check } from 'lucide-react';
+import { Upload, Plus, AlertCircle, Trash2, Sparkles, FileText, Headphones, Check, Loader2, Wand2, Eye } from 'lucide-react';
 import { Theme, CLOUD_VOICES } from '../types';
 import { extractChapterWithAI } from '../services/geminiService';
 
@@ -25,6 +25,7 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
   const [chapterNum, setChapterNum] = useState<number>(suggestedIndex);
   const [error, setError] = useState<string | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
+  const [previewData, setPreviewData] = useState<{title: string, snippet: string} | null>(null);
   
   const [selectedVoiceId, setSelectedVoiceId] = useState(defaultVoiceId || 'en-US-Standard-C');
   const [setAsDefault, setSetAsDefault] = useState(false);
@@ -72,7 +73,7 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
     e.target.value = '';
   };
 
-  const handleSmartExtract = async () => {
+  const runAIExtraction = async (justPreview = false) => {
     if (!content.trim()) {
       setError("Paste the messy website text first.");
       return;
@@ -81,12 +82,21 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
     setError(null);
     try {
       const result = await extractChapterWithAI(content);
-      setTitle(result.title);
-      setContent(result.content);
-      setChapterNum(result.index);
-      setActiveMode('manual'); // Switch to manual to review
+      if (justPreview) {
+        setPreviewData({
+          title: result.title,
+          snippet: result.content.substring(0, 500) + '...'
+        });
+      } else {
+        setTitle(result.title);
+        setContent(result.content);
+        setChapterNum(result.index);
+        setActiveMode('manual'); // Switch to manual to review
+        setPreviewData(null);
+      }
     } catch (err) {
-      setError("AI Extraction failed. Please try cleaning manually or ensuring you copied enough content.");
+      setError("Smart extraction failed. Switched to Manual mode.");
+      setActiveMode('manual');
     } finally {
       setIsExtracting(false);
     }
@@ -115,8 +125,6 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
   const isSepia = theme === Theme.SEPIA;
   const inputBg = isDark ? 'bg-slate-800 text-white border-slate-700' : isSepia ? 'bg-[#efe6d5] text-[#3c2f25] border-[#d8ccb6]' : 'bg-slate-50 text-black border-slate-200';
   const voiceItemBg = isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-black/5';
-
-  const isSaveDisabled = !content.trim() || !selectedVoiceId;
 
   return (
     <div className={`border rounded-[2.5rem] shadow-2xl overflow-hidden transition-colors duration-500 max-w-4xl mx-auto ${isDark ? 'bg-slate-900 border-white/10' : isSepia ? 'bg-[#f4ecd8] border-[#d8ccb6]' : 'bg-white border-black/10'}`}>
@@ -214,7 +222,7 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
             </label>
             <div className="flex gap-2">
               <button 
-                onClick={() => setContent('')} 
+                onClick={() => { setContent(''); setPreviewData(null); }} 
                 title="Clear content"
                 className={`p-2 rounded-xl transition-all ${isDark ? 'bg-white/5 hover:bg-red-500/20' : 'bg-black/5 hover:bg-red-500/10'}`}
               >
@@ -236,23 +244,44 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
             value={content} 
             onChange={(e) => setContent(e.target.value)} 
             placeholder={activeMode === 'ai' ? "Paste everything you copied from the website here..." : "Paste your text content here..."} 
-            className={`w-full h-96 px-6 py-6 rounded-3xl focus:ring-2 focus:ring-indigo-500 outline-none font-bold transition-all resize-none leading-relaxed border ${inputBg}`} 
+            className={`w-full h-80 px-6 py-6 rounded-3xl focus:ring-2 focus:ring-indigo-500 outline-none font-bold transition-all resize-none leading-relaxed border ${inputBg}`} 
           />
         </div>
 
+        {activeMode === 'ai' && previewData && (
+          <div className={`p-6 rounded-2xl border-2 border-indigo-500/20 bg-indigo-500/5 space-y-2 animate-in fade-in slide-in-from-top-2`}>
+            <div className="flex justify-between items-center">
+               <span className="text-[10px] font-black uppercase text-indigo-600">AI Preview</span>
+               <button onClick={() => setPreviewData(null)} className="p-1 opacity-40 hover:opacity-100">×</button>
+            </div>
+            <h4 className="font-black text-sm">{previewData.title}</h4>
+            <p className="text-xs opacity-60 leading-relaxed italic">{previewData.snippet}</p>
+          </div>
+        )}
+
         {activeMode === 'ai' ? (
-          <button 
-            onClick={handleSmartExtract} 
-            disabled={!content.trim() || isExtracting} 
-            className="w-full py-6 bg-indigo-600 text-white rounded-[1.5rem] font-black uppercase tracking-[0.3em] shadow-2xl hover:bg-indigo-700 transition-all flex items-center justify-center gap-4 active:scale-[0.98] text-sm disabled:opacity-50"
-          >
-            {isExtracting ? <Loader2 className="w-6 h-6 animate-spin" /> : <Wand2 className="w-6 h-6" />}
-            {isExtracting ? 'GEMINI IS EXTRACTING...' : 'RUN SMART EXTRACTION'}
-          </button>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+             <button 
+                onClick={() => runAIExtraction(true)} 
+                disabled={!content.trim() || isExtracting} 
+                className={`py-6 rounded-[1.5rem] font-black uppercase tracking-widest border-2 transition-all flex items-center justify-center gap-3 active:scale-[0.98] text-[10px] ${isDark ? 'border-slate-700 hover:bg-white/5' : 'border-black/5 hover:bg-black/5'}`}
+              >
+                {isExtracting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Eye className="w-4 h-4" />}
+                Test Extract
+              </button>
+              <button 
+                onClick={() => runAIExtraction(false)} 
+                disabled={!content.trim() || isExtracting} 
+                className="py-6 bg-indigo-600 text-white rounded-[1.5rem] font-black uppercase tracking-widest shadow-2xl hover:bg-indigo-700 transition-all flex items-center justify-center gap-3 active:scale-[0.98] text-[10px] disabled:opacity-50"
+              >
+                {isExtracting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+                Run Full Smart Extraction
+              </button>
+          </div>
         ) : (
           <button 
             onClick={handleAddManual} 
-            disabled={isSaveDisabled} 
+            disabled={!content.trim() || !selectedVoiceId} 
             className="w-full py-6 bg-indigo-600 text-white rounded-[1.5rem] font-black uppercase tracking-[0.3em] shadow-2xl hover:bg-indigo-700 transition-all flex items-center justify-center gap-4 active:scale-[0.98] text-sm disabled:opacity-50"
           >
             <Plus className="w-6 h-6" /> SAVE TO COLLECTION
