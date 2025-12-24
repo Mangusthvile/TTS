@@ -88,8 +88,16 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       
       if (!audioBlob) {
         const res = await synthesizeChunk(fullText, voice, 1.0);
-        audioBlob = await fetch(res.audioUrl).then(r => r.blob());
-        await saveAudioToCache(cacheKey, audioBlob);
+        const fetchRes = await fetch(res.audioUrl);
+        if (!fetchRes.ok) throw new Error("Synthesis output fetch failed");
+        audioBlob = await fetchRes.blob();
+        if (audioBlob) {
+          await saveAudioToCache(cacheKey, audioBlob);
+        }
+      }
+
+      if (!audioBlob) {
+        throw new Error("No audio blob available for storage.");
       }
 
       let cloudId = chapter.cloudAudioFileId || chapter.audioDriveId;

@@ -86,7 +86,6 @@ const App: React.FC = () => {
     if (state.googleClientId) initDriveAuth(state.googleClientId);
   }, [state.googleClientId]);
 
-  // Automated verify cloud files when entering collection
   useEffect(() => {
     if (activeTab === 'collection' && activeBook && activeBook.backend === StorageBackend.DRIVE) {
       verifyCloudFiles();
@@ -269,23 +268,35 @@ const App: React.FC = () => {
     const book = s.books.find(b => b.id === s.activeBookId);
     if (!book) return;
 
+    const filename = `${data.index.toString().padStart(3, '0')}_${data.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.txt`;
+    const wordCount = data.content.split(/\s+/).filter(Boolean).length;
+
     let cloudTextId = undefined;
     if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
-      showToast("Uploading text to Drive...", 0, 'info');
+      showToast("Uploading to Drive...", 0, 'info');
       try {
-        const txtName = `${data.index.toString().padStart(3, '0')}_${data.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.txt`;
-        cloudTextId = await uploadToDrive(book.driveFolderId, txtName, data.content, undefined, 'text/plain');
+        cloudTextId = await uploadToDrive(book.driveFolderId, filename, data.content, undefined, 'text/plain');
       } catch (e) {
         showToast("Drive Upload Failed", 0, 'error');
       }
     }
 
+    if (book.backend === StorageBackend.LOCAL && book.directoryHandle) {
+      showToast("Saving locally...", 0, 'info');
+      try {
+        const stub: Chapter = { 
+          id: 'temp', index: data.index, title: data.title, content: data.content, 
+          filename, wordCount, progress: 0, progressChars: 0 
+        };
+        await saveChapterToFile(book.directoryHandle, stub);
+      } catch (e) {
+        showToast("Local Storage Failed", 0, 'error');
+      }
+    }
+
     const newChapter: Chapter = {
       id: crypto.randomUUID(), index: data.index, title: data.title, content: data.content,
-      filename: `${data.index.toString().padStart(3, '0')}_${data.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.txt`,
-      wordCount: data.content.split(/\s+/).filter(Boolean).length, 
-      progress: 0, 
-      progressChars: 0,
+      filename, wordCount, progress: 0, progressChars: 0,
       audioStatus: AudioStatus.PENDING,
       cloudTextFileId: cloudTextId
     };
@@ -296,9 +307,31 @@ const App: React.FC = () => {
     }));
     
     setIsAddChapterOpen(false);
-    showToast("Chapter added. Starting TTS...", 0, 'success');
+    showToast("Chapter added", 0, 'success');
     queueBackgroundTTS(s.activeBookId, newChapter.id);
   }, [queueBackgroundTTS]);
+
+  // Fix missing function: Navigates to the next chapter in the book's list.
+  const handleNextChapter = useCallback(() => {
+    const s = stateRef.current;
+    const book = s.books.find(b => b.id === s.activeBookId);
+    if (!book || !book.currentChapterId) return;
+
+    const sorted = [...book.chapters].sort((a, b) => a.index - b.index);
+    const idx = sorted.findIndex(c => c.id === book.currentChapterId);
+
+    if (idx >= 0 && idx < sorted.length - 1) {
+      const next = sorted[idx + 1];
+      setState(p => ({
+        ...p,
+        books: p.books.map(b => b.id === book.id ? { ...b, currentChapterId: next.id } : b),
+        currentOffsetChars: 0
+      }));
+    } else {
+      setIsPlaying(false);
+      showToast("End of book collection reached", 0, 'success');
+    }
+  }, []);
 
   const handlePlay = useCallback(async () => {
     const s = stateRef.current;
@@ -346,20 +379,14 @@ const App: React.FC = () => {
         setTimeout(() => handlePlay(), 1000);
       }
     } catch (e) { setIsPlaying(false); showToast("Playback Error", 0, 'error'); }
-  }, [queueBackgroundTTS, stopAfterChapter]);
+  }, [queueBackgroundTTS, stopAfterChapter, handleNextChapter]);
 
-  const handleNextChapter = useCallback(() => {
-    const b = activeBook; if (!b) return;
-    const idx = b.chapters.findIndex(c => c.id === b.currentChapterId);
-    if (idx < b.chapters.length - 1) {
-      const next = b.chapters[idx + 1];
-      setState(p => ({ ...p, books: p.books.map(bk => bk.id === b.id ? { ...bk, currentChapterId: next.id } : bk), currentOffsetChars: 0 }));
-      setTimeout(() => handlePlay(), 100);
-    } else {
-      setIsPlaying(false);
-      showToast("Book Complete", 0, 'success');
+  // Fix playback transition: Automatically re-trigger handlePlay when chapter ID changes during an active session.
+  useEffect(() => {
+    if (isPlaying && activeBook?.currentChapterId) {
+      handlePlay();
     }
-  }, [activeBook, handlePlay]);
+  }, [activeBook?.currentChapterId, isPlaying, handlePlay]);
 
   const handlePause = () => { speechController.pause(); setIsPlaying(false); };
   const handleSeekToTime = (t: number) => speechController.seekToTime(t);
@@ -368,14 +395,6 @@ const App: React.FC = () => {
   useEffect(() => {
     localStorage.setItem('talevox_pro_v2', JSON.stringify({ ...state, books: state.books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined })) }));
   }, [state]);
-
-  useEffect(() => {
-    const handleProgUpdate = (e: any) => {
-      const { bookId, chapterId } = e.detail;
-    };
-    window.addEventListener('talevox_progress_updated', handleProgUpdate);
-    return () => window.removeEventListener('talevox_progress_updated', handleProgUpdate);
-  }, []);
 
   return (
     <div className={`flex flex-col h-screen overflow-hidden font-sans transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-950 text-slate-100' : state.theme === Theme.SEPIA ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
@@ -416,7 +435,7 @@ const App: React.FC = () => {
         {isChapterSidebarOpen && activeBook && (
           <div className="fixed inset-0 z-[60] flex">
             <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setIsChapterSidebarOpen(false)} />
-            <div className={`relative w-[85%] max-w-sm h-full shadow-2xl animate-in slide-in-from-left duration-300 ${state.theme === Theme.DARK ? 'bg-slate-900' : state.theme === Theme.SEPIA ? 'bg-[#efe6d5]' : 'bg-white'}`}>
+            <div className={`relative w-[85%] max-sm max-w-sm h-full shadow-2xl animate-in slide-in-from-left duration-300 ${state.theme === Theme.DARK ? 'bg-slate-900' : state.theme === Theme.SEPIA ? 'bg-[#efe6d5]' : 'bg-white'}`}>
               <ChapterSidebar 
                 book={activeBook} theme={state.theme} onSelectChapter={(cid) => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, currentChapterId: cid } : b), currentOffsetChars: 0 })); setIsChapterSidebarOpen(false); }} 
                 onClose={() => setIsChapterSidebarOpen(false)} isDrawer={true}
