@@ -55,12 +55,24 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const renderAudioStatusIcon = (c: Chapter) => {
     if (c.audioStatus === AudioStatus.READY) {
-      return <Cloud className="w-4 h-4 text-indigo-500" title="Audio ready" />;
+      return (
+        <span title="Audio ready" className="inline-flex items-center">
+          <Cloud className="w-4 h-4 text-indigo-500" aria-label="Audio ready" role="img" />
+        </span>
+      );
     }
     if (c.audioStatus === AudioStatus.GENERATING) {
-      return <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" title="Generating..." />;
+      return (
+        <span title="Generating..." className="inline-flex items-center">
+          <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" aria-label="Generating..." role="img" />
+        </span>
+      );
     }
-    return <AlertCircle className="w-4 h-4 text-amber-500" title="Audio missing — generate/sync needed" />;
+    return (
+      <span title="Audio missing — generate/sync needed" className="inline-flex items-center">
+        <AlertCircle className="w-4 h-4 text-amber-500" aria-label="Audio missing — generate/sync needed" role="img" />
+      </span>
+    );
   };
 
   const renderDetailsView = () => (
