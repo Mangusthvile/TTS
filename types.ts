@@ -1,4 +1,3 @@
-
 export enum CaseMode {
   EXACT = 'EXACT',
   IGNORE = 'IGNORE',

@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES } from './types';
 import Library from './components/Library';
@@ -17,7 +16,7 @@ import { synthesizeChunk } from './services/cloudTtsService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu } from 'lucide-react';
 
-const STATE_FILENAME = 'talevox_state_v263.json';
+const STATE_FILENAME = 'talevox_state_v2611.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 
 const App: React.FC = () => {
