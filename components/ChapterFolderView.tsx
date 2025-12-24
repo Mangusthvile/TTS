@@ -1,6 +1,6 @@
 
 import React, { useMemo, useState, useEffect } from 'react';
-import { Book, Theme, StorageBackend, Chapter, AudioChunkMetadata, AudioStatus } from '../types';
+import { Book, Theme, StorageBackend, Chapter, AudioChunkMetadata, AudioStatus, CLOUD_VOICES } from '../types';
 import { LayoutGrid, List, AlignJustify, Plus, Folder, CheckCircle2, Edit2, Check, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Wand2, FileText, AlertCircle } from 'lucide-react';
 import { PROGRESS_STORE_V4, applyRules } from '../services/speechService';
 import { synthesizeChunk } from '../services/cloudTtsService';
@@ -8,15 +8,6 @@ import { saveAudioToCache, generateAudioKey, getAudioFromCache } from '../servic
 import { uploadToDrive, listFilesInFolder, buildMp3Name, checkFileExists } from '../services/driveService';
 
 type ViewMode = 'details' | 'list' | 'grid';
-
-const CLOUD_VOICES = [
-  { id: 'en-US-Standard-C', name: 'Standard Female (US)' },
-  { id: 'en-US-Standard-D', name: 'Standard Male (US)' },
-  { id: 'en-US-Wavenet-D', name: 'Premium Male (US)' },
-  { id: 'en-US-Wavenet-C', name: 'Premium Female (US)' },
-  { id: 'en-GB-Wavenet-B', name: 'Premium Male (UK)' },
-  { id: 'en-GB-Wavenet-A', name: 'Premium Female (UK)' },
-];
 
 interface ChapterFolderViewProps {
   book: Book;
@@ -152,6 +143,27 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
   };
 
+  const handleVoiceSelect = (voiceId: string) => {
+    const isBulk = showVoiceModal?.isBulk;
+    const chId = showVoiceModal?.chapterId;
+    
+    // 1. Persist book default if requested
+    if (onUpdateBookSettings && rememberAsDefault) {
+      onUpdateBookSettings({ ...book.settings, defaultVoiceId: voiceId });
+    }
+
+    // 2. CLOSE MODAL IMMEDIATELY
+    setShowVoiceModal(null);
+
+    // 3. START WORK IN BACKGROUND
+    if (isBulk) {
+      handleRunBulkSync(voiceId);
+    } else if (chId) {
+      const chapter = chapters.find(c => c.id === chId);
+      if (chapter) generateAudio(chapter, voiceId);
+    }
+  };
+
   const renderAudioStatusIcon = (c: Chapter) => {
     if (c.cloudAudioFileId || c.audioDriveId || c.audioStatus === AudioStatus.READY) {
       return (
@@ -283,7 +295,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               </div>
               <div className="space-y-2 max-h-[40vh] overflow-y-auto pr-1">
                 {CLOUD_VOICES.map(v => (
-                  <button key={v.id} onClick={() => showVoiceModal.chapterId ? generateAudio(chapters.find(c => c.id === showVoiceModal.chapterId)!, v.id).then(() => setShowVoiceModal(null)) : handleRunBulkSync(v.id)} className={`w-full p-4 rounded-xl border-2 text-left font-black text-sm transition-all flex justify-between items-center ${isDark ? 'border-slate-800 hover:border-indigo-600 bg-slate-950/40' : 'border-slate-100 hover:border-indigo-600 bg-slate-50'}`}>{v.name}<Headphones className="w-4 h-4 opacity-40" /></button>
+                  <button key={v.id} onClick={() => handleVoiceSelect(v.id)} className={`w-full p-4 rounded-xl border-2 text-left font-black text-sm transition-all flex justify-between items-center ${isDark ? 'border-slate-800 hover:border-indigo-600 bg-slate-950/40' : 'border-slate-100 hover:border-indigo-600 bg-slate-50'}`}>{v.name}<Headphones className="w-4 h-4 opacity-40" /></button>
                 ))}
               </div>
             </div>

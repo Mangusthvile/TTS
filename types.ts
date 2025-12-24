@@ -41,6 +41,15 @@ export enum AudioStatus {
   FAILED = 'failed'
 }
 
+export const CLOUD_VOICES = [
+  { id: 'en-US-Standard-C', name: 'Standard Female (US)' },
+  { id: 'en-US-Standard-D', name: 'Standard Male (US)' },
+  { id: 'en-US-Wavenet-D', name: 'Premium Male (US)' },
+  { id: 'en-US-Wavenet-C', name: 'Premium Female (US)' },
+  { id: 'en-GB-Wavenet-B', name: 'Premium Male (UK)' },
+  { id: 'en-GB-Wavenet-A', name: 'Premium Female (UK)' },
+];
+
 export interface Rule {
   id: string;
   find: string;

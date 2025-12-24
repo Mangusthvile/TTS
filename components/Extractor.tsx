@@ -1,15 +1,24 @@
+
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Plus, AlertCircle, Trash2, Sparkles, FileText, Type, Hash, Loader2, Wand2, Globe } from 'lucide-react';
-import { Theme } from '../types';
+import { Upload, Plus, AlertCircle, Trash2, Sparkles, FileText, Type, Hash, Loader2, Wand2, Globe, Headphones, Check } from 'lucide-react';
+import { Theme, CLOUD_VOICES } from '../types';
 import { extractChapterWithAI } from '../services/geminiService';
 
 interface ImporterProps {
-  onChapterExtracted: (data: { title: string; content: string; url: string; index: number }) => void;
+  onChapterExtracted: (data: { 
+    title: string; 
+    content: string; 
+    url: string; 
+    index: number;
+    voiceId: string;
+    setAsDefault: boolean;
+  }) => void;
   suggestedIndex: number;
   theme: Theme;
+  defaultVoiceId?: string;
 }
 
-const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex, theme }) => {
+const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex, theme, defaultVoiceId }) => {
   const [activeMode, setActiveMode] = useState<'manual' | 'ai'>('ai');
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
@@ -17,6 +26,9 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
   const [error, setError] = useState<string | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
   
+  const [selectedVoiceId, setSelectedVoiceId] = useState(defaultVoiceId || 'en-US-Standard-C');
+  const [setAsDefault, setSetAsDefault] = useState(false);
+
   const [options, setOptions] = useState({
     removeBlankLines: true,
     normalizeSeparators: true
@@ -27,6 +39,10 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
   useEffect(() => {
     setChapterNum(suggestedIndex);
   }, [suggestedIndex]);
+
+  useEffect(() => {
+    if (defaultVoiceId) setSelectedVoiceId(defaultVoiceId);
+  }, [defaultVoiceId]);
 
   const cleanText = (text: string) => {
     let result = text;
@@ -86,7 +102,9 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
       title: finalTitle,
       content: content,
       url: 'text-import',
-      index: chapterNum
+      index: chapterNum,
+      voiceId: selectedVoiceId,
+      setAsDefault: setAsDefault
     });
     setTitle('');
     setContent('');
@@ -96,6 +114,9 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
   const inputBg = isDark ? 'bg-slate-800 text-white border-slate-700' : isSepia ? 'bg-[#efe6d5] text-[#3c2f25] border-[#d8ccb6]' : 'bg-slate-50 text-black border-slate-200';
+  const voiceItemBg = isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-black/5';
+
+  const isSaveDisabled = !content.trim() || !selectedVoiceId;
 
   return (
     <div className={`border rounded-[2.5rem] shadow-2xl overflow-hidden transition-colors duration-500 max-w-4xl mx-auto ${isDark ? 'bg-slate-900 border-white/10' : isSepia ? 'bg-[#f4ecd8] border-[#d8ccb6]' : 'bg-white border-black/10'}`}>
@@ -137,20 +158,6 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
           </div>
         )}
 
-        {activeMode === 'ai' && !content && (
-          <div className={`p-6 rounded-2xl border-2 border-dashed ${isDark ? 'border-slate-800 bg-slate-900/50' : 'border-indigo-100 bg-indigo-50/30'}`}>
-            <h3 className="text-sm font-black uppercase tracking-tight flex items-center gap-2 mb-3">
-              <Globe className="w-4 h-4 text-indigo-500" /> Instructions for Web Import
-            </h3>
-            <ol className="text-xs font-medium space-y-2 opacity-70 list-decimal pl-4">
-              <li>Open the story chapter in your browser.</li>
-              <li>Press <span className="font-bold">Ctrl+A</span> (Select All) then <span className="font-bold">Ctrl+C</span> (Copy).</li>
-              <li>Paste the contents into the box below.</li>
-              <li>Gemini will strip away ads, links, and comments, keeping only the clean prose.</li>
-            </ol>
-          </div>
-        )}
-
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
           <div className="md:col-span-3 space-y-2">
             <label className="text-[10px] font-black uppercase tracking-widest opacity-60">Chapter Title</label>
@@ -170,6 +177,33 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
               onChange={(e) => setChapterNum(parseInt(e.target.value) || 0)} 
               className={`w-full px-4 py-4 rounded-xl border outline-none font-black text-sm focus:ring-2 focus:ring-indigo-500 ${inputBg}`} 
             />
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          <div className="flex flex-col gap-2">
+             <label className="text-[10px] font-black uppercase tracking-widest opacity-60 flex items-center gap-2">
+               <Headphones className="w-3.5 h-3.5" /> Audio Synthesis Voice
+             </label>
+             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                {CLOUD_VOICES.map(v => (
+                  <button 
+                    key={v.id} 
+                    onClick={() => setSelectedVoiceId(v.id)}
+                    className={`flex items-center justify-between px-4 py-3 rounded-xl border-2 text-left transition-all ${selectedVoiceId === v.id ? 'border-indigo-600 bg-indigo-600/5' : 'border-transparent ' + voiceItemBg}`}
+                  >
+                    <span className="text-xs font-black truncate mr-2">{v.name}</span>
+                    {selectedVoiceId === v.id && <Check className="w-4 h-4 text-indigo-600 flex-shrink-0" />}
+                  </button>
+                ))}
+             </div>
+             <label className="mt-2 flex items-center gap-2 cursor-pointer group">
+               <div className={`w-5 h-5 rounded-md border-2 flex items-center justify-center transition-all ${setAsDefault ? 'bg-indigo-600 border-indigo-600' : 'border-black/10'}`}>
+                 <input type="checkbox" className="hidden" checked={setAsDefault} onChange={e => setSetAsDefault(e.target.checked)} />
+                 {setAsDefault && <Check className="w-3.5 h-3.5 text-white" />}
+               </div>
+               <span className="text-[10px] font-black uppercase tracking-widest opacity-60 group-hover:opacity-100">Set as book default</span>
+             </label>
           </div>
         </div>
 
@@ -218,8 +252,8 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
         ) : (
           <button 
             onClick={handleAddManual} 
-            disabled={!content.trim()} 
-            className="w-full py-6 bg-indigo-600 text-white rounded-[1.5rem] font-black uppercase tracking-[0.3em] shadow-2xl hover:bg-indigo-700 transition-all flex items-center justify-center gap-4 active:scale-[0.98] text-sm"
+            disabled={isSaveDisabled} 
+            className="w-full py-6 bg-indigo-600 text-white rounded-[1.5rem] font-black uppercase tracking-[0.3em] shadow-2xl hover:bg-indigo-700 transition-all flex items-center justify-center gap-4 active:scale-[0.98] text-sm disabled:opacity-50"
           >
             <Plus className="w-6 h-6" /> SAVE TO COLLECTION
           </button>
