@@ -15,6 +15,15 @@ export function buildMp3Name(chapterIndex: number, title: string) {
   return `${chapterIndex.toString().padStart(3, '0')}_${safe}.mp3`;
 }
 
+/**
+ * Guarantees a real ArrayBuffer, preventing TS SharedArrayBuffer errors.
+ */
+export function u8ToArrayBuffer(u8: Uint8Array): ArrayBuffer {
+  const ab = new ArrayBuffer(u8.byteLength);
+  new Uint8Array(ab).set(u8);
+  return ab;
+}
+
 export async function checkFileExists(fileId: string): Promise<boolean> {
   if (!fileId) return false;
   try {

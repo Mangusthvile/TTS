@@ -78,6 +78,7 @@ export interface Chapter {
   driveId?: string; // Legacy field for main file
   cloudTextFileId?: string; // Google Drive ID for .txt
   cloudAudioFileId?: string; // Google Drive ID for .mp3
+  audioDriveId?: string; // Legacy audio ID field
   audioStatus?: AudioStatus;
   audioSignature?: string; 
   audioPrefixLen?: number; 
