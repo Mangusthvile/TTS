@@ -1,3 +1,4 @@
+
 /**
  * Talevox Google Drive Authentication Manager
  * Implements self-healing OAuth2 flow with Google Identity Services.
@@ -40,8 +41,8 @@ export function clearStoredToken() {
 }
 
 function isTokenValid() {
-  // 60s safety buffer
-  return !!accessToken && expiresAt > Date.now() + 60_000;
+  // Refresh if less than 5 mins left
+  return !!accessToken && expiresAt > Date.now() + 300_000;
 }
 
 export function initDriveAuth(clientId: string) {
@@ -62,12 +63,9 @@ export function initDriveAuth(clientId: string) {
 
 /**
  * Get a valid token.
- * - interactive=false: silent refresh (prompt: '')
- * - interactive=true: forces UI (prompt: 'consent')
  */
 export async function getValidDriveToken(opts?: { interactive?: boolean }): Promise<string> {
   if (!tokenClient) {
-    // Attempt lazy init if we have a client ID in the environment
     const envId = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID;
     if (envId) initDriveAuth(envId);
     else throw new Error("Drive auth not initialized.");
@@ -88,6 +86,8 @@ export async function getValidDriveToken(opts?: { interactive?: boolean }): Prom
       saveToStorage();
       resolve(accessToken!);
     };
+    // Use prompt: none for silent if possible, but Google often requires 'consent' or 'select_account'
+    // if a session isn't explicitly active.
     tokenClient.requestAccessToken({ prompt: opts?.interactive ? "consent" : "" });
   });
 }
@@ -96,21 +96,24 @@ export async function getValidDriveToken(opts?: { interactive?: boolean }): Prom
  * Wrapper for Drive API calls that handles Authorization and 401 retries.
  */
 export async function driveFetch(input: RequestInfo, init: RequestInit = {}): Promise<Response> {
-  const token = await getValidDriveToken({ interactive: false });
+  // Pre-emptive refresh
+  if (!isTokenValid()) {
+    try { await getValidDriveToken({ interactive: false }); } catch(e) {}
+  }
 
-  const doFetch = async (t: string) => {
+  const doFetch = async () => {
     const headers = new Headers(init.headers || {});
-    headers.set("Authorization", `Bearer ${t}`);
+    if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
     return fetch(input, { ...init, headers });
   };
 
-  let res = await doFetch(token);
+  let res = await doFetch();
 
   if (res.status === 401) {
     clearStoredToken();
     try {
-      const fresh = await getValidDriveToken({ interactive: false });
-      res = await doFetch(fresh);
+      await getValidDriveToken({ interactive: false });
+      res = await doFetch();
     } catch (e) {
       throw new Error("Reconnect Google Drive");
     }

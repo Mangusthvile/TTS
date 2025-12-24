@@ -33,6 +33,14 @@ export enum StorageBackend {
   MEMORY = 'memory'
 }
 
+export enum AudioStatus {
+  NONE = 'none',
+  PENDING = 'pending',
+  GENERATING = 'generating',
+  READY = 'ready',
+  FAILED = 'failed'
+}
+
 export interface Rule {
   id: string;
   find: string;
@@ -68,6 +76,7 @@ export interface Chapter {
   isCompleted?: boolean;
   driveId?: string;
   audioDriveId?: string;
+  audioStatus?: AudioStatus;
   audioSignature?: string; 
   audioPrefixLen?: number; 
   audioIntroDurSec?: number; 
@@ -89,12 +98,14 @@ export interface ReaderSettings {
   lineHeight: number;
   paragraphSpacing: number;
   highlightColor: string;
+  followHighlight: boolean;
 }
 
 export interface Book {
   id: string;
   title: string;
   author?: string;
+  coverImage?: string; // Data URL
   chapters: Chapter[];
   currentChapterId?: string;
   rules: Rule[];
@@ -125,7 +136,7 @@ export interface AppState {
   playbackSpeed: number;
   selectedVoiceName?: string;
   theme: Theme;
-  currentOffsetChars: number; // Character index only (v2.6.2)
+  currentOffsetChars: number;
   debugMode: boolean;
   readerSettings: ReaderSettings;
   driveToken?: string;

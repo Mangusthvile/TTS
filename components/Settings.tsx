@@ -1,6 +1,7 @@
+
 import React from 'react';
 import { ReaderSettings, Theme } from '../types';
-import { Type, AlignJustify, MoveVertical, Minus, Plus, RefreshCw, Smartphone, MonitorOff, AlertTriangle, Cloud, CloudOff, Loader2, Key, LogOut, Save, LogIn, Palette } from 'lucide-react';
+import { Type, RefreshCw, Smartphone, Cloud, CloudOff, Loader2, Key, LogOut, Save, LogIn, Palette, Eye } from 'lucide-react';
 
 interface SettingsProps {
   settings: ReaderSettings;
@@ -16,7 +17,6 @@ interface SettingsProps {
   googleClientId?: string;
   onUpdateGoogleClientId?: (id: string) => void;
   onClearAuth?: () => void;
-  onClearCache?: () => void;
   onSaveState?: () => void;
   lastSavedAt?: number;
 }
@@ -29,21 +29,16 @@ const Settings: React.FC<SettingsProps> = ({
 }) => {
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
-  
   const cardBg = isDark ? 'bg-slate-900 border-slate-800' : isSepia ? 'bg-[#f4ecd8] border-[#d8ccb6]' : 'bg-white border-black/10';
   const textClass = isDark ? 'text-slate-100' : isSepia ? 'text-[#3c2f25]' : 'text-black';
   const labelClass = `text-[11px] font-black uppercase tracking-[0.2em] mb-4 block ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`;
-
   const fonts = [
     { name: 'Source Serif 4', font: "'Source Serif 4', serif" },
     { name: 'Literata', font: "'Literata', serif" },
     { name: 'Inter', font: "'Inter', sans-serif" },
     { name: 'System Serif', font: "serif" },
   ];
-
   const presetColors = ['#4f46e5', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#8b5cf6'];
-
-  const controlBg = isDark ? 'bg-slate-950/40 border-slate-800' : isSepia ? 'bg-[#efe6d5] border-[#d8ccb6]' : 'bg-white border-black/5';
   const isWakeLockSupported = 'wakeLock' in navigator;
 
   return (
@@ -52,108 +47,46 @@ const Settings: React.FC<SettingsProps> = ({
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
           <div>
             <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
-            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.6.6</p>
+            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.6.7</p>
           </div>
-          <button 
-            onClick={onCheckForUpdates}
-            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-sm ${isDark ? 'bg-slate-800 text-slate-100 hover:bg-slate-700' : 'bg-white text-slate-600 hover:bg-slate-50'}`}
-          >
-            <RefreshCw className="w-3.5 h-3.5" /> Force Refresh App
-          </button>
+          <button onClick={onCheckForUpdates} className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase bg-white shadow-sm`}><RefreshCw className="w-3.5 h-3.5" /> Refresh</button>
         </div>
 
-        {/* Cloud & Identity */}
         <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm space-y-6 ${cardBg}`}>
-          <div className="flex items-center justify-between">
-            <label className={labelClass}>Cloud Synchronization</label>
-            {lastSavedAt && <span className="text-[10px] font-black uppercase tracking-widest opacity-40">Last saved: {new Date(lastSavedAt).toLocaleTimeString()}</span>}
-          </div>
+          <label className={labelClass}>Cloud & Identity</label>
           <div className="space-y-4">
-             <div className="flex flex-col gap-2">
-                <div className="flex items-center gap-2 mb-1">
-                   <Key className="w-3.5 h-3.5 text-indigo-500" />
-                   <span className="text-[10px] font-black uppercase tracking-widest opacity-60">Google OAuth Client ID</span>
+             <input type="text" value={googleClientId || ''} onChange={e => onUpdateGoogleClientId?.(e.target.value.trim())} placeholder="Google OAuth Client ID" className={`w-full px-4 py-3 rounded-xl border-none outline-none font-mono text-[16px] ${isDark ? 'bg-slate-950 text-white' : 'bg-slate-50 text-black'}`} />
+             <div className="flex justify-between items-center pt-4 border-t border-black/5">
+                <div className="flex items-center gap-4">
+                   <div className={`p-4 rounded-2xl ${isCloudLinked ? 'bg-indigo-600 text-white' : 'bg-black/5'}`}>{isCloudLinked ? <Cloud className="w-6 h-6" /> : <CloudOff className="w-6 h-6" />}</div>
+                   <div><div className={`text-sm font-black ${textClass}`}>{isCloudLinked ? 'Library Linked' : 'Offline'}</div><div className="text-[10px] opacity-60">Sync state via snapshot</div></div>
                 </div>
-                <input 
-                  type="text"
-                  value={googleClientId || ''}
-                  onChange={e => onUpdateGoogleClientId?.(e.target.value.trim())}
-                  placeholder="...apps.googleusercontent.com"
-                  className={`w-full px-4 py-3 rounded-xl border-none outline-none font-mono text-[16px] ${isDark ? 'bg-slate-950 text-white' : 'bg-slate-50 text-black'}`}
-                />
-             </div>
-             <div className="flex flex-col gap-6 pt-4 border-t border-black/5 lg:flex-row lg:items-center lg:justify-between">
-                <div className="flex items-center gap-4 min-w-0">
-                   <div className={`p-3.5 sm:p-4 rounded-2xl flex-shrink-0 ${isCloudLinked ? 'bg-indigo-600 text-white' : 'bg-black/5 text-slate-400'}`}>
-                      {isCloudLinked ? <Cloud className="w-5 h-5 sm:w-6 sm:h-6" /> : <CloudOff className="w-5 h-5 sm:w-6 sm:h-6" />}
-                   </div>
-                   <div className="min-w-0">
-                      <div className={`text-sm font-black ${textClass}`}>{isCloudLinked ? 'Library Linked' : 'Offline Mode'}</div>
-                      <div className="text-[10px] font-bold opacity-60 truncate">{isCloudLinked ? 'Syncs via snapshot' : 'Sync libraries across devices'}</div>
-                   </div>
-                </div>
-                <div className="flex items-center gap-2 w-full sm:w-auto">
-                   <button onClick={onSaveState} className="p-3 rounded-xl border border-emerald-500/30 text-emerald-500 hover:bg-emerald-500/10 transition-all" title="Freeze Snapshot">
-                      <Save className="w-4 h-4" />
-                   </button>
+                <div className="flex gap-2">
+                   <button onClick={onSaveState} className="p-3 rounded-xl border border-emerald-500/30 text-emerald-500" title="Freeze Snapshot"><Save className="w-4 h-4" /></button>
                    {isCloudLinked ? (
                       <>
-                        <button onClick={onLinkCloud} title="Reconnect Account" className="p-3 rounded-xl border border-amber-500/30 text-amber-500 hover:bg-amber-500/10 transition-all">
-                           <LogIn className="w-4 h-4" />
-                        </button>
-                        <button onClick={onSyncNow} disabled={isSyncing} className="flex-1 sm:flex-none px-6 py-3 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 hover:scale-105 transition-all">
-                           {isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} Sync Saved
-                        </button>
-                        <button onClick={onClearAuth} className={`p-3 rounded-xl border transition-all ${isDark ? 'bg-slate-800 text-slate-400' : 'bg-white text-slate-400'}`}><LogOut className="w-4 h-4" /></button>
+                        <button onClick={onLinkCloud} title="Reconnect" className="p-3 rounded-xl border border-amber-500/30 text-amber-500"><LogIn className="w-4 h-4" /></button>
+                        <button onClick={onSyncNow} disabled={isSyncing} className="px-6 py-3 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest">{isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Sync Saved'}</button>
+                        <button onClick={onClearAuth} className="p-3 rounded-xl border opacity-40"><LogOut className="w-4 h-4" /></button>
                       </>
-                   ) : <button onClick={onLinkCloud} disabled={!googleClientId} className="w-full sm:w-auto px-8 py-4 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 hover:scale-105 transition-all disabled:opacity-50"><Cloud className="w-3.5 h-3.5" /> Link Account</button>}
+                   ) : <button onClick={onLinkCloud} disabled={!googleClientId} className="px-8 py-4 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest">Link Account</button>}
                 </div>
              </div>
           </div>
         </div>
 
-        {/* Visual Customization */}
         <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm space-y-6 ${cardBg}`}>
-          <label className={labelClass}>Visual Customization</label>
+          <label className={labelClass}>Reader Experience</label>
           <div className="space-y-6">
-            {/* Font Size */}
-            <div className="space-y-4">
-              <div className="flex justify-between items-center">
-                <span className={`text-sm font-black ${textClass}`}>Font Size</span>
-                <span className="text-xs font-mono font-black opacity-60">{settings.fontSizePx}px</span>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <Eye className={`w-5 h-5 ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`} />
+                <div className={`text-sm font-black ${textClass}`}>Follow Highlight</div>
               </div>
-              <input type="range" min="16" max="40" value={settings.fontSizePx} onChange={e => onUpdate({ fontSizePx: parseInt(e.target.value) })} className="w-full h-1.5 accent-indigo-600 rounded-full cursor-pointer" />
+              <button onClick={() => onUpdate({ followHighlight: !settings.followHighlight })} className={`w-14 h-7 rounded-full transition-colors relative ${settings.followHighlight ? 'bg-indigo-600' : 'bg-slate-300'}`}>
+                <div className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-all ${settings.followHighlight ? 'left-8' : 'left-1'}`} />
+              </button>
             </div>
-
-            {/* Highlight Color */}
-            <div className="space-y-4">
-              <div className="flex justify-between items-center">
-                <div className="flex items-center gap-2">
-                  <Palette className={`w-5 h-5 ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`} />
-                  <span className={`text-sm font-black ${textClass}`}>Highlight Color</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input 
-                    type="color" 
-                    value={settings.highlightColor} 
-                    onChange={e => onUpdate({ highlightColor: e.target.value })}
-                    className="w-8 h-8 rounded-lg border-none bg-transparent cursor-pointer"
-                  />
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-3">
-                {presetColors.map(color => (
-                  <button 
-                    key={color} 
-                    onClick={() => onUpdate({ highlightColor: color })}
-                    className={`w-8 h-8 rounded-full border-2 transition-all ${settings.highlightColor === color ? 'border-white ring-2 ring-indigo-600 scale-110' : 'border-transparent opacity-60 hover:opacity-100'}`}
-                    style={{ backgroundColor: color }}
-                  />
-                ))}
-              </div>
-            </div>
-
-            {/* Keep Awake */}
             <div className="flex items-center justify-between border-t border-black/5 pt-4">
               <div className="flex items-center gap-3">
                 <Smartphone className={`w-5 h-5 ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`} />
@@ -166,19 +99,26 @@ const Settings: React.FC<SettingsProps> = ({
           </div>
         </div>
 
-        {/* Typography */}
-        <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm ${cardBg}`}>
-          <label className={labelClass}>Typography</label>
-          <div className="grid grid-cols-2 gap-3 sm:gap-4">
-            {fonts.map((f) => (
-              <button key={f.name} onClick={() => onUpdate({ fontFamily: f.font })} className={`p-4 sm:p-6 rounded-2xl border text-left transition-all flex flex-col items-center justify-center text-center ${settings.fontFamily === f.font ? 'border-indigo-600 bg-indigo-600/5 ring-1 text-indigo-600' : `border-transparent ${controlBg} ${textClass}`}`}>
-                <div style={{ fontFamily: f.font }} className="text-2xl sm:text-3xl mb-1 sm:mb-2">Aa</div>
-                <div className="text-[9px] sm:text-[11px] font-black uppercase tracking-tight">{f.name}</div>
-              </button>
-            ))}
+        <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm space-y-6 ${cardBg}`}>
+          <label className={labelClass}>Visual Customization</label>
+          <div className="space-y-6">
+            <div className="space-y-4">
+              <div className="flex justify-between items-center"><span className={`text-sm font-black ${textClass}`}>Font Size</span><span className="text-xs font-mono font-black opacity-60">{settings.fontSizePx}px</span></div>
+              <input type="range" min="16" max="40" value={settings.fontSizePx} onChange={e => onUpdate({ fontSizePx: parseInt(e.target.value) })} className="w-full h-1.5 accent-indigo-600 rounded-full cursor-pointer" />
+            </div>
+            <div className="space-y-4">
+              <div className="flex justify-between items-center">
+                <div className="flex items-center gap-2"><Palette className={`w-5 h-5 ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`} /><span className={`text-sm font-black ${textClass}`}>Highlight Color</span></div>
+                <input type="color" value={settings.highlightColor} onChange={e => onUpdate({ highlightColor: e.target.value })} className="w-8 h-8 rounded-lg border-none bg-transparent cursor-pointer" />
+              </div>
+              <div className="flex flex-wrap gap-3">
+                {presetColors.map(color => (
+                  <button key={color} onClick={() => onUpdate({ highlightColor: color })} className={`w-8 h-8 rounded-full border-2 transition-all ${settings.highlightColor === color ? 'border-white ring-2 ring-indigo-600' : 'border-transparent opacity-60'}`} style={{ backgroundColor: color }} />
+                ))}
+              </div>
+            </div>
           </div>
         </div>
-        <div className="text-center font-black uppercase tracking-[0.4em] text-[9px] sm:text-[11px] pt-8 sm:pt-12 opacity-30">VoxLib Engine v2.6.6</div>
       </div>
     </div>
   );
