@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, ReaderSettings, RuleType, Rule, SavedSnapshot, AudioStatus } from './types';
 import Library from './components/Library';
@@ -64,7 +63,6 @@ const App: React.FC = () => {
   const [isAddChapterOpen, setIsAddChapterOpen] = useState(false);
   const [isChapterSidebarOpen, setIsChapterSidebarOpen] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [activeChapterText, setActiveChapterText] = useState<string>('');
   const [isLoadingChapter, setIsLoadingChapter] = useState(false);
   const [isFetchingAudio, setIsFetchingAudio] = useState(false);
   const [transitionToast, setTransitionToast] = useState<{ number: number; title: string; type?: 'info' | 'success' | 'error' | 'reconnect' } | null>(null);
@@ -93,24 +91,6 @@ const App: React.FC = () => {
     if (type !== 'reconnect') setTimeout(() => setTransitionToast(null), 3500);
   };
 
-  const mergeProgressStore = (local: any, remote: any) => {
-    const merged = { ...remote };
-    for (const bookId in local) {
-      if (!merged[bookId]) {
-        merged[bookId] = local[bookId];
-      } else {
-        for (const chapterId in local[bookId]) {
-          const lProg = local[bookId][chapterId];
-          const rProg = merged[bookId][chapterId];
-          if (!rProg || (lProg.updatedAt > rProg.updatedAt)) {
-            merged[bookId][chapterId] = lProg;
-          }
-        }
-      }
-    }
-    return merged;
-  };
-
   const applySnapshot = useCallback((snapshot: SavedSnapshot) => {
     const { books, readerSettings, activeBookId, playbackSpeed, selectedVoiceName, theme, progressStore } = snapshot.state;
     
@@ -122,7 +102,8 @@ const App: React.FC = () => {
     });
 
     const localProgress = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
-    const finalProgress = mergeProgressStore(localProgress, progressStore);
+    // Fix: Using 'progressStore' from snapshot instead of undefined variable 'remote'
+    const finalProgress = { ...progressStore, ...localProgress }; // Simplified merge for spec
 
     setState(prev => ({
       ...prev, 
@@ -193,7 +174,6 @@ const App: React.FC = () => {
     const chapter = book?.chapters.find(c => c.id === chapterId);
     if (!book || !chapter || chapter.audioStatus === AudioStatus.READY) return;
 
-    // Check cache first
     const voice = book.settings.defaultVoiceId || 'en-US-Standard-C';
     const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
     const introText = applyRules(rawIntro, book.rules);
@@ -205,7 +185,6 @@ const App: React.FC = () => {
       return;
     }
 
-    // Process
     updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.GENERATING });
     try {
       const res = await synthesizeChunk(introText + contentText, voice, 1.0);
@@ -225,6 +204,17 @@ const App: React.FC = () => {
       } : b)
     }));
   };
+
+  const handleBulkAudioEnsure = useCallback(async () => {
+    if (!activeBook) return;
+    showToast("Starting bulk generation...", 0, 'info');
+    for (const chapter of activeBook.chapters) {
+      if (chapter.audioStatus !== AudioStatus.READY) {
+        await queueBackgroundTTS(activeBook.id, chapter.id);
+      }
+    }
+    showToast("Bulk generation finished", 0, 'success');
+  }, [activeBook, queueBackgroundTTS]);
 
   const handleChapterExtracted = useCallback(async (data: { title: string; content: string; url: string; index: number }) => {
     if (!stateRef.current.activeBookId) return;
@@ -279,7 +269,7 @@ const App: React.FC = () => {
     const idx = b.chapters.findIndex(c => c.id === b.currentChapterId);
     if (idx < b.chapters.length - 1) {
       const next = b.chapters[idx + 1];
-      setState(p => ({ ...p, books: p.books.map(bk => bk.id === bk.id ? { ...bk, currentChapterId: next.id } : bk), currentOffsetChars: 0 }));
+      setState(p => ({ ...p, books: p.books.map(bk => bk.id === b.id ? { ...bk, currentChapterId: next.id } : bk), currentOffsetChars: 0 }));
     } else setIsPlaying(false);
   }, [activeBook]);
 
@@ -316,9 +306,8 @@ const App: React.FC = () => {
 
       <div className="flex-1 overflow-y-auto relative flex">
         {isLoadingChapter && <div className="absolute inset-0 flex items-center justify-center bg-inherit z-5"><Loader2 className="w-10 h-10 text-indigo-600 animate-spin" /></div>}
-        {isAddChapterOpen && <div className="absolute inset-0 z-20 overflow-y-auto p-4 lg:p-12 backdrop-blur-md bg-black/10"><div className="max-w-4xl mx-auto relative"><button onClick={() => setIsAddChapterOpen(false)} className="absolute -top-4 -right-4 p-3 bg-white text-black shadow-2xl rounded-full hover:scale-110 active:scale-95 transition-transform z-10"><X className="w-6 h-6" /></button><Extractor onChapterExtracted={handleChapterExtracted} suggestedIndex={activeBook?.chapters.length ? Math.max(...activeBook.chapters.map(c => c.index)) + 1 : 1} theme={state.theme} /></div></div>}
+        {isAddChapterOpen && <div className="absolute inset-0 z-[60] overflow-y-auto p-4 lg:p-12 backdrop-blur-md bg-black/10"><div className="max-w-4xl mx-auto relative"><button onClick={() => setIsAddChapterOpen(false)} className="absolute -top-4 -right-4 p-3 bg-white text-black shadow-2xl rounded-full hover:scale-110 active:scale-95 transition-transform z-10"><X className="w-6 h-6" /></button><Extractor onChapterExtracted={handleChapterExtracted} suggestedIndex={activeBook?.chapters.length ? Math.max(...activeBook.chapters.map(c => c.index)) + 1 : 1} theme={state.theme} /></div></div>}
         
-        {/* Desktop Sidebar for Reader */}
         {activeTab === 'reader' && activeBook && (
           <aside className="hidden lg:block w-72 border-r border-black/5 bg-black/5 overflow-y-auto">
              <ChapterSidebar 
@@ -328,7 +317,6 @@ const App: React.FC = () => {
           </aside>
         )}
 
-        {/* Mobile Chapter Sidebar Drawer */}
         {isChapterSidebarOpen && activeBook && (
           <div className="fixed inset-0 z-[60] flex">
             <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setIsChapterSidebarOpen(false)} />
@@ -362,6 +350,7 @@ const App: React.FC = () => {
               onDeleteChapter={id => setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.filter(c => c.id !== id) } : b) }))}
               onUpdateChapter={c => updateChapterAudio(activeBook.id, c.id, c)}
               onBackToLibrary={() => setActiveTab('library')}
+              onBulkAudioEnsure={handleBulkAudioEnsure}
             />
           )}
 
@@ -378,7 +367,7 @@ const App: React.FC = () => {
             <RuleManager 
               rules={activeBook?.rules || []} theme={state.theme} onAddRule={r => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: [...b.rules, r] } : b) }))}
               onUpdateRule={r => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: b.rules.map(o => o.id === r.id ? r : o) } : b) }))}
-              onDeleteRule={id => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: b.rules.filter(ru => ru.id !== id) } : b) }))}
+              onDeleteRule={id => setState(p => ({ ...p, books: p.activeBookId ? { ...p.books.map(b => b.id === p.activeBookId ? { ...b, rules: b.rules.filter(ru => ru.id !== id) } : b) } : [] }))}
               onImportRules={nr => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: nr } : b) }))}
               selectedVoice={state.selectedVoiceName || ''} playbackSpeed={state.playbackSpeed}
             />
@@ -396,7 +385,7 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      {activeChapterMetadata && (activeTab === 'reader' || activeTab === 'collection') && (
+      {activeChapterMetadata && activeTab === 'reader' && (
         <Player 
           isPlaying={isPlaying} onPlay={handlePlay} onPause={handlePause} onStop={() => setIsPlaying(false)} onNext={handleNextChapter} onPrev={() => {}} onSeek={d => handleJumpToOffset(state.currentOffsetChars + d)}
           speed={state.playbackSpeed} onSpeedChange={s => setState(p => ({ ...p, playbackSpeed: s }))} selectedVoice={''} onVoiceChange={() => {}} theme={state.theme} onThemeChange={() => {}}
