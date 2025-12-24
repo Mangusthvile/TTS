@@ -47,7 +47,7 @@ const Settings: React.FC<SettingsProps> = ({
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
           <div>
             <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
-            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.6.7</p>
+            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.6.8</p>
           </div>
           <button onClick={onCheckForUpdates} className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase bg-white shadow-sm`}><RefreshCw className="w-3.5 h-3.5" /> Refresh</button>
         </div>
@@ -56,18 +56,20 @@ const Settings: React.FC<SettingsProps> = ({
           <label className={labelClass}>Cloud & Identity</label>
           <div className="space-y-4">
              <input type="text" value={googleClientId || ''} onChange={e => onUpdateGoogleClientId?.(e.target.value.trim())} placeholder="Google OAuth Client ID" className={`w-full px-4 py-3 rounded-xl border-none outline-none font-mono text-[16px] ${isDark ? 'bg-slate-950 text-white' : 'bg-slate-50 text-black'}`} />
-             <div className="flex justify-between items-center pt-4 border-t border-black/5">
+             <div className="flex flex-col gap-6 pt-4 border-t border-black/5 lg:flex-row lg:items-center lg:justify-between">
                 <div className="flex items-center gap-4">
                    <div className={`p-4 rounded-2xl ${isCloudLinked ? 'bg-indigo-600 text-white' : 'bg-black/5'}`}>{isCloudLinked ? <Cloud className="w-6 h-6" /> : <CloudOff className="w-6 h-6" />}</div>
                    <div><div className={`text-sm font-black ${textClass}`}>{isCloudLinked ? 'Library Linked' : 'Offline'}</div><div className="text-[10px] opacity-60">Sync state via snapshot</div></div>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                    <button onClick={onSaveState} className="p-3 rounded-xl border border-emerald-500/30 text-emerald-500" title="Freeze Snapshot"><Save className="w-4 h-4" /></button>
                    {isCloudLinked ? (
                       <>
                         <button onClick={onLinkCloud} title="Reconnect" className="p-3 rounded-xl border border-amber-500/30 text-amber-500"><LogIn className="w-4 h-4" /></button>
-                        <button onClick={onSyncNow} disabled={isSyncing} className="px-6 py-3 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest">{isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Sync Saved'}</button>
-                        <button onClick={onClearAuth} className="p-3 rounded-xl border opacity-40"><LogOut className="w-4 h-4" /></button>
+                        <button onClick={onSyncNow} disabled={isSyncing} className="px-6 py-3 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2">
+                           {isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} Sync Now
+                        </button>
+                        <button onClick={onClearAuth} className="p-3 rounded-xl border opacity-40 hover:text-red-500 hover:border-red-500 transition-colors"><LogOut className="w-4 h-4" /></button>
                       </>
                    ) : <button onClick={onLinkCloud} disabled={!googleClientId} className="px-8 py-4 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest">Link Account</button>}
                 </div>
