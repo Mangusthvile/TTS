@@ -93,24 +93,6 @@ const App: React.FC = () => {
     if (type !== 'reconnect') setTimeout(() => setTransitionToast(null), 3500);
   };
 
-  const mergeProgressStore = (local: any, remote: any) => {
-    const merged = { ...remote };
-    for (const bookId in local) {
-      if (!merged[bookId]) {
-        merged[bookId] = local[bookId];
-      } else {
-        for (const chapterId in local[bookId]) {
-          const lProg = local[bookId][chapterId];
-          const rProg = merged[bookId][chapterId];
-          if (!rProg || (lProg.updatedAt > rProg.updatedAt)) {
-            merged[bookId][chapterId] = lProg;
-          }
-        }
-      }
-    }
-    return merged;
-  };
-
   const applySnapshot = useCallback((snapshot: SavedSnapshot) => {
     const { books, readerSettings, activeBookId, playbackSpeed, selectedVoiceName, theme, progressStore } = snapshot.state;
     
@@ -193,7 +175,6 @@ const App: React.FC = () => {
     const chapter = book?.chapters.find(c => c.id === chapterId);
     if (!book || !chapter || chapter.audioStatus === AudioStatus.READY) return;
 
-    // Check cache first
     const voice = book.settings.defaultVoiceId || 'en-US-Standard-C';
     const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
     const introText = applyRules(rawIntro, book.rules);
@@ -205,7 +186,6 @@ const App: React.FC = () => {
       return;
     }
 
-    // Process
     updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.GENERATING });
     try {
       const res = await synthesizeChunk(introText + contentText, voice, 1.0);
@@ -287,21 +267,66 @@ const App: React.FC = () => {
   const handleSeekToTime = (t: number) => speechController.seekToTime(t);
   const handleJumpToOffset = (o: number) => speechController.seekToOffset(o);
 
+  const mergeProgressStore = (local: any, remote: any) => {
+    const merged = { ...remote };
+    for (const bookId in local) {
+      if (!merged[bookId]) {
+        merged[bookId] = local[bookId];
+      } else {
+        for (const chapterId in local[bookId]) {
+          const lProg = local[bookId][chapterId];
+          const rProg = merged[bookId][chapterId];
+          if (!rProg || (lProg.updatedAt > rProg.updatedAt)) {
+            merged[bookId][chapterId] = lProg;
+          }
+        }
+      }
+    }
+    return merged;
+  };
+
   useEffect(() => {
     localStorage.setItem('talevox_pro_v2', JSON.stringify({ ...state, books: state.books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined })) }));
   }, [state]);
 
   return (
     <div className={`flex flex-col h-screen overflow-hidden font-sans transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-950 text-slate-100' : state.theme === Theme.SEPIA ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
-      <header className={`h-16 border-b flex items-center justify-between px-4 lg:px-8 z-10 sticky top-0 transition-colors ${state.theme === Theme.DARK ? 'border-slate-800 bg-slate-900/80 backdrop-blur-md' : state.theme === Theme.SEPIA ? 'border-[#d8ccb6] bg-[#efe6d5]/90 backdrop-blur-md' : 'border-black/5 bg-white/90 backdrop-blur-md'}`}>
-        <div className="flex items-center gap-4">
+      <header className={`h-16 border-b flex items-center justify-between px-4 lg:px-8 z-30 sticky top-0 transition-colors ${state.theme === Theme.DARK ? 'border-slate-800 bg-slate-900/80 backdrop-blur-md' : state.theme === Theme.SEPIA ? 'border-[#d8ccb6] bg-[#efe6d5]/90 backdrop-blur-md' : 'border-black/5 bg-white/90 backdrop-blur-md'}`}>
+        <div className="flex items-center gap-4 h-full">
           {activeTab === 'reader' && (
             <button onClick={() => setIsChapterSidebarOpen(true)} className="p-2 lg:hidden rounded-lg hover:bg-black/5"><Menu className="w-5 h-5" /></button>
           )}
-          <nav className="flex items-center gap-4 sm:gap-6">
-            <button onClick={() => setActiveTab('library')} className={`flex items-center gap-2 h-16 border-b-2 font-black uppercase text-[10px] tracking-widest ${activeTab === 'library' || activeTab === 'collection' ? 'border-indigo-600 text-indigo-600' : 'border-transparent opacity-60'}`}><LibraryIcon className="w-4 h-4" /> <span className="hidden xs:inline">Library</span></button>
-            <button onClick={() => setActiveTab('rules')} className={`flex items-center gap-2 h-16 border-b-2 font-black uppercase text-[10px] tracking-widest ${activeTab === 'rules' ? 'border-indigo-600 text-indigo-600' : 'border-transparent opacity-60'}`}><Zap className="w-4 h-4" /> <span className="hidden xs:inline">Rules</span></button>
-            <button onClick={() => setActiveTab('settings')} className={`flex items-center gap-2 h-16 border-b-2 font-black uppercase text-[10px] tracking-widest ${activeTab === 'settings' ? 'border-indigo-600 text-indigo-600' : 'border-transparent opacity-60'}`}><SettingsIcon className="w-4 h-4" /> <span className="hidden xs:inline">Settings</span></button>
+          <nav className="flex items-center h-full">
+            <button 
+              onClick={() => setActiveTab('library')} 
+              className={`flex items-center gap-2 px-4 h-16 border-b-2 font-black uppercase text-[10px] tracking-widest transition-all ${activeTab === 'library' || activeTab === 'collection' ? 'border-indigo-600 text-indigo-600' : 'border-transparent opacity-60'}`}
+            >
+              <LibraryIcon className="w-4 h-4" /> 
+              <span className="hidden sm:inline">Library</span>
+            </button>
+            {activeBook && activeBook.currentChapterId && (
+              <button 
+                onClick={() => setActiveTab('reader')} 
+                className={`flex items-center gap-2 px-4 h-16 border-b-2 font-black uppercase text-[10px] tracking-widest transition-all ${activeTab === 'reader' ? 'border-indigo-600 text-indigo-600' : 'border-transparent opacity-60'}`}
+              >
+                <BookText className="w-4 h-4" /> 
+                <span className="hidden sm:inline">Reader</span>
+              </button>
+            )}
+            <button 
+              onClick={() => setActiveTab('rules')} 
+              className={`flex items-center gap-2 px-4 h-16 border-b-2 font-black uppercase text-[10px] tracking-widest transition-all ${activeTab === 'rules' ? 'border-indigo-600 text-indigo-600' : 'border-transparent opacity-60'}`}
+            >
+              <Zap className="w-4 h-4" /> 
+              <span className="hidden sm:inline">Rules</span>
+            </button>
+            <button 
+              onClick={() => setActiveTab('settings')} 
+              className={`flex items-center gap-2 px-4 h-16 border-b-2 font-black uppercase text-[10px] tracking-widest transition-all ${activeTab === 'settings' ? 'border-indigo-600 text-indigo-600' : 'border-transparent opacity-60'}`}
+            >
+              <SettingsIcon className="w-4 h-4" /> 
+              <span className="hidden sm:inline">Settings</span>
+            </button>
           </nav>
         </div>
         <div className="flex items-center gap-2 sm:gap-4">
@@ -315,10 +340,9 @@ const App: React.FC = () => {
       </header>
 
       <div className="flex-1 overflow-y-auto relative flex">
-        {isLoadingChapter && <div className="absolute inset-0 flex items-center justify-center bg-inherit z-5"><Loader2 className="w-10 h-10 text-indigo-600 animate-spin" /></div>}
-        {isAddChapterOpen && <div className="absolute inset-0 z-20 overflow-y-auto p-4 lg:p-12 backdrop-blur-md bg-black/10"><div className="max-w-4xl mx-auto relative"><button onClick={() => setIsAddChapterOpen(false)} className="absolute -top-4 -right-4 p-3 bg-white text-black shadow-2xl rounded-full hover:scale-110 active:scale-95 transition-transform z-10"><X className="w-6 h-6" /></button><Extractor onChapterExtracted={handleChapterExtracted} suggestedIndex={activeBook?.chapters.length ? Math.max(...activeBook.chapters.map(c => c.index)) + 1 : 1} theme={state.theme} /></div></div>}
+        {isLoadingChapter && <div className="absolute inset-0 flex items-center justify-center bg-inherit z-40"><Loader2 className="w-10 h-10 text-indigo-600 animate-spin" /></div>}
+        {isAddChapterOpen && <div className="absolute inset-0 z-50 overflow-y-auto p-4 lg:p-12 backdrop-blur-md bg-black/20"><div className="max-w-4xl mx-auto relative"><button onClick={() => setIsAddChapterOpen(false)} className="absolute -top-4 -right-4 p-3 bg-white text-black shadow-2xl rounded-full hover:scale-110 active:scale-95 transition-transform z-10"><X className="w-6 h-6" /></button><Extractor onChapterExtracted={handleChapterExtracted} suggestedIndex={activeBook?.chapters.length ? Math.max(...activeBook.chapters.map(c => c.index)) + 1 : 1} theme={state.theme} /></div></div>}
         
-        {/* Desktop Sidebar for Reader */}
         {activeTab === 'reader' && activeBook && (
           <aside className="hidden lg:block w-72 border-r border-black/5 bg-black/5 overflow-y-auto">
              <ChapterSidebar 
@@ -328,7 +352,6 @@ const App: React.FC = () => {
           </aside>
         )}
 
-        {/* Mobile Chapter Sidebar Drawer */}
         {isChapterSidebarOpen && activeBook && (
           <div className="fixed inset-0 z-[60] flex">
             <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setIsChapterSidebarOpen(false)} />

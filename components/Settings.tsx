@@ -49,7 +49,12 @@ const Settings: React.FC<SettingsProps> = ({
             <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
             <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.6.8</p>
           </div>
-          <button onClick={onCheckForUpdates} className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase bg-white shadow-sm`}><RefreshCw className="w-3.5 h-3.5" /> Refresh</button>
+          <button 
+            onClick={onCheckForUpdates} 
+            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase transition-all shadow-sm ${isDark ? 'bg-slate-800 text-slate-100 hover:bg-slate-700' : isSepia ? 'bg-[#f4ecd8] text-[#3c2f25] hover:opacity-80' : 'bg-white text-slate-600 hover:bg-slate-50'}`}
+          >
+            <RefreshCw className="w-3.5 h-3.5" /> Refresh
+          </button>
         </div>
 
         <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm space-y-6 ${cardBg}`}>
