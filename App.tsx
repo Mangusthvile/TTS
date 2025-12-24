@@ -213,7 +213,7 @@ const App: React.FC = () => {
     const contentText = applyRules(chapter.content, book.rules);
     const cacheKey = generateAudioKey(introText + contentText, voice, 1.0);
     
-    // Step 1: Check Drive for existing file by name to avoid duplication
+    // PART C: Prevent duplicate audio - Check Drive first
     if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
        const audioName = buildMp3Name(chapter.index, chapter.title);
        const driveId = await findFileSync(audioName, book.driveFolderId);
@@ -226,7 +226,6 @@ const App: React.FC = () => {
        }
     }
 
-    // Step 2: Check Local Cache
     const cached = await getAudioFromCache(cacheKey);
     if (cached) {
       if (book.backend === StorageBackend.DRIVE && book.driveFolderId && !chapter.cloudAudioFileId) {
@@ -244,7 +243,6 @@ const App: React.FC = () => {
       return;
     }
 
-    // Step 3: Synthesis
     updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.GENERATING });
     try {
       const res = await synthesizeChunk(introText + contentText, voice, 1.0);
@@ -290,7 +288,7 @@ const App: React.FC = () => {
     const book = s.books.find(b => b.id === s.activeBookId);
     if (!book) return;
 
-    // Persist book-wide voice setting if requested
+    // Persist default if requested
     if (data.setAsDefault) {
       setState(prev => ({
         ...prev,
@@ -341,11 +339,10 @@ const App: React.FC = () => {
     setIsAddChapterOpen(false);
     showToast("Chapter added", 0, 'success');
     
-    // Auto-start generation with chosen voice
+    // PART B: Automatic generation using chosen voice
     queueBackgroundTTS(s.activeBookId, newChapter.id, data.voiceId);
   }, [queueBackgroundTTS]);
 
-  // Fix missing function: Navigates to the next chapter in the book's list.
   const handleNextChapter = useCallback(() => {
     const s = stateRef.current;
     const book = s.books.find(b => b.id === s.activeBookId);
@@ -363,7 +360,7 @@ const App: React.FC = () => {
       }));
     } else {
       setIsPlaying(false);
-      showToast("End of book collection reached", 0, 'success');
+      showToast("End of book reached", 0, 'success');
     }
   }, []);
 
@@ -415,7 +412,6 @@ const App: React.FC = () => {
     } catch (e) { setIsPlaying(false); showToast("Playback Error", 0, 'error'); }
   }, [queueBackgroundTTS, stopAfterChapter, handleNextChapter]);
 
-  // Fix playback transition: Automatically re-trigger handlePlay when chapter ID changes during an active session.
   useEffect(() => {
     if (isPlaying && activeBook?.currentChapterId) {
       handlePlay();
@@ -455,7 +451,19 @@ const App: React.FC = () => {
 
       <div className="flex-1 overflow-y-auto relative flex">
         {isLoadingChapter && <div className="absolute inset-0 flex items-center justify-center bg-inherit z-5"><Loader2 className="w-10 h-10 text-indigo-600 animate-spin" /></div>}
-        {isAddChapterOpen && <div className="absolute inset-0 z-[60] overflow-y-auto p-4 lg:p-12 backdrop-blur-md bg-black/10"><div className="max-w-4xl mx-auto relative"><button onClick={() => setIsAddChapterOpen(false)} className="absolute -top-4 -right-4 p-3 bg-white text-black shadow-2xl rounded-full hover:scale-110 active:scale-95 transition-transform z-10"><X className="w-6 h-6" /></button><Extractor onChapterExtracted={handleChapterExtracted} suggestedIndex={activeBook?.chapters.length ? Math.max(...activeBook.chapters.map(c => c.index)) + 1 : 1} theme={state.theme} defaultVoiceId={activeBook?.settings.defaultVoiceId} /></div></div>}
+        {isAddChapterOpen && (
+          <div className="absolute inset-0 z-[60] overflow-y-auto p-4 lg:p-12 backdrop-blur-md bg-black/10">
+            <div className="max-w-4xl mx-auto relative">
+              <button onClick={() => setIsAddChapterOpen(false)} className="absolute -top-4 -right-4 p-3 bg-white text-black shadow-2xl rounded-full hover:scale-110 active:scale-95 transition-transform z-10"><X className="w-6 h-6" /></button>
+              <Extractor 
+                onChapterExtracted={handleChapterExtracted} 
+                suggestedIndex={activeBook?.chapters.length ? Math.max(...activeBook.chapters.map(c => c.index)) + 1 : 1} 
+                theme={state.theme} 
+                defaultVoiceId={activeBook?.settings.defaultVoiceId} 
+              />
+            </div>
+          </div>
+        )}
         
         {activeTab === 'reader' && activeBook && (
           <aside className="hidden lg:block w-72 border-r border-black/5 bg-black/5 overflow-y-auto">

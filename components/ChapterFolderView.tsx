@@ -147,7 +147,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     const isBulk = showVoiceModal?.isBulk;
     const chId = showVoiceModal?.chapterId;
     
-    // 1. Persist book default if requested
+    // 1. Persist choice if needed
     if (onUpdateBookSettings && rememberAsDefault) {
       onUpdateBookSettings({ ...book.settings, defaultVoiceId: voiceId });
     }
@@ -155,7 +155,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     // 2. CLOSE MODAL IMMEDIATELY
     setShowVoiceModal(null);
 
-    // 3. START WORK IN BACKGROUND
+    // 3. Trigger background work
     if (isBulk) {
       handleRunBulkSync(voiceId);
     } else if (chId) {
