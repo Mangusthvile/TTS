@@ -1,11 +1,10 @@
-
 import React, { useMemo, useState, useEffect, useCallback } from 'react';
-import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES } from '../types';
-import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle } from 'lucide-react';
+import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile } from '../types';
+import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash } from 'lucide-react';
 import { PROGRESS_STORE_V4, applyRules } from '../services/speechService';
 import { synthesizeChunk } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache } from '../services/audioCache';
-import { uploadToDrive, listFilesInFolder, buildMp3Name, buildTextName } from '../services/driveService';
+import { uploadToDrive, listFilesInFolder, buildMp3Name, buildTextName, createDriveFolder, findFileSync, moveFile } from '../services/driveService';
 
 type ViewMode = 'details' | 'list' | 'grid';
 
@@ -37,8 +36,19 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [tempTitle, setTempTitle] = useState('');
   const [synthesizingId, setSynthesizingId] = useState<string | null>(null);
   const [isCheckingDrive, setIsCheckingDrive] = useState(false);
+  const [lastScan, setLastScan] = useState<ScanResult | null>(null);
+  const [showFixModal, setShowFixModal] = useState(false);
+  const [isFixing, setIsFixing] = useState(false);
+  const [fixProgress, setFixProgress] = useState({ current: 0, total: 0 });
+
   const [showVoiceModal, setShowVoiceModal] = useState<{ chapterId?: string } | null>(null);
   const [rememberAsDefault, setRememberAsDefault] = useState(true);
+
+  const [fixOptions, setFixOptions] = useState({
+    genAudio: true,
+    restoreText: true,
+    cleanupStrays: true
+  });
 
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
@@ -67,31 +77,48 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     setIsCheckingDrive(true);
     try {
       const driveFiles = await listFilesInFolder(book.driveFolderId);
-      const fileMap = new Map(driveFiles.map(f => [f.name, f.id]));
+      const fileMap = new Map(driveFiles.map(f => [f.name, f]));
       
-      let missingText = 0;
-      let missingAudio = 0;
+      const scan: ScanResult = {
+        missingTextIds: [],
+        missingAudioIds: [],
+        strayFiles: [],
+        duplicates: [],
+        totalChecked: chapters.length
+      };
+
+      const matchedFileIds = new Set<string>();
 
       for (const chapter of chapters) {
         const expectedTextName = buildTextName(chapter.index, chapter.title);
         const expectedAudioName = buildMp3Name(chapter.index, chapter.title);
         
-        const textId = fileMap.get(expectedTextName);
-        const audioId = fileMap.get(expectedAudioName);
+        const textFile = fileMap.get(expectedTextName);
+        const audioFile = fileMap.get(expectedAudioName);
 
-        if (!textId) missingText++;
-        if (!audioId) missingAudio++;
+        if (!textFile) scan.missingTextIds.push(chapter.id);
+        else matchedFileIds.add(textFile.id);
+
+        if (!audioFile) scan.missingAudioIds.push(chapter.id);
+        else matchedFileIds.add(audioFile.id);
 
         onUpdateChapter({
           ...chapter,
-          cloudTextFileId: textId || chapter.cloudTextFileId,
-          cloudAudioFileId: audioId || chapter.cloudAudioFileId,
-          hasTextOnDrive: !!textId,
-          audioStatus: audioId ? AudioStatus.READY : AudioStatus.PENDING
+          cloudTextFileId: textFile?.id || chapter.cloudTextFileId,
+          cloudAudioFileId: audioFile?.id || chapter.cloudAudioFileId,
+          hasTextOnDrive: !!textFile,
+          audioStatus: audioFile ? AudioStatus.READY : AudioStatus.PENDING
         });
       }
 
-      alert(`Checked ${chapters.length} chapters:\n${missingText} missing text\n${missingAudio} missing audio`);
+      // Identify strays
+      for (const f of driveFiles) {
+        if (!matchedFileIds.has(f.id) && f.mimeType !== 'application/vnd.google-apps.folder') {
+          scan.strayFiles.push(f);
+        }
+      }
+
+      setLastScan(scan);
     } catch (e: any) {
       alert("Integrity check failed: " + e.message);
     } finally {
@@ -138,6 +165,60 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       onUpdateChapter({ ...chapter, audioStatus: AudioStatus.FAILED });
     } finally {
       setSynthesizingId(null);
+    }
+  };
+
+  const handleRunFix = async () => {
+    if (!lastScan || !book.driveFolderId) return;
+    setIsFixing(true);
+    const totalActions = 
+      (fixOptions.restoreText ? lastScan.missingTextIds.length : 0) + 
+      (fixOptions.genAudio ? lastScan.missingAudioIds.length : 0) +
+      (fixOptions.cleanupStrays ? lastScan.strayFiles.length : 0);
+    
+    setFixProgress({ current: 0, total: totalActions });
+
+    try {
+      // 1. Restore Text
+      if (fixOptions.restoreText) {
+        for (const cid of lastScan.missingTextIds) {
+          const ch = chapters.find(c => c.id === cid);
+          if (ch && ch.content) {
+            const filename = buildTextName(ch.index, ch.title);
+            const id = await uploadToDrive(book.driveFolderId, filename, ch.content);
+            onUpdateChapter({ ...ch, cloudTextFileId: id, hasTextOnDrive: true });
+          }
+          setFixProgress(p => ({ ...p, current: p.current + 1 }));
+        }
+      }
+
+      // 2. Generate Audio
+      if (fixOptions.genAudio) {
+        // Simple sequential limiter for safety
+        for (const cid of lastScan.missingAudioIds) {
+          const ch = chapters.find(c => c.id === cid);
+          if (ch) await generateAudio(ch);
+          setFixProgress(p => ({ ...p, current: p.current + 1 }));
+        }
+      }
+
+      // 3. Cleanup Strays
+      if (fixOptions.cleanupStrays && lastScan.strayFiles.length > 0) {
+        let trashFolderId = await findFileSync('_trash', book.driveFolderId);
+        if (!trashFolderId) trashFolderId = await createDriveFolder('_trash', book.driveFolderId);
+        
+        for (const file of lastScan.strayFiles) {
+          await moveFile(file.id, book.driveFolderId!, trashFolderId);
+          setFixProgress(p => ({ ...p, current: p.current + 1 }));
+        }
+      }
+
+      setShowFixModal(false);
+      handleCheckDriveIntegrity();
+    } catch (e: any) {
+      alert("Fix encountered error: " + e.message);
+    } finally {
+      setIsFixing(false);
     }
   };
 
@@ -241,7 +322,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       {chapters.map(c => {
         const saved = progressData[c.id];
         const percent = saved?.percent !== undefined ? Math.floor(saved.percent * 100) : 0;
-        return (
+        return (lastScan && (
           <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`flex flex-col gap-2 p-4 rounded-2xl border cursor-pointer transition-all hover:translate-x-1 ${cardBg}`}>
             <div className="flex items-center gap-4">
               <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-mono text-[10px] font-black ${isDark ? 'bg-slate-950 text-indigo-400' : 'bg-indigo-50 text-indigo-600'}`}>{c.index}</div>
@@ -258,7 +339,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                <div className="h-full bg-indigo-500" style={{ width: `${percent}%` }} />
             </div>
           </div>
-        );
+        ));
       })}
     </div>
   );
@@ -289,6 +370,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     </div>
   );
 
+  const hasIssues = lastScan && (lastScan.missingTextIds.length > 0 || lastScan.missingAudioIds.length > 0 || lastScan.strayFiles.length > 0);
+
   return (
     <div className={`h-full min-h-0 flex flex-col ${isDark ? 'bg-slate-900 text-slate-100' : isSepia ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
       {showVoiceModal && (
@@ -309,6 +392,94 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                 ))}
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {showFixModal && lastScan && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm overflow-y-auto">
+          <div className={`w-full max-w-2xl rounded-[2.5rem] shadow-2xl p-8 lg:p-12 space-y-8 animate-in zoom-in-95 ${isDark ? 'bg-slate-900 border border-white/10' : 'bg-white'}`}>
+             <div className="flex justify-between items-start">
+                <div>
+                   <h3 className="text-2xl font-black tracking-tight flex items-center gap-3">
+                      <Wrench className="w-7 h-7 text-indigo-600" /> Fix & Cleanup Cloud Folder
+                   </h3>
+                   <p className="text-xs font-bold opacity-50 uppercase tracking-widest mt-2">Book: {book.title}</p>
+                </div>
+                {!isFixing && <button onClick={() => setShowFixModal(false)} className="p-3 bg-black/5 rounded-full hover:bg-black/10"><X className="w-6 h-6" /></button>}
+             </div>
+
+             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="p-4 rounded-2xl bg-indigo-600/5 border border-indigo-600/10 flex flex-col gap-1">
+                   <span className="text-[10px] font-black uppercase text-indigo-600">Missing Text</span>
+                   <span className="text-2xl font-black">{lastScan.missingTextIds.length}</span>
+                </div>
+                <div className="p-4 rounded-2xl bg-amber-600/5 border border-amber-600/10 flex flex-col gap-1">
+                   <span className="text-[10px] font-black uppercase text-amber-600">Missing Audio</span>
+                   <span className="text-2xl font-black">{lastScan.missingAudioIds.length}</span>
+                </div>
+                <div className="p-4 rounded-2xl bg-red-600/5 border border-red-600/10 flex flex-col gap-1">
+                   <span className="text-[10px] font-black uppercase text-red-600">Stray Files</span>
+                   <span className="text-2xl font-black">{lastScan.strayFiles.length}</span>
+                </div>
+             </div>
+
+             <div className="space-y-4">
+                <label className="text-[10px] font-black uppercase tracking-widest opacity-60">Actions to Perform</label>
+                <div className="space-y-3">
+                   <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors">
+                      <input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.restoreText} onChange={e => setFixOptions(o => ({...o, restoreText: e.target.checked}))} />
+                      <div>
+                         <div className="text-sm font-black">Restore Missing Text</div>
+                         <p className="text-[10px] opacity-60 uppercase font-bold">Re-upload local content to Drive</p>
+                      </div>
+                   </label>
+                   <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors">
+                      <input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.genAudio} onChange={e => setFixOptions(o => ({...o, genAudio: e.target.checked}))} />
+                      <div>
+                         <div className="text-sm font-black">Generate Missing Audio</div>
+                         <p className="text-[10px] opacity-60 uppercase font-bold">Synthesize and upload MP3s</p>
+                      </div>
+                   </label>
+                   <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors">
+                      <input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.cleanupStrays} onChange={e => setFixOptions(o => ({...o, cleanupStrays: e.target.checked}))} />
+                      <div>
+                         <div className="text-sm font-black">Cleanup Book Folder</div>
+                         <p className="text-[10px] opacity-60 uppercase font-bold">Move unrecognized files to _trash</p>
+                      </div>
+                   </label>
+                </div>
+             </div>
+
+             <div className="max-h-[25vh] overflow-y-auto border rounded-2xl p-4 bg-black/5 space-y-2">
+                <span className="text-[10px] font-black uppercase opacity-40 sticky top-0 bg-inherit py-1">Detailed Breakdown</span>
+                {fixOptions.restoreText && lastScan.missingTextIds.map(cid => (
+                  <div key={`txt-${cid}`} className="text-xs font-bold flex items-center gap-2 text-indigo-600"><Plus className="w-3 h-3" /> Re-upload: {chapters.find(c=>c.id===cid)?.title}</div>
+                ))}
+                {fixOptions.genAudio && lastScan.missingAudioIds.map(cid => (
+                  <div key={`aud-${cid}`} className="text-xs font-bold flex items-center gap-2 text-amber-600"><Headphones className="w-3 h-3" /> Synthesize: {chapters.find(c=>c.id===cid)?.title}</div>
+                ))}
+                {fixOptions.cleanupStrays && lastScan.strayFiles.map(f => (
+                  <div key={`stray-${f.id}`} className="text-xs font-bold flex items-center gap-2 text-red-600"><History className="w-3 h-3" /> Move to _trash: {f.name}</div>
+                ))}
+             </div>
+
+             {isFixing ? (
+                <div className="space-y-4 pt-4">
+                   <div className="flex justify-between items-center">
+                      <span className="text-sm font-black">Restoring Integrity...</span>
+                      <span className="text-xs font-mono font-black">{fixProgress.current} / {fixProgress.total}</span>
+                   </div>
+                   <div className="h-3 w-full bg-black/5 rounded-full overflow-hidden">
+                      <div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${(fixProgress.current / fixProgress.total) * 100}%` }} />
+                   </div>
+                </div>
+             ) : (
+                <div className="grid grid-cols-2 gap-4">
+                  <button onClick={() => setShowFixModal(false)} className="py-4 rounded-2xl font-black uppercase text-[10px] tracking-widest border-2 hover:bg-black/5">Cancel</button>
+                  <button onClick={handleRunFix} className="py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-xl hover:scale-[1.02] active:scale-95 transition-all">Start Fixing</button>
+                </div>
+             )}
           </div>
         </div>
       )}
@@ -337,6 +508,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               <button onClick={handleCheckDriveIntegrity} disabled={isCheckingDrive} className="px-6 py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center gap-2" title="Check cloud text/audio integrity">
                 {isCheckingDrive ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />} 
                 {isCheckingDrive ? 'Checking Drive...' : 'Check Drive'}
+              </button>
+              <button onClick={() => setShowFixModal(true)} disabled={!hasIssues} className={`px-6 py-3 rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-lg active:scale-95 transition-all flex items-center gap-2 ${hasIssues ? 'bg-amber-600 text-white shadow-amber-600/20 hover:scale-105' : 'bg-black/5 text-black/20 cursor-not-allowed'}`} title="Fix missing assets and cleanup strays">
+                <Wrench className="w-4 h-4" /> Fix Missing
               </button>
             </div>
           </div>

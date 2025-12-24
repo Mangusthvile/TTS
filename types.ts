@@ -128,6 +128,21 @@ export interface Book {
   settings: BookSettings;
 }
 
+export interface StrayFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  modifiedTime: string;
+}
+
+export interface ScanResult {
+  missingTextIds: string[];
+  missingAudioIds: string[];
+  strayFiles: StrayFile[];
+  duplicates: { chapterId: string, type: 'audio' | 'text', keepId: string, removeIds: string[] }[];
+  totalChecked: number;
+}
+
 export interface SavedSnapshot {
   version: "v1";
   savedAt: number;

@@ -1,4 +1,3 @@
-
 import { driveFetch, getValidDriveToken } from './driveAuth';
 
 /**
@@ -44,6 +43,12 @@ export async function checkFileExists(fileId: string): Promise<boolean> {
   } catch (e) {
     return false;
   }
+}
+
+export async function moveFile(fileId: string, currentParentId: string, newParentId: string): Promise<void> {
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?addParents=${newParentId}&removeParents=${currentParentId}&supportsAllDrives=true`;
+  const response = await driveFetch(url, { method: 'PATCH' });
+  if (!response.ok) throw new Error("MOVE_FAILED");
 }
 
 export async function openFolderPicker(): Promise<{id: string, name: string} | null> {
@@ -107,9 +112,9 @@ async function getErrorFromResponse(response: Response, fallbackPrefix: string):
   return new Error(`${details || fallbackPrefix} (HTTP ${response.status})`);
 }
 
-export async function listFilesInFolder(folderId: string): Promise<{id: string, name: string, mimeType: string}[]> {
+export async function listFilesInFolder(folderId: string): Promise<{id: string, name: string, mimeType: string, modifiedTime: string}[]> {
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
-  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, mimeType)&orderBy=name&pageSize=1000&includeItemsFromAllDrives=true&supportsAllDrives=true`;
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, mimeType, modifiedTime)&orderBy=name&pageSize=1000&includeItemsFromAllDrives=true&supportsAllDrives=true`;
   const response = await driveFetch(url);
   if (!response.ok) throw await getErrorFromResponse(response, 'DRIVE_LIST_FILES_ERROR');
   const data = await response.json();
