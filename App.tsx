@@ -10,7 +10,7 @@ import Extractor from './components/Extractor';
 import ChapterFolderView from './components/ChapterFolderView';
 import ChapterSidebar from './components/ChapterSidebar';
 import { speechController, applyRules, PROGRESS_STORE_V4 } from './services/speechService';
-import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, openFolderPicker, STATE_FILENAME } from './services/driveService';
+import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, openFolderPicker, STATE_FILENAME, runLibraryMigration } from './services/driveService';
 import { initDriveAuth, getValidDriveToken, clearStoredToken, isTokenValid } from './services/driveAuth';
 import { saveChapterToFile } from './services/fileService';
 import { synthesizeChunk } from './services/cloudTtsService';
@@ -250,6 +250,22 @@ const App: React.FC = () => {
       showToast(e.message, 0, 'error');
     } finally { setIsSyncing(false); }
   }, []);
+
+  const handleRunMigration = useCallback(async () => {
+    if (!state.driveRootFolderId) return;
+    setIsSyncing(true);
+    try {
+        const result = await runLibraryMigration(state.driveRootFolderId);
+        showToast(result.message, 0, 'success');
+        // Re-initialize to ensure we're pointing to canonical folders
+        const sub = await ensureRootStructure(state.driveRootFolderId);
+        setState(p => ({ ...p, driveSubfolders: sub }));
+    } catch(e) {
+        showToast("Migration Failed", 0, 'error');
+    } finally {
+        setIsSyncing(false);
+    }
+  }, [state.driveRootFolderId]);
 
   const queueBackgroundTTS = useCallback(async (bookId: string, chapterId: string, customVoiceId?: string) => {
     const s = stateRef.current;
@@ -560,7 +576,7 @@ const App: React.FC = () => {
               onLinkCloud={() => getValidDriveToken({ interactive: true })} onSyncNow={() => handleSyncFromCloud(true)}
               googleClientId={state.googleClientId} onUpdateGoogleClientId={id => setState(p => ({ ...p, googleClientId: id }))}
               onClearAuth={() => clearStoredToken()} onSaveState={() => handleSaveStateToCloud()} lastSavedAt={state.lastSavedAt}
-              driveRootName={state.driveRootFolderName} onSelectRoot={handleSelectRoot} onRunMigration={() => {}}
+              driveRootName={state.driveRootFolderName} onSelectRoot={handleSelectRoot} onRunMigration={handleRunMigration}
             />
           )}
         </div>
