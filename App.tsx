@@ -10,7 +10,7 @@ import ChapterFolderView from './components/ChapterFolderView';
 import ChapterSidebar from './components/ChapterSidebar';
 import { speechController, applyRules, PROGRESS_STORE_V4 } from './services/speechService';
 import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName } from './services/driveService';
-import { initDriveAuth, getValidDriveToken, clearStoredToken } from './services/driveAuth';
+import { initDriveAuth, getValidDriveToken, clearStoredToken, isTokenValid } from './services/driveAuth';
 import { saveChapterToFile } from './services/fileService';
 import { synthesizeChunk } from './services/cloudTtsService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
@@ -70,6 +70,7 @@ const App: React.FC = () => {
   const [isSyncing, setIsSyncing] = useState(false);
   const [audioDuration, setAudioDuration] = useState(0);
   const [audioCurrentTime, setAudioCurrentTime] = useState(0);
+  const [isAuthorized, setIsAuthorized] = useState(isTokenValid());
 
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
@@ -83,17 +84,26 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (state.googleClientId) initDriveAuth(state.googleClientId);
+    
+    const handleAuthEvent = () => setIsAuthorized(isTokenValid());
+    window.addEventListener('talevox_auth_changed', handleAuthEvent);
+    window.addEventListener('talevox_auth_invalid', handleAuthEvent);
+    return () => {
+      window.removeEventListener('talevox_auth_changed', handleAuthEvent);
+      window.removeEventListener('talevox_auth_invalid', handleAuthEvent);
+    };
   }, [state.googleClientId]);
 
   useEffect(() => {
     if (activeTab === 'collection' && activeBook && activeBook.backend === StorageBackend.DRIVE) {
-      verifyCloudFiles();
+      if (isAuthorized) verifyCloudFiles();
     }
-  }, [activeTab, state.activeBookId]);
+  }, [activeTab, state.activeBookId, isAuthorized]);
 
   const verifyCloudFiles = useCallback(async () => {
     if (!activeBook || activeBook.backend !== StorageBackend.DRIVE || !activeBook.driveFolderId) return;
-    
+    if (!isAuthorized) return;
+
     setIsSyncing(true);
     try {
       const driveFiles = await listFilesInFolder(activeBook.driveFolderId);
@@ -117,7 +127,7 @@ const App: React.FC = () => {
     } finally {
       setIsSyncing(false);
     }
-  }, [activeBook]);
+  }, [activeBook, isAuthorized]);
 
   const showToast = (title: string, number = 0, type: 'info' | 'success' | 'error' | 'reconnect' = 'info') => {
     setTransitionToast({ number, title, type });
@@ -163,7 +173,8 @@ const App: React.FC = () => {
     };
     localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
     setState(prev => ({ ...prev, lastSavedAt: snapshot.savedAt }));
-    if (isCloudSave) {
+    
+    if (isCloudSave && isAuthorized) {
       setIsSyncing(true);
       try {
         const fileId = await findFileSync(STATE_FILENAME);
@@ -173,9 +184,13 @@ const App: React.FC = () => {
         showToast(e.message === "Reconnect Google Drive" ? "Drive Expired" : "Cloud Sync Failed", 0, e.message === "Reconnect Google Drive" ? 'reconnect' : 'error');
       } finally { setIsSyncing(false); }
     }
-  }, []);
+  }, [isAuthorized]);
 
   const handleSync = useCallback(async (manual = false) => {
+    if (!isAuthorized) {
+      if (manual) showToast("Sign in to sync", 0, 'error');
+      return;
+    }
     setIsSyncing(true);
     try {
       const fileId = await findFileSync(STATE_FILENAME);
@@ -198,7 +213,39 @@ const App: React.FC = () => {
     } catch (err: any) { 
       showToast(err.message === "Reconnect Google Drive" ? "Drive Expired" : "Sync Failed", 0, 'error');
     } finally { setIsSyncing(false); }
-  }, [applySnapshot]);
+  }, [applySnapshot, isAuthorized]);
+
+  const handleResetChapterProgress = useCallback(async (bookId: string, chapterId: string) => {
+    console.log(`[ResetChapter] bookId: ${bookId}, chapterId: ${chapterId}`);
+    
+    // 1. Clear Local Storage Progress
+    const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
+    const store = storeRaw ? JSON.parse(storeRaw) : {};
+    if (store[bookId] && store[bookId][chapterId]) {
+      store[bookId][chapterId] = { 
+        timeSec: 0, 
+        durationSec: store[bookId][chapterId].durationSec || 0,
+        percent: 0, 
+        completed: false, 
+        updatedAt: Date.now() 
+      };
+      localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(store));
+    }
+
+    // 2. Clear App State currentOffset if this is the active chapter
+    if (state.activeBookId === bookId && activeBook?.currentChapterId === chapterId) {
+      setState(p => ({ ...p, currentOffsetChars: 0 }));
+    }
+
+    // 3. Dispatch reactive update event
+    window.dispatchEvent(new CustomEvent('talevox_progress_updated', { 
+      detail: { bookId, chapterId } 
+    }));
+
+    // 4. Update cloud state
+    handleSaveState(true);
+    showToast("Progress Reset", 0, 'success');
+  }, [activeBook, state.activeBookId, handleSaveState]);
 
   const queueBackgroundTTS = useCallback(async (bookId: string, chapterId: string, customVoiceId?: string) => {
     const s = stateRef.current;
@@ -212,7 +259,7 @@ const App: React.FC = () => {
     const contentText = applyRules(chapter.content, book.rules);
     const cacheKey = generateAudioKey(introText + contentText, voice, 1.0);
     
-    if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
+    if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
        const audioName = buildMp3Name(chapter.index, chapter.title);
        const driveId = await findFileSync(audioName, book.driveFolderId);
        if (driveId) {
@@ -226,7 +273,7 @@ const App: React.FC = () => {
 
     const cached = await getAudioFromCache(cacheKey);
     if (cached) {
-      if (book.backend === StorageBackend.DRIVE && book.driveFolderId && !chapter.cloudAudioFileId) {
+      if (book.backend === StorageBackend.DRIVE && book.driveFolderId && !chapter.cloudAudioFileId && isAuthorized) {
          updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.GENERATING });
          try {
            const audioName = buildMp3Name(chapter.index, chapter.title);
@@ -248,7 +295,7 @@ const App: React.FC = () => {
       await saveAudioToCache(cacheKey, audioBlob);
       
       let cloudId = undefined;
-      if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
+      if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
          const audioName = buildMp3Name(chapter.index, chapter.title);
          cloudId = await uploadToDrive(book.driveFolderId, audioName, audioBlob, undefined, 'audio/mpeg');
       }
@@ -262,7 +309,7 @@ const App: React.FC = () => {
     } catch (e) {
       updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.FAILED });
     }
-  }, [handleSaveState]);
+  }, [handleSaveState, isAuthorized]);
 
   const updateChapterAudio = (bookId: string, chapterId: string, updates: Partial<Chapter>) => {
     setState(prev => ({
@@ -299,7 +346,7 @@ const App: React.FC = () => {
     const wordCount = data.content.split(/\s+/).filter(Boolean).length;
 
     let cloudTextId = undefined;
-    if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
+    if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
       showToast("Uploading source text...", 0, 'info');
       try {
         cloudTextId = await uploadToDrive(book.driveFolderId, filename, data.content, undefined, 'text/plain');
@@ -338,7 +385,7 @@ const App: React.FC = () => {
     showToast("Chapter added", 0, 'success');
     
     queueBackgroundTTS(s.activeBookId, newChapter.id, data.voiceId);
-  }, [queueBackgroundTTS]);
+  }, [queueBackgroundTTS, isAuthorized]);
 
   const handleNextChapter = useCallback(() => {
     const s = stateRef.current;
@@ -379,7 +426,7 @@ const App: React.FC = () => {
       const cacheKey = generateAudioKey(introText + text, voice, 1.0);
       let audioBlob = await getAudioFromCache(cacheKey);
 
-      if (!audioBlob && chapter.cloudAudioFileId) {
+      if (!audioBlob && chapter.cloudAudioFileId && isAuthorized) {
         showToast("Downloading from Drive...", 0, 'info');
         try {
           audioBlob = await fetchDriveBinary(chapter.cloudAudioFileId);
@@ -407,7 +454,7 @@ const App: React.FC = () => {
         setTimeout(() => handlePlay(), 1000);
       }
     } catch (e) { setIsPlaying(false); showToast("Playback Error", 0, 'error'); }
-  }, [queueBackgroundTTS, stopAfterChapter, handleNextChapter]);
+  }, [queueBackgroundTTS, stopAfterChapter, handleNextChapter, isAuthorized]);
 
   useEffect(() => {
     if (isPlaying && activeBook?.currentChapterId) {
@@ -437,11 +484,6 @@ const App: React.FC = () => {
           </nav>
         </div>
         <div className="flex items-center gap-2 sm:gap-4">
-          <div className="hidden sm:flex items-center gap-1 p-1 rounded-xl bg-black/5">
-            <button onClick={() => setState(p => ({ ...p, theme: Theme.LIGHT }))} className={`p-1.5 rounded-lg ${state.theme === Theme.LIGHT ? 'bg-white shadow-sm text-indigo-600' : 'opacity-60'}`}><Sun className="w-4 h-4" /></button>
-            <button onClick={() => setState(p => ({ ...p, theme: Theme.SEPIA }))} className={`p-1.5 rounded-lg ${state.theme === Theme.SEPIA ? 'bg-[#f4ecd8] shadow-sm text-[#9c6644]' : 'opacity-60'}`}><Coffee className="w-4 h-4" /></button>
-            <button onClick={() => setState(p => ({ ...p, theme: Theme.DARK }))} className={`p-1.5 rounded-lg ${state.theme === Theme.DARK ? 'bg-slate-800 shadow-sm text-indigo-400' : 'opacity-60'}`}><Moon className="w-5 h-5" /></button>
-          </div>
           <button onClick={() => handleSaveState(true)} className={`p-2.5 rounded-xl bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20 transition-all ${isSyncing ? 'animate-pulse' : ''}`}><Save className="w-4 h-4" /></button>
         </div>
       </header>
@@ -505,6 +547,7 @@ const App: React.FC = () => {
               onUpdateChapter={c => setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(ch => ch.id === c.id ? c : ch) } : b) }))}
               onUpdateBookSettings={s => setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, ...s } } : b) }))}
               onBackToLibrary={() => setActiveTab('library')}
+              onResetChapterProgress={handleResetChapterProgress}
             />
           )}
 
@@ -530,6 +573,7 @@ const App: React.FC = () => {
           {activeTab === 'settings' && (
             <Settings 
               settings={state.readerSettings} onUpdate={s => setState(p => ({ ...p, readerSettings: { ...p.readerSettings, ...s } }))} theme={state.theme} 
+              onSetTheme={t => setState(p => ({ ...p, theme: t }))}
               keepAwake={state.keepAwake} onSetKeepAwake={v => setState(p => ({ ...p, keepAwake: v }))} onCheckForUpdates={() => window.location.reload()}
               isCloudLinked={!!state.googleClientId} onLinkCloud={() => getValidDriveToken({ interactive: true })} onSyncNow={() => handleSync(true)}
               googleClientId={state.googleClientId} onUpdateGoogleClientId={id => setState(p => ({ ...p, googleClientId: id }))}

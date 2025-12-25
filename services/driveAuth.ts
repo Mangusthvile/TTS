@@ -1,4 +1,3 @@
-
 /**
  * Talevox Google Drive Authentication Manager
  * Implements self-healing OAuth2 flow with Google Identity Services.
@@ -31,6 +30,7 @@ function saveToStorage() {
   try {
     if (!accessToken) return;
     localStorage.setItem(LS_KEY, JSON.stringify({ accessToken, expiresAt }));
+    window.dispatchEvent(new CustomEvent('talevox_auth_changed', { detail: { authorized: true } }));
   } catch {}
 }
 
@@ -38,11 +38,26 @@ export function clearStoredToken() {
   accessToken = null;
   expiresAt = 0;
   localStorage.removeItem(LS_KEY);
+  window.dispatchEvent(new CustomEvent('talevox_auth_changed', { detail: { authorized: false } }));
 }
 
-function isTokenValid() {
-  // Refresh if less than 5 mins left
-  return !!accessToken && expiresAt > Date.now() + 300_000;
+/**
+ * Checks if we have a locally valid, non-expired token.
+ */
+export function isTokenValid() {
+  // Buffer of 60 seconds to prevent race conditions during requests
+  return !!accessToken && expiresAt > Date.now() + 60_000;
+}
+
+/**
+ * Returns session info for UI display
+ */
+export function getAuthSessionInfo() {
+  return {
+    authorized: isTokenValid(),
+    expiresAt,
+    hasToken: !!accessToken
+  };
 }
 
 export function initDriveAuth(clientId: string) {
@@ -77,7 +92,6 @@ export async function getValidDriveToken(opts?: { interactive?: boolean }): Prom
     tokenClient.callback = (resp: TokenResponse & { error?: string }) => {
       if (resp?.error) {
         clearStoredToken();
-        // If we tried silently and failed, we don't reject yet if it was meant to be interactive
         if (!opts?.interactive) {
            reject(new Error(resp.error));
         } else {
@@ -86,13 +100,13 @@ export async function getValidDriveToken(opts?: { interactive?: boolean }): Prom
         return;
       }
       accessToken = resp.access_token;
+      // expires_in is in seconds
       const ttlMs = (resp.expires_in ?? 3600) * 1000;
       expiresAt = Date.now() + ttlMs;
       saveToStorage();
       resolve(accessToken!);
     };
     
-    // Attempt silent refresh first if not forced interactive
     if (!opts?.interactive) {
        tokenClient.requestAccessToken({ prompt: "" });
     } else {
@@ -105,7 +119,6 @@ export async function getValidDriveToken(opts?: { interactive?: boolean }): Prom
  * Wrapper for Drive API calls that handles Authorization and 401 retries.
  */
 export async function driveFetch(input: RequestInfo, init: RequestInit = {}): Promise<Response> {
-  // Pre-emptive refresh (silent)
   if (!isTokenValid()) {
     try { await getValidDriveToken({ interactive: false }); } catch(e) {}
   }
@@ -125,6 +138,9 @@ export async function driveFetch(input: RequestInfo, init: RequestInit = {}): Pr
       await getValidDriveToken({ interactive: false });
       res = await doFetch();
     } catch (e) {
+      // Still failing? Auth is definitely dead.
+      clearStoredToken();
+      window.dispatchEvent(new CustomEvent('talevox_auth_invalid'));
       throw new Error("Reconnect Google Drive");
     }
   }
