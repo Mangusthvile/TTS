@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES } from './types';
 import Library from './components/Library';
@@ -14,7 +15,7 @@ import { initDriveAuth, getValidDriveToken, clearStoredToken, isTokenValid } fro
 import { saveChapterToFile } from './services/fileService';
 import { synthesizeChunk } from './services/cloudTtsService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
-import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu } from 'lucide-react';
+import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw } from 'lucide-react';
 
 const STATE_FILENAME = 'talevox_state_v2611.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
@@ -484,7 +485,23 @@ const App: React.FC = () => {
           </nav>
         </div>
         <div className="flex items-center gap-2 sm:gap-4">
-          <button onClick={() => handleSaveState(true)} className={`p-2.5 rounded-xl bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20 transition-all ${isSyncing ? 'animate-pulse' : ''}`}><Save className="w-4 h-4" /></button>
+          {!isAuthorized ? (
+            <button 
+              onClick={() => getValidDriveToken({ interactive: true })}
+              className="flex items-center gap-2 px-3 py-2 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-md"
+            >
+              <LogIn className="w-3.5 h-3.5" /> <span className="hidden xs:inline">Sign In</span>
+            </button>
+          ) : (
+            <button 
+              onClick={() => handleSync(true)} 
+              disabled={isSyncing}
+              className={`flex items-center gap-2 px-3 py-2 bg-indigo-600/10 text-indigo-600 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-600/20 transition-all ${isSyncing ? 'animate-pulse' : ''}`}
+            >
+              <RefreshCw className="w-3.5 h-3.5" /> <span className="hidden xs:inline">Sync</span>
+            </button>
+          )}
+          <button onClick={() => handleSaveState(true)} className={`p-2.5 rounded-xl bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20 transition-all ${isSyncing ? 'animate-pulse' : ''}`} title="Save State"><Save className="w-4 h-4" /></button>
         </div>
       </header>
 
