@@ -195,6 +195,8 @@ export async function ensureRootStructure(rootId: string) {
     return null;
   };
 
+  // Allow "Books" (Canonical), "books" (Legacy), "book" (Legacy)
+  // If multiple exist, this logic prefers the first match in the list.
   let booksId = findId(['Books', 'books', 'book']);
   let trashId = findId(['Trash', 'trash', '_trash']);
   let savesId = findId(['Cloud Saves', 'cloud saves', 'Saves', 'saves']);
@@ -218,9 +220,11 @@ export async function ensureRootStructure(rootId: string) {
  * Consolidate library: Move items from legacy 'book' folders or root to canonical 'Books'.
  */
 export async function runLibraryMigration(rootId: string): Promise<{ message: string, movedCount: number }> {
+  // 1. Ensure structure gives us the target Canonical Books ID
   const structure = await ensureRootStructure(rootId);
   const canonicalBooksId = structure.booksId;
   
+  // 2. Scan Root again to identify source candidates
   const q = encodeURIComponent(`'${rootId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)&pageSize=1000&supportsAllDrives=true`;
   const response = await driveFetch(url);
@@ -228,7 +232,18 @@ export async function runLibraryMigration(rootId: string): Promise<{ message: st
 
   let movedCount = 0;
 
-  // 1. Check for legacy container 'book' or 'books' that is NOT the canonical one
+  // 3. Find Legacy "book" or "books" folder that IS NOT the canonical one.
+  const canonicalFolder = folders.find((f: any) => f.id === canonicalBooksId);
+  if (canonicalFolder && canonicalFolder.name !== 'Books') {
+      // Rename current 'book' to 'Books'
+      await driveFetch(`https://www.googleapis.com/drive/v3/files/${canonicalBooksId}?supportsAllDrives=true`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: 'Books' })
+      });
+  }
+
+  // Now scan for other containers that might be duplicate/legacy
   const legacyContainers = folders.filter((f: any) => 
     f.id !== canonicalBooksId && 
     f.id !== structure.trashId && 
@@ -244,11 +259,13 @@ export async function runLibraryMigration(rootId: string): Promise<{ message: st
       if (!exists) {
         await moveFile(child.id, legacy.id, canonicalBooksId);
         movedCount++;
+      } else {
+        console.log(`Skipping duplicate: ${child.name}`);
       }
     }
   }
 
-  // 2. Check for stray book folders directly in root
+  // 4. Check for stray book folders directly in root
   const strayFolders = folders.filter((f: any) => 
     f.id !== canonicalBooksId && 
     f.id !== structure.trashId && 
@@ -265,7 +282,14 @@ export async function runLibraryMigration(rootId: string): Promise<{ message: st
      }
   }
 
-  return { message: `Migration Complete. Organized ${movedCount} book folders.`, movedCount };
+  return { message: `Migration Complete. Organized ${movedCount} items.`, movedCount };
+}
+
+export async function scanBooksInDrive(booksFolderId: string): Promise<{id: string, title: string}[]> {
+  const folders = await listFilesInFolder(booksFolderId);
+  return folders
+    .filter(f => f.mimeType === 'application/vnd.google-apps.folder')
+    .map(f => ({ id: f.id, title: f.name }));
 }
 
 export async function ensureBookFolder(booksId: string, bookTitle: string) {

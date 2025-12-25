@@ -10,7 +10,7 @@ import Extractor from './components/Extractor';
 import ChapterFolderView from './components/ChapterFolderView';
 import ChapterSidebar from './components/ChapterSidebar';
 import { speechController, applyRules, PROGRESS_STORE_V4 } from './services/speechService';
-import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, openFolderPicker, STATE_FILENAME, runLibraryMigration } from './services/driveService';
+import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, openFolderPicker, STATE_FILENAME, runLibraryMigration, scanBooksInDrive } from './services/driveService';
 import { initDriveAuth, getValidDriveToken, clearStoredToken, isTokenValid } from './services/driveAuth';
 import { saveChapterToFile } from './services/fileService';
 import { synthesizeChunk } from './services/cloudTtsService';
@@ -256,10 +256,38 @@ const App: React.FC = () => {
     setIsSyncing(true);
     try {
         const result = await runLibraryMigration(state.driveRootFolderId);
-        showToast(result.message, 0, 'success');
         // Re-initialize to ensure we're pointing to canonical folders
         const sub = await ensureRootStructure(state.driveRootFolderId);
-        setState(p => ({ ...p, driveSubfolders: sub }));
+        
+        // Scan for new books in canonical folder
+        const driveBooks = await scanBooksInDrive(sub.booksId);
+        let newBooksAdded = 0;
+        
+        setState(prev => {
+          const currentBooks = [...prev.books];
+          const knownIds = new Set(currentBooks.map(b => b.driveFolderId));
+          const knownTitles = new Set(currentBooks.map(b => b.title.toLowerCase()));
+          
+          for (const db of driveBooks) {
+             if (!knownIds.has(db.id) && !knownTitles.has(db.title.toLowerCase())) {
+               currentBooks.push({
+                 id: crypto.randomUUID(),
+                 title: db.title,
+                 chapters: [],
+                 rules: [],
+                 backend: StorageBackend.DRIVE,
+                 driveFolderId: db.id,
+                 driveFolderName: db.title,
+                 settings: { useBookSettings: false, highlightMode: HighlightMode.WORD },
+                 updatedAt: Date.now()
+               });
+               newBooksAdded++;
+             }
+          }
+          return { ...prev, driveSubfolders: sub, books: currentBooks, updatedAt: Date.now() };
+        });
+
+        showToast(`${result.message} ${newBooksAdded > 0 ? ` + ${newBooksAdded} books found.` : ''}`, 0, 'success');
     } catch(e) {
         showToast("Migration Failed", 0, 'error');
     } finally {
