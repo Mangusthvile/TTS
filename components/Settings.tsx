@@ -1,7 +1,8 @@
+
 import React, { useState, useEffect } from 'react';
 import { ReaderSettings, Theme } from '../types';
-import { Type, RefreshCw, Smartphone, Cloud, CloudOff, Loader2, Key, LogOut, Save, LogIn, Palette, Eye, ShieldCheck, Clock, Sun, Coffee, Moon, Check } from 'lucide-react';
-import { getAuthSessionInfo } from '../services/driveAuth';
+import { Type, RefreshCw, Smartphone, Cloud, CloudOff, Loader2, Key, LogOut, Save, LogIn, Palette, Eye, ShieldCheck, Clock, Sun, Coffee, Moon, Check, FolderSync, Wrench, AlertTriangle } from 'lucide-react';
+import { getAuthSessionInfo, isTokenValid } from '../services/driveAuth';
 
 interface SettingsProps {
   settings: ReaderSettings;
@@ -20,13 +21,17 @@ interface SettingsProps {
   onClearAuth?: () => void;
   onSaveState?: () => void;
   lastSavedAt?: number;
+  driveRootName?: string;
+  onSelectRoot?: () => void;
+  onRunMigration?: () => void;
 }
 
 const Settings: React.FC<SettingsProps> = ({ 
   settings, onUpdate, theme, onSetTheme, keepAwake, onSetKeepAwake, onCheckForUpdates,
-  isCloudLinked, onLinkCloud, onSyncNow, isSyncing,
+  onLinkCloud, onSyncNow, isSyncing,
   googleClientId, onUpdateGoogleClientId, onClearAuth,
-  onSaveState, lastSavedAt
+  onSaveState, lastSavedAt,
+  driveRootName, onSelectRoot, onRunMigration
 }) => {
   const [session, setSession] = useState(getAuthSessionInfo());
   
@@ -46,7 +51,7 @@ const Settings: React.FC<SettingsProps> = ({
   const textClass = isDark ? 'text-slate-100' : isSepia ? 'text-[#3c2f25]' : 'text-black';
   const labelClass = `text-[11px] font-black uppercase tracking-[0.2em] mb-4 block ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`;
   
-  const isAuthorized = session.authorized;
+  const isAuthorized = isTokenValid();
   const expiryMinutes = session.expiresAt > 0 ? Math.max(0, Math.round((session.expiresAt - Date.now()) / 60000)) : 0;
 
   const themes = [
@@ -63,7 +68,7 @@ const Settings: React.FC<SettingsProps> = ({
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
           <div>
             <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
-            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.7.4</p>
+            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.7.5</p>
           </div>
           <button 
             onClick={onCheckForUpdates} 
@@ -101,58 +106,87 @@ const Settings: React.FC<SettingsProps> = ({
         {/* 2. Cloud & Identity */}
         <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm space-y-6 ${cardBg}`}>
           <label className={labelClass}>Cloud & Identity</label>
-          <div className="space-y-4">
-             <input type="text" value={googleClientId || ''} onChange={e => onUpdateGoogleClientId?.(e.target.value.trim())} placeholder="Google OAuth Client ID" className={`w-full px-4 py-3 rounded-xl border-none outline-none font-mono text-[16px] ${isDark ? 'bg-slate-950 text-white' : 'bg-slate-50 text-black'}`} />
-             <div className="flex flex-col gap-6 pt-4 border-t border-black/5 lg:flex-row lg:items-center lg:justify-between">
-                <div className="flex items-center gap-4">
-                   <div className={`p-4 rounded-2xl ${isAuthorized ? 'bg-indigo-600 text-white' : 'bg-black/5'}`}>
-                      {isAuthorized ? <Cloud className="w-6 h-6" /> : <CloudOff className="w-6 h-6" />}
-                   </div>
-                   <div>
-                      <div className={`text-sm font-black ${textClass}`}>{isAuthorized ? 'Cloud Active' : 'Offline'}</div>
-                      <div className="text-[10px] opacity-60 font-bold uppercase tracking-tighter">
-                        {isAuthorized ? `Session expires in ${expiryMinutes}m` : 'Google Drive Disconnected'}
+          <div className="space-y-6">
+             <div className="space-y-2">
+               <span className="text-[10px] font-black uppercase opacity-60">Google OAuth Client ID</span>
+               <input type="text" value={googleClientId || ''} onChange={e => onUpdateGoogleClientId?.(e.target.value.trim())} placeholder="Google OAuth Client ID" className={`w-full px-4 py-3 rounded-xl border-none outline-none font-mono text-[14px] ${isDark ? 'bg-slate-950 text-white' : 'bg-slate-50 text-black'}`} />
+             </div>
+
+             <div className="p-5 rounded-2xl bg-indigo-600/5 border border-indigo-600/10 space-y-4">
+                <div className="flex items-center justify-between">
+                   <div className="flex items-center gap-4">
+                      <div className={`p-3 rounded-xl ${isAuthorized ? 'bg-indigo-600 text-white shadow-lg' : 'bg-slate-200 text-slate-400'}`}>
+                         {isAuthorized ? <Cloud className="w-5 h-5" /> : <CloudOff className="w-5 h-5" />}
+                      </div>
+                      <div>
+                         <div className={`text-sm font-black ${textClass}`}>{isAuthorized ? 'Connected to Drive' : 'Disconnected'}</div>
+                         <div className="text-[9px] opacity-60 font-black uppercase tracking-tighter">
+                           {isAuthorized ? `Session expires in ${expiryMinutes}m` : 'Sign in to access cloud features'}
+                         </div>
                       </div>
                    </div>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                   <button onClick={onSaveState} className="p-3 rounded-xl border border-emerald-500/30 text-emerald-500" title="Manual Backup"><Save className="w-4 h-4" /></button>
-                   {isAuthorized ? (
-                      <>
-                        <button onClick={onSyncNow} disabled={isSyncing} className="px-6 py-3 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2">
-                           {isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} Sync Now
-                        </button>
-                        <button onClick={onClearAuth} title="Disconnect Account" className="p-3 rounded-xl border border-red-500/20 text-red-500 hover:bg-red-500/10 transition-colors"><LogOut className="w-4 h-4" /></button>
-                      </>
-                   ) : (
-                      <button onClick={onLinkCloud} disabled={!googleClientId} className="px-8 py-4 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest">
-                         Sign in to Google
+                   {!isAuthorized && (
+                      <button onClick={onLinkCloud} disabled={!googleClientId} className="px-5 py-2.5 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-md hover:bg-indigo-700 transition-all">
+                         Reconnect
                       </button>
                    )}
                 </div>
+
+                {isAuthorized && (
+                  <div className="space-y-4 pt-4 border-t border-indigo-600/10">
+                    <div className="flex flex-col gap-3">
+                       <span className="text-[10px] font-black uppercase text-indigo-600">Active Storage Root</span>
+                       <div className="flex items-center justify-between gap-3 p-3 bg-white/40 dark:bg-black/20 rounded-xl">
+                          <div className="flex items-center gap-2 truncate">
+                             <FolderSync className="w-4 h-4 text-indigo-500 flex-shrink-0" />
+                             <span className="text-xs font-bold truncate">{driveRootName || 'Not Selected'}</span>
+                          </div>
+                          <button onClick={onSelectRoot} className="text-[9px] font-black uppercase bg-indigo-600 text-white px-3 py-1.5 rounded-lg shadow-sm">Change</button>
+                       </div>
+                    </div>
+                    
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                       <button onClick={onRunMigration} className="flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-indigo-600/20 text-indigo-600 text-[10px] font-black uppercase hover:bg-indigo-600/5 transition-all">
+                          <Wrench className="w-3.5 h-3.5" /> File Checkup / Migration
+                       </button>
+                       <button onClick={onSyncNow} disabled={isSyncing} className="flex items-center justify-center gap-2 px-4 py-3 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase hover:bg-indigo-700 transition-all shadow-md">
+                          {isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} Force Cloud Sync
+                       </button>
+                    </div>
+                  </div>
+                )}
              </div>
+
+             {isAuthorized && (
+               <div className="flex items-center justify-between gap-4 pt-2">
+                 <button onClick={onSaveState} className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl border border-emerald-500/30 text-emerald-500 text-[10px] font-black uppercase hover:bg-emerald-500/5 transition-all">
+                    <Save className="w-3.5 h-3.5" /> Manual State Backup
+                 </button>
+                 <button onClick={onClearAuth} title="Disconnect Account" className="p-3 rounded-xl border border-red-500/20 text-red-500 hover:bg-red-500/10 transition-all"><LogOut className="w-4 h-4" /></button>
+               </div>
+             )}
           </div>
         </div>
 
-        {/* 3. Security & Session */}
+        {/* 3. Session Integrity */}
         <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm space-y-4 ${cardBg}`}>
-           <label className={labelClass}>Security & Session</label>
+           <label className={labelClass}>Cloud Health</label>
            <div className="space-y-3">
               <div className="flex items-center justify-between text-xs">
-                 <span className="opacity-60 font-bold flex items-center gap-2"><ShieldCheck className="w-3.5 h-3.5" /> Token Status</span>
+                 <span className="opacity-60 font-bold flex items-center gap-2"><ShieldCheck className="w-3.5 h-3.5" /> Security Token</span>
                  <span className={`font-black uppercase tracking-widest ${isAuthorized ? 'text-emerald-500' : 'text-red-500'}`}>
-                    {isAuthorized ? 'Verified' : 'Invalid / Expired'}
+                    {isAuthorized ? 'Authenticated' : 'Expired / Off'}
                  </span>
               </div>
               <div className="flex items-center justify-between text-xs">
-                 <span className="opacity-60 font-bold flex items-center gap-2"><Clock className="w-3.5 h-3.5" /> Token Expiry</span>
+                 <span className="opacity-60 font-bold flex items-center gap-2"><Clock className="w-3.5 h-3.5" /> Session Ends</span>
                  <span className={`font-mono font-bold ${textClass}`}>
                     {session.expiresAt > 0 ? new Date(session.expiresAt).toLocaleTimeString() : 'N/A'}
                  </span>
               </div>
               {lastSavedAt && (
                 <div className="flex items-center justify-between text-xs pt-2 border-t border-black/5">
-                   <span className="opacity-60 font-bold">Last Cloud Sync</span>
+                   <span className="opacity-60 font-bold">Last Successful State Save</span>
                    <span className={`font-bold ${textClass}`}>{new Date(lastSavedAt).toLocaleString()}</span>
                 </div>
               )}

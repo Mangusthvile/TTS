@@ -1,3 +1,4 @@
+
 export enum CaseMode {
   EXACT = 'EXACT',
   IGNORE = 'IGNORE',
@@ -83,17 +84,17 @@ export interface Chapter {
   progressTotalLength?: number;
   isFavorite?: boolean;
   isCompleted?: boolean;
-  driveId?: string; // Legacy field for main file
+  driveId?: string; // Legacy field
   cloudTextFileId?: string; // Google Drive ID for .txt
   cloudAudioFileId?: string; // Google Drive ID for .mp3
-  audioDriveId?: string; // Legacy audio ID field
+  audioDriveId?: string; 
   audioStatus?: AudioStatus;
   audioSignature?: string; 
   audioPrefixLen?: number; 
   audioIntroDurSec?: number; 
   audioChunkMap?: AudioChunkMetadata[]; 
   hasCachedAudio?: boolean;
-  hasTextOnDrive?: boolean; // New for integrity checks
+  hasTextOnDrive?: boolean;
 }
 
 export interface BookSettings {
@@ -154,6 +155,9 @@ export interface SavedSnapshot {
     selectedVoiceName?: string;
     theme: Theme;
     progressStore: any;
+    driveRootFolderId?: string;
+    driveRootFolderName?: string;
+    driveSubfolders?: { booksId: string; trashId: string; savesId: string };
   };
 }
 
@@ -175,4 +179,7 @@ export interface AppState {
     offsetChars: number;
   };
   lastSavedAt?: number;
+  driveRootFolderId?: string;
+  driveRootFolderName?: string;
+  driveSubfolders?: { booksId: string; trashId: string; savesId: string };
 }
