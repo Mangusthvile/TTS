@@ -45,6 +45,11 @@ const Settings: React.FC<SettingsProps> = ({
     };
   }, []);
 
+  const handleMigrationClick = () => {
+    console.log("[UI] Settings Check Drive clicked");
+    if (onRunMigration) onRunMigration();
+  };
+
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
   const cardBg = isDark ? 'bg-slate-900 border-slate-800' : isSepia ? 'bg-[#f4ecd8] border-[#d8ccb6]' : 'bg-white border-black/10';
@@ -146,7 +151,7 @@ const Settings: React.FC<SettingsProps> = ({
                     </div>
                     
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                       <button onClick={onRunMigration} className="flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-indigo-600/20 text-indigo-600 text-[10px] font-black uppercase hover:bg-indigo-600/5 transition-all">
+                       <button onClick={handleMigrationClick} disabled={isSyncing} className={`flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-indigo-600/20 text-indigo-600 text-[10px] font-black uppercase hover:bg-indigo-600/5 transition-all ${isSyncing ? 'opacity-50 cursor-wait' : ''}`}>
                           <Wrench className="w-3.5 h-3.5" /> File Checkup / Migration
                        </button>
                        <button onClick={onSyncNow} disabled={isSyncing} className="flex items-center justify-center gap-2 px-4 py-3 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase hover:bg-indigo-700 transition-all shadow-md">

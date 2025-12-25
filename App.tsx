@@ -12,6 +12,7 @@ import ChapterSidebar from './components/ChapterSidebar';
 import { speechController, applyRules, PROGRESS_STORE_V4 } from './services/speechService';
 import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, openFolderPicker, STATE_FILENAME, runLibraryMigration, scanBooksInDrive } from './services/driveService';
 import { initDriveAuth, getValidDriveToken, clearStoredToken, isTokenValid } from './services/driveAuth';
+import { runFullDriveCheck } from './services/driveCheckService';
 import { saveChapterToFile } from './services/fileService';
 import { synthesizeChunk } from './services/cloudTtsService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
@@ -255,7 +256,8 @@ const App: React.FC = () => {
     if (!state.driveRootFolderId) return;
     setIsSyncing(true);
     try {
-        const result = await runLibraryMigration(state.driveRootFolderId);
+        const result = await runFullDriveCheck(state.driveRootFolderId);
+        
         // Re-initialize to ensure we're pointing to canonical folders
         const sub = await ensureRootStructure(state.driveRootFolderId);
         
@@ -288,8 +290,13 @@ const App: React.FC = () => {
         });
 
         showToast(`${result.message} ${newBooksAdded > 0 ? ` + ${newBooksAdded} books found.` : ''}`, 0, 'success');
-    } catch(e) {
-        showToast("Migration Failed", 0, 'error');
+    } catch(e: any) {
+        if (e.code === "AUTH_REQUIRED") {
+            showToast("Sign-in required for check", 0, 'error');
+            getValidDriveToken({ interactive: true }).catch(() => {});
+        } else {
+            showToast("Check Failed: " + e.message, 0, 'error');
+        }
     } finally {
         setIsSyncing(false);
     }
