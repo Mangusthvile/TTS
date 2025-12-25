@@ -23,14 +23,16 @@ export function buildTextName(chapterIndex: number, title: string) {
 
 /**
  * Attempts to extract a chapter number from a filename using various common patterns.
- * e.g. "001_intro.txt" -> 1, "Chapter 5.mp3" -> 5
+ * e.g. "001_intro.txt" -> 1, "Chapter 5.mp3" -> 5, "ch-10.txt" -> 10
  */
 export function inferChapterIndex(filename: string): number | null {
   const patterns = [
     /chapter[_ -]?(\d+)/i, // Chapter 1, Chapter_01
     /ch[_ -]?(\d+)/i,      // ch 1, ch-01
     /^(\d+)\s*[-_.]/i,     // 001 - Title, 001_Title
-    /^(\d+)\.[a-z]+$/i     // 001.txt
+    /^(\d+)\.[a-z]+$/i,    // 001.txt
+    /_(\d+)_/i,            // title_001_something
+    /(\d+)$/i              // file123 (no extension check here, done by caller)
   ];
 
   for (const p of patterns) {
@@ -199,7 +201,6 @@ export async function createDriveFolder(name: string, parentId?: string): Promis
  * Robustly ensure root structure exists, supporting legacy folder names.
  */
 export async function ensureRootStructure(rootId: string) {
-  // 1. List all immediate subfolders of root
   const q = encodeURIComponent(`'${rootId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)&pageSize=1000&supportsAllDrives=true`;
   const response = await driveFetch(url);
@@ -209,14 +210,11 @@ export async function ensureRootStructure(rootId: string) {
 
   console.log(`[Drive] Root scan found ${folders.length} folders.`);
 
-  // Helper for case-insensitive matching with priority
   const findId = (candidates: string[]) => {
-    // Exact match first
     for (const c of candidates) {
         const exact = folders.find((f: any) => f.name === c);
         if (exact) return exact.id;
     }
-    // Case-insensitive match next
     for (const c of candidates) {
         const loose = folders.find((f: any) => f.name.toLowerCase() === c.toLowerCase());
         if (loose) return loose.id;
@@ -224,13 +222,10 @@ export async function ensureRootStructure(rootId: string) {
     return null;
   };
 
-  // Allow "Books" (Canonical), "books" (Legacy), "book" (Legacy)
-  // If multiple exist, this logic prefers the first match in the list.
   let booksId = findId(['Books', 'books', 'book']);
   let trashId = findId(['Trash', 'trash', '_trash']);
   let savesId = findId(['Cloud Saves', 'cloud saves', 'Saves', 'saves']);
 
-  // Create missing canonicals ONLY if we found nothing at all
   if (!booksId) {
       console.log('[Drive] Creating canonical Books folder');
       booksId = await createDriveFolder('Books', rootId);
@@ -245,15 +240,10 @@ export async function ensureRootStructure(rootId: string) {
   return { booksId, trashId, savesId };
 }
 
-/**
- * Consolidate library: Move items from legacy 'book' folders or root to canonical 'Books'.
- */
 export async function runLibraryMigration(rootId: string): Promise<{ message: string, movedCount: number }> {
-  // 1. Ensure structure gives us the target Canonical Books ID
   const structure = await ensureRootStructure(rootId);
   const canonicalBooksId = structure.booksId;
   
-  // 2. Scan Root again to identify source candidates
   const q = encodeURIComponent(`'${rootId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)&pageSize=1000&supportsAllDrives=true`;
   const response = await driveFetch(url);
@@ -261,10 +251,8 @@ export async function runLibraryMigration(rootId: string): Promise<{ message: st
 
   let movedCount = 0;
 
-  // 3. Find Legacy "book" or "books" folder that IS NOT the canonical one.
   const canonicalFolder = folders.find((f: any) => f.id === canonicalBooksId);
   if (canonicalFolder && canonicalFolder.name !== 'Books') {
-      // Rename current 'book' to 'Books'
       await driveFetch(`https://www.googleapis.com/drive/v3/files/${canonicalBooksId}?supportsAllDrives=true`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -272,7 +260,6 @@ export async function runLibraryMigration(rootId: string): Promise<{ message: st
       });
   }
 
-  // Now scan for other containers that might be duplicate/legacy
   const legacyContainers = folders.filter((f: any) => 
     f.id !== canonicalBooksId && 
     f.id !== structure.trashId && 
@@ -283,7 +270,6 @@ export async function runLibraryMigration(rootId: string): Promise<{ message: st
   for (const legacy of legacyContainers) {
     const children = await listFilesInFolder(legacy.id);
     for (const child of children) {
-      // Check if duplicate exists in canonical
       const exists = await findFileSync(child.name, canonicalBooksId);
       if (!exists) {
         await moveFile(child.id, legacy.id, canonicalBooksId);
@@ -294,16 +280,14 @@ export async function runLibraryMigration(rootId: string): Promise<{ message: st
     }
   }
 
-  // 4. Check for stray book folders directly in root
   const strayFolders = folders.filter((f: any) => 
     f.id !== canonicalBooksId && 
     f.id !== structure.trashId && 
     f.id !== structure.savesId &&
-    !['book', 'books'].includes(f.name.toLowerCase()) // exclude containers processed above
+    !['book', 'books'].includes(f.name.toLowerCase())
   );
 
   for (const stray of strayFolders) {
-     // Treat as a book folder and move to Books
      const exists = await findFileSync(stray.name, canonicalBooksId);
      if (!exists) {
        await moveFile(stray.id, rootId, canonicalBooksId);

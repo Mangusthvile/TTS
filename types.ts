@@ -88,6 +88,8 @@ export interface Chapter {
   driveId?: string;
   cloudTextFileId?: string;
   cloudAudioFileId?: string;
+  textFileName?: string;
+  audioFileName?: string;
   audioDriveId?: string; 
   audioStatus?: AudioStatus;
   audioSignature?: string; 
@@ -205,4 +207,5 @@ export interface ScanResult {
   strayFiles: StrayFile[];
   duplicates: { chapterId: string, type: 'audio' | 'text', keepId: string, removeIds: string[] }[];
   totalChecked: number;
+  updatedChapters?: Chapter[]; // Chapters that need their IDs/Names updated in state
 }
