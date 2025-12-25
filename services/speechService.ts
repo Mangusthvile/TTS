@@ -1,5 +1,5 @@
 
-import { Rule, RuleType, AudioChunkMetadata } from '../types';
+import { Rule, RuleType, AudioChunkMetadata, ProgressStore } from '../types';
 import { getDriveAudioObjectUrl, revokeObjectUrl } from "../services/driveService";
 
 export const PROGRESS_STORE_V4 = 'talevox_progress_v4';
@@ -42,7 +42,6 @@ class SpeechController {
   private context: { bookId: string; chapterId: string } | null = null;
   private lastSaveTime: number = 0;
 
-  // Highlight buffer to account for synthesis pauses and speech pacing (300ms)
   private readonly HIGHLIGHT_DELAY_SEC = 0.3;
 
   constructor() {
@@ -72,7 +71,7 @@ class SpeechController {
     };
     this.audio.onplay = () => { this.applyRequestedSpeed(); this.startSyncLoop(); if (this.onFetchStateChange) this.onFetchStateChange(false); };
     this.audio.onpause = () => { this.saveProgress(); this.stopSyncLoop(); };
-    this.audio.ontimeupdate = () => { if (Date.now() - this.lastSaveTime > 2000) this.saveProgress(); };
+    this.audio.ontimeupdate = () => { if (Date.now() - this.lastSaveTime > 5000) this.saveProgress(); };
     this.audio.onerror = () => { if (this.onFetchStateChange) this.onFetchStateChange(false); };
   }
 
@@ -86,13 +85,24 @@ class SpeechController {
     const curTime = this.audio.currentTime;
     const duration = isFinite(this.audio.duration) && this.audio.duration > 0 ? this.audio.duration : 0;
     if (duration === 0 && !completed) return;
+    
     const finalTime = completed ? duration : Math.min(curTime, duration || Infinity);
     const percent = duration > 0 ? Math.min(1, Math.max(0, finalTime / duration)) : (completed ? 1 : 0);
+    
     const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
-    const store = storeRaw ? JSON.parse(storeRaw) : {};
+    const store = (storeRaw ? JSON.parse(storeRaw) : {}) as ProgressStore;
+    
     if (!store[this.context.bookId]) store[this.context.bookId] = {};
     const existing = store[this.context.bookId][this.context.chapterId];
-    store[this.context.bookId][this.context.chapterId] = { timeSec: finalTime, durationSec: duration > 0 ? duration : (existing?.durationSec || 0), percent, completed: completed || existing?.completed || false, updatedAt: Date.now() };
+    
+    store[this.context.bookId][this.context.chapterId] = { 
+      timeSec: finalTime, 
+      durationSec: duration > 0 ? duration : (existing?.durationSec || 0), 
+      percent, 
+      completed: completed || existing?.completed || false, 
+      updatedAt: Date.now() 
+    };
+    
     localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(store));
     this.lastSaveTime = Date.now();
     window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: this.context }));
@@ -112,7 +122,6 @@ class SpeechController {
 
   public getOffsetFromTime(t: number, dur?: number): number {
     const duration = dur || this.audio.duration || 0;
-    // Add buffer after intro before starting body highlight
     const effectiveIntroEnd = this.currentIntroDurSec > 0 ? (this.currentIntroDurSec + this.HIGHLIGHT_DELAY_SEC) : 0;
     
     if (duration === 0 || t < effectiveIntroEnd) return 0;
@@ -173,10 +182,12 @@ class SpeechController {
       });
       if (this.sessionToken !== session) return;
       this.applyRequestedSpeed();
+      
       const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
-      const store = storeRaw ? JSON.parse(storeRaw) : {};
+      const store = (storeRaw ? JSON.parse(storeRaw) : {}) as ProgressStore;
       const saved = this.context ? store[this.context.bookId]?.[this.context.chapterId] : null;
       const resumeTime = saved?.timeSec ?? startTimeSec;
+      
       if (resumeTime > 0) this.audio.currentTime = Math.min(resumeTime, Math.max(0, this.audio.duration - 0.25));
       await this.audio.play();
     } catch (err) {

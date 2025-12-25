@@ -1,6 +1,8 @@
 
 import { driveFetch, getValidDriveToken } from './driveAuth';
 
+export const STATE_FILENAME = 'talevox_state.json';
+
 export function buildMp3Name(chapterIndex: number, title: string) {
   const safe = (title || "untitled")
     .toLowerCase()
@@ -17,25 +19,6 @@ export function buildTextName(chapterIndex: number, title: string) {
     .replace(/^_+|_+$/g, "")
     .slice(0, 60);
   return `${chapterIndex.toString().padStart(3, '0')}_${safe}.txt`;
-}
-
-export function u8ToArrayBuffer(u8: Uint8Array): ArrayBuffer {
-  const ab = new ArrayBuffer(u8.byteLength);
-  new Uint8Array(ab).set(u8);
-  return ab;
-}
-
-export async function checkFileExists(fileId: string): Promise<boolean> {
-  if (!fileId) return false;
-  try {
-    const url = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,trashed&supportsAllDrives=true`;
-    const response = await driveFetch(url);
-    if (!response.ok) return false;
-    const data = await response.json();
-    return data && !data.trashed;
-  } catch (e) {
-    return false;
-  }
 }
 
 export async function moveFile(fileId: string, currentParentId: string, newParentId: string): Promise<void> {
@@ -122,12 +105,6 @@ export async function fetchDriveBinary(fileId: string): Promise<Blob> {
   return response.blob();
 }
 
-export async function deleteDriveFile(fileId: string): Promise<void> {
-  const response = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
-    method: 'DELETE'
-  });
-}
-
 export async function uploadToDrive(
   folderId: string | null, 
   filename: string, 
@@ -160,14 +137,17 @@ export async function uploadToDrive(
   bodyBuffer.set(mediaHeaderBuffer, offset); offset += mediaHeaderBuffer.byteLength;
   bodyBuffer.set(mediaBuffer, offset); offset += mediaBuffer.byteLength;
   bodyBuffer.set(footerBuffer, offset);
+  
   const url = existingFileId 
     ? `https://www.googleapis.com/upload/drive/v3/files/${existingFileId}?uploadType=multipart&supportsAllDrives=true`
     : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&supportsAllDrives=true';
+  
   const response = await driveFetch(url, {
     method: existingFileId ? 'PATCH' : 'POST',
     headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
     body: bodyBuffer
   });
+  
   if (!response.ok) throw new Error("UPLOAD_FAILED");
   const data = await response.json();
   return data.id || existingFileId || '';
@@ -188,7 +168,7 @@ export async function createDriveFolder(name: string, parentId?: string): Promis
 
 export async function ensureRootStructure(rootId: string) {
   const subfolders = { booksId: '', trashId: '', savesId: '' };
-  const names = { books: 'booksId', trash: 'trashId', cloud_saves: 'savesId' };
+  const names = { Books: 'booksId', Trash: 'trashId', 'Cloud Saves': 'savesId' };
   for (const [name, key] of Object.entries(names)) {
     let id = await findFileSync(name, rootId);
     if (!id) id = await createDriveFolder(name, rootId);

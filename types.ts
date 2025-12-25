@@ -63,6 +63,7 @@ export interface Rule {
   enabled: boolean;
   phoneticHint?: string;
   caseMode?: CaseMode;
+  updatedAt?: number;
 }
 
 export interface AudioChunkMetadata {
@@ -79,14 +80,14 @@ export interface Chapter {
   filename: string;
   content: string;
   wordCount: number;
-  progress: number; // progress as ratio 0..1
-  progressChars: number; // actual character offset
+  progress: number;
+  progressChars: number;
   progressTotalLength?: number;
   isFavorite?: boolean;
   isCompleted?: boolean;
-  driveId?: string; // Legacy field
-  cloudTextFileId?: string; // Google Drive ID for .txt
-  cloudAudioFileId?: string; // Google Drive ID for .mp3
+  driveId?: string;
+  cloudTextFileId?: string;
+  cloudAudioFileId?: string;
   audioDriveId?: string; 
   audioStatus?: AudioStatus;
   audioSignature?: string; 
@@ -95,6 +96,7 @@ export interface Chapter {
   audioChunkMap?: AudioChunkMetadata[]; 
   hasCachedAudio?: boolean;
   hasTextOnDrive?: boolean;
+  updatedAt?: number;
 }
 
 export interface BookSettings {
@@ -103,6 +105,7 @@ export interface BookSettings {
   defaultVoiceId?: string; 
   useBookSettings: boolean;
   highlightMode: HighlightMode;
+  updatedAt?: number;
 }
 
 export interface ReaderSettings {
@@ -112,13 +115,14 @@ export interface ReaderSettings {
   paragraphSpacing: number;
   highlightColor: string;
   followHighlight: boolean;
+  updatedAt?: number;
 }
 
 export interface Book {
   id: string;
   title: string;
   author?: string;
-  coverImage?: string; // Data URL
+  coverImage?: string;
   chapters: Chapter[];
   currentChapterId?: string;
   rules: Rule[];
@@ -127,21 +131,23 @@ export interface Book {
   driveFolderName?: string;
   backend: StorageBackend;
   settings: BookSettings;
+  updatedAt?: number;
 }
 
-export interface StrayFile {
-  id: string;
-  name: string;
-  mimeType: string;
-  modifiedTime: string;
+export interface ProgressEntry {
+  timeSec: number;
+  durationSec: number;
+  percent: number;
+  completed: boolean;
+  updatedAt: number;
 }
 
-export interface ScanResult {
-  missingTextIds: string[];
-  missingAudioIds: string[];
-  strayFiles: StrayFile[];
-  duplicates: { chapterId: string, type: 'audio' | 'text', keepId: string, removeIds: string[] }[];
-  totalChecked: number;
+export interface BookProgress {
+  [chapterId: string]: ProgressEntry;
+}
+
+export interface ProgressStore {
+  [bookId: string]: BookProgress;
 }
 
 export interface SavedSnapshot {
@@ -154,10 +160,11 @@ export interface SavedSnapshot {
     playbackSpeed: number;
     selectedVoiceName?: string;
     theme: Theme;
-    progressStore: any;
+    progressStore: ProgressStore;
     driveRootFolderId?: string;
     driveRootFolderName?: string;
     driveSubfolders?: { booksId: string; trashId: string; savesId: string };
+    updatedAt: number;
   };
 }
 
@@ -179,7 +186,23 @@ export interface AppState {
     offsetChars: number;
   };
   lastSavedAt?: number;
+  updatedAt: number;
   driveRootFolderId?: string;
   driveRootFolderName?: string;
   driveSubfolders?: { booksId: string; trashId: string; savesId: string };
+}
+
+export interface StrayFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  modifiedTime: string;
+}
+
+export interface ScanResult {
+  missingTextIds: string[];
+  missingAudioIds: string[];
+  strayFiles: StrayFile[];
+  duplicates: { chapterId: string, type: 'audio' | 'text', keepId: string, removeIds: string[] }[];
+  totalChecked: number;
 }
