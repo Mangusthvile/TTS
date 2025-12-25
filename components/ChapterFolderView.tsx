@@ -1,6 +1,6 @@
-import React, { useMemo, useState, useEffect, useCallback } from 'react';
+import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile } from '../types';
-import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash } from 'lucide-react';
+import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp } from 'lucide-react';
 import { PROGRESS_STORE_V4, applyRules } from '../services/speechService';
 import { synthesizeChunk } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache } from '../services/audioCache';
@@ -44,6 +44,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [showVoiceModal, setShowVoiceModal] = useState<{ chapterId?: string } | null>(null);
   const [rememberAsDefault, setRememberAsDefault] = useState(true);
 
+  const [isHeaderExpanded, setIsHeaderExpanded] = useState(false);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
   const [fixOptions, setFixOptions] = useState({
     genAudio: true,
     restoreText: true,
@@ -54,12 +57,27 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const isSepia = theme === Theme.SEPIA;
   const cardBg = isDark ? 'bg-slate-800 border-slate-700' : isSepia ? 'bg-[#f4ecd8] border-[#d8ccb6]' : 'bg-white border-black/10';
   const textSecondary = isDark ? 'text-slate-400' : isSepia ? 'text-[#3c2f25]/70' : 'text-slate-600';
+  const stickyHeaderBg = isDark ? 'bg-slate-900/90' : isSepia ? 'bg-[#f4ecd8]/90' : 'bg-white/90';
 
   const chapters = useMemo(() => [...(book.chapters || [])].sort((a, b) => a.index - b.index), [book.chapters]);
   const progressData = useMemo(() => {
     const store = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
     return store[book.id] || {};
   }, [book.id]);
+
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      if (window.innerWidth < 768 && container.scrollTop > 40) {
+        setIsHeaderExpanded(false);
+      }
+    };
+
+    container.addEventListener('scroll', handleScroll);
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, []);
 
   const handleRestart = (chapterId: string) => {
     const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
@@ -194,7 +212,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       // 2. Generate Audio
       if (fixOptions.genAudio) {
-        // Simple sequential limiter for safety
         for (const cid of lastScan.missingAudioIds) {
           const ch = chapters.find(c => c.id === cid);
           if (ch) await generateAudio(ch);
@@ -322,7 +339,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       {chapters.map(c => {
         const saved = progressData[c.id];
         const percent = saved?.percent !== undefined ? Math.floor(saved.percent * 100) : 0;
-        return (lastScan && (
+        return (
           <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`flex flex-col gap-2 p-4 rounded-2xl border cursor-pointer transition-all hover:translate-x-1 ${cardBg}`}>
             <div className="flex items-center gap-4">
               <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-mono text-[10px] font-black ${isDark ? 'bg-slate-950 text-indigo-400' : 'bg-indigo-50 text-indigo-600'}`}>{c.index}</div>
@@ -339,7 +356,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                <div className="h-full bg-indigo-500" style={{ width: `${percent}%` }} />
             </div>
           </div>
-        ));
+        );
       })}
     </div>
   );
@@ -361,7 +378,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                <div className={`h-1 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-700' : 'bg-black/5'}`}>
                   <div className="h-full bg-indigo-500" style={{ width: `${percent}%` }} />
                </div>
-               <div className="text-[8px] font-black uppercase opacity-40 mt-1">{percent}%</div>
+               <div className="text-[8px] font-black uppercase mt-1">{percent}%</div>
             </div>
             <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete?')) onDeleteChapter(c.id); }} className="absolute bottom-2 right-2 p-2 opacity-0 group-hover:opacity-100 text-red-500 transition-opacity"><Trash2 className="w-3.5 h-3.5" /></button>
           </div>
@@ -484,40 +501,56 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         </div>
       )}
 
-      <div className="p-6 sm:p-8 flex-shrink-0 border-b border-black/5 bg-black/5">
-        <div className="flex items-center justify-between mb-6">
-          <button onClick={onBackToLibrary} className="flex items-center gap-1 text-[10px] font-black uppercase tracking-widest text-indigo-500 hover:translate-x-[-2px] transition-transform">
-            <ChevronLeft className="w-3 h-3" /> Library
-          </button>
-          <div className="flex items-center gap-1 p-1 rounded-xl bg-black/5">
-            <button onClick={() => setViewMode('grid')} className={`p-2 rounded-lg transition-all ${viewMode === 'grid' ? 'bg-white shadow-sm text-indigo-600' : 'opacity-40'}`}><LayoutGrid className="w-4 h-4" /></button>
-            <button onClick={() => setViewMode('list')} className={`p-2 rounded-lg transition-all ${viewMode === 'list' ? 'bg-white shadow-sm text-indigo-600' : 'opacity-40'}`}><AlignJustify className="w-4 h-4" /></button>
-            <button onClick={() => setViewMode('details')} className={`p-2 rounded-lg transition-all ${viewMode === 'details' ? 'bg-white shadow-sm text-indigo-600' : 'opacity-40'}`}><List className="w-4 h-4" /></button>
-          </div>
-        </div>
-        
-        <div className="flex flex-col md:flex-row gap-8 items-start md:items-center">
-          <div className="w-32 aspect-[2/3] rounded-2xl overflow-hidden shadow-2xl flex-shrink-0 bg-indigo-600/10 flex items-center justify-center">
-            {book.coverImage ? <img src={book.coverImage} className="w-full h-full object-cover" alt={book.title} /> : <ImageIcon className="w-10 h-10 opacity-20" />}
-          </div>
-          <div className="flex-1 min-w-0">
-            <h1 className="text-3xl font-black tracking-tight mb-2 truncate">{book.title}</h1>
-            <p className="text-xs font-bold opacity-60 uppercase tracking-widest mb-6">{book.chapters.length} Chapters • {book.backend} backend</p>
-            <div className="flex flex-wrap gap-3">
-              <button onClick={onAddChapter} className="px-6 py-3 bg-indigo-600 text-white rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-all flex items-center gap-2"><Plus className="w-4 h-4" /> Add Chapter</button>
-              <button onClick={handleCheckDriveIntegrity} disabled={isCheckingDrive} className="px-6 py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center gap-2" title="Check cloud text/audio integrity">
-                {isCheckingDrive ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />} 
-                {isCheckingDrive ? 'Checking Drive...' : 'Check Drive'}
-              </button>
-              <button onClick={() => setShowFixModal(true)} disabled={!hasIssues} className={`px-6 py-3 rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-lg active:scale-95 transition-all flex items-center gap-2 ${hasIssues ? 'bg-amber-600 text-white shadow-amber-600/20 hover:scale-105' : 'bg-black/5 text-black/20 cursor-not-allowed'}`} title="Fix missing assets and cleanup strays">
-                <Wrench className="w-4 h-4" /> Fix Missing
-              </button>
+      {/* STICKY HEADER */}
+      <div className={`sticky top-0 z-50 border-b border-black/5 backdrop-blur-md transition-all duration-300 ${stickyHeaderBg}`}>
+        {/* COMPACT MOBILE HEADER / DESKTOP HEADER */}
+        <div className={`p-4 sm:p-6 lg:p-8 flex flex-col gap-4 ${!isHeaderExpanded ? 'md:block' : ''}`}>
+          <div className="flex items-center justify-between">
+            <button onClick={onBackToLibrary} className="flex items-center gap-1 text-[10px] font-black uppercase tracking-widest text-indigo-500 hover:translate-x-[-2px] transition-transform">
+              <ChevronLeft className="w-3 h-3" /> Library
+            </button>
+            <div className="flex items-center gap-1 p-1 rounded-xl bg-black/5">
+              <button onClick={() => setViewMode('grid')} className={`p-1.5 rounded-lg transition-all ${viewMode === 'grid' ? 'bg-white shadow-sm text-indigo-600' : 'opacity-40'}`}><LayoutGrid className="w-3.5 h-3.5" /></button>
+              <button onClick={() => setViewMode('list')} className={`p-1.5 rounded-lg transition-all ${viewMode === 'list' ? 'bg-white shadow-sm text-indigo-600' : 'opacity-40'}`}><AlignJustify className="w-3.5 h-3.5" /></button>
+              <button onClick={() => setViewMode('details')} className={`p-1.5 rounded-lg transition-all ${viewMode === 'details' ? 'bg-white shadow-sm text-indigo-600' : 'opacity-40'}`}><List className="w-3.5 h-3.5" /></button>
             </div>
+          </div>
+          
+          <div 
+            className={`flex items-center gap-3 sm:gap-8 cursor-pointer md:cursor-default`}
+            onClick={() => window.innerWidth < 768 && setIsHeaderExpanded(!isHeaderExpanded)}
+          >
+            <div className={`rounded-xl sm:rounded-2xl overflow-hidden shadow-xl flex-shrink-0 bg-indigo-600/10 flex items-center justify-center transition-all duration-300 ${isHeaderExpanded ? 'w-24 sm:w-32 aspect-[2/3]' : 'w-12 sm:w-32 aspect-[1/1] sm:aspect-[2/3]'}`}>
+              {book.coverImage ? <img src={book.coverImage} className="w-full h-full object-cover" alt={book.title} /> : <ImageIcon className="w-5 h-5 sm:w-10 sm:h-10 opacity-20" />}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <h1 className={`font-black tracking-tight truncate transition-all duration-300 ${isHeaderExpanded ? 'text-xl sm:text-3xl' : 'text-sm sm:text-3xl'}`}>{book.title}</h1>
+                <div className="md:hidden">
+                  {isHeaderExpanded ? <ChevronUp className="w-4 h-4 opacity-40" /> : <ChevronDown className="w-4 h-4 opacity-40" />}
+                </div>
+              </div>
+              {/* Optional line (collapsed) or full line (expanded) */}
+              <p className={`font-bold opacity-60 uppercase tracking-widest transition-all duration-300 ${isHeaderExpanded ? 'text-[10px] sm:text-xs mt-1' : 'text-[8px] sm:text-xs'}`}>
+                {chapters.length} Chapters {isHeaderExpanded && `• ${book.backend} backend`}
+              </p>
+            </div>
+          </div>
+
+          <div className={`flex flex-wrap gap-2 transition-all duration-300 ${isHeaderExpanded || window.innerWidth >= 768 ? 'opacity-100 max-h-40 pointer-events-auto' : 'opacity-0 max-h-0 pointer-events-none overflow-hidden sm:opacity-100 sm:max-h-40 sm:pointer-events-auto'}`}>
+            <button onClick={onAddChapter} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-indigo-600 text-white rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center gap-2"><Plus className="w-3.5 h-3.5" /> Add Chapter</button>
+            <button onClick={handleCheckDriveIntegrity} disabled={isCheckingDrive} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center justify-center gap-2">
+              {isCheckingDrive ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />} 
+              {isCheckingDrive ? '...' : 'Check'}
+            </button>
+            <button onClick={() => setShowFixModal(true)} disabled={!hasIssues} className={`flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2 ${hasIssues ? 'bg-amber-600 text-white shadow-amber-600/20 hover:scale-105' : 'bg-black/5 text-black/20 cursor-not-allowed'}`}>
+              <Wrench className="w-3.5 h-3.5" /> Fix
+            </button>
           </div>
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-6 py-8">
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 sm:px-6 py-6 sm:py-8">
         {chapters.length === 0 ? (
           <div className="p-12 text-center text-xs font-black opacity-30 uppercase">No chapters found</div>
         ) : (
