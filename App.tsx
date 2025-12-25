@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES } from './types';
 import Library from './components/Library';
@@ -25,19 +26,27 @@ const App: React.FC = () => {
     const parsed = saved ? JSON.parse(saved) : {};
     const snapshotStr = localStorage.getItem(SNAPSHOT_KEY);
     const snapshot = snapshotStr ? JSON.parse(snapshotStr) as SavedSnapshot : null;
+    const progressStore = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
 
     return {
-      books: (parsed.books || []).map((b: any) => ({
-        ...b,
-        directoryHandle: undefined,
-        settings: b.settings || { useBookSettings: false, highlightMode: HighlightMode.WORD },
-        rules: (b.rules || []).map((r: any) => ({
-          ...r,
-          matchCase: r.matchCase ?? (r.caseMode === 'EXACT'),
-          matchExpression: r.matchExpression ?? false,
-          ruleType: r.ruleType ?? RuleType.REPLACE
-        }))
-      })),
+      books: (parsed.books || []).map((b: any) => {
+        const bookProgress = progressStore[b.id] || {};
+        return {
+          ...b,
+          directoryHandle: undefined,
+          chapters: (b.chapters || []).map((c: any) => ({
+            ...c,
+            isCompleted: !!bookProgress[c.id]?.completed
+          })),
+          settings: b.settings || { useBookSettings: false, highlightMode: HighlightMode.WORD },
+          rules: (b.rules || []).map((r: any) => ({
+            ...r,
+            matchCase: r.matchCase ?? (r.caseMode === 'EXACT'),
+            matchExpression: r.matchExpression ?? false,
+            ruleType: r.ruleType ?? RuleType.REPLACE
+          }))
+        };
+      }),
       activeBookId: parsed.activeBookId,
       playbackSpeed: parsed.playbackSpeed || 1.0,
       selectedVoiceName: parsed.selectedVoiceName,
@@ -96,6 +105,39 @@ const App: React.FC = () => {
       window.removeEventListener('talevox_auth_invalid', handleAuthEvent);
     };
   }, [state.googleClientId]);
+
+  // Sync unread counts and completion status by bridging the progress store to the main state
+  useEffect(() => {
+    const handleProgressUpdate = (e: any) => {
+      if (!e.detail) return;
+      const { bookId, chapterId } = e.detail;
+      const store = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
+      const bookProgress = store[bookId] || {};
+
+      setState(prev => ({
+        ...prev,
+        books: prev.books.map(b => {
+          if (b.id !== bookId) return b;
+          
+          const updatedChapters = b.chapters.map(c => {
+            // Update specific chapter if ID provided, otherwise check all in book (e.g. after sync)
+            const isTarget = !chapterId || c.id === chapterId;
+            if (!isTarget) return c;
+            
+            const isActuallyCompleted = !!bookProgress[c.id]?.completed;
+            if (c.isCompleted === isActuallyCompleted) return c;
+            return { ...c, isCompleted: isActuallyCompleted };
+          });
+
+          const hasChanged = updatedChapters.some((c, idx) => c !== b.chapters[idx]);
+          return hasChanged ? { ...b, chapters: updatedChapters } : b;
+        })
+      }));
+    };
+
+    window.addEventListener('talevox_progress_updated', handleProgressUpdate);
+    return () => window.removeEventListener('talevox_progress_updated', handleProgressUpdate);
+  }, []);
 
   const showToast = (title: string, number = 0, type: 'info' | 'success' | 'error' | 'reconnect' = 'info') => {
     setTransitionToast({ number, title, type });
