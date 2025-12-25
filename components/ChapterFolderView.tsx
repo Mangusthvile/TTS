@@ -5,7 +5,7 @@ import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headpho
 import { PROGRESS_STORE_V4, applyRules } from '../services/speechService';
 import { synthesizeChunk } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache } from '../services/audioCache';
-import { uploadToDrive, listFilesInFolder, buildMp3Name, buildTextName, createDriveFolder, findFileSync, moveFile } from '../services/driveService';
+import { uploadToDrive, listFilesInFolder, buildMp3Name, buildTextName, createDriveFolder, findFileSync, moveFile, inferChapterIndex, isPlausibleChapterFile } from '../services/driveService';
 import { isTokenValid } from '../services/driveAuth';
 
 type ViewMode = 'details' | 'list' | 'grid';
@@ -88,22 +88,64 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     setIsCheckingDrive(true);
     try {
       const driveFiles = await listFilesInFolder(book.driveFolderId);
-      const fileMap = new Map(driveFiles.map(f => [f.name, f]));
-      const scan: ScanResult = { missingTextIds: [], missingAudioIds: [], strayFiles: [], duplicates: [], totalChecked: chapters.length };
       const matchedFileIds = new Set<string>();
+      
+      const scan: ScanResult = { missingTextIds: [], missingAudioIds: [], strayFiles: [], duplicates: [], totalChecked: chapters.length };
+
+      // Helper to find fuzzy matches if exact match fails
+      const findFileForChapter = (index: number, type: 'text' | 'audio') => {
+         const exts = type === 'text' ? ['txt', 'md'] : ['mp3', 'wav', 'm4a'];
+         return driveFiles.find(f => {
+            if (matchedFileIds.has(f.id)) return false;
+            const fExt = f.name.split('.').pop()?.toLowerCase();
+            if (!exts.includes(fExt || '')) return false;
+            const inferred = inferChapterIndex(f.name);
+            return inferred === index;
+         });
+      };
 
       for (const chapter of chapters) {
         const expectedTextName = buildTextName(chapter.index, chapter.title);
         const expectedAudioName = buildMp3Name(chapter.index, chapter.title);
-        const textFile = fileMap.get(expectedTextName);
-        const audioFile = fileMap.get(expectedAudioName);
-        if (!textFile) scan.missingTextIds.push(chapter.id); else matchedFileIds.add(textFile.id);
-        if (!audioFile) scan.missingAudioIds.push(chapter.id); else matchedFileIds.add(audioFile.id);
-        onUpdateChapter({ ...chapter, cloudTextFileId: textFile?.id || chapter.cloudTextFileId, cloudAudioFileId: audioFile?.id || chapter.cloudAudioFileId, hasTextOnDrive: !!textFile, audioStatus: audioFile ? AudioStatus.READY : AudioStatus.PENDING });
+        
+        // 1. Try exact name match
+        let textFile = driveFiles.find(f => f.name === expectedTextName);
+        let audioFile = driveFiles.find(f => f.name === expectedAudioName);
+
+        // 2. Fallback to fuzzy match (index + extension)
+        if (!textFile) textFile = findFileForChapter(chapter.index, 'text');
+        if (!audioFile) audioFile = findFileForChapter(chapter.index, 'audio');
+
+        if (textFile) matchedFileIds.add(textFile.id);
+        if (audioFile) matchedFileIds.add(audioFile.id);
+
+        if (!textFile) scan.missingTextIds.push(chapter.id);
+        if (!audioFile) scan.missingAudioIds.push(chapter.id);
+
+        // Update chapter record with found IDs (even if name doesn't match standard)
+        onUpdateChapter({ 
+            ...chapter, 
+            cloudTextFileId: textFile?.id || chapter.cloudTextFileId, 
+            cloudAudioFileId: audioFile?.id || chapter.cloudAudioFileId, 
+            hasTextOnDrive: !!textFile, 
+            audioStatus: audioFile ? AudioStatus.READY : (chapter.audioStatus === AudioStatus.READY ? AudioStatus.PENDING : chapter.audioStatus) 
+        });
       }
 
       for (const f of driveFiles) {
-        if (!matchedFileIds.has(f.id) && f.mimeType !== 'application/vnd.google-apps.folder') scan.strayFiles.push(f);
+        if (matchedFileIds.has(f.id) || f.mimeType === 'application/vnd.google-apps.folder') continue;
+        
+        const lower = f.name.toLowerCase();
+        if (lower.includes('cover') || lower.includes('manifest') || lower.endsWith('.json') || lower.endsWith('.jpg') || lower.endsWith('.png')) continue;
+
+        // Skip files that look like chapters but weren't matched to current library (prevent deletion of potentially valid files)
+        if (isPlausibleChapterFile(f.name)) {
+            console.log(`[Scanner] Ignoring plausible chapter file not in library: ${f.name}`);
+            continue;
+        }
+
+        scan.strayFiles.push(f);
+        console.log(`[Scanner] Marked as stray: ${f.name} (No match, not plausible asset)`);
       }
       setLastScan(scan);
     } catch (e: any) {

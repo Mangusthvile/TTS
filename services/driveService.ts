@@ -21,6 +21,35 @@ export function buildTextName(chapterIndex: number, title: string) {
   return `${chapterIndex.toString().padStart(3, '0')}_${safe}.txt`;
 }
 
+/**
+ * Attempts to extract a chapter number from a filename using various common patterns.
+ * e.g. "001_intro.txt" -> 1, "Chapter 5.mp3" -> 5
+ */
+export function inferChapterIndex(filename: string): number | null {
+  const patterns = [
+    /chapter[_ -]?(\d+)/i, // Chapter 1, Chapter_01
+    /ch[_ -]?(\d+)/i,      // ch 1, ch-01
+    /^(\d+)\s*[-_.]/i,     // 001 - Title, 001_Title
+    /^(\d+)\.[a-z]+$/i     // 001.txt
+  ];
+
+  for (const p of patterns) {
+    const m = filename.match(p);
+    if (m && m[1]) return parseInt(m[1], 10);
+  }
+  return null;
+}
+
+/**
+ * Checks if a file looks like it belongs to a chapter based on extension and naming.
+ * Used to prevent flagging valid files as 'stray'.
+ */
+export function isPlausibleChapterFile(filename: string): boolean {
+    const ext = filename.split('.').pop()?.toLowerCase();
+    if (!['txt', 'md', 'mp3', 'wav', 'm4a'].includes(ext || '')) return false;
+    return inferChapterIndex(filename) !== null;
+}
+
 export async function moveFile(fileId: string, currentParentId: string, newParentId: string): Promise<void> {
   const url = `https://www.googleapis.com/drive/v3/files/${fileId}?addParents=${newParentId}&removeParents=${currentParentId}&supportsAllDrives=true`;
   const response = await driveFetch(url, { method: 'PATCH' });
