@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES } from './types';
 import Library from './components/Library';
@@ -17,7 +16,7 @@ import { synthesizeChunk } from './services/cloudTtsService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle } from 'lucide-react';
 
-const STATE_FILENAME = 'talevox_state_v275.json';
+const STATE_FILENAME = 'talevox_state_v276.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 
 const App: React.FC = () => {
@@ -205,7 +204,6 @@ const App: React.FC = () => {
       for (let i = 0; i < updatedBooks.length; i++) {
         const book = updatedBooks[i];
         if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
-          // If the book folder is the root itself or outside the /books subfolder, migrate it.
           if (book.driveFolderId === s.driveRootFolderId || book.driveFolderId !== (await findFileSync(book.title, s.driveSubfolders.booksId))) {
              const newBookFolderId = await ensureBookFolder(s.driveSubfolders.booksId, book.title);
              const files = await listFilesInFolder(book.driveFolderId);
@@ -261,7 +259,11 @@ const App: React.FC = () => {
     updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.GENERATING });
     try {
       const res = await synthesizeChunk(fullText, voice, 1.0);
-      const audioBlob = await fetch(res.audioUrl).then(r => r.blob());
+      const fetchRes = await fetch(res.audioUrl);
+      if (!fetchRes.ok) throw new Error("Synthesis output error");
+      const audioBlob = await fetchRes.blob();
+      if (!audioBlob || audioBlob.size === 0) throw new Error("Empty audio output");
+      
       await saveAudioToCache(cacheKey, audioBlob);
       let cloudId = undefined;
       if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
@@ -344,22 +346,24 @@ const App: React.FC = () => {
     const text = applyRules(chapter.content, book.rules);
     const speed = (book.settings.useBookSettings && book.settings.playbackSpeed) ? book.settings.playbackSpeed : s.playbackSpeed;
 
+    const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
+    const introText = applyRules(rawIntro, book.rules);
+    const estimatedIntroDurSec = introText.length / 18; 
+
     try {
-      const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
-      const introText = applyRules(rawIntro, book.rules);
       const cacheKey = generateAudioKey(introText + text, voice, 1.0);
       let audioBlob = await getAudioFromCache(cacheKey);
 
       if (!audioBlob && chapter.cloudAudioFileId && isAuthorized) {
         showToast("Fetching cloud audio...", 0, 'info');
-        try { audioBlob = await fetchDriveBinary(chapter.cloudAudioFileId); await saveAudioToCache(cacheKey, audioBlob); } catch(e) {}
+        try { audioBlob = await fetchDriveBinary(chapter.cloudAudioFileId); if (audioBlob) await saveAudioToCache(cacheKey, audioBlob); } catch(e) {}
       }
 
-      if (audioBlob) {
+      if (audioBlob && audioBlob.size > 0) {
         const url = URL.createObjectURL(audioBlob);
         speechController.setContext({ bookId: book.id, chapterId: chapter.id });
         try {
-          await speechController.loadAndPlayDriveFile('', 'LOCAL_ID', text.length, 0, undefined, 0, speed, 
+          await speechController.loadAndPlayDriveFile('', 'LOCAL_ID', text.length, estimatedIntroDurSec, undefined, 0, speed, 
             () => { if (stopAfterChapter) setIsPlaying(false); else handleNextChapter(); },
             (meta) => { setAudioCurrentTime(meta.currentTime); setAudioDuration(meta.duration); setState(p => ({ ...p, currentOffsetChars: meta.charOffset })); },
             url

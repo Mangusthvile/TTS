@@ -1,6 +1,7 @@
+
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile } from '../types';
-import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp } from 'lucide-react';
+import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon } from 'lucide-react';
 import { PROGRESS_STORE_V4, applyRules } from '../services/speechService';
 import { synthesizeChunk } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache } from '../services/audioCache';
@@ -49,6 +50,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [rememberAsDefault, setRememberAsDefault] = useState(true);
 
   const [isHeaderExpanded, setIsHeaderExpanded] = useState(false);
+  const [mobileMenuId, setMobileMenuId] = useState<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const [fixOptions, setFixOptions] = useState({
@@ -66,7 +68,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const chapters = useMemo(() => [...(book.chapters || [])].sort((a, b) => a.index - b.index), [book.chapters]);
   
   const progressData = useMemo(() => {
-    // refreshKey is used to force re-calculation when progress events happen
     void refreshKey;
     const store = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
     return store[book.id] || {};
@@ -76,16 +77,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     const handleProgressUpdate = () => setRefreshKey(k => k + 1);
     window.addEventListener('talevox_progress_updated', handleProgressUpdate);
     return () => window.removeEventListener('talevox_progress_updated', handleProgressUpdate);
-  }, []);
-
-  useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const handleScroll = () => {
-      if (window.innerWidth < 768 && container.scrollTop > 40) setIsHeaderExpanded(false);
-    };
-    container.addEventListener('scroll', handleScroll);
-    return () => container.removeEventListener('scroll', handleScroll);
   }, []);
 
   const handleCheckDriveIntegrity = useCallback(async () => {
@@ -215,9 +206,38 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     return null;
   };
 
+  const MobileChapterMenu = ({ chapterId }: { chapterId: string }) => {
+    const ch = chapters.find(c => c.id === chapterId);
+    if (!ch) return null;
+    return (
+      <div className="fixed inset-0 z-[110] flex items-end sm:items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setMobileMenuId(null)}>
+        <div className={`w-full max-w-sm rounded-[2rem] shadow-2xl p-6 overflow-hidden animate-in slide-in-from-bottom-4 duration-200 ${isDark ? 'bg-slate-900 border border-white/10' : 'bg-white'}`} onClick={e => e.stopPropagation()}>
+           <div className="flex justify-between items-center mb-6">
+              <h3 className="text-sm font-black uppercase tracking-widest opacity-60">Chapter Options</h3>
+              <button onClick={() => setMobileMenuId(null)} className="p-2 opacity-40"><X className="w-5 h-5" /></button>
+           </div>
+           <div className="space-y-2">
+              <button onClick={() => { setMobileMenuId(null); handleCheckDriveIntegrity(); }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}>
+                 <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg"><RefreshCw className="w-4 h-4" /></div>
+                 Check Audio + Text
+              </button>
+              <button onClick={() => { setMobileMenuId(null); setEditingChapterId(ch.id); setTempTitle(ch.title); }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}>
+                 <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg"><Edit2 className="w-4 h-4" /></div>
+                 Edit Title
+              </button>
+              <button onClick={() => { if (confirm('Delete?')) { onDeleteChapter(ch.id); setMobileMenuId(null); } }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm text-red-500 transition-all ${isDark ? 'hover:bg-red-500/10' : 'hover:bg-red-500/5'}`}>
+                 <div className="p-2 bg-red-500/10 text-red-500 rounded-lg"><Trash2 className="w-4 h-4" /></div>
+                 Delete Chapter
+              </button>
+           </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderDetailsView = () => (
     <div className={`rounded-3xl border shadow-sm overflow-hidden ${cardBg}`}>
-      <div className={`grid grid-cols-[40px_1fr_100px_150px] px-6 py-3 text-[10px] font-black uppercase tracking-widest border-b ${isDark ? 'border-slate-800 bg-slate-950/40 text-indigo-400' : 'border-black/5 bg-black/5 text-indigo-600'}`}>
+      <div className={`grid grid-cols-[40px_1fr_80px_100px] md:grid-cols-[40px_1fr_100px_150px] px-6 py-3 text-[10px] font-black uppercase tracking-widest border-b ${isDark ? 'border-slate-800 bg-slate-950/40 text-indigo-400' : 'border-black/5 bg-black/5 text-indigo-600'}`}>
         <div>Idx</div><div>Title</div><div className="text-right px-4">Progress</div><div className="text-right">Actions</div>
       </div>
       <div className="divide-y divide-black/5">
@@ -228,7 +248,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           const isEditing = editingChapterId === c.id;
 
           return (
-            <div key={c.id} onClick={() => !isEditing && onOpenChapter(c.id)} className={`grid grid-cols-[40px_1fr_100px_150px] items-center px-6 py-4 cursor-pointer border-b last:border-0 transition-colors ${isDark ? 'hover:bg-white/5 border-slate-800' : 'hover:bg-black/5 border-black/5'} ${isCompleted ? 'opacity-50' : ''}`}>
+            <div key={c.id} onClick={() => !isEditing && onOpenChapter(c.id)} className={`grid grid-cols-[40px_1fr_80px_60px] md:grid-cols-[40px_1fr_100px_150px] items-center px-6 py-4 cursor-pointer border-b last:border-0 transition-colors ${isDark ? 'hover:bg-white/5 border-slate-800' : 'hover:bg-black/5 border-black/5'} ${isCompleted ? 'opacity-50' : ''}`}>
               <div className={`font-mono text-xs font-black ${textSecondary}`}>{String(c.index).padStart(3, '0')}</div>
               <div className="flex flex-col gap-1 min-w-0 mr-4">
                 <div className="flex items-center gap-3">
@@ -239,7 +259,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                   ) : (
                     <div className="font-black text-sm truncate flex items-center">{c.title}{renderTextStatusIcon(c)}</div>
                   )}
-                  {renderAudioStatusIcon(c)}
+                  <span className="md:inline hidden">{renderAudioStatusIcon(c)}</span>
                 </div>
                 <div className={`h-1 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-700' : 'bg-black/5'}`}>
                    <div className={`h-full transition-all duration-500 ${isCompleted ? 'bg-emerald-500' : 'bg-indigo-500'}`} style={{ width: `${percent}%` }} />
@@ -248,15 +268,30 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               <div className="text-right px-4">
                 <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${isCompleted ? 'bg-emerald-500/20 text-emerald-600' : 'bg-indigo-500/15 text-indigo-500'}`}>{isCompleted ? 'Done' : `${percent}%`}</span>
               </div>
+              {/* Actions Toggle */}
               <div className="flex justify-end items-center gap-2">
-                {isCompleted && (
-                  <button onClick={(e) => { e.stopPropagation(); onResetChapterProgress(book.id, c.id); }} className="p-2 bg-indigo-600/10 text-indigo-600 rounded-xl hover:bg-indigo-600/20" title="Reset Chapter Progress">
-                    <RotateCcw className="w-4 h-4" />
+                {/* Desktop Buttons */}
+                <div className="hidden md:flex items-center gap-2">
+                  {isCompleted && (
+                    <button onClick={(e) => { e.stopPropagation(); onResetChapterProgress(book.id, c.id); }} className="p-2 bg-indigo-600/10 text-indigo-600 rounded-xl hover:bg-indigo-600/20" title="Reset Progress">
+                      <RotateCcw className="w-4 h-4" />
+                    </button>
+                  )}
+                  <button onClick={(e) => { e.stopPropagation(); setRememberAsDefault(false); setShowVoiceModal({ chapterId: c.id }); }} className="p-2 opacity-40 hover:opacity-100"><RefreshCw className="w-4 h-4" /></button>
+                  <button onClick={(e) => { e.stopPropagation(); setEditingChapterId(c.id); setTempTitle(c.title); }} className="p-2 opacity-40 hover:opacity-100"><Edit2 className="w-4 h-4" /></button>
+                  <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete?')) onDeleteChapter(c.id); }} className="p-2 opacity-40 hover:opacity-100 hover:text-red-500"><Trash2 className="w-4 h-4" /></button>
+                </div>
+                {/* Mobile Gear */}
+                <div className="md:hidden flex items-center gap-2">
+                   {isCompleted && (
+                    <button onClick={(e) => { e.stopPropagation(); onResetChapterProgress(book.id, c.id); }} className="p-1.5 text-indigo-600" title="Reset Progress">
+                      <RotateCcw className="w-4 h-4" />
+                    </button>
+                  )}
+                  <button onClick={(e) => { e.stopPropagation(); setMobileMenuId(c.id); }} className="p-1.5 opacity-40">
+                    <GearIcon className="w-4 h-4" />
                   </button>
-                )}
-                <button onClick={(e) => { e.stopPropagation(); setRememberAsDefault(false); setShowVoiceModal({ chapterId: c.id }); }} className="p-2 opacity-40 hover:opacity-100"><RefreshCw className="w-4 h-4" /></button>
-                <button onClick={(e) => { e.stopPropagation(); setEditingChapterId(c.id); setTempTitle(c.title); }} className="p-2 opacity-40 hover:opacity-100"><Edit2 className="w-4 h-4" /></button>
-                <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete?')) onDeleteChapter(c.id); }} className="p-2 opacity-40 hover:opacity-100 hover:text-red-500"><Trash2 className="w-4 h-4" /></button>
+                </div>
               </div>
             </div>
           );
@@ -270,6 +305,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       {chapters.map(c => {
         const saved = progressData[c.id];
         const percent = saved?.percent !== undefined ? Math.floor(saved.percent * 100) : 0;
+        const isCompleted = saved?.completed || false;
         return (
           <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`flex flex-col gap-2 p-4 rounded-2xl border cursor-pointer transition-all hover:translate-x-1 ${cardBg}`}>
             <div className="flex items-center gap-4">
@@ -278,6 +314,16 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               <div className="flex items-center gap-3">
                 <span className="text-[9px] font-black opacity-40 uppercase">{percent}%</span>
                 {renderAudioStatusIcon(c)}
+                <div className="flex md:hidden gap-1 items-center">
+                  {isCompleted && (
+                    <button onClick={(e) => { e.stopPropagation(); onResetChapterProgress(book.id, c.id); }} className="p-1.5 text-indigo-600">
+                      <RotateCcw className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                  <button onClick={(e) => { e.stopPropagation(); setMobileMenuId(c.id); }} className="p-1.5 opacity-40">
+                    <GearIcon className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
             </div>
             <div className={`h-0.5 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-700' : 'bg-black/5'}`}>
@@ -294,6 +340,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       {chapters.map(c => {
         const saved = progressData[c.id];
         const percent = saved?.percent !== undefined ? Math.floor(saved.percent * 100) : 0;
+        const isCompleted = saved?.completed || false;
         return (
           <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`aspect-square p-4 rounded-3xl border flex flex-col items-center justify-center text-center gap-2 cursor-pointer transition-all hover:scale-105 group relative ${cardBg}`}>
             <div className="absolute top-3 right-3 flex gap-1">{renderTextStatusIcon(c)}{renderAudioStatusIcon(c)}</div>
@@ -303,7 +350,19 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                <div className={`h-1 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-700' : 'bg-black/5'}`}><div className="h-full bg-indigo-500" style={{ width: `${percent}%` }} /></div>
                <div className="text-[8px] font-black uppercase mt-1">{percent}%</div>
             </div>
-            <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete?')) onDeleteChapter(c.id); }} className="absolute bottom-2 right-2 p-2 opacity-0 group-hover:opacity-100 text-red-500 transition-opacity"><Trash2 className="w-3.5 h-3.5" /></button>
+            {/* Desktop Quick Actions Overlay */}
+            <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete?')) onDeleteChapter(c.id); }} className="hidden md:block absolute bottom-2 right-2 p-2 opacity-0 group-hover:opacity-100 text-red-500 transition-opacity"><Trash2 className="w-3.5 h-3.5" /></button>
+            {/* Mobile Actions Overlay */}
+            <div className="md:hidden absolute bottom-2 left-0 right-0 flex justify-center gap-2 px-2">
+               {isCompleted && (
+                 <button onClick={(e) => { e.stopPropagation(); onResetChapterProgress(book.id, c.id); }} className="p-2 bg-indigo-600/10 text-indigo-600 rounded-xl">
+                   <RotateCcw className="w-3.5 h-3.5" />
+                 </button>
+               )}
+               <button onClick={(e) => { e.stopPropagation(); setMobileMenuId(c.id); }} className="p-2 bg-black/5 rounded-xl opacity-60">
+                 <GearIcon className="w-3.5 h-3.5" />
+               </button>
+            </div>
           </div>
         );
       })}
@@ -327,6 +386,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           </div>
         </div>
       )}
+
+      {mobileMenuId && <MobileChapterMenu chapterId={mobileMenuId} />}
 
       {showFixModal && lastScan && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm overflow-y-auto">

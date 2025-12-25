@@ -42,6 +42,9 @@ class SpeechController {
   private context: { bookId: string; chapterId: string } | null = null;
   private lastSaveTime: number = 0;
 
+  // Highlight buffer to account for synthesis pauses and speech pacing (300ms)
+  private readonly HIGHLIGHT_DELAY_SEC = 0.3;
+
   constructor() {
     this.audio = new Audio();
     this.audio.volume = 1.0;
@@ -109,11 +112,15 @@ class SpeechController {
 
   public getOffsetFromTime(t: number, dur?: number): number {
     const duration = dur || this.audio.duration || 0;
-    if (duration === 0 || t < this.currentIntroDurSec) return 0;
-    const contentTime = t - this.currentIntroDurSec;
+    // Add buffer after intro before starting body highlight
+    const effectiveIntroEnd = this.currentIntroDurSec > 0 ? (this.currentIntroDurSec + this.HIGHLIGHT_DELAY_SEC) : 0;
+    
+    if (duration === 0 || t < effectiveIntroEnd) return 0;
+    
+    const contentTime = t - effectiveIntroEnd;
     if (this.currentChunkMap && this.currentChunkMap.length > 0) {
       const mapTotalDur = this.currentChunkMap.reduce((acc, c) => acc + c.durSec, 0);
-      const totalContentDur = Math.max(0.1, duration - this.currentIntroDurSec);
+      const totalContentDur = Math.max(0.1, duration - effectiveIntroEnd);
       const scale = totalContentDur / Math.max(0.1, mapTotalDur);
       let cumulativeTime = 0;
       for (const chunk of this.currentChunkMap) {
@@ -125,7 +132,7 @@ class SpeechController {
         cumulativeTime += scaledDur;
       }
     }
-    const contentPortion = Math.max(0.001, duration - this.currentIntroDurSec);
+    const contentPortion = Math.max(0.001, duration - effectiveIntroEnd);
     return Math.max(0, Math.floor(this.currentTextLength * Math.min(1, contentTime / contentPortion)));
   }
 
@@ -190,21 +197,23 @@ class SpeechController {
     const duration = this.audio.duration;
     if (!duration || this.currentTextLength <= 0) return;
     let targetTime = 0;
+    const effectiveIntroEnd = this.currentIntroDurSec > 0 ? (this.currentIntroDurSec + this.HIGHLIGHT_DELAY_SEC) : 0;
+    
     if (this.currentChunkMap && this.currentChunkMap.length > 0) {
       const mapTotalDur = this.currentChunkMap.reduce((acc, c) => acc + c.durSec, 0);
-      const totalContentDur = Math.max(0.1, duration - this.currentIntroDurSec);
+      const totalContentDur = Math.max(0.1, duration - effectiveIntroEnd);
       const scale = totalContentDur / Math.max(0.1, mapTotalDur);
       let cumulativeTime = 0;
       for (const chunk of this.currentChunkMap) {
         if (offset >= chunk.startChar && offset <= chunk.endChar) {
           const ratio = (offset - chunk.startChar) / Math.max(1, chunk.endChar - chunk.startChar);
-          targetTime = this.currentIntroDurSec + cumulativeTime + (ratio * chunk.durSec * scale);
+          targetTime = effectiveIntroEnd + cumulativeTime + (ratio * chunk.durSec * scale);
           break;
         }
         cumulativeTime += chunk.durSec * scale;
       }
     } else {
-      targetTime = this.currentIntroDurSec + (Math.max(0, Math.min(1, offset / this.currentTextLength)) * Math.max(0.001, duration - this.currentIntroDurSec));
+      targetTime = effectiveIntroEnd + (Math.max(0, Math.min(1, offset / this.currentTextLength)) * Math.max(0.001, duration - effectiveIntroEnd));
     }
     this.audio.currentTime = targetTime;
     this.syncCallback?.({ currentTime: targetTime, duration, charOffset: offset });
