@@ -378,7 +378,6 @@ const App: React.FC = () => {
           isDirty: false, 
           cloudDirty: false,
           dirtySince: undefined,
-          // Fixed typo 'iAuto' to 'isAuto'
           lastCloudSaveTrigger: isAuto ? 'auto' : 'manual',
           lastCloudSaveAt: Date.now(),
           lastSyncSuccessAt: Date.now(),
@@ -768,7 +767,7 @@ const App: React.FC = () => {
               onDeleteChapter={id => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.filter(c => c.id !== id) } : b) })); markDirty(); }}
               onUpdateChapter={c => { setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(ch => ch.id === c.id ? c : ch) } : b) })); markDirty(); }}
               onUpdateBookSettings={s => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, ...s } } : b) })); markDirty(); }}
-              onBackToLibrary: () => setActiveTab('library')}
+              onBackToLibrary={() => setActiveTab('library')}
               onResetChapterProgress={handleResetChapterProgress}
             />
           )}
