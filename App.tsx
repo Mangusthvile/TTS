@@ -14,10 +14,11 @@ import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFile
 import { initDriveAuth, getValidDriveToken, clearStoredToken, isTokenValid } from './services/driveAuth';
 import { saveChapterToFile } from './services/fileService';
 import { synthesizeChunk } from './services/cloudTtsService';
+import { extractChapterWithAI } from './services/geminiService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle } from 'lucide-react';
 
-const STATE_FILENAME = 'talevox_state_v277.json';
+const STATE_FILENAME = 'talevox_state_v279.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 
 const App: React.FC = () => {
@@ -138,6 +139,175 @@ const App: React.FC = () => {
     }
   }, [isAuthorized]);
 
+  const updateChapterAudio = useCallback((bookId: string, chapterId: string, updates: Partial<Chapter>) => {
+    setState(prev => ({
+      ...prev, books: prev.books.map(b => b.id === bookId ? { ...b, chapters: b.chapters.map(c => c.id === chapterId ? { ...c, ...updates } : c) } : b)
+    }));
+  }, []);
+
+  const queueBackgroundTTS = useCallback(async (bookId: string, chapterId: string, customVoiceId?: string, forceChapter?: Chapter) => {
+    const s = stateRef.current;
+    const book = s.books.find(b => b.id === bookId);
+    // Use forceChapter if provided (helps with race conditions during creation)
+    const chapter = forceChapter || book?.chapters.find(c => c.id === chapterId);
+    if (!book || !chapter || chapter.audioStatus === AudioStatus.READY) return;
+
+    const voice = customVoiceId || book.settings.defaultVoiceId || 'en-US-Standard-C';
+    const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
+    const fullText = applyRules(rawIntro + chapter.content, book.rules);
+    const cacheKey = generateAudioKey(fullText, voice, 1.0);
+    
+    if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
+       const audioName = buildMp3Name(chapter.index, chapter.title);
+       const driveId = await findFileSync(audioName, book.driveFolderId);
+       if (driveId) {
+          updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, cloudAudioFileId: driveId });
+          return;
+       }
+    }
+
+    const cached = await getAudioFromCache(cacheKey);
+    if (cached) {
+      if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
+         updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.GENERATING });
+         try {
+           const audioName = buildMp3Name(chapter.index, chapter.title);
+           const driveFileId = await uploadToDrive(book.driveFolderId, audioName, cached, undefined, 'audio/mpeg');
+           updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, cloudAudioFileId: driveFileId, hasCachedAudio: true });
+         } catch(e) { updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.FAILED }); }
+      } else { updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, hasCachedAudio: true }); }
+      return;
+    }
+
+    updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.GENERATING });
+    showToast(`Generating audio: ${chapter.title.substring(0, 15)}...`, 0, 'info');
+    try {
+      const res = await synthesizeChunk(fullText, voice, 1.0);
+      const fetchRes = await fetch(res.audioUrl);
+      if (!fetchRes.ok) throw new Error("Synthesis output error");
+      const audioBlob = await fetchRes.blob();
+      if (!audioBlob || audioBlob.size === 0) throw new Error("Empty audio output");
+      
+      await saveAudioToCache(cacheKey, audioBlob);
+      let cloudId = undefined;
+      if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
+         const audioName = buildMp3Name(chapter.index, chapter.title);
+         cloudId = await uploadToDrive(book.driveFolderId, audioName, audioBlob, undefined, 'audio/mpeg');
+      }
+      updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, hasCachedAudio: true, cloudAudioFileId: cloudId });
+      showToast(`Audio ready: ${chapter.title.substring(0, 15)}`, 0, 'success');
+      handleSaveState(true);
+    } catch (e) { 
+      updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.FAILED }); 
+      showToast(`Audio failed: ${chapter.title}`, 0, 'error');
+    }
+  }, [handleSaveState, isAuthorized, updateChapterAudio]);
+
+  const handleSmartExtractChapter = useCallback(async (bookId: string, chapterId: string) => {
+    const s = stateRef.current;
+    const book = s.books.find(b => b.id === bookId);
+    const chapter = book?.chapters.find(c => c.id === chapterId);
+    if (!book || !chapter) return;
+
+    showToast("Starting Smart Extraction...", 0, 'info');
+    setIsLoadingChapter(true);
+
+    try {
+      let sourceText = chapter.content;
+      
+      // Prefer loading from Drive if possible to get original messy version if available
+      if (book.backend === StorageBackend.DRIVE && isAuthorized) {
+        let fileId = chapter.cloudTextFileId;
+        if (!fileId && book.driveFolderId) {
+          const expectedName = buildTextName(chapter.index, chapter.title);
+          fileId = await findFileSync(expectedName, book.driveFolderId) || undefined;
+        }
+        if (fileId) {
+          try {
+            sourceText = await fetchDriveFile(fileId);
+          } catch (e) {
+            console.warn("Could not fetch drive file for smart extraction, using state content.");
+          }
+        }
+      }
+
+      const extracted = await extractChapterWithAI(sourceText);
+      const cleanedContent = extracted.content;
+      const cleanedTitle = extracted.title;
+      const cleanedIndex = extracted.index;
+
+      const updatedChapter: Chapter = {
+        ...chapter,
+        title: cleanedTitle,
+        content: cleanedContent,
+        index: cleanedIndex,
+        wordCount: cleanedContent.split(/\s+/).filter(Boolean).length,
+        audioStatus: AudioStatus.PENDING, // Mark for re-generation since content changed
+        updatedAt: Date.now()
+      };
+
+      // Save back to Drive if applicable
+      if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
+        const filename = buildTextName(cleanedIndex, cleanedTitle);
+        const newFileId = await uploadToDrive(book.driveFolderId, filename, cleanedContent, chapter.cloudTextFileId, 'text/plain');
+        updatedChapter.cloudTextFileId = newFileId;
+        updatedChapter.hasTextOnDrive = true;
+      }
+
+      setState(prev => ({
+        ...prev,
+        books: prev.books.map(b => b.id === bookId ? {
+          ...b,
+          chapters: b.chapters.map(c => c.id === chapterId ? updatedChapter : c).sort((x, y) => x.index - y.index)
+        } : b)
+      }));
+
+      showToast("Smart Extraction Successful", 0, 'success');
+      
+      // Auto-trigger audio update for cleaned content
+      queueBackgroundTTS(bookId, chapterId, book.settings.defaultVoiceId, updatedChapter);
+
+    } catch (err: any) {
+      showToast("Extraction Failed: " + (err.message || "Unknown error"), 0, 'error');
+    } finally {
+      setIsLoadingChapter(false);
+    }
+  }, [isAuthorized, queueBackgroundTTS]);
+
+  const handleChapterExtracted = useCallback(async (data: { 
+    title: string; content: string; url: string; index: number; voiceId: string; setAsDefault: boolean;
+  }) => {
+    const s = stateRef.current;
+    if (!s.activeBookId) return;
+    const book = s.books.find(b => b.id === s.activeBookId);
+    if (!book) return;
+
+    if (data.setAsDefault) {
+      setState(prev => ({ ...prev, books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, settings: { ...b.settings, defaultVoiceId: data.voiceId } } : b) }));
+    }
+
+    const filename = buildTextName(data.index, data.title);
+    let cloudTextId = undefined;
+    if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
+      showToast("Saving source text...", 0, 'info');
+      try { cloudTextId = await uploadToDrive(book.driveFolderId, filename, data.content, undefined, 'text/plain'); } catch (e) { showToast("Drive save failed", 0, 'error'); }
+    }
+
+    if (book.backend === StorageBackend.LOCAL && book.directoryHandle) {
+      try { await saveChapterToFile(book.directoryHandle, { id: 'tmp', index: data.index, title: data.title, content: data.content, filename, wordCount: 0, progress: 0, progressChars: 0 }); } catch (e) {}
+    }
+
+    const newChapter: Chapter = { id: crypto.randomUUID(), index: data.index, title: data.title, content: data.content, filename, wordCount: data.content.split(/\s+/).filter(Boolean).length, progress: 0, progressChars: 0, audioStatus: AudioStatus.PENDING, cloudTextFileId: cloudTextId, hasTextOnDrive: !!cloudTextId };
+    
+    setState(prev => ({ ...prev, books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, chapters: [...b.chapters, newChapter].sort((a,b) => a.index-b.index), currentChapterId: b.currentChapterId || newChapter.id } : b) }));
+    setIsAddChapterOpen(false);
+    showToast("Chapter Saved", 0, 'success');
+    
+    // Trigger auto-creation of audio
+    queueBackgroundTTS(s.activeBookId, newChapter.id, data.voiceId, newChapter);
+    handleSaveState(true);
+  }, [queueBackgroundTTS, isAuthorized, handleSaveState]);
+
   const applySnapshot = useCallback((snapshot: SavedSnapshot) => {
     const { books, readerSettings, activeBookId, playbackSpeed, selectedVoiceName, theme, progressStore, driveRootFolderId, driveRootFolderName, driveSubfolders } = snapshot.state;
     const mergedBooks = [...books];
@@ -207,7 +377,6 @@ const App: React.FC = () => {
       for (let i = 0; i < updatedBooks.length; i++) {
         const book = updatedBooks[i];
         if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
-          // If the book folder is not currently in the "Books" subfolder, migrate it
           const currentParentId = s.driveSubfolders.booksId;
           const bookFolderInBooksId = await findFileSync(book.title, currentParentId);
           
@@ -229,95 +398,6 @@ const App: React.FC = () => {
       showToast("Migration failed", 0, 'error');
     } finally { setIsSyncing(false); }
   }, [isAuthorized]);
-
-  const queueBackgroundTTS = useCallback(async (bookId: string, chapterId: string, customVoiceId?: string) => {
-    const s = stateRef.current;
-    const book = s.books.find(b => b.id === bookId);
-    const chapter = book?.chapters.find(c => c.id === chapterId);
-    if (!book || !chapter || chapter.audioStatus === AudioStatus.READY) return;
-
-    const voice = customVoiceId || book.settings.defaultVoiceId || 'en-US-Standard-C';
-    const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
-    const fullText = applyRules(rawIntro + chapter.content, book.rules);
-    const cacheKey = generateAudioKey(fullText, voice, 1.0);
-    
-    if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
-       const audioName = buildMp3Name(chapter.index, chapter.title);
-       const driveId = await findFileSync(audioName, book.driveFolderId);
-       if (driveId) {
-          updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, cloudAudioFileId: driveId });
-          return;
-       }
-    }
-
-    const cached = await getAudioFromCache(cacheKey);
-    if (cached) {
-      if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
-         updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.GENERATING });
-         try {
-           const audioName = buildMp3Name(chapter.index, chapter.title);
-           const driveFileId = await uploadToDrive(book.driveFolderId, audioName, cached, undefined, 'audio/mpeg');
-           updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, cloudAudioFileId: driveFileId, hasCachedAudio: true });
-         } catch(e) { updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.FAILED }); }
-      } else { updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, hasCachedAudio: true }); }
-      return;
-    }
-
-    updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.GENERATING });
-    try {
-      const res = await synthesizeChunk(fullText, voice, 1.0);
-      const fetchRes = await fetch(res.audioUrl);
-      if (!fetchRes.ok) throw new Error("Synthesis output error");
-      const audioBlob = await fetchRes.blob();
-      if (!audioBlob || audioBlob.size === 0) throw new Error("Empty audio output");
-      
-      await saveAudioToCache(cacheKey, audioBlob);
-      let cloudId = undefined;
-      if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
-         const audioName = buildMp3Name(chapter.index, chapter.title);
-         cloudId = await uploadToDrive(book.driveFolderId, audioName, audioBlob, undefined, 'audio/mpeg');
-      }
-      updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, hasCachedAudio: true, cloudAudioFileId: cloudId });
-      handleSaveState(true);
-    } catch (e) { updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.FAILED }); }
-  }, [handleSaveState, isAuthorized]);
-
-  const updateChapterAudio = (bookId: string, chapterId: string, updates: Partial<Chapter>) => {
-    setState(prev => ({
-      ...prev, books: prev.books.map(b => b.id === bookId ? { ...b, chapters: b.chapters.map(c => c.id === chapterId ? { ...c, ...updates } : c) } : b)
-    }));
-  };
-
-  const handleChapterExtracted = useCallback(async (data: { 
-    title: string; content: string; url: string; index: number; voiceId: string; setAsDefault: boolean;
-  }) => {
-    const s = stateRef.current;
-    if (!s.activeBookId) return;
-    const book = s.books.find(b => b.id === s.activeBookId);
-    if (!book) return;
-
-    if (data.setAsDefault) {
-      setState(prev => ({ ...prev, books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, settings: { ...b.settings, defaultVoiceId: data.voiceId } } : b) }));
-    }
-
-    const filename = buildTextName(data.index, data.title);
-    let cloudTextId = undefined;
-    if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
-      showToast("Saving source text...", 0, 'info');
-      try { cloudTextId = await uploadToDrive(book.driveFolderId, filename, data.content, undefined, 'text/plain'); } catch (e) { showToast("Drive save failed", 0, 'error'); }
-    }
-
-    if (book.backend === StorageBackend.LOCAL && book.directoryHandle) {
-      try { await saveChapterToFile(book.directoryHandle, { id: 'tmp', index: data.index, title: data.title, content: data.content, filename, wordCount: 0, progress: 0, progressChars: 0 }); } catch (e) {}
-    }
-
-    const newChapter: Chapter = { id: crypto.randomUUID(), index: data.index, title: data.title, content: data.content, filename, wordCount: data.content.split(/\s+/).filter(Boolean).length, progress: 0, progressChars: 0, audioStatus: AudioStatus.PENDING, cloudTextFileId: cloudTextId, hasTextOnDrive: !!cloudTextId };
-    setState(prev => ({ ...prev, books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, chapters: [...b.chapters, newChapter].sort((a,b) => a.index-b.index), currentChapterId: b.currentChapterId || newChapter.id } : b) }));
-    setIsAddChapterOpen(false);
-    showToast("Chapter Saved", 0, 'success');
-    queueBackgroundTTS(s.activeBookId, newChapter.id, data.voiceId);
-    handleSaveState(true);
-  }, [queueBackgroundTTS, isAuthorized, handleSaveState]);
 
   const handleNextChapter = useCallback(() => {
     const s = stateRef.current;
@@ -355,7 +435,6 @@ const App: React.FC = () => {
 
     const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
     const introText = applyRules(rawIntro, book.rules);
-    // Refined duration estimation: ~18 characters per second at 1.0x speed
     const estimatedIntroDurSec = (introText.length / (18 * speed)); 
 
     try {
@@ -464,7 +543,7 @@ const App: React.FC = () => {
       </header>
 
       <div className="flex-1 overflow-y-auto relative flex">
-        {isLoadingChapter && <div className="absolute inset-0 flex items-center justify-center bg-inherit z-5"><Loader2 className="w-10 h-10 text-indigo-600 animate-spin" /></div>}
+        {isLoadingChapter && <div className="absolute inset-0 flex items-center justify-center bg-inherit z-[70]"><Loader2 className="w-10 h-10 text-indigo-600 animate-spin" /></div>}
         {isAddChapterOpen && (
           <div className="absolute inset-0 z-[60] overflow-y-auto p-4 lg:p-12 backdrop-blur-md bg-black/10">
             <div className="max-w-4xl mx-auto relative">
@@ -523,6 +602,7 @@ const App: React.FC = () => {
               onUpdateBookSettings={s => setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, ...s } } : b) }))}
               onBackToLibrary={() => setActiveTab('library')}
               onResetChapterProgress={handleResetChapterProgress}
+              onSmartExtractChapter={(cid) => handleSmartExtractChapter(activeBook.id, cid)}
             />
           )}
 
