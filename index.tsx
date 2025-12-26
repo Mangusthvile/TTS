@@ -1,11 +1,10 @@
-
-import React, { ErrorInfo, ReactNode } from 'react';
+import React, { Component, ErrorInfo, ReactNode } from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import { AlertTriangle, RefreshCw, ClipboardCopy, Loader2 } from 'lucide-react';
 
 declare global {
-  interface Window {
+  interface window {
     __APP_VERSION__: string;
     gapi: any;
     google: any;
@@ -14,7 +13,7 @@ declare global {
 }
 
 // Set version on window for settings display
-window.__APP_VERSION__ = '2.7.13';
+window.__APP_VERSION__ = '2.7.14';
 
 // --- Error Recovery Utilities ---
 
@@ -70,8 +69,6 @@ window.onerror = (message, source, lineno, colno, error) => {
       msg.includes('Failed to fetch dynamically imported module') || 
       msg.includes('Importing a module script failed')) {
     recordFatalError(error || message, "ChunkLoadError Detected");
-    // For chunk errors, we often want to force a reload immediately if the app hasn't mounted
-    // but the boundary will handle it if we are already in React.
   } else {
     recordFatalError(error || message, `Global Window Error: ${source}:${lineno}`);
   }
@@ -95,8 +92,8 @@ interface State {
   isReloading: boolean;
 }
 
-// Fixed: Explicitly use React.Component to ensure TypeScript correctly identifies base class members.
-class ErrorBoundary extends React.Component<Props, State> {
+// Fix: Explicitly import and extend Component to ensure setState and props are correctly inherited
+class ErrorBoundary extends Component<Props, State> {
   public state: State = {
     hasError: false,
     error: null,
@@ -115,9 +112,10 @@ class ErrorBoundary extends React.Component<Props, State> {
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error("Uncaught error:", error, errorInfo);
-    // Fixed: setState is now correctly identified via inheritance from React.Component.
-    this.setState({ errorInfo: errorInfo.componentStack });
-    recordFatalError(error, `React Component Crash: ${errorInfo.componentStack?.substring(0, 200)}`);
+    // Fix: Normalize undefined to null before setting state to satisfy string | null type
+    const componentStack = errorInfo.componentStack ?? null;
+    this.setState({ errorInfo: componentStack });
+    recordFatalError(error, `React Component Crash: ${(componentStack || "").substring(0, 200)}`);
   }
 
   private handleCopy = () => {
@@ -132,7 +130,6 @@ class ErrorBoundary extends React.Component<Props, State> {
   };
 
   private handleReload = () => {
-    // Fixed: setState is now correctly identified via inheritance from React.Component.
     this.setState({ isReloading: true });
     attemptHardReload();
   };
@@ -197,7 +194,6 @@ class ErrorBoundary extends React.Component<Props, State> {
       );
     }
 
-    // Fixed: props is now correctly identified through explicit React.Component extension.
     return this.props.children;
   }
 }

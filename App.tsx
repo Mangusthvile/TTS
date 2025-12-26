@@ -17,7 +17,7 @@ import { extractChapterWithAI } from './services/geminiService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud } from 'lucide-react';
 
-const STATE_FILENAME = 'talevox_state_v2713.json';
+const STATE_FILENAME = 'talevox_state_v2714.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -29,7 +29,6 @@ const safeSetLocalStorage = (key: string, value: string) => {
   } catch (e: any) {
     console.warn(`LocalStorage write failed for key "${key}":`, e.message);
     if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED') {
-      // Record diagnostics for the UI to see
       const diagStr = localStorage.getItem('talevox_sync_diag') || '{}';
       try {
         const diag = JSON.parse(diagStr);
@@ -122,6 +121,72 @@ const App: React.FC = () => {
     });
   }, []);
 
+  const applySnapshot = useCallback((snapshot: SavedSnapshot) => {
+    const s = stateRef.current;
+    const { books: cloudBooks, readerSettings: cloudRS, activeBookId, playbackSpeed, selectedVoiceName, theme, progressStore: cloudProgress, driveRootFolderId, driveRootFolderName, driveSubfolders, autoSaveInterval } = snapshot.state;
+    
+    safeSetLocalStorage(BACKUP_KEY, JSON.stringify({ state: s, progress: JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}') }));
+
+    const mergedBooks = [...s.books];
+    cloudBooks.forEach(cb => {
+      const idx = mergedBooks.findIndex(b => b.id === cb.id || b.title === cb.title);
+      if (idx === -1) {
+        mergedBooks.push(cb);
+      } else {
+        const lb = mergedBooks[idx];
+        const trustCloud = !lb.updatedAt || (cb.updatedAt && cb.updatedAt > lb.updatedAt);
+        if (trustCloud) {
+           const mergedChapters = [...lb.chapters];
+           cb.chapters.forEach(cc => {
+              const cIdx = mergedChapters.findIndex(lc => lc.id === cc.id || lc.index === cc.index);
+              if (cIdx === -1) {
+                 mergedChapters.push(cc);
+              } else {
+                 const lc = mergedChapters[cIdx];
+                 if (!lc.updatedAt || (cc.updatedAt && cc.updatedAt > lc.updatedAt)) {
+                    mergedChapters[cIdx] = cc;
+                 }
+              }
+           });
+           mergedBooks[idx] = { ...lb, ...cb, chapters: mergedChapters.sort((a,b) => a.index-b.index) };
+        }
+      }
+    });
+
+    const localProgress = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
+    const finalProgress = { ...cloudProgress };
+    Object.keys(localProgress).forEach(bookId => {
+       if (!finalProgress[bookId]) finalProgress[bookId] = localProgress[bookId];
+       else {
+          Object.keys(localProgress[bookId]).forEach(chId => {
+             const lp = localProgress[bookId][chId];
+             const cp = finalProgress[bookId][chId];
+             if (!cp || (lp.updatedAt && lp.updatedAt > (cp.updatedAt || 0))) {
+                finalProgress[bookId][chId] = lp;
+             }
+          });
+       }
+    });
+
+    setState(prev => ({ 
+      ...prev, 
+      books: mergedBooks, 
+      readerSettings: cloudRS || prev.readerSettings, 
+      activeBookId: activeBookId || prev.activeBookId, 
+      playbackSpeed: playbackSpeed || prev.playbackSpeed, 
+      selectedVoiceName: selectedVoiceName || prev.selectedVoiceName, 
+      theme: theme || prev.theme, 
+      lastSavedAt: snapshot.savedAt, 
+      driveRootFolderId: driveRootFolderId || prev.driveRootFolderId, 
+      driveRootFolderName: driveRootFolderName || prev.driveRootFolderName, 
+      driveSubfolders: driveSubfolders || prev.driveSubfolders,
+      autoSaveInterval: autoSaveInterval || prev.autoSaveInterval
+    }));
+    
+    safeSetLocalStorage(PROGRESS_STORE_V4, JSON.stringify(finalProgress));
+    window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: { bookId: activeBookId || stateRef.current.activeBookId } }));
+  }, []);
+
   const handleSync = useCallback(async (manual = false) => {
     const s = stateRef.current;
     if (!isAuthorized || !s.driveRootFolderId) {
@@ -208,10 +273,9 @@ const App: React.FC = () => {
       showToast(`Sync Failed: ${err.message}`, 0, 'error');
       updateDiagnostics({ lastSyncError: err.message });
     } finally { setIsSyncing(false); }
-  }, [isAuthorized, updateDiagnostics]);
+  }, [isAuthorized, updateDiagnostics, applySnapshot]);
 
   useEffect(() => {
-    // 1. Initialize Drive Auth safely
     if (state.googleClientId) {
       try {
         initDriveAuth(state.googleClientId);
@@ -221,12 +285,10 @@ const App: React.FC = () => {
       }
     }
 
-    // 2. Handle Auth Changed event with safe initialization
     const handleAuthEvent = async (event: any) => {
       const isValid = isTokenValid();
       setIsAuthorized(isValid);
       
-      // If we just became authorized, start sync flow safely
       if (isValid && stateRef.current.driveRootFolderId) {
         try {
           console.log("Post-login: Starting sync flow...");
@@ -276,14 +338,11 @@ const App: React.FC = () => {
   const handleSaveState = useCallback(async (isCloudSave = true, isAuto = false) => {
     const s = stateRef.current;
     
-    // Check if we should skip auto-save
     if (isCloudSave && isAuto) {
       if (!isDirty) return;
       if (!isAuthorized) return;
       if (isSyncing) return;
     }
-
-    console.log(`CloudSave trigger=${isAuto ? 'auto' : 'manual'}`);
 
     const progressStore = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
     const snapshot: SavedSnapshot = {
@@ -338,83 +397,14 @@ const App: React.FC = () => {
     }
   }, [isAuthorized, isDirty, isSyncing, updateDiagnostics]);
 
-  // Auto Cloud Save Scheduler - Fixed to honor interval and only trigger if dirty
   useEffect(() => {
     if (!state.driveRootFolderId || !isAuthorized || !isDirty || isSyncing) return;
-    
     const intervalMs = state.autoSaveInterval * 60 * 1000;
     const timer = setTimeout(() => {
       handleSaveState(true, true);
     }, intervalMs);
-
     return () => clearTimeout(timer);
   }, [isDirty, isAuthorized, state.autoSaveInterval, state.driveRootFolderId, isSyncing, handleSaveState]);
-
-  const applySnapshot = useCallback((snapshot: SavedSnapshot) => {
-    const s = stateRef.current;
-    const { books: cloudBooks, readerSettings: cloudRS, activeBookId, playbackSpeed, selectedVoiceName, theme, progressStore: cloudProgress, driveRootFolderId, driveRootFolderName, driveSubfolders, autoSaveInterval } = snapshot.state;
-    
-    safeSetLocalStorage(BACKUP_KEY, JSON.stringify({ state: s, progress: JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}') }));
-
-    const mergedBooks = [...s.books];
-    cloudBooks.forEach(cb => {
-      const idx = mergedBooks.findIndex(b => b.id === cb.id || b.title === cb.title);
-      if (idx === -1) {
-        mergedBooks.push(cb);
-      } else {
-        const lb = mergedBooks[idx];
-        const trustCloud = !lb.updatedAt || (cb.updatedAt && cb.updatedAt > lb.updatedAt);
-        if (trustCloud) {
-           const mergedChapters = [...lb.chapters];
-           cb.chapters.forEach(cc => {
-              const cIdx = mergedChapters.findIndex(lc => lc.id === cc.id || lc.index === cc.index);
-              if (cIdx === -1) {
-                 mergedChapters.push(cc);
-              } else {
-                 const lc = mergedChapters[cIdx];
-                 if (!lc.updatedAt || (cc.updatedAt && cc.updatedAt > lc.updatedAt)) {
-                    mergedChapters[cIdx] = cc;
-                 }
-              }
-           });
-           mergedBooks[idx] = { ...lb, ...cb, chapters: mergedChapters.sort((a,b) => a.index-b.index) };
-        }
-      }
-    });
-
-    const localProgress = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
-    const finalProgress = { ...cloudProgress };
-    Object.keys(localProgress).forEach(bookId => {
-       if (!finalProgress[bookId]) finalProgress[bookId] = localProgress[bookId];
-       else {
-          Object.keys(localProgress[bookId]).forEach(chId => {
-             const lp = localProgress[bookId][chId];
-             const cp = finalProgress[bookId][chId];
-             if (!cp || (lp.updatedAt && lp.updatedAt > (cp.updatedAt || 0))) {
-                finalProgress[bookId][chId] = lp;
-             }
-          });
-       }
-    });
-
-    setState(prev => ({ 
-      ...prev, 
-      books: mergedBooks, 
-      readerSettings: cloudRS || prev.readerSettings, 
-      activeBookId: activeBookId || prev.activeBookId, 
-      playbackSpeed: playbackSpeed || prev.playbackSpeed, 
-      selectedVoiceName: selectedVoiceName || prev.selectedVoiceName, 
-      theme: theme || prev.theme, 
-      lastSavedAt: snapshot.savedAt, 
-      driveRootFolderId: driveRootFolderId || prev.driveRootFolderId, 
-      driveRootFolderName: driveRootFolderName || prev.driveRootFolderName, 
-      driveSubfolders: driveSubfolders || prev.driveSubfolders,
-      autoSaveInterval: autoSaveInterval || prev.autoSaveInterval
-    }));
-    
-    safeSetLocalStorage(PROGRESS_STORE_V4, JSON.stringify(finalProgress));
-    window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: { bookId: activeBookId || stateRef.current.activeBookId } }));
-  }, []);
 
   const updateChapterAudio = useCallback((bookId: string, chapterId: string, updates: Partial<Chapter>) => {
     setState(prev => ({
