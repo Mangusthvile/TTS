@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { ReaderSettings, Theme, SyncDiagnostics } from '../types';
-import { Type, RefreshCw, Smartphone, Cloud, CloudOff, Loader2, Key, LogOut, Save, LogIn, Palette, Eye, ShieldCheck, Clock, Sun, Coffee, Moon, Check, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal } from 'lucide-react';
+import { Type, RefreshCw, Smartphone, Cloud, CloudOff, Loader2, Key, LogOut, Save, LogIn, Palette, Eye, ShieldCheck, Clock, Sun, Coffee, Moon, Check, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer } from 'lucide-react';
 import { getAuthSessionInfo, isTokenValid } from '../services/driveAuth';
 
 interface SettingsProps {
@@ -24,6 +24,9 @@ interface SettingsProps {
   onSelectRoot?: () => void;
   onRunMigration?: () => void;
   syncDiagnostics?: SyncDiagnostics;
+  autoSaveInterval: number;
+  onSetAutoSaveInterval: (v: number) => void;
+  isDirty?: boolean;
 }
 
 const Settings: React.FC<SettingsProps> = ({ 
@@ -32,7 +35,7 @@ const Settings: React.FC<SettingsProps> = ({
   googleClientId, onUpdateGoogleClientId, onClearAuth,
   onSaveState, lastSavedAt,
   driveRootName, onSelectRoot, onRunMigration,
-  syncDiagnostics
+  syncDiagnostics, autoSaveInterval, onSetAutoSaveInterval, isDirty
 }) => {
   const [session, setSession] = useState(getAuthSessionInfo());
   const [isDiagExpanded, setIsDiagExpanded] = useState(false);
@@ -70,7 +73,7 @@ const Settings: React.FC<SettingsProps> = ({
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
           <div>
             <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
-            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.7.10</p>
+            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.7.11</p>
           </div>
           <button 
             onClick={onCheckForUpdates} 
@@ -146,6 +149,26 @@ const Settings: React.FC<SettingsProps> = ({
                           <button onClick={onSelectRoot} className="text-[9px] font-black uppercase bg-indigo-600 text-white px-3 py-1.5 rounded-lg shadow-sm">Change</button>
                        </div>
                     </div>
+
+                    <div className="space-y-3 pt-2">
+                       <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                             <Timer className="w-4 h-4 text-indigo-600" />
+                             <span className={`text-xs font-black ${textClass}`}>Auto Cloud Save</span>
+                          </div>
+                          <select 
+                             value={autoSaveInterval} 
+                             onChange={e => onSetAutoSaveInterval(parseInt(e.target.value))}
+                             className={`text-xs font-black p-2 rounded-xl border-none outline-none ${isDark ? 'bg-slate-950 text-white' : 'bg-white text-black'}`}
+                          >
+                             <option value={15}>15 Minutes</option>
+                             <option value={30}>30 Minutes</option>
+                             <option value={45}>45 Minutes</option>
+                             <option value={60}>60 Minutes</option>
+                          </select>
+                       </div>
+                       <p className="text-[9px] font-bold opacity-40 uppercase tracking-tighter">Saves only when changes are detected</p>
+                    </div>
                     
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                        <button onClick={onRunMigration} className="flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-indigo-600/20 text-indigo-600 text-[10px] font-black uppercase hover:bg-indigo-600/5 transition-all">
@@ -180,14 +203,23 @@ const Settings: React.FC<SettingsProps> = ({
               <div className="flex items-center gap-2">
                 <Terminal className="w-4 h-4" /> Sync Diagnostics
               </div>
-              {isDiagExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              <div className="flex items-center gap-3">
+                 {isDirty && <span className="bg-amber-500 text-white text-[8px] px-1.5 py-0.5 rounded-full animate-pulse">Unsaved Changes</span>}
+                 {isDiagExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              </div>
             </button>
             {isDiagExpanded && (
               <div className="mt-6 space-y-4 animate-in slide-in-from-top-2 duration-200">
                 <div className="grid grid-cols-1 gap-2 text-[10px] font-mono p-4 bg-black/5 dark:bg-black/40 rounded-xl border border-black/5 overflow-x-auto whitespace-pre">
-                   <div>Attempt: {syncDiagnostics?.lastSyncAttemptAt ? new Date(syncDiagnostics.lastSyncAttemptAt).toLocaleString() : 'Never'}</div>
-                   <div>Success: {syncDiagnostics?.lastSyncSuccessAt ? new Date(syncDiagnostics.lastSyncSuccessAt).toLocaleString() : 'Never'}</div>
-                   {syncDiagnostics?.lastSyncError && <div className="text-red-500">Error: {syncDiagnostics.lastSyncError}</div>}
+                   <div>Dirty: {isDirty ? 'YES' : 'NO'}</div>
+                   <div>Interval: {autoSaveInterval}m</div>
+                   <div>Sync Attempt: {syncDiagnostics?.lastSyncAttemptAt ? new Date(syncDiagnostics.lastSyncAttemptAt).toLocaleString() : 'Never'}</div>
+                   <div>Sync Success: {syncDiagnostics?.lastSyncSuccessAt ? new Date(syncDiagnostics.lastSyncSuccessAt).toLocaleString() : 'Never'}</div>
+                   {syncDiagnostics?.lastSyncError && <div className="text-red-500">Sync Error: {syncDiagnostics.lastSyncError}</div>}
+                   <div className="opacity-50 mt-2 border-t border-black/5 pt-2">Auto-Save:</div>
+                   <div>Auto Attempt: {syncDiagnostics?.lastAutoSaveAttemptAt ? new Date(syncDiagnostics.lastAutoSaveAttemptAt).toLocaleString() : 'Never'}</div>
+                   <div>Auto Success: {syncDiagnostics?.lastAutoSaveSuccessAt ? new Date(syncDiagnostics.lastAutoSaveSuccessAt).toLocaleString() : 'Never'}</div>
+                   {syncDiagnostics?.lastAutoSaveError && <div className="text-red-500">Auto Error: {syncDiagnostics.lastAutoSaveError}</div>}
                    <div className="opacity-50 mt-2 border-t border-black/5 pt-2">IDs:</div>
                    <div>Root: {syncDiagnostics?.driveRootFolderId || 'N/A'}</div>
                    <div>Saves: {syncDiagnostics?.resolvedCloudSavesFolderId || 'N/A'}</div>

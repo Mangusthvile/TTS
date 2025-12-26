@@ -23,6 +23,9 @@ const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
 
 const App: React.FC = () => {
+  const [isDirty, setIsDirty] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+
   const [state, setState] = useState<AppState>(() => {
     const saved = localStorage.getItem('talevox_pro_v2');
     const parsed = saved ? JSON.parse(saved) : {};
@@ -65,7 +68,8 @@ const App: React.FC = () => {
       driveRootFolderId: parsed.driveRootFolderId,
       driveRootFolderName: parsed.driveRootFolderName,
       driveSubfolders: parsed.driveSubfolders,
-      syncDiagnostics: savedDiag ? JSON.parse(savedDiag) : {}
+      syncDiagnostics: savedDiag ? JSON.parse(savedDiag) : {},
+      autoSaveInterval: parsed.autoSaveInterval || 30
     };
   });
 
@@ -78,7 +82,6 @@ const App: React.FC = () => {
   const [transitionToast, setTransitionToast] = useState<{ number: number; title: string; type?: 'info' | 'success' | 'error' | 'reconnect' } | null>(null);
   const [sleepTimerSeconds, setSleepTimerSeconds] = useState<number | null>(null);
   const [stopAfterChapter, setStopAfterChapter] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
   const [audioDuration, setAudioDuration] = useState(0);
   const [audioCurrentTime, setAudioCurrentTime] = useState(0);
   const [isAuthorized, setIsAuthorized] = useState(isTokenValid());
@@ -103,7 +106,7 @@ const App: React.FC = () => {
     const handleRejection = (event: PromiseRejectionEvent) => {
       console.error("Unhandled promise rejection:", event.reason);
       const msg = event.reason?.message || String(event.reason);
-      setState(p => ({ ...p, syncDiagnostics: { ...p.syncDiagnostics, lastSyncError: `Global Error: ${msg}` } }));
+      updateDiagnostics({ lastSyncError: `Global Error: ${msg}` });
     };
     window.addEventListener('unhandledrejection', handleRejection);
 
@@ -127,7 +130,12 @@ const App: React.FC = () => {
     });
   };
 
-  const handleSaveState = useCallback(async (isCloudSave = true) => {
+  const markDirty = useCallback(() => {
+    setIsDirty(true);
+    updateDiagnostics({ isDirty: true });
+  }, []);
+
+  const handleSaveState = useCallback(async (isCloudSave = true, isAuto = false) => {
     const s = stateRef.current;
     const progressStore = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
     const snapshot: SavedSnapshot = {
@@ -142,30 +150,60 @@ const App: React.FC = () => {
         progressStore,
         driveRootFolderId: s.driveRootFolderId,
         driveRootFolderName: s.driveRootFolderName,
-        driveSubfolders: s.driveSubfolders
+        driveSubfolders: s.driveSubfolders,
+        autoSaveInterval: s.autoSaveInterval
       }
     };
     localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
     setState(prev => ({ ...prev, lastSavedAt: snapshot.savedAt }));
     
     if (isCloudSave && isAuthorized && s.driveSubfolders?.savesId) {
+      if (isAuto) updateDiagnostics({ lastAutoSaveAttemptAt: Date.now() });
       setIsSyncing(true);
       try {
         const timestampedName = `talevox_state_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
         await uploadToDrive(s.driveSubfolders.savesId, timestampedName, JSON.stringify(snapshot), undefined, 'application/json');
         const latestId = await findFileSync(STABLE_POINTER_NAME, s.driveSubfolders.savesId);
         await uploadToDrive(s.driveSubfolders.savesId, STABLE_POINTER_NAME, JSON.stringify(snapshot), latestId || undefined, 'application/json');
-        showToast("Cloud State Saved", 0, 'success');
+        
+        setIsDirty(false);
+        updateDiagnostics({ 
+          isDirty: false, 
+          lastSyncSuccessAt: Date.now(),
+          ...(isAuto ? { lastAutoSaveSuccessAt: Date.now(), lastAutoSaveError: undefined } : {})
+        });
+        showToast(isAuto ? "Auto-saved" : "Cloud State Saved", 0, 'success');
       } catch (e: any) {
-        showToast("Cloud Save Failed", 0, 'error');
-        updateDiagnostics({ lastSyncError: `Save Failed: ${e.message}` });
+        showToast(isAuto ? "Auto-save failed" : "Cloud Save Failed", 0, 'error');
+        const errorMsg = `Save Failed: ${e.message}`;
+        updateDiagnostics({ 
+          lastSyncError: errorMsg,
+          ...(isAuto ? { lastAutoSaveError: errorMsg } : {})
+        });
       } finally { setIsSyncing(false); }
+    } else if (isAuto && !isAuthorized) {
+      updateDiagnostics({ lastAutoSaveError: "Skipped: Drive not connected", lastAutoSaveAttemptAt: Date.now() });
+      showToast("Auto-save skipped: Drive not connected", 0, 'info');
     }
   }, [isAuthorized]);
 
+  // Auto Cloud Save Scheduler
+  useEffect(() => {
+    if (!state.driveRootFolderId || !isAuthorized) return;
+    
+    const intervalMs = state.autoSaveInterval * 60 * 1000;
+    const timer = setTimeout(() => {
+      if (isDirty && !isSyncing) {
+        handleSaveState(true, true);
+      }
+    }, intervalMs);
+
+    return () => clearTimeout(timer);
+  }, [isDirty, isAuthorized, state.autoSaveInterval, state.driveRootFolderId, isSyncing, handleSaveState]);
+
   const applySnapshot = useCallback((snapshot: SavedSnapshot) => {
     const s = stateRef.current;
-    const { books: cloudBooks, readerSettings: cloudRS, activeBookId, playbackSpeed, selectedVoiceName, theme, progressStore: cloudProgress, driveRootFolderId, driveRootFolderName, driveSubfolders } = snapshot.state;
+    const { books: cloudBooks, readerSettings: cloudRS, activeBookId, playbackSpeed, selectedVoiceName, theme, progressStore: cloudProgress, driveRootFolderId, driveRootFolderName, driveSubfolders, autoSaveInterval } = snapshot.state;
     
     localStorage.setItem(BACKUP_KEY, JSON.stringify({ state: s, progress: JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}') }));
 
@@ -221,7 +259,8 @@ const App: React.FC = () => {
       lastSavedAt: snapshot.savedAt, 
       driveRootFolderId: driveRootFolderId || prev.driveRootFolderId, 
       driveRootFolderName: driveRootFolderName || prev.driveRootFolderName, 
-      driveSubfolders: driveSubfolders || prev.driveSubfolders 
+      driveSubfolders: driveSubfolders || prev.driveSubfolders,
+      autoSaveInterval: autoSaveInterval || prev.autoSaveInterval
     }));
     
     localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(finalProgress));
@@ -329,7 +368,8 @@ const App: React.FC = () => {
     setState(prev => ({
       ...prev, books: prev.books.map(b => b.id === bookId ? { ...b, chapters: b.chapters.map(c => c.id === chapterId ? { ...c, ...updates } : c) } : b)
     }));
-  }, []);
+    markDirty();
+  }, [markDirty]);
 
   const queueBackgroundTTS = useCallback(async (bookId: string, chapterId: string, customVoiceId?: string, forceChapter?: Chapter) => {
     const s = stateRef.current;
@@ -413,9 +453,10 @@ const App: React.FC = () => {
     setIsAddChapterOpen(false);
     showToast("Chapter Saved", 0, 'success');
     
+    markDirty();
     queueBackgroundTTS(s.activeBookId, newChapter.id, data.voiceId, newChapter);
     handleSaveState(true);
-  }, [queueBackgroundTTS, isAuthorized, handleSaveState]);
+  }, [queueBackgroundTTS, isAuthorized, handleSaveState, markDirty]);
 
   const handleSelectRoot = useCallback(async () => {
     try {
@@ -425,10 +466,11 @@ const App: React.FC = () => {
       const sub = await ensureRootStructure(selected.id);
       setState(p => ({ ...p, driveRootFolderId: selected.id, driveRootFolderName: selected.name, driveSubfolders: sub }));
       showToast("TaleVox Root Linked", 0, 'success');
+      markDirty();
     } catch (e: any) {
       showToast(e.message, 0, 'error');
     } finally { setIsSyncing(false); }
-  }, []);
+  }, [markDirty]);
 
   const handleRunMigration = useCallback(async () => {
     const s = stateRef.current;
@@ -459,11 +501,12 @@ const App: React.FC = () => {
         }
       }
       setState(p => ({ ...p, books: updatedBooks }));
+      markDirty();
       showToast("Migration Complete", 0, 'success');
     } catch (e: any) {
       showToast("Migration failed", 0, 'error');
     } finally { setIsSyncing(false); }
-  }, [isAuthorized]);
+  }, [isAuthorized, markDirty]);
 
   const handleNextChapter = useCallback(() => {
     const s = stateRef.current;
@@ -568,6 +611,7 @@ const App: React.FC = () => {
     const bk: Book = { id: crypto.randomUUID(), title, chapters: [], rules: [], backend, directoryHandle, driveFolderId: driveId, driveFolderName: driveName, settings: { useBookSettings: false, highlightMode: HighlightMode.WORD }, updatedAt: Date.now() };
     setState(p => ({ ...p, books: [...p.books, bk], activeBookId: bk.id }));
     setActiveTab('collection');
+    markDirty();
     showToast("Book added", 0, 'success');
   };
 
@@ -582,13 +626,19 @@ const App: React.FC = () => {
       setState(p => ({ ...p, currentOffsetChars: 0 }));
     }
     window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: { bookId, chapterId } }));
+    markDirty();
     handleSaveState(true);
     showToast("Progress reset", 0, 'success');
-  }, [activeBook, state.activeBookId, handleSaveState]);
+  }, [activeBook, state.activeBookId, handleSaveState, markDirty]);
 
   useEffect(() => {
     localStorage.setItem('talevox_pro_v2', JSON.stringify({ ...state, books: state.books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined })) }));
   }, [state]);
+
+  const handleStateChangeWithDirty = useCallback((updates: Partial<AppState>) => {
+    setState(prev => ({ ...prev, ...updates }));
+    markDirty();
+  }, [markDirty]);
 
   return (
     <div className={`flex flex-col h-screen overflow-hidden font-sans transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-950 text-slate-100' : state.theme === Theme.SEPIA ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
@@ -609,7 +659,7 @@ const App: React.FC = () => {
           ) : (
             <button onClick={() => handleSync(true)} disabled={isSyncing} className={`flex items-center gap-2 px-3 py-2 bg-indigo-600/10 text-indigo-600 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-600/20 transition-all ${isSyncing ? 'animate-pulse' : ''}`}><RefreshCw className="w-3.5 h-3.5" /> <span className="hidden xs:inline">Sync</span></button>
           )}
-          <button onClick={() => handleSaveState(true)} className={`p-2.5 rounded-xl bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20 transition-all ${isSyncing ? 'animate-pulse' : ''}`} title="Save State"><Save className="w-4 h-4" /></button>
+          <button onClick={() => handleSaveState(true)} className={`p-2.5 rounded-xl bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20 transition-all ${isDirty ? 'ring-2 ring-indigo-600 animate-pulse' : ''}`} title="Save State"><Save className="w-4 h-4" /></button>
         </div>
       </header>
 
@@ -663,8 +713,8 @@ const App: React.FC = () => {
               books={state.books} activeBookId={state.activeBookId} lastSession={state.lastSession} 
               onSelectBook={id => { setState(p => ({ ...p, activeBookId: id })); setActiveTab('collection'); }} 
               onAddBook={handleAddBook}
-              onDeleteBook={id => setState(p => ({ ...p, books: p.books.filter(b => b.id !== id) }))}
-              onUpdateBook={book => setState(p => ({ ...p, books: p.books.map(b => b.id === book.id ? book : b) }))}
+              onDeleteBook={id => { setState(p => ({ ...p, books: p.books.filter(b => b.id !== id) })); markDirty(); }}
+              onUpdateBook={book => { setState(p => ({ ...p, books: p.books.map(b => b.id === book.id ? book : b) })); markDirty(); }}
               onSelectChapter={(bid, cid) => { setState(p => ({ ...p, activeBookId: bid, books: p.books.map(b => b.id === bid ? { ...b, currentChapterId: cid } : b) })); setActiveTab('reader'); }}
               theme={state.theme}
             />
@@ -674,10 +724,10 @@ const App: React.FC = () => {
             <ChapterFolderView 
               book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)}
               onOpenChapter={id => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, currentChapterId: id } : b) })); setActiveTab('reader'); }}
-              onToggleFavorite={() => {}} onUpdateChapterTitle={(id, t) => setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(c => c.id === id ? { ...c, title: t } : c) } : b) }))}
-              onDeleteChapter={id => setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.filter(c => c.id !== id) } : b) }))}
-              onUpdateChapter={c => setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(ch => ch.id === c.id ? c : ch) } : b) }))}
-              onUpdateBookSettings={s => setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, ...s } } : b) }))}
+              onToggleFavorite={() => {}} onUpdateChapterTitle={(id, t) => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(c => c.id === id ? { ...c, title: t } : c) } : b) })); markDirty(); }}
+              onDeleteChapter={id => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.filter(c => c.id !== id) } : b) })); markDirty(); }}
+              onUpdateChapter={c => { setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(ch => ch.id === c.id ? c : ch) } : b) })); markDirty(); }}
+              onUpdateBookSettings={s => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, ...s } } : b) })); markDirty(); }}
               onBackToLibrary={() => setActiveTab('library')}
               onResetChapterProgress={handleResetChapterProgress}
             />
@@ -694,24 +744,27 @@ const App: React.FC = () => {
 
           {activeTab === 'rules' && (
             <RuleManager 
-              rules={activeBook?.rules || []} theme={state.theme} onAddRule={r => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: [...b.rules, r] } : b) }))}
-              onUpdateRule={r => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: b.rules.map(o => o.id === r.id ? r : o) } : b) }))}
-              onDeleteRule={id => setState(p => ({ ...p, books: p.activeBookId ? { ...p.books.map(b => b.id === p.activeBookId ? { ...b, rules: b.rules.filter(ru => ru.id !== id) } : b) } : [] }))}
-              onImportRules={nr => setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: nr } : b) }))}
+              rules={activeBook?.rules || []} theme={state.theme} onAddRule={r => { setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: [...b.rules, r] } : b) })); markDirty(); }}
+              onUpdateRule={r => { setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: b.rules.map(o => o.id === r.id ? r : o) } : b) })); markDirty(); }}
+              onDeleteRule={id => { setState(p => ({ ...p, books: p.activeBookId ? { ...p.books.map(b => b.id === p.activeBookId ? { ...b, rules: b.rules.filter(ru => ru.id !== id) } : b) } : [] })); markDirty(); }}
+              onImportRules={nr => { setState(p => ({ ...p, books: p.books.map(b => b.id === p.activeBookId ? { ...b, rules: nr } : b) })); markDirty(); }}
               selectedVoice={state.selectedVoiceName || ''} playbackSpeed={state.playbackSpeed}
             />
           )}
 
           {activeTab === 'settings' && (
             <Settings 
-              settings={state.readerSettings} onUpdate={s => setState(p => ({ ...p, readerSettings: { ...p.readerSettings, ...s } }))} theme={state.theme} 
-              onSetTheme={t => setState(p => ({ ...p, theme: t }))}
-              keepAwake={state.keepAwake} onSetKeepAwake={v => setState(p => ({ ...p, keepAwake: v }))} onCheckForUpdates={() => window.location.reload()}
+              settings={state.readerSettings} onUpdate={s => handleStateChangeWithDirty({ readerSettings: { ...state.readerSettings, ...s } })} theme={state.theme} 
+              onSetTheme={t => handleStateChangeWithDirty({ theme: t })}
+              keepAwake={state.keepAwake} onSetKeepAwake={v => handleStateChangeWithDirty({ keepAwake: v })} onCheckForUpdates={() => window.location.reload()}
               onLinkCloud={() => getValidDriveToken({ interactive: true })} onSyncNow={() => handleSync(true)}
-              googleClientId={state.googleClientId} onUpdateGoogleClientId={id => setState(p => ({ ...p, googleClientId: id }))}
+              googleClientId={state.googleClientId} onUpdateGoogleClientId={id => handleStateChangeWithDirty({ googleClientId: id })}
               onClearAuth={() => clearStoredToken()} onSaveState={() => handleSaveState(true)} lastSavedAt={state.lastSavedAt}
               driveRootName={state.driveRootFolderName} onSelectRoot={handleSelectRoot} onRunMigration={handleRunMigration}
               syncDiagnostics={state.syncDiagnostics}
+              autoSaveInterval={state.autoSaveInterval}
+              onSetAutoSaveInterval={v => handleStateChangeWithDirty({ autoSaveInterval: v })}
+              isDirty={isDirty}
             />
           )}
         </div>
@@ -720,10 +773,10 @@ const App: React.FC = () => {
       {activeChapterMetadata && activeTab === 'reader' && (
         <Player 
           isPlaying={isPlaying} onPlay={handlePlay} onPause={handlePause} onStop={() => setIsPlaying(false)} onNext={handleNextChapter} onPrev={() => {}} onSeek={d => handleJumpToOffset(state.currentOffsetChars + d)}
-          speed={state.playbackSpeed} onSpeedChange={s => setState(p => ({ ...p, playbackSpeed: s }))} selectedVoice={''} onVoiceChange={() => {}} theme={state.theme} onThemeChange={() => {}}
+          speed={state.playbackSpeed} onSpeedChange={s => handleStateChangeWithDirty({ playbackSpeed: s })} selectedVoice={''} onVoiceChange={() => {}} theme={state.theme} onThemeChange={() => {}}
           progressChars={state.currentOffsetChars} totalLengthChars={activeChapterMetadata.content.length} wordCount={activeChapterMetadata.wordCount} onSeekToOffset={handleJumpToOffset}
           sleepTimer={sleepTimerSeconds} onSetSleepTimer={setSleepTimerSeconds} stopAfterChapter={stopAfterChapter} onSetStopAfterChapter={setStopAfterChapter}
-          useBookSettings={false} onSetUseBookSettings={() => {}} highlightMode={activeBook?.settings.highlightMode || HighlightMode.WORD} onSetHighlightMode={m => setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook?.id ? { ...b, settings: { ...b.settings, highlightMode: m } } : b) }))}
+          useBookSettings={false} onSetUseBookSettings={() => {}} highlightMode={activeBook?.settings.highlightMode || HighlightMode.WORD} onSetHighlightMode={m => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook?.id ? { ...b, settings: { ...b.settings, highlightMode: m } } : b) })); markDirty(); }}
           playbackCurrentTime={audioCurrentTime} playbackDuration={audioDuration} onSeekToTime={handleSeekToTime}
           autoplayBlocked={autoplayBlocked}
         />

@@ -155,6 +155,11 @@ export interface SyncDiagnostics {
   folderChoiceMethod?: string;
   lastCloudSaveFileName?: string;
   lastCloudSaveModifiedTime?: string;
+  lastAutoSaveAttemptAt?: number;
+  lastAutoSaveSuccessAt?: number;
+  lastAutoSaveError?: string;
+  isDirty?: boolean;
+  intervalMinutes?: number;
 }
 
 export interface SavedSnapshot {
@@ -171,6 +176,7 @@ export interface SavedSnapshot {
     driveRootFolderId?: string;
     driveRootFolderName?: string;
     driveSubfolders?: { booksId: string; trashId: string; savesId: string };
+    autoSaveInterval?: number;
   };
 }
 
@@ -196,4 +202,5 @@ export interface AppState {
   driveRootFolderName?: string;
   driveSubfolders?: { booksId: string; trashId: string; savesId: string };
   syncDiagnostics?: SyncDiagnostics;
+  autoSaveInterval: number;
 }
