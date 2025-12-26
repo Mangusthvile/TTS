@@ -17,10 +17,28 @@ import { extractChapterWithAI } from './services/geminiService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud } from 'lucide-react';
 
-const STATE_FILENAME = 'talevox_state_v2712.json';
+const STATE_FILENAME = 'talevox_state_v2713.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
+
+// --- Safe Storage Helper ---
+const safeSetLocalStorage = (key: string, value: string) => {
+  try {
+    localStorage.setItem(key, value);
+  } catch (e: any) {
+    console.warn(`LocalStorage write failed for key "${key}":`, e.message);
+    if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED') {
+      // Record diagnostics for the UI to see
+      const diagStr = localStorage.getItem('talevox_sync_diag') || '{}';
+      try {
+        const diag = JSON.parse(diagStr);
+        diag.lastSyncError = `Storage Quota Exceeded: ${e.message}`;
+        localStorage.setItem('talevox_sync_diag', JSON.stringify(diag));
+      } catch (inner) {}
+    }
+  }
+};
 
 const App: React.FC = () => {
   const [isDirty, setIsDirty] = useState(false);
@@ -96,204 +114,12 @@ const App: React.FC = () => {
     document.documentElement.style.setProperty('--highlight-color', state.readerSettings.highlightColor);
   }, [state.readerSettings.highlightColor]);
 
-  useEffect(() => {
-    if (state.googleClientId) initDriveAuth(state.googleClientId);
-    const handleAuthEvent = () => setIsAuthorized(isTokenValid());
-    window.addEventListener('talevox_auth_changed', handleAuthEvent);
-    window.addEventListener('talevox_auth_invalid', handleAuthEvent);
-
-    const handleRejection = (event: PromiseRejectionEvent) => {
-      console.error("Unhandled promise rejection:", event.reason);
-      const msg = event.reason?.message || String(event.reason);
-      updateDiagnostics({ lastSyncError: `Global Error: ${msg}` });
-    };
-    window.addEventListener('unhandledrejection', handleRejection);
-
-    return () => {
-      window.removeEventListener('talevox_auth_changed', handleAuthEvent);
-      window.removeEventListener('talevox_auth_invalid', handleAuthEvent);
-      window.removeEventListener('unhandledrejection', handleRejection);
-    };
-  }, [state.googleClientId]);
-
-  const showToast = (title: string, number = 0, type: 'info' | 'success' | 'error' | 'reconnect' = 'info') => {
-    setTransitionToast({ number, title, type });
-    if (type !== 'reconnect') setTimeout(() => setTransitionToast(null), 3500);
-  };
-
-  const updateDiagnostics = (updates: Partial<SyncDiagnostics>) => {
+  const updateDiagnostics = useCallback((updates: Partial<SyncDiagnostics>) => {
     setState(p => {
       const next = { ...p.syncDiagnostics, ...updates };
-      localStorage.setItem('talevox_sync_diag', JSON.stringify(next));
+      safeSetLocalStorage('talevox_sync_diag', JSON.stringify(next));
       return { ...p, syncDiagnostics: next };
     });
-  };
-
-  const markDirty = useCallback(() => {
-    setIsDirty(true);
-    setState(p => {
-      if (p.syncDiagnostics?.isDirty && p.syncDiagnostics?.cloudDirty) return p;
-      const nextDiag = { 
-        ...p.syncDiagnostics, 
-        isDirty: true, 
-        cloudDirty: true, 
-        dirtySince: p.syncDiagnostics?.dirtySince || Date.now() 
-      };
-      localStorage.setItem('talevox_sync_diag', JSON.stringify(nextDiag));
-      return { ...p, syncDiagnostics: nextDiag };
-    });
-  }, []);
-
-  const handleSaveState = useCallback(async (isCloudSave = true, isAuto = false) => {
-    const s = stateRef.current;
-    
-    // Check if we should skip auto-save
-    if (isCloudSave && isAuto) {
-      if (!isDirty) {
-        console.log("CloudSave skipped: not dirty / no changes detected");
-        return;
-      }
-      if (!isAuthorized) {
-        console.log("CloudSave skipped: Drive not connected");
-        return;
-      }
-      if (isSyncing) {
-        console.log("CloudSave skipped: sync in progress");
-        return;
-      }
-    }
-
-    console.log(`CloudSave trigger=${isAuto ? 'auto' : 'manual'}`);
-
-    const progressStore = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
-    const snapshot: SavedSnapshot = {
-      version: "v1", savedAt: Date.now(),
-      state: { 
-        books: s.books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined })), 
-        readerSettings: s.readerSettings, 
-        activeBookId: s.activeBookId, 
-        playbackSpeed: s.playbackSpeed, 
-        selectedVoiceName: s.selectedVoiceName, 
-        theme: s.theme, 
-        progressStore,
-        driveRootFolderId: s.driveRootFolderId,
-        driveRootFolderName: s.driveRootFolderName,
-        driveSubfolders: s.driveSubfolders,
-        autoSaveInterval: s.autoSaveInterval
-      }
-    };
-    localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
-    setState(prev => ({ ...prev, lastSavedAt: snapshot.savedAt }));
-    
-    if (isCloudSave && isAuthorized && s.driveSubfolders?.savesId) {
-      if (isAuto) updateDiagnostics({ lastAutoSaveAttemptAt: Date.now() });
-      setIsSyncing(true);
-      try {
-        const timestampedName = `talevox_state_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-        await uploadToDrive(s.driveSubfolders.savesId, timestampedName, JSON.stringify(snapshot), undefined, 'application/json');
-        const latestId = await findFileSync(STABLE_POINTER_NAME, s.driveSubfolders.savesId);
-        await uploadToDrive(s.driveSubfolders.savesId, STABLE_POINTER_NAME, JSON.stringify(snapshot), latestId || undefined, 'application/json');
-        
-        setIsDirty(false);
-        updateDiagnostics({ 
-          isDirty: false, 
-          cloudDirty: false,
-          dirtySince: undefined,
-          lastCloudSaveTrigger: isAuto ? 'auto' : 'manual',
-          lastCloudSaveAt: Date.now(),
-          lastSyncSuccessAt: Date.now(),
-          ...(isAuto ? { lastAutoSaveSuccessAt: Date.now(), lastAutoSaveError: undefined } : {})
-        });
-        showToast(isAuto ? "Auto-saved" : "Cloud State Saved", 0, 'success');
-      } catch (e: any) {
-        showToast(isAuto ? "Auto-save failed" : "Cloud Save Failed", 0, 'error');
-        const errorMsg = `Save Failed: ${e.message}`;
-        updateDiagnostics({ 
-          lastSyncError: errorMsg,
-          ...(isAuto ? { lastAutoSaveError: errorMsg } : {})
-        });
-      } finally { setIsSyncing(false); }
-    } else if (isAuto && !isAuthorized) {
-      updateDiagnostics({ lastAutoSaveError: "Skipped: Drive not connected", lastAutoSaveAttemptAt: Date.now() });
-    }
-  }, [isAuthorized, isDirty, isSyncing]);
-
-  // Auto Cloud Save Scheduler - Fixed to honor interval and only trigger if dirty
-  useEffect(() => {
-    if (!state.driveRootFolderId || !isAuthorized || !isDirty || isSyncing) return;
-    
-    const intervalMs = state.autoSaveInterval * 60 * 1000;
-    const timer = setTimeout(() => {
-      handleSaveState(true, true);
-    }, intervalMs);
-
-    return () => clearTimeout(timer);
-  }, [isDirty, isAuthorized, state.autoSaveInterval, state.driveRootFolderId, isSyncing, handleSaveState]);
-
-  const applySnapshot = useCallback((snapshot: SavedSnapshot) => {
-    const s = stateRef.current;
-    const { books: cloudBooks, readerSettings: cloudRS, activeBookId, playbackSpeed, selectedVoiceName, theme, progressStore: cloudProgress, driveRootFolderId, driveRootFolderName, driveSubfolders, autoSaveInterval } = snapshot.state;
-    
-    localStorage.setItem(BACKUP_KEY, JSON.stringify({ state: s, progress: JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}') }));
-
-    const mergedBooks = [...s.books];
-    cloudBooks.forEach(cb => {
-      const idx = mergedBooks.findIndex(b => b.id === cb.id || b.title === cb.title);
-      if (idx === -1) {
-        mergedBooks.push(cb);
-      } else {
-        const lb = mergedBooks[idx];
-        const trustCloud = !lb.updatedAt || (cb.updatedAt && cb.updatedAt > lb.updatedAt);
-        if (trustCloud) {
-           const mergedChapters = [...lb.chapters];
-           cb.chapters.forEach(cc => {
-              const cIdx = mergedChapters.findIndex(lc => lc.id === cc.id || lc.index === cc.index);
-              if (cIdx === -1) {
-                 mergedChapters.push(cc);
-              } else {
-                 const lc = mergedChapters[cIdx];
-                 if (!lc.updatedAt || (cc.updatedAt && cc.updatedAt > lc.updatedAt)) {
-                    mergedChapters[cIdx] = cc;
-                 }
-              }
-           });
-           mergedBooks[idx] = { ...lb, ...cb, chapters: mergedChapters.sort((a,b) => a.index-b.index) };
-        }
-      }
-    });
-
-    const localProgress = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
-    const finalProgress = { ...cloudProgress };
-    Object.keys(localProgress).forEach(bookId => {
-       if (!finalProgress[bookId]) finalProgress[bookId] = localProgress[bookId];
-       else {
-          Object.keys(localProgress[bookId]).forEach(chId => {
-             const lp = localProgress[bookId][chId];
-             const cp = finalProgress[bookId][chId];
-             if (!cp || (lp.updatedAt && lp.updatedAt > (cp.updatedAt || 0))) {
-                finalProgress[bookId][chId] = lp;
-             }
-          });
-       }
-    });
-
-    setState(prev => ({ 
-      ...prev, 
-      books: mergedBooks, 
-      readerSettings: cloudRS || prev.readerSettings, 
-      activeBookId: activeBookId || prev.activeBookId, 
-      playbackSpeed: playbackSpeed || prev.playbackSpeed, 
-      selectedVoiceName: selectedVoiceName || prev.selectedVoiceName, 
-      theme: theme || prev.theme, 
-      lastSavedAt: snapshot.savedAt, 
-      driveRootFolderId: driveRootFolderId || prev.driveRootFolderId, 
-      driveRootFolderName: driveRootFolderName || prev.driveRootFolderName, 
-      driveSubfolders: driveSubfolders || prev.driveSubfolders,
-      autoSaveInterval: autoSaveInterval || prev.autoSaveInterval
-    }));
-    
-    localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(finalProgress));
-    window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: { bookId: activeBookId || stateRef.current.activeBookId } }));
   }, []);
 
   const handleSync = useCallback(async (manual = false) => {
@@ -382,13 +208,213 @@ const App: React.FC = () => {
       showToast(`Sync Failed: ${err.message}`, 0, 'error');
       updateDiagnostics({ lastSyncError: err.message });
     } finally { setIsSyncing(false); }
-  }, [applySnapshot, isAuthorized]);
+  }, [isAuthorized, updateDiagnostics]);
 
   useEffect(() => {
-    if (isAuthorized && state.driveRootFolderId) {
-       handleSync(false);
+    // 1. Initialize Drive Auth safely
+    if (state.googleClientId) {
+      try {
+        initDriveAuth(state.googleClientId);
+      } catch (e: any) {
+        console.error("Failed to initialize Drive auth:", e);
+        updateDiagnostics({ lastSyncError: `Init Auth Failed: ${e.message}` });
+      }
     }
-  }, [isAuthorized, state.driveRootFolderId]);
+
+    // 2. Handle Auth Changed event with safe initialization
+    const handleAuthEvent = async (event: any) => {
+      const isValid = isTokenValid();
+      setIsAuthorized(isValid);
+      
+      // If we just became authorized, start sync flow safely
+      if (isValid && stateRef.current.driveRootFolderId) {
+        try {
+          console.log("Post-login: Starting sync flow...");
+          await handleSync(false);
+        } catch (e: any) {
+          console.error("Post-login sync crash-prevention:", e);
+          showToast("Sync init failed (non-fatal)", 0, 'error');
+          updateDiagnostics({ lastSyncError: `Post-login sync error: ${e.message}` });
+        }
+      }
+    };
+
+    const handleAuthInvalid = () => {
+      setIsAuthorized(false);
+      showToast("Google Drive session expired", 0, 'error');
+    };
+
+    window.addEventListener('talevox_auth_changed', handleAuthEvent);
+    window.addEventListener('talevox_auth_invalid', handleAuthInvalid);
+
+    return () => {
+      window.removeEventListener('talevox_auth_changed', handleAuthEvent);
+      window.removeEventListener('talevox_auth_invalid', handleAuthInvalid);
+    };
+  }, [state.googleClientId, handleSync, updateDiagnostics]);
+
+  const showToast = (title: string, number = 0, type: 'info' | 'success' | 'error' | 'reconnect' = 'info') => {
+    setTransitionToast({ number, title, type });
+    if (type !== 'reconnect') setTimeout(() => setTransitionToast(null), 3500);
+  };
+
+  const markDirty = useCallback(() => {
+    setIsDirty(true);
+    setState(p => {
+      if (p.syncDiagnostics?.isDirty && p.syncDiagnostics?.cloudDirty) return p;
+      const nextDiag = { 
+        ...p.syncDiagnostics, 
+        isDirty: true, 
+        cloudDirty: true, 
+        dirtySince: p.syncDiagnostics?.dirtySince || Date.now() 
+      };
+      safeSetLocalStorage('talevox_sync_diag', JSON.stringify(nextDiag));
+      return { ...p, syncDiagnostics: nextDiag };
+    });
+  }, []);
+
+  const handleSaveState = useCallback(async (isCloudSave = true, isAuto = false) => {
+    const s = stateRef.current;
+    
+    // Check if we should skip auto-save
+    if (isCloudSave && isAuto) {
+      if (!isDirty) return;
+      if (!isAuthorized) return;
+      if (isSyncing) return;
+    }
+
+    console.log(`CloudSave trigger=${isAuto ? 'auto' : 'manual'}`);
+
+    const progressStore = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
+    const snapshot: SavedSnapshot = {
+      version: "v1", savedAt: Date.now(),
+      state: { 
+        books: s.books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined })), 
+        readerSettings: s.readerSettings, 
+        activeBookId: s.activeBookId, 
+        playbackSpeed: s.playbackSpeed, 
+        selectedVoiceName: s.selectedVoiceName, 
+        theme: s.theme, 
+        progressStore,
+        driveRootFolderId: s.driveRootFolderId,
+        driveRootFolderName: s.driveRootFolderName,
+        driveSubfolders: s.driveSubfolders,
+        autoSaveInterval: s.autoSaveInterval
+      }
+    };
+    safeSetLocalStorage(SNAPSHOT_KEY, JSON.stringify(snapshot));
+    setState(prev => ({ ...prev, lastSavedAt: snapshot.savedAt }));
+    
+    if (isCloudSave && isAuthorized && s.driveSubfolders?.savesId) {
+      if (isAuto) updateDiagnostics({ lastAutoSaveAttemptAt: Date.now() });
+      setIsSyncing(true);
+      try {
+        const timestampedName = `talevox_state_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+        await uploadToDrive(s.driveSubfolders.savesId, timestampedName, JSON.stringify(snapshot), undefined, 'application/json');
+        const latestId = await findFileSync(STABLE_POINTER_NAME, s.driveSubfolders.savesId);
+        await uploadToDrive(s.driveSubfolders.savesId, STABLE_POINTER_NAME, JSON.stringify(snapshot), latestId || undefined, 'application/json');
+        
+        setIsDirty(false);
+        updateDiagnostics({ 
+          isDirty: false, 
+          cloudDirty: false,
+          dirtySince: undefined,
+          lastCloudSaveTrigger: isAuto ? 'auto' : 'manual',
+          lastCloudSaveAt: Date.now(),
+          lastSyncSuccessAt: Date.now(),
+          ...(isAuto ? { lastAutoSaveSuccessAt: Date.now(), lastAutoSaveError: undefined } : {})
+        });
+        showToast(isAuto ? "Auto-saved" : "Cloud State Saved", 0, 'success');
+      } catch (e: any) {
+        showToast(isAuto ? "Auto-save failed" : "Cloud Save Failed", 0, 'error');
+        const errorMsg = `Save Failed: ${e.message}`;
+        updateDiagnostics({ 
+          lastSyncError: errorMsg,
+          ...(isAuto ? { lastAutoSaveError: errorMsg } : {})
+        });
+      } finally { setIsSyncing(false); }
+    } else if (isAuto && !isAuthorized) {
+      updateDiagnostics({ lastAutoSaveError: "Skipped: Drive not connected", lastAutoSaveAttemptAt: Date.now() });
+    }
+  }, [isAuthorized, isDirty, isSyncing, updateDiagnostics]);
+
+  // Auto Cloud Save Scheduler - Fixed to honor interval and only trigger if dirty
+  useEffect(() => {
+    if (!state.driveRootFolderId || !isAuthorized || !isDirty || isSyncing) return;
+    
+    const intervalMs = state.autoSaveInterval * 60 * 1000;
+    const timer = setTimeout(() => {
+      handleSaveState(true, true);
+    }, intervalMs);
+
+    return () => clearTimeout(timer);
+  }, [isDirty, isAuthorized, state.autoSaveInterval, state.driveRootFolderId, isSyncing, handleSaveState]);
+
+  const applySnapshot = useCallback((snapshot: SavedSnapshot) => {
+    const s = stateRef.current;
+    const { books: cloudBooks, readerSettings: cloudRS, activeBookId, playbackSpeed, selectedVoiceName, theme, progressStore: cloudProgress, driveRootFolderId, driveRootFolderName, driveSubfolders, autoSaveInterval } = snapshot.state;
+    
+    safeSetLocalStorage(BACKUP_KEY, JSON.stringify({ state: s, progress: JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}') }));
+
+    const mergedBooks = [...s.books];
+    cloudBooks.forEach(cb => {
+      const idx = mergedBooks.findIndex(b => b.id === cb.id || b.title === cb.title);
+      if (idx === -1) {
+        mergedBooks.push(cb);
+      } else {
+        const lb = mergedBooks[idx];
+        const trustCloud = !lb.updatedAt || (cb.updatedAt && cb.updatedAt > lb.updatedAt);
+        if (trustCloud) {
+           const mergedChapters = [...lb.chapters];
+           cb.chapters.forEach(cc => {
+              const cIdx = mergedChapters.findIndex(lc => lc.id === cc.id || lc.index === cc.index);
+              if (cIdx === -1) {
+                 mergedChapters.push(cc);
+              } else {
+                 const lc = mergedChapters[cIdx];
+                 if (!lc.updatedAt || (cc.updatedAt && cc.updatedAt > lc.updatedAt)) {
+                    mergedChapters[cIdx] = cc;
+                 }
+              }
+           });
+           mergedBooks[idx] = { ...lb, ...cb, chapters: mergedChapters.sort((a,b) => a.index-b.index) };
+        }
+      }
+    });
+
+    const localProgress = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
+    const finalProgress = { ...cloudProgress };
+    Object.keys(localProgress).forEach(bookId => {
+       if (!finalProgress[bookId]) finalProgress[bookId] = localProgress[bookId];
+       else {
+          Object.keys(localProgress[bookId]).forEach(chId => {
+             const lp = localProgress[bookId][chId];
+             const cp = finalProgress[bookId][chId];
+             if (!cp || (lp.updatedAt && lp.updatedAt > (cp.updatedAt || 0))) {
+                finalProgress[bookId][chId] = lp;
+             }
+          });
+       }
+    });
+
+    setState(prev => ({ 
+      ...prev, 
+      books: mergedBooks, 
+      readerSettings: cloudRS || prev.readerSettings, 
+      activeBookId: activeBookId || prev.activeBookId, 
+      playbackSpeed: playbackSpeed || prev.playbackSpeed, 
+      selectedVoiceName: selectedVoiceName || prev.selectedVoiceName, 
+      theme: theme || prev.theme, 
+      lastSavedAt: snapshot.savedAt, 
+      driveRootFolderId: driveRootFolderId || prev.driveRootFolderId, 
+      driveRootFolderName: driveRootFolderName || prev.driveRootFolderName, 
+      driveSubfolders: driveSubfolders || prev.driveSubfolders,
+      autoSaveInterval: autoSaveInterval || prev.autoSaveInterval
+    }));
+    
+    safeSetLocalStorage(PROGRESS_STORE_V4, JSON.stringify(finalProgress));
+    window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: { bookId: activeBookId || stateRef.current.activeBookId } }));
+  }, []);
 
   const updateChapterAudio = useCallback((bookId: string, chapterId: string, updates: Partial<Chapter>) => {
     setState(prev => ({
@@ -444,7 +470,6 @@ const App: React.FC = () => {
          cloudId = await uploadToDrive(book.driveFolderId, audioName, audioBlob, undefined, 'audio/mpeg');
       }
       updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, hasCachedAudio: true, cloudAudioFileId: cloudId });
-      // Removed immediate cloud JSON save; markDirty handles it via auto-save
     } catch (e) { 
       updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.FAILED }); 
     }
@@ -481,7 +506,6 @@ const App: React.FC = () => {
     
     markDirty();
     queueBackgroundTTS(s.activeBookId, newChapter.id, data.voiceId, newChapter);
-    // Removed immediate cloud JSON save; markDirty handles it via auto-save
   }, [queueBackgroundTTS, isAuthorized, markDirty]);
 
   const handleSelectRoot = useCallback(async () => {
@@ -646,19 +670,18 @@ const App: React.FC = () => {
     const store = storeRaw ? JSON.parse(storeRaw) : {};
     if (store[bookId] && store[bookId][chapterId]) {
       store[bookId][chapterId] = { timeSec: 0, durationSec: store[bookId][chapterId].durationSec || 0, percent: 0, completed: false, updatedAt: Date.now() };
-      localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(store));
+      safeSetLocalStorage(PROGRESS_STORE_V4, JSON.stringify(store));
     }
     if (state.activeBookId === bookId && activeBook?.currentChapterId === chapterId) {
       setState(p => ({ ...p, currentOffsetChars: 0 }));
     }
     window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: { bookId, chapterId } }));
     markDirty();
-    // Removed immediate cloud JSON save; markDirty handles it via auto-save
     showToast("Progress reset", 0, 'success');
   }, [activeBook, state.activeBookId, markDirty]);
 
   useEffect(() => {
-    localStorage.setItem('talevox_pro_v2', JSON.stringify({ ...state, books: state.books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined })) }));
+    safeSetLocalStorage('talevox_pro_v2', JSON.stringify({ ...state, books: state.books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined })) }));
   }, [state]);
 
   const handleStateChangeWithDirty = useCallback((updates: Partial<AppState>) => {

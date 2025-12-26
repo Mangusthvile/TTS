@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { ReaderSettings, Theme, SyncDiagnostics } from '../types';
-import { Type, RefreshCw, Smartphone, Cloud, CloudOff, Loader2, Key, LogOut, Save, LogIn, Palette, Eye, ShieldCheck, Clock, Sun, Coffee, Moon, Check, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer } from 'lucide-react';
+import { Type, RefreshCw, Smartphone, Cloud, CloudOff, Loader2, Key, LogOut, Save, LogIn, Palette, Eye, ShieldCheck, Clock, Sun, Coffee, Moon, Check, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer, ClipboardCopy, FileWarning } from 'lucide-react';
 import { getAuthSessionInfo, isTokenValid } from '../services/driveAuth';
 
 interface SettingsProps {
@@ -40,6 +40,13 @@ const Settings: React.FC<SettingsProps> = ({
   const [session, setSession] = useState(getAuthSessionInfo());
   const [isDiagExpanded, setIsDiagExpanded] = useState(false);
   
+  const lastFatalError = useMemo(() => {
+    try {
+      const raw = localStorage.getItem("talevox_last_fatal_error");
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+  }, []);
+
   useEffect(() => {
     const handleAuthChange = () => setSession(getAuthSessionInfo());
     window.addEventListener('talevox_auth_changed', handleAuthChange);
@@ -67,13 +74,24 @@ const Settings: React.FC<SettingsProps> = ({
 
   const presetColors = ['#4f46e5', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#8b5cf6'];
 
+  const handleCopyDiagnostics = () => {
+    const data = {
+      sync: syncDiagnostics,
+      fatal: lastFatalError,
+      version: window.__APP_VERSION__,
+      userAgent: navigator.userAgent
+    };
+    navigator.clipboard.writeText(JSON.stringify(data, null, 2));
+    alert("Full diagnostics copied to clipboard");
+  };
+
   return (
     <div className={`p-4 sm:p-8 h-full overflow-y-auto transition-colors duration-500 ${isDark ? 'bg-slate-900' : isSepia ? 'bg-[#efe6d5]' : 'bg-slate-50'}`}>
       <div className="max-w-2xl mx-auto space-y-8 sm:space-y-12 pb-32">
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
           <div>
             <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
-            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.7.12</p>
+            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.7.13</p>
           </div>
           <button 
             onClick={onCheckForUpdates} 
@@ -224,22 +242,26 @@ const Settings: React.FC<SettingsProps> = ({
                    <div>Auto Attempt: {syncDiagnostics?.lastAutoSaveAttemptAt ? new Date(syncDiagnostics.lastAutoSaveAttemptAt).toLocaleString() : 'Never'}</div>
                    <div>Auto Success: {syncDiagnostics?.lastAutoSaveSuccessAt ? new Date(syncDiagnostics.lastAutoSaveSuccessAt).toLocaleString() : 'Never'}</div>
                    {syncDiagnostics?.lastAutoSaveError && <div className="text-red-500">Auto Error: {syncDiagnostics.lastAutoSaveError}</div>}
+                   
+                   {lastFatalError && (
+                     <>
+                       <div className="opacity-50 mt-2 border-t border-black/5 pt-2 text-red-500 flex items-center gap-1">
+                         <FileWarning className="w-3 h-3" /> Last Fatal Crash:
+                       </div>
+                       <div className="text-red-500 truncate">{lastFatalError.message}</div>
+                       <div className="text-slate-500">{new Date(lastFatalError.timestamp).toLocaleString()}</div>
+                     </>
+                   )}
+
                    <div className="opacity-50 mt-2 border-t border-black/5 pt-2">IDs:</div>
                    <div>Root: {syncDiagnostics?.driveRootFolderId || 'N/A'}</div>
                    <div>Saves: {syncDiagnostics?.resolvedCloudSavesFolderId || 'N/A'}</div>
-                   <div className="opacity-50 mt-2 border-t border-black/5 pt-2">File:</div>
-                   <div>Last: {syncDiagnostics?.lastCloudSaveFileName || 'None'}</div>
-                   <div>Time: {syncDiagnostics?.lastCloudSaveModifiedTime || 'N/A'}</div>
                 </div>
                 <button 
-                  onClick={() => {
-                    const text = JSON.stringify(syncDiagnostics, null, 2);
-                    navigator.clipboard.writeText(text);
-                    alert("Diagnostics copied to clipboard");
-                  }}
-                  className="w-full py-2 bg-indigo-600/10 text-indigo-600 rounded-lg text-[9px] font-black uppercase hover:bg-indigo-600/20"
+                  onClick={handleCopyDiagnostics}
+                  className="w-full py-2 bg-indigo-600/10 text-indigo-600 rounded-lg text-[9px] font-black uppercase hover:bg-indigo-600/20 flex items-center justify-center gap-2"
                 >
-                  Copy JSON for Support
+                  <ClipboardCopy className="w-3.5 h-3.5" /> Copy Full Logs for Support
                 </button>
               </div>
             )}
