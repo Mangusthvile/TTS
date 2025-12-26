@@ -1,4 +1,3 @@
-
 import { Chapter, ScanResult, StrayFile, AudioStatus } from '../types';
 import { listFilesInFolder, buildMp3Name, buildTextName, inferChapterIndex, isPlausibleChapterFile, ensureRootStructure, runLibraryMigration } from './driveService';
 import { getValidDriveToken, isTokenValid } from './driveAuth';
@@ -116,8 +115,7 @@ export async function runBookDriveCheck(
       }
     } else {
       scan.missingAudioIds.push(chapter.id);
-      // Don't reset audioStatus to pending if it was generating, but if it claimed READY and is missing, strictly it's gone.
-      // However, to avoid UI flicker during transient checks, we only update if we found something positive or explicitly missing text.
+      // We don't force a state update to "PENDING" here to avoid UI flicker
     }
 
     if (needsUpdate) updatedChapters.push(updatedChapter);
@@ -128,10 +126,14 @@ export async function runBookDriveCheck(
     if (matchedFileIds.has(f.id) || f.mimeType === 'application/vnd.google-apps.folder') continue;
     
     const lower = f.name.toLowerCase();
+    // Ignore common non-chapter files
     if (lower.includes('cover') || lower.includes('manifest') || lower.endsWith('.json') || lower.endsWith('.jpg') || lower.endsWith('.png')) continue;
 
-    // IMPORTANT: If it looks like a chapter file but wasn't matched (e.g. extra chapter not in index),
-    // we still list it as stray but UI might want to warn differently. For now, standard stray.
+    // RELAXED STRAY CHECK: If it looks like a valid chapter file (heuristics), don't flag as stray
+    // This prevents deleting content that belongs to chapters not yet in the local database
+    if (isPlausibleChapterFile(f.name)) {
+      continue;
+    }
     
     scan.strayFiles.push(f as StrayFile);
   }
@@ -140,7 +142,7 @@ export async function runBookDriveCheck(
 
   return {
     success: true,
-    message: `Scan complete. Found ${scan.strayFiles.length} strays, ${scan.missingAudioIds.length} missing audio.`,
+    message: `Scan complete. Found ${scan.strayFiles.length} genuine strays and matched ${updatedChapters.length} file updates.`,
     scan
   };
 }

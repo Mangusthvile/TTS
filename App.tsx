@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, ProgressStore, ProgressEntry } from './types';
 import Library from './components/Library';
@@ -19,7 +18,7 @@ import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './service
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle } from 'lucide-react';
 
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
-const APP_DATA_KEY = "talevox_pro_v2_7_7";
+const APP_DATA_KEY = "talevox_pro_v2_7_8";
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(() => {
@@ -62,7 +61,8 @@ const App: React.FC = () => {
       updatedAt: parsed.updatedAt || Date.now(),
       driveRootFolderId: parsed.driveRootFolderId,
       driveRootFolderName: parsed.driveRootFolderName,
-      driveSubfolders: parsed.driveSubfolders
+      driveSubfolders: parsed.driveSubfolders,
+      lastSavedAt: parsed.lastSavedAt
     };
   });
 
@@ -137,14 +137,13 @@ const App: React.FC = () => {
       if (idx === -1) {
         mergedBooks.push(rb);
       } else {
-        // Simple "remote wins" if updatedAt exists and is newer
+        // Remote wins if newer
         if ((rb.updatedAt || 0) > (mergedBooks[idx].updatedAt || 0)) {
           mergedBooks[idx] = { ...rb, directoryHandle: mergedBooks[idx].directoryHandle };
         }
       }
     });
 
-    // Reader settings merge
     const mergedReaderSettings = (remote.readerSettings.updatedAt || 0) > (local.readerSettings.updatedAt || 0)
       ? remote.readerSettings : local.readerSettings;
 
@@ -155,7 +154,8 @@ const App: React.FC = () => {
       updatedAt: Math.max(local.updatedAt, remote.updatedAt),
       driveRootFolderId: remote.driveRootFolderId || local.driveRootFolderId,
       driveRootFolderName: remote.driveRootFolderName || local.driveRootFolderName,
-      driveSubfolders: remote.driveSubfolders || local.driveSubfolders
+      driveSubfolders: remote.driveSubfolders || local.driveSubfolders,
+      lastSavedAt: remote.updatedAt > (local.lastSavedAt || 0) ? remote.updatedAt : local.lastSavedAt
     };
   }, []);
 
@@ -166,9 +166,10 @@ const App: React.FC = () => {
     setSyncStatus('saving');
     try {
       const progressStore = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
+      const now = Date.now();
       const snapshot: SavedSnapshot = {
         version: "v1",
-        savedAt: Date.now(),
+        savedAt: now,
         state: { 
           books: s.books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined })), 
           readerSettings: s.readerSettings, 
@@ -180,12 +181,14 @@ const App: React.FC = () => {
           driveRootFolderId: s.driveRootFolderId,
           driveRootFolderName: s.driveRootFolderName,
           driveSubfolders: s.driveSubfolders,
-          updatedAt: s.updatedAt
+          updatedAt: now
         }
       };
 
       const fileId = await findFileSync(STATE_FILENAME, s.driveSubfolders.savesId);
       await uploadToDrive(s.driveSubfolders.savesId, STATE_FILENAME, JSON.stringify(snapshot), fileId || undefined, 'application/json');
+      
+      setState(prev => ({ ...prev, lastSavedAt: now }));
       setSyncStatus('saved');
     } catch (e) {
       setSyncStatus('error');
@@ -197,7 +200,7 @@ const App: React.FC = () => {
     if (autosaveTimerRef.current) window.clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = window.setTimeout(() => {
       handleSaveStateToCloud();
-    }, 2000);
+    }, 5000);
     return () => { if (autosaveTimerRef.current) window.clearTimeout(autosaveTimerRef.current); };
   }, [state.books, state.readerSettings, state.playbackSpeed, state.theme, handleSaveStateToCloud]);
 
@@ -223,14 +226,12 @@ const App: React.FC = () => {
     } finally { setIsSyncing(false); }
   }, [isAuthorized, mergeState]);
 
-  // Initial cloud load
   useEffect(() => {
     if (isAuthorized && state.driveSubfolders?.savesId) {
       handleSyncFromCloud();
     }
   }, [isAuthorized, state.driveSubfolders?.savesId, handleSyncFromCloud]);
 
-  // Folder validation effect
   useEffect(() => {
     if (isAuthorized && state.driveRootFolderId && !state.driveSubfolders) {
       ensureRootStructure(state.driveRootFolderId).then(sub => {
@@ -317,7 +318,11 @@ const App: React.FC = () => {
        const audioName = buildMp3Name(chapter.index, chapter.title);
        const driveId = await findFileSync(audioName, book.driveFolderId);
        if (driveId) {
-          updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, cloudAudioFileId: driveId });
+          updateChapterAudio(bookId, chapterId, { 
+            audioStatus: AudioStatus.READY, 
+            cloudAudioFileId: driveId,
+            audioFileName: audioName
+          });
           return;
        }
     }
@@ -329,7 +334,7 @@ const App: React.FC = () => {
          try {
            const audioName = buildMp3Name(chapter.index, chapter.title);
            const driveFileId = await uploadToDrive(book.driveFolderId, audioName, cached, undefined, 'audio/mpeg');
-           updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, cloudAudioFileId: driveFileId, hasCachedAudio: true });
+           updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, cloudAudioFileId: driveFileId, audioFileName: audioName, hasCachedAudio: true });
          } catch(e) { updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.FAILED }); }
       } else { updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, hasCachedAudio: true }); }
       return;
@@ -342,11 +347,12 @@ const App: React.FC = () => {
       const audioBlob = await fetchRes.blob();
       await saveAudioToCache(cacheKey, audioBlob);
       let cloudId = undefined;
+      let audioName = undefined;
       if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
-         const audioName = buildMp3Name(chapter.index, chapter.title);
+         audioName = buildMp3Name(chapter.index, chapter.title);
          cloudId = await uploadToDrive(book.driveFolderId, audioName, audioBlob, undefined, 'audio/mpeg');
       }
-      updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, hasCachedAudio: true, cloudAudioFileId: cloudId, updatedAt: Date.now() });
+      updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, hasCachedAudio: true, cloudAudioFileId: cloudId, audioFileName: audioName, updatedAt: Date.now() });
     } catch (e) { updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.FAILED }); }
   }, [isAuthorized]);
 
@@ -374,8 +380,27 @@ const App: React.FC = () => {
       try { cloudTextId = await uploadToDrive(book.driveFolderId, filename, data.content, undefined, 'text/plain'); } catch (e) {}
     }
 
-    const newChapter: Chapter = { id: crypto.randomUUID(), index: data.index, title: data.title, content: data.content, filename, wordCount: data.content.split(/\s+/).filter(Boolean).length, progress: 0, progressChars: 0, audioStatus: AudioStatus.PENDING, cloudTextFileId: cloudTextId, hasTextOnDrive: !!cloudTextId, updatedAt: Date.now() };
-    setState(prev => ({ ...prev, updatedAt: Date.now(), books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, updatedAt: Date.now(), chapters: [...b.chapters, newChapter].sort((a,b) => a.index-b.index), currentChapterId: b.currentChapterId || newChapter.id } : b) }));
+    const newChapter: Chapter = { 
+      id: crypto.randomUUID(), 
+      index: data.index, 
+      title: data.title, 
+      content: data.content, 
+      filename, 
+      textFileName: filename,
+      wordCount: data.content.split(/\s+/).filter(Boolean).length, 
+      progress: 0, 
+      progressChars: 0, 
+      audioStatus: AudioStatus.PENDING, 
+      cloudTextFileId: cloudTextId, 
+      hasTextOnDrive: !!cloudTextId, 
+      updatedAt: Date.now() 
+    };
+    
+    setState(prev => ({ 
+      ...prev, 
+      updatedAt: Date.now(), 
+      books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, updatedAt: Date.now(), chapters: [...b.chapters, newChapter].sort((a,b) => a.index-b.index), currentChapterId: b.currentChapterId || newChapter.id } : b) 
+    }));
     setIsAddChapterOpen(false);
     showToast("Chapter Saved", 0, 'success');
     queueBackgroundTTS(s.activeBookId, newChapter.id, data.voiceId);
@@ -622,6 +647,7 @@ const App: React.FC = () => {
           isPlaying={isPlaying} onPlay={handlePlay} onPause={handlePause} onStop={() => setIsPlaying(false)} onNext={handleNextChapter} onPrev={() => {}} onSeek={d => handleJumpToOffset(state.currentOffsetChars + d)}
           speed={state.playbackSpeed} onSpeedChange={s => setState(p => ({ ...p, playbackSpeed: s, updatedAt: Date.now() }))} selectedVoice={''} onVoiceChange={() => {}} theme={state.theme} onThemeChange={() => {}}
           progressChars={state.currentOffsetChars} totalLengthChars={activeChapterMetadata.content.length} wordCount={activeChapterMetadata.wordCount} onSeekToOffset={handleJumpToOffset}
+          // Fix: Replace incorrect setter setSyncStopAfterChapter with setStopAfterChapter
           sleepTimer={sleepTimerSeconds} onSetSleepTimer={setSleepTimerSeconds} stopAfterChapter={stopAfterChapter} onSetStopAfterChapter={setStopAfterChapter}
           useBookSettings={false} onSetUseBookSettings={() => {}} highlightMode={activeBook?.settings.highlightMode || HighlightMode.WORD} onSetHighlightMode={m => setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook?.id ? { ...b, settings: { ...b.settings, highlightMode: m, updatedAt: Date.now() } } : b) }))}
           playbackCurrentTime={audioCurrentTime} playbackDuration={audioDuration} onSeekToTime={handleSeekToTime}
