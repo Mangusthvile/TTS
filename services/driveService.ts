@@ -152,7 +152,9 @@ export async function uploadToDrive(
   if (typeof content === 'string') {
     mediaBuffer = encoder.encode(content);
   } else {
-    mediaBuffer = new Uint8Array(await content.arrayBuffer());
+    // Correctly handle Blob to ArrayBuffer conversion
+    const ab = await content.arrayBuffer();
+    mediaBuffer = new Uint8Array(ab);
   }
   const bodyBuffer = new Uint8Array(metadataBuffer.byteLength + mediaHeaderBuffer.byteLength + mediaBuffer.byteLength + footerBuffer.byteLength);
   let offset = 0;
@@ -188,11 +190,17 @@ export async function createDriveFolder(name: string, parentId?: string): Promis
 
 export async function ensureRootStructure(rootId: string) {
   const subfolders = { booksId: '', trashId: '', savesId: '' };
-  const names = { books: 'booksId', trash: 'trashId', cloud_saves: 'savesId' };
-  for (const [name, key] of Object.entries(names)) {
-    let id = await findFileSync(name, rootId);
-    if (!id) id = await createDriveFolder(name, rootId);
-    (subfolders as any)[key] = id;
+  // Fixed mapping for clarity and persistence
+  const mapping = [
+    { name: 'Books', key: 'booksId' },
+    { name: 'Trash', key: 'trashId' },
+    { name: 'Cloud Saves', key: 'savesId' }
+  ];
+  
+  for (const item of mapping) {
+    let id = await findFileSync(item.name, rootId);
+    if (!id) id = await createDriveFolder(item.name, rootId);
+    (subfolders as any)[item.key] = id;
   }
   return subfolders;
 }

@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES } from './types';
 import Library from './components/Library';
@@ -16,13 +17,15 @@ import { synthesizeChunk } from './services/cloudTtsService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle } from 'lucide-react';
 
-const STATE_FILENAME = 'talevox_state_v276.json';
+const STATE_FILENAME = 'talevox_state_v277.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(() => {
     const saved = localStorage.getItem('talevox_pro_v2');
     const parsed = saved ? JSON.parse(saved) : {};
+    
+    // Migration fallback for snapshot
     const snapshotStr = localStorage.getItem(SNAPSHOT_KEY);
     const snapshot = snapshotStr ? JSON.parse(snapshotStr) as SavedSnapshot : null;
 
@@ -204,8 +207,12 @@ const App: React.FC = () => {
       for (let i = 0; i < updatedBooks.length; i++) {
         const book = updatedBooks[i];
         if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
-          if (book.driveFolderId === s.driveRootFolderId || book.driveFolderId !== (await findFileSync(book.title, s.driveSubfolders.booksId))) {
-             const newBookFolderId = await ensureBookFolder(s.driveSubfolders.booksId, book.title);
+          // If the book folder is not currently in the "Books" subfolder, migrate it
+          const currentParentId = s.driveSubfolders.booksId;
+          const bookFolderInBooksId = await findFileSync(book.title, currentParentId);
+          
+          if (!bookFolderInBooksId || book.driveFolderId !== bookFolderInBooksId) {
+             const newBookFolderId = await ensureBookFolder(currentParentId, book.title);
              const files = await listFilesInFolder(book.driveFolderId);
              for (const file of files) {
                if (file.mimeType !== 'application/vnd.google-apps.folder') {
@@ -348,7 +355,8 @@ const App: React.FC = () => {
 
     const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
     const introText = applyRules(rawIntro, book.rules);
-    const estimatedIntroDurSec = introText.length / 18; 
+    // Refined duration estimation: ~18 characters per second at 1.0x speed
+    const estimatedIntroDurSec = (introText.length / (18 * speed)); 
 
     try {
       const cacheKey = generateAudioKey(introText + text, voice, 1.0);

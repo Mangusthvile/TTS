@@ -95,15 +95,36 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       for (const chapter of chapters) {
         const expectedTextName = buildTextName(chapter.index, chapter.title);
         const expectedAudioName = buildMp3Name(chapter.index, chapter.title);
-        const textFile = fileMap.get(expectedTextName);
-        const audioFile = fileMap.get(expectedAudioName);
+        
+        let textFile = fileMap.get(expectedTextName);
+        let audioFile = fileMap.get(expectedAudioName);
+
+        // Fallback heuristic: find by start of filename (e.g., "001_")
+        if (!textFile) {
+            const prefix = `${chapter.index.toString().padStart(3, '0')}_`;
+            textFile = driveFiles.find(f => f.name.startsWith(prefix) && f.name.endsWith('.txt'));
+        }
+        if (!audioFile) {
+            const prefix = `${chapter.index.toString().padStart(3, '0')}_`;
+            audioFile = driveFiles.find(f => f.name.startsWith(prefix) && f.name.endsWith('.mp3'));
+        }
+
         if (!textFile) scan.missingTextIds.push(chapter.id); else matchedFileIds.add(textFile.id);
         if (!audioFile) scan.missingAudioIds.push(chapter.id); else matchedFileIds.add(audioFile.id);
-        onUpdateChapter({ ...chapter, cloudTextFileId: textFile?.id || chapter.cloudTextFileId, cloudAudioFileId: audioFile?.id || chapter.cloudAudioFileId, hasTextOnDrive: !!textFile, audioStatus: audioFile ? AudioStatus.READY : AudioStatus.PENDING });
+        
+        onUpdateChapter({ 
+            ...chapter, 
+            cloudTextFileId: textFile?.id || chapter.cloudTextFileId, 
+            cloudAudioFileId: audioFile?.id || chapter.cloudAudioFileId, 
+            hasTextOnDrive: !!textFile, 
+            audioStatus: audioFile ? AudioStatus.READY : AudioStatus.PENDING 
+        });
       }
 
       for (const f of driveFiles) {
-        if (!matchedFileIds.has(f.id) && f.mimeType !== 'application/vnd.google-apps.folder') scan.strayFiles.push(f);
+        if (!matchedFileIds.has(f.id) && f.mimeType !== 'application/vnd.google-apps.folder' && f.name !== 'manifest.json' && !f.name.startsWith('_')) {
+            scan.strayFiles.push(f);
+        }
       }
       setLastScan(scan);
     } catch (e: any) {

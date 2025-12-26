@@ -43,7 +43,7 @@ class SpeechController {
   private lastSaveTime: number = 0;
 
   // Highlight buffer to account for synthesis pauses and speech pacing (300ms)
-  private readonly HIGHLIGHT_DELAY_SEC = 0.3;
+  private readonly HIGHLIGHT_DELAY_SEC = 0.35;
 
   constructor() {
     this.audio = new Audio();
@@ -112,7 +112,7 @@ class SpeechController {
 
   public getOffsetFromTime(t: number, dur?: number): number {
     const duration = dur || this.audio.duration || 0;
-    // Add buffer after intro before starting body highlight
+    // Buffer is only added if there's actually an intro duration recorded
     const effectiveIntroEnd = this.currentIntroDurSec > 0 ? (this.currentIntroDurSec + this.HIGHLIGHT_DELAY_SEC) : 0;
     
     if (duration === 0 || t < effectiveIntroEnd) return 0;
@@ -221,14 +221,28 @@ class SpeechController {
 
   private stopSyncLoop() { if (this.rafId !== null) { cancelAnimationFrame(this.rafId); this.rafId = null; } }
 
-  speak(text: string, voiceName: string | undefined, rate: number, offset: number, onEnd: () => void) {
+  speak(text: string, voiceName: string | undefined, rate: number, offset: number, onEnd: () => void, isIntro: boolean = false) {
     window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    const voice = window.speechSynthesis.getVoices().find(v => v.name === voiceName);
-    if (voice) utterance.voice = voice;
-    utterance.rate = rate;
-    utterance.onend = () => onEnd();
-    window.speechSynthesis.speak(utterance);
+    
+    // For main reading flow with highlighting, handle buffer
+    const executeUtterance = (txt: string, delay: number, callback: () => void) => {
+      const utterance = new SpeechSynthesisUtterance(txt);
+      const voice = window.speechSynthesis.getVoices().find(v => v.name === voiceName);
+      if (voice) utterance.voice = voice;
+      utterance.rate = rate;
+      utterance.onend = () => {
+        if (delay > 0) setTimeout(callback, delay * 1000);
+        else callback();
+      };
+      window.speechSynthesis.speak(utterance);
+    };
+
+    if (isIntro) {
+      // Just speak it, don't trigger end callback for highlighting yet
+      executeUtterance(text, 0, onEnd);
+    } else {
+      executeUtterance(text, 0, onEnd);
+    }
   }
 
   pause() { this.audio.pause(); window.speechSynthesis.pause(); }
