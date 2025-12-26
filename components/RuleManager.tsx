@@ -1,4 +1,3 @@
-
 import React, { useState, useMemo, useRef } from 'react';
 import { Rule, RuleType, Scope, Theme } from '../types';
 import { applyRules, speechController } from '../services/speechService';
@@ -71,8 +70,6 @@ const RuleManager: React.FC<RuleManagerProps> = ({
     const testProcessed = applyRules(testText, [...rules, ruleToTest]);
     
     setIsTesting(true);
-    // Fix: Removed extra arguments to match the speak signature (Exactly 5 arguments)
-    // Removed redundant undefined arguments previously passed to speak call.
     speechController.speak(
       testProcessed,
       selectedVoice,

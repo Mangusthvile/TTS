@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES } from './types';
 import Library from './components/Library';
@@ -148,7 +147,6 @@ const App: React.FC = () => {
   const queueBackgroundTTS = useCallback(async (bookId: string, chapterId: string, customVoiceId?: string, forceChapter?: Chapter) => {
     const s = stateRef.current;
     const book = s.books.find(b => b.id === bookId);
-    // Use forceChapter if provided (helps with race conditions during creation)
     const chapter = forceChapter || book?.chapters.find(c => c.id === chapterId);
     if (!book || !chapter || chapter.audioStatus === AudioStatus.READY) return;
 
@@ -202,77 +200,6 @@ const App: React.FC = () => {
       showToast(`Audio failed: ${chapter.title}`, 0, 'error');
     }
   }, [handleSaveState, isAuthorized, updateChapterAudio]);
-
-  const handleSmartExtractChapter = useCallback(async (bookId: string, chapterId: string) => {
-    const s = stateRef.current;
-    const book = s.books.find(b => b.id === bookId);
-    const chapter = book?.chapters.find(c => c.id === chapterId);
-    if (!book || !chapter) return;
-
-    showToast("Starting Smart Extraction...", 0, 'info');
-    setIsLoadingChapter(true);
-
-    try {
-      let sourceText = chapter.content;
-      
-      // Prefer loading from Drive if possible to get original messy version if available
-      if (book.backend === StorageBackend.DRIVE && isAuthorized) {
-        let fileId = chapter.cloudTextFileId;
-        if (!fileId && book.driveFolderId) {
-          const expectedName = buildTextName(chapter.index, chapter.title);
-          fileId = await findFileSync(expectedName, book.driveFolderId) || undefined;
-        }
-        if (fileId) {
-          try {
-            sourceText = await fetchDriveFile(fileId);
-          } catch (e) {
-            console.warn("Could not fetch drive file for smart extraction, using state content.");
-          }
-        }
-      }
-
-      const extracted = await extractChapterWithAI(sourceText);
-      const cleanedContent = extracted.content;
-      const cleanedTitle = extracted.title;
-      const cleanedIndex = extracted.index;
-
-      const updatedChapter: Chapter = {
-        ...chapter,
-        title: cleanedTitle,
-        content: cleanedContent,
-        index: cleanedIndex,
-        wordCount: cleanedContent.split(/\s+/).filter(Boolean).length,
-        audioStatus: AudioStatus.PENDING, // Mark for re-generation since content changed
-        updatedAt: Date.now()
-      };
-
-      // Save back to Drive if applicable
-      if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
-        const filename = buildTextName(cleanedIndex, cleanedTitle);
-        const newFileId = await uploadToDrive(book.driveFolderId, filename, cleanedContent, chapter.cloudTextFileId, 'text/plain');
-        updatedChapter.cloudTextFileId = newFileId;
-        updatedChapter.hasTextOnDrive = true;
-      }
-
-      setState(prev => ({
-        ...prev,
-        books: prev.books.map(b => b.id === bookId ? {
-          ...b,
-          chapters: b.chapters.map(c => c.id === chapterId ? updatedChapter : c).sort((x, y) => x.index - y.index)
-        } : b)
-      }));
-
-      showToast("Smart Extraction Successful", 0, 'success');
-      
-      // Auto-trigger audio update for cleaned content
-      queueBackgroundTTS(bookId, chapterId, book.settings.defaultVoiceId, updatedChapter);
-
-    } catch (err: any) {
-      showToast("Extraction Failed: " + (err.message || "Unknown error"), 0, 'error');
-    } finally {
-      setIsLoadingChapter(false);
-    }
-  }, [isAuthorized, queueBackgroundTTS]);
 
   const handleChapterExtracted = useCallback(async (data: { 
     title: string; content: string; url: string; index: number; voiceId: string; setAsDefault: boolean;
@@ -602,7 +529,6 @@ const App: React.FC = () => {
               onUpdateBookSettings={s => setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, ...s } } : b) }))}
               onBackToLibrary={() => setActiveTab('library')}
               onResetChapterProgress={handleResetChapterProgress}
-              onSmartExtractChapter={(cid) => handleSmartExtractChapter(activeBook.id, cid)}
             />
           )}
 

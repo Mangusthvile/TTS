@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { Play, Pause, SkipBack, SkipForward, FastForward, Rewind, Clock, Type, AlignLeft, Sparkles, Repeat, Loader2, ChevronUp, ChevronDown, X, Settings as SettingsIcon, AlertCircle } from 'lucide-react';
 import { Theme, HighlightMode } from '../types';
@@ -122,11 +121,10 @@ const Player: React.FC<PlayerProps> = ({
         <div className="px-4 lg:px-8 py-2 lg:py-6 flex flex-col gap-2">
           {/* Main Control Layer */}
           <div className="flex items-center justify-between w-full">
-            {/* Mobile: Settings Gear | Desktop: Hidden (expanded) */}
             <button 
               onClick={() => setIsExpandedMobile(!isExpandedMobile)}
               className="lg:hidden p-3 hover:bg-black/5 rounded-xl transition-all"
-              title="Advanced Controls"
+              aria-label="Advanced Controls"
             >
               <SettingsIcon className={`w-6 h-6 ${isExpandedMobile ? 'text-indigo-600' : ''}`} />
             </button>

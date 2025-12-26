@@ -1,4 +1,3 @@
-
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile } from '../types';
 import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon, Sparkles } from 'lucide-react';
@@ -22,11 +21,10 @@ interface ChapterFolderViewProps {
   onUpdateBookSettings?: (settings: any) => void;
   onBackToLibrary: () => void;
   onResetChapterProgress: (bookId: string, chapterId: string) => void;
-  onSmartExtractChapter?: (chapterId: string) => void;
 }
 
 const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
-  book, theme, onAddChapter, onOpenChapter, onUpdateChapterTitle, onDeleteChapter, onUpdateChapter, onUpdateBookSettings, onBackToLibrary, onResetChapterProgress, onSmartExtractChapter
+  book, theme, onAddChapter, onOpenChapter, onUpdateChapterTitle, onDeleteChapter, onUpdateChapter, onUpdateBookSettings, onBackToLibrary, onResetChapterProgress
 }) => {
   const VIEW_MODE_KEY = `talevox:viewMode:${book.id}`;
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
@@ -216,14 +214,36 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   };
 
   const renderAudioStatusIcon = (c: Chapter) => {
-    if (c.cloudAudioFileId || c.audioDriveId || c.audioStatus === AudioStatus.READY) return <span className="inline-flex items-center"><Cloud className="w-4 h-4 text-emerald-500" /></span>;
-    if (synthesizingId === c.id || c.audioStatus === AudioStatus.GENERATING) return <span className="inline-flex items-center"><Loader2 className="w-4 h-4 text-indigo-400 animate-spin" /></span>;
-    return <span className="inline-flex items-center"><AlertTriangle className="w-4 h-4 text-amber-500" /></span>;
+    if (c.cloudAudioFileId || c.audioDriveId || c.audioStatus === AudioStatus.READY) {
+      return (
+        <span title="Audio ready on Google Drive" className="inline-flex items-center">
+          <Cloud className="w-4 h-4 text-emerald-500" />
+        </span>
+      );
+    }
+    if (synthesizingId === c.id || c.audioStatus === AudioStatus.GENERATING) {
+      return (
+        <span title="Generating and Uploading..." className="inline-flex items-center">
+          <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />
+        </span>
+      );
+    }
+    return (
+      <span title="Audio missing" className="inline-flex items-center">
+        <AlertTriangle className="w-4 h-4 text-amber-500" />
+      </span>
+    );
   };
 
   const renderTextStatusIcon = (c: Chapter) => {
     if (book.backend !== StorageBackend.DRIVE) return null;
-    if (c.hasTextOnDrive === false) return <span className="inline-flex items-center ml-2"><FileX className="w-4 h-4 text-red-500" /></span>;
+    if (c.hasTextOnDrive === false) {
+      return (
+        <span title="Source text missing from Drive" className="inline-flex items-center ml-2">
+          <FileX className="w-4 h-4 text-red-500" />
+        </span>
+      );
+    }
     return null;
   };
 
@@ -238,10 +258,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               <button onClick={() => setMobileMenuId(null)} className="p-2 opacity-40"><X className="w-5 h-5" /></button>
            </div>
            <div className="space-y-2">
-              <button onClick={() => { setMobileMenuId(null); onSmartExtractChapter?.(ch.id); }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}>
-                 <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg"><Sparkles className="w-4 h-4" /></div>
-                 Smart AI Extract
-              </button>
               <button onClick={() => { setMobileMenuId(null); handleCheckDriveIntegrity(); }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}>
                  <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg"><RefreshCw className="w-4 h-4" /></div>
                  Check Audio + Text
@@ -295,9 +311,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               </div>
               <div className="flex justify-end items-center gap-2">
                 <div className="hidden md:flex items-center gap-2">
-                  <button onClick={(e) => { e.stopPropagation(); onSmartExtractChapter?.(c.id); }} className="p-2 opacity-40 hover:opacity-100 text-indigo-600" title="Smart AI Extraction">
-                    <Sparkles className="w-4 h-4" />
-                  </button>
                   {isCompleted && (
                     <button onClick={(e) => { e.stopPropagation(); onResetChapterProgress(book.id, c.id); }} className="p-2 bg-indigo-600/10 text-indigo-600 rounded-xl hover:bg-indigo-600/20" title="Reset Progress">
                       <RotateCcw className="w-4 h-4" />

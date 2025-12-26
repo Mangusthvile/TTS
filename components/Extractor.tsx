@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, useEffect } from 'react';
 import { Upload, Plus, AlertCircle, Trash2, Sparkles, FileText, Headphones, Check, Loader2, Wand2, Eye } from 'lucide-react';
 import { Theme, CLOUD_VOICES } from '../types';
@@ -90,13 +89,13 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
       } else {
         setTitle(result.title);
         setContent(result.content);
-        setChapterNum(result.index);
-        setActiveMode('manual'); // Switch to manual to review
+        setChapterNum(result.index || chapterNum);
+        setActiveMode('manual'); // Switch to manual to review cleaned text
         setPreviewData(null);
       }
-    } catch (err) {
-      setError("Smart extraction failed. Switched to Manual mode.");
-      setActiveMode('manual');
+    } catch (err: any) {
+      console.error("Smart extraction error:", err);
+      setError("AI Extraction failed. Please check your pasted text or API key.");
     } finally {
       setIsExtracting(false);
     }
@@ -223,7 +222,6 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
             <div className="flex gap-2">
               <button 
                 onClick={() => { setContent(''); setPreviewData(null); }} 
-                title="Clear content"
                 className={`p-2 rounded-xl transition-all ${isDark ? 'bg-white/5 hover:bg-red-500/20' : 'bg-black/5 hover:bg-red-500/10'}`}
               >
                 <Trash2 className="w-4 h-4" />

@@ -1,4 +1,3 @@
-
 import React, { useState, useRef } from 'react';
 import { Book, Theme, StorageBackend } from '../types';
 import { BookOpen, Plus, Trash2, History, Cloud, Monitor, X, Database, Loader2, Image as ImageIcon } from 'lucide-react';
@@ -89,6 +88,7 @@ const Library: React.FC<LibraryProps> = ({
         <button 
           onClick={() => setIsAdding(true)} 
           className="p-3 bg-indigo-600 text-white rounded-2xl shadow-xl hover:scale-105 active:scale-95 transition-transform"
+          aria-label="Add new book"
         >
           <Plus className="w-6 h-6" />
         </button>
@@ -158,14 +158,14 @@ const Library: React.FC<LibraryProps> = ({
                     <button 
                       onClick={(e) => { e.stopPropagation(); setUploadingCoverFor(book.id); coverInputRef.current?.click(); }}
                       className="p-3 bg-white/20 backdrop-blur-md text-white rounded-xl hover:bg-white/40 transition-all"
-                      title="Change Cover"
+                      aria-label="Change Cover"
                     >
                       <ImageIcon className="w-5 h-5" />
                     </button>
                     <button 
                       onClick={(e) => { e.stopPropagation(); if (confirm(`Delete '${book.title}'?`)) onDeleteBook(book.id); }}
                       className="p-3 bg-red-500/40 backdrop-blur-md text-white rounded-xl hover:bg-red-500/60 transition-all"
-                      title="Delete Book"
+                      aria-label="Delete Book"
                     >
                       <Trash2 className="w-5 h-5" />
                     </button>

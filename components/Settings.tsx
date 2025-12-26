@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from 'react';
 import { ReaderSettings, Theme } from '../types';
 import { Type, RefreshCw, Smartphone, Cloud, CloudOff, Loader2, Key, LogOut, Save, LogIn, Palette, Eye, ShieldCheck, Clock, Sun, Coffee, Moon, Check, FolderSync, Wrench, AlertTriangle } from 'lucide-react';
