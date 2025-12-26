@@ -1,12 +1,12 @@
+
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile } from '../types';
 import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon } from 'lucide-react';
 import { PROGRESS_STORE_V4, applyRules } from '../services/speechService';
 import { synthesizeChunk } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache } from '../services/audioCache';
-import { uploadToDrive, listFilesInFolder, buildMp3Name, buildTextName, createDriveFolder, findFileSync, moveFile, inferChapterIndex, isPlausibleChapterFile } from '../services/driveService';
-import { isTokenValid, getValidDriveToken } from '../services/driveAuth';
-import { runBookDriveCheck } from '../services/driveCheckService';
+import { uploadToDrive, listFilesInFolder, buildMp3Name, buildTextName, createDriveFolder, findFileSync, moveFile } from '../services/driveService';
+import { isTokenValid } from '../services/driveAuth';
 
 type ViewMode = 'details' | 'list' | 'grid';
 
@@ -80,49 +80,40 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   }, []);
 
   const handleCheckDriveIntegrity = useCallback(async () => {
-    console.log("[UI] Book Check Drive clicked", book.id, book.driveFolderId);
-    
-    if (!book.driveFolderId) {
-        alert("This book is not linked to a cloud folder.");
-        return;
+    if (!book.driveFolderId) return;
+    if (!isTokenValid()) {
+      alert("Google Drive session expired. Please sign in again in Settings.");
+      return;
     }
-
     setIsCheckingDrive(true);
     try {
-      const report = await runBookDriveCheck(book.driveFolderId, chapters);
-      
-      if (report.scan) {
-          setLastScan(report.scan);
-          
-          // Apply updates found during scan (mapping legacy files)
-          if (report.scan.updatedChapters && report.scan.updatedChapters.length > 0) {
-             console.log(`[CheckDrive] Updating ${report.scan.updatedChapters.length} chapters with discovered file metadata.`);
-             // We need to update all changed chapters. Since state updates are async, 
-             // ideally we'd batch this, but for now individual calls work as long as `onUpdateChapter` handles it.
-             // IMPORTANT: The parent `onUpdateChapter` likely updates the whole book state array.
-             // We iterate and update.
-             report.scan.updatedChapters.forEach(c => onUpdateChapter(c));
-          }
+      const driveFiles = await listFilesInFolder(book.driveFolderId);
+      const fileMap = new Map(driveFiles.map(f => [f.name, f]));
+      const scan: ScanResult = { missingTextIds: [], missingAudioIds: [], strayFiles: [], duplicates: [], totalChecked: chapters.length };
+      const matchedFileIds = new Set<string>();
+
+      for (const chapter of chapters) {
+        const expectedTextName = buildTextName(chapter.index, chapter.title);
+        const expectedAudioName = buildMp3Name(chapter.index, chapter.title);
+        const textFile = fileMap.get(expectedTextName);
+        const audioFile = fileMap.get(expectedAudioName);
+        if (!textFile) scan.missingTextIds.push(chapter.id); else matchedFileIds.add(textFile.id);
+        if (!audioFile) scan.missingAudioIds.push(chapter.id); else matchedFileIds.add(audioFile.id);
+        onUpdateChapter({ ...chapter, cloudTextFileId: textFile?.id || chapter.cloudTextFileId, cloudAudioFileId: audioFile?.id || chapter.cloudAudioFileId, hasTextOnDrive: !!textFile, audioStatus: audioFile ? AudioStatus.READY : AudioStatus.PENDING });
       }
 
-    } catch (e: any) {
-      console.error("[CheckDrive] Error:", e);
-      if (e.code === "AUTH_REQUIRED") {
-          if(confirm("Sign-in required to check Drive. Sign in now?")) {
-              getValidDriveToken({ interactive: true }).catch(() => {});
-          }
-      } else {
-          alert("Integrity check failed: " + e.message);
+      for (const f of driveFiles) {
+        if (!matchedFileIds.has(f.id) && f.mimeType !== 'application/vnd.google-apps.folder') scan.strayFiles.push(f);
       }
+      setLastScan(scan);
+    } catch (e: any) {
+      alert("Integrity check failed: " + e.message);
     } finally {
       setIsCheckingDrive(false);
     }
   }, [book.driveFolderId, chapters, onUpdateChapter]);
 
   const generateAudio = async (chapter: Chapter, voiceToUse?: string) => {
-    // If we already have a valid cloud file, don't regenerate unless forced (UI doesn't force here yet)
-    if (chapter.cloudAudioFileId && chapter.audioStatus === AudioStatus.READY) return;
-
     const voice = voiceToUse || book.settings.defaultVoiceId || 'en-US-Standard-C';
     const introText = applyRules(`Chapter ${chapter.index}. ${chapter.title}. `, book.rules);
     const contentText = applyRules(chapter.content, book.rules);
@@ -139,21 +130,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         if (audioBlob) await saveAudioToCache(cacheKey, audioBlob);
       }
       if (!audioBlob) throw new Error("No audio blob available");
-      
-      let cloudId = undefined;
-      let cloudName = undefined;
+      let cloudId = chapter.cloudAudioFileId || chapter.audioDriveId;
       if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
-        cloudName = buildMp3Name(chapter.index, chapter.title);
-        cloudId = await uploadToDrive(book.driveFolderId, cloudName, audioBlob, undefined, 'audio/mpeg');
+        const filename = buildMp3Name(chapter.index, chapter.title);
+        cloudId = await uploadToDrive(book.driveFolderId, filename, audioBlob, cloudId, 'audio/mpeg');
       }
-      
-      onUpdateChapter({ 
-        ...chapter, 
-        cloudAudioFileId: cloudId, 
-        audioFileName: cloudName, 
-        audioStatus: AudioStatus.READY, 
-        hasCachedAudio: true 
-      });
+      onUpdateChapter({ ...chapter, cloudAudioFileId: cloudId, audioStatus: AudioStatus.READY, hasCachedAudio: true });
     } catch (e) {
       onUpdateChapter({ ...chapter, audioStatus: AudioStatus.FAILED });
     } finally {
@@ -173,7 +155,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           if (ch && ch.content) {
             const filename = buildTextName(ch.index, ch.title);
             const id = await uploadToDrive(book.driveFolderId, filename, ch.content);
-            onUpdateChapter({ ...ch, cloudTextFileId: id, textFileName: filename, hasTextOnDrive: true });
+            onUpdateChapter({ ...ch, cloudTextFileId: id, hasTextOnDrive: true });
           }
           setFixProgress(p => ({ ...p, current: p.current + 1 }));
         }
@@ -189,8 +171,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         let trashFolderId = await findFileSync('_trash', book.driveFolderId);
         if (!trashFolderId) trashFolderId = await createDriveFolder('_trash', book.driveFolderId);
         for (const file of lastScan.strayFiles) {
-          // Double check: if it is plausibly a chapter file (heuristic match), move with caution or skip?
-          // The scanner separates 'Matched' from 'Stray'. If it's in 'Stray', it didn't match any heuristic.
           await moveFile(file.id, book.driveFolderId!, trashFolderId);
           setFixProgress(p => ({ ...p, current: p.current + 1 }));
         }

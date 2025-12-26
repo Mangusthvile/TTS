@@ -1,8 +1,6 @@
 
 import { driveFetch, getValidDriveToken } from './driveAuth';
 
-export const STATE_FILENAME = 'talevox_state.json';
-
 export function buildMp3Name(chapterIndex: number, title: string) {
   const safe = (title || "untitled")
     .toLowerCase()
@@ -21,35 +19,23 @@ export function buildTextName(chapterIndex: number, title: string) {
   return `${chapterIndex.toString().padStart(3, '0')}_${safe}.txt`;
 }
 
-/**
- * Attempts to extract a chapter number from a filename using various common patterns.
- * e.g. "001_intro.txt" -> 1, "Chapter 5.mp3" -> 5, "ch-10.txt" -> 10
- */
-export function inferChapterIndex(filename: string): number | null {
-  const patterns = [
-    /chapter[_ -]?(\d+)/i, // Chapter 1, Chapter_01
-    /ch[_ -]?(\d+)/i,      // ch 1, ch-01
-    /^(\d+)\s*[-_.]/i,     // 001 - Title, 001_Title
-    /^(\d+)\.[a-z]+$/i,    // 001.txt
-    /_(\d+)_/i,            // title_001_something
-    /(\d+)$/i              // file123 (no extension check here, done by caller)
-  ];
-
-  for (const p of patterns) {
-    const m = filename.match(p);
-    if (m && m[1]) return parseInt(m[1], 10);
-  }
-  return null;
+export function u8ToArrayBuffer(u8: Uint8Array): ArrayBuffer {
+  const ab = new ArrayBuffer(u8.byteLength);
+  new Uint8Array(ab).set(u8);
+  return ab;
 }
 
-/**
- * Checks if a file looks like it belongs to a chapter based on extension and naming.
- * Used to prevent flagging valid files as 'stray'.
- */
-export function isPlausibleChapterFile(filename: string): boolean {
-    const ext = filename.split('.').pop()?.toLowerCase();
-    if (!['txt', 'md', 'mp3', 'wav', 'm4a'].includes(ext || '')) return false;
-    return inferChapterIndex(filename) !== null;
+export async function checkFileExists(fileId: string): Promise<boolean> {
+  if (!fileId) return false;
+  try {
+    const url = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,trashed&supportsAllDrives=true`;
+    const response = await driveFetch(url);
+    if (!response.ok) return false;
+    const data = await response.json();
+    return data && !data.trashed;
+  } catch (e) {
+    return false;
+  }
 }
 
 export async function moveFile(fileId: string, currentParentId: string, newParentId: string): Promise<void> {
@@ -136,6 +122,12 @@ export async function fetchDriveBinary(fileId: string): Promise<Blob> {
   return response.blob();
 }
 
+export async function deleteDriveFile(fileId: string): Promise<void> {
+  const response = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+    method: 'DELETE'
+  });
+}
+
 export async function uploadToDrive(
   folderId: string | null, 
   filename: string, 
@@ -168,17 +160,14 @@ export async function uploadToDrive(
   bodyBuffer.set(mediaHeaderBuffer, offset); offset += mediaHeaderBuffer.byteLength;
   bodyBuffer.set(mediaBuffer, offset); offset += mediaBuffer.byteLength;
   bodyBuffer.set(footerBuffer, offset);
-  
   const url = existingFileId 
     ? `https://www.googleapis.com/upload/drive/v3/files/${existingFileId}?uploadType=multipart&supportsAllDrives=true`
     : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&supportsAllDrives=true';
-  
   const response = await driveFetch(url, {
     method: existingFileId ? 'PATCH' : 'POST',
     headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
     body: bodyBuffer
   });
-  
   if (!response.ok) throw new Error("UPLOAD_FAILED");
   const data = await response.json();
   return data.id || existingFileId || '';
@@ -197,112 +186,15 @@ export async function createDriveFolder(name: string, parentId?: string): Promis
   return data.id;
 }
 
-/**
- * Robustly ensure root structure exists, supporting legacy folder names.
- */
 export async function ensureRootStructure(rootId: string) {
-  const q = encodeURIComponent(`'${rootId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
-  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)&pageSize=1000&supportsAllDrives=true`;
-  const response = await driveFetch(url);
-  if (!response.ok) throw new Error("ROOT_SCAN_FAILED");
-  const data = await response.json();
-  const folders = data.files || [];
-
-  console.log(`[Drive] Root scan found ${folders.length} folders.`);
-
-  const findId = (candidates: string[]) => {
-    for (const c of candidates) {
-        const exact = folders.find((f: any) => f.name === c);
-        if (exact) return exact.id;
-    }
-    for (const c of candidates) {
-        const loose = folders.find((f: any) => f.name.toLowerCase() === c.toLowerCase());
-        if (loose) return loose.id;
-    }
-    return null;
-  };
-
-  let booksId = findId(['Books', 'books', 'book']);
-  let trashId = findId(['Trash', 'trash', '_trash']);
-  let savesId = findId(['Cloud Saves', 'cloud saves', 'Saves', 'saves']);
-
-  if (!booksId) {
-      console.log('[Drive] Creating canonical Books folder');
-      booksId = await createDriveFolder('Books', rootId);
-  } else {
-      const match = folders.find((f:any) => f.id === booksId);
-      console.log(`[Drive] Resolved Books folder: ${match?.name} (${booksId})`);
+  const subfolders = { booksId: '', trashId: '', savesId: '' };
+  const names = { books: 'booksId', trash: 'trashId', cloud_saves: 'savesId' };
+  for (const [name, key] of Object.entries(names)) {
+    let id = await findFileSync(name, rootId);
+    if (!id) id = await createDriveFolder(name, rootId);
+    (subfolders as any)[key] = id;
   }
-
-  if (!trashId) trashId = await createDriveFolder('Trash', rootId);
-  if (!savesId) savesId = await createDriveFolder('Cloud Saves', rootId);
-
-  return { booksId, trashId, savesId };
-}
-
-export async function runLibraryMigration(rootId: string): Promise<{ message: string, movedCount: number }> {
-  const structure = await ensureRootStructure(rootId);
-  const canonicalBooksId = structure.booksId;
-  
-  const q = encodeURIComponent(`'${rootId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
-  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)&pageSize=1000&supportsAllDrives=true`;
-  const response = await driveFetch(url);
-  const folders = (await response.json()).files || [];
-
-  let movedCount = 0;
-
-  const canonicalFolder = folders.find((f: any) => f.id === canonicalBooksId);
-  if (canonicalFolder && canonicalFolder.name !== 'Books') {
-      await driveFetch(`https://www.googleapis.com/drive/v3/files/${canonicalBooksId}?supportsAllDrives=true`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: 'Books' })
-      });
-  }
-
-  const legacyContainers = folders.filter((f: any) => 
-    f.id !== canonicalBooksId && 
-    f.id !== structure.trashId && 
-    f.id !== structure.savesId &&
-    ['book', 'books'].includes(f.name.toLowerCase())
-  );
-
-  for (const legacy of legacyContainers) {
-    const children = await listFilesInFolder(legacy.id);
-    for (const child of children) {
-      const exists = await findFileSync(child.name, canonicalBooksId);
-      if (!exists) {
-        await moveFile(child.id, legacy.id, canonicalBooksId);
-        movedCount++;
-      } else {
-        console.log(`Skipping duplicate: ${child.name}`);
-      }
-    }
-  }
-
-  const strayFolders = folders.filter((f: any) => 
-    f.id !== canonicalBooksId && 
-    f.id !== structure.trashId && 
-    f.id !== structure.savesId &&
-    !['book', 'books'].includes(f.name.toLowerCase())
-  );
-
-  for (const stray of strayFolders) {
-     const exists = await findFileSync(stray.name, canonicalBooksId);
-     if (!exists) {
-       await moveFile(stray.id, rootId, canonicalBooksId);
-       movedCount++;
-     }
-  }
-
-  return { message: `Migration Complete. Organized ${movedCount} items.`, movedCount };
-}
-
-export async function scanBooksInDrive(booksFolderId: string): Promise<{id: string, title: string}[]> {
-  const folders = await listFilesInFolder(booksFolderId);
-  return folders
-    .filter(f => f.mimeType === 'application/vnd.google-apps.folder')
-    .map(f => ({ id: f.id, title: f.name }));
+  return subfolders;
 }
 
 export async function ensureBookFolder(booksId: string, bookTitle: string) {

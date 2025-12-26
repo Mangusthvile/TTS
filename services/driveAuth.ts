@@ -1,4 +1,3 @@
-
 /**
  * Talevox Google Drive Authentication Manager
  * Implements self-healing OAuth2 flow with Google Identity Services.
@@ -101,13 +100,18 @@ export async function getValidDriveToken(opts?: { interactive?: boolean }): Prom
         return;
       }
       accessToken = resp.access_token;
+      // expires_in is in seconds
       const ttlMs = (resp.expires_in ?? 3600) * 1000;
       expiresAt = Date.now() + ttlMs;
       saveToStorage();
       resolve(accessToken!);
     };
     
-    tokenClient.requestAccessToken({ prompt: opts?.interactive ? "consent" : "" });
+    if (!opts?.interactive) {
+       tokenClient.requestAccessToken({ prompt: "" });
+    } else {
+       tokenClient.requestAccessToken({ prompt: "consent" });
+    }
   });
 }
 
@@ -115,26 +119,27 @@ export async function getValidDriveToken(opts?: { interactive?: boolean }): Prom
  * Wrapper for Drive API calls that handles Authorization and 401 retries.
  */
 export async function driveFetch(input: RequestInfo, init: RequestInit = {}): Promise<Response> {
+  if (!isTokenValid()) {
+    try { await getValidDriveToken({ interactive: false }); } catch(e) {}
+  }
+
   const doFetch = async () => {
     const headers = new Headers(init.headers || {});
     if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
     return fetch(input, { ...init, headers });
   };
 
-  if (!isTokenValid()) {
-    try { await getValidDriveToken({ interactive: false }); } catch(e) {}
-  }
-
   let res = await doFetch();
 
-  // If unauthorized, token might have been revoked or expired early
   if (res.status === 401) {
     clearStoredToken();
     try {
-      // Attempt one silent refresh
+      // One retry attempt silent
       await getValidDriveToken({ interactive: false });
       res = await doFetch();
-    } catch (err) {
+    } catch (e) {
+      // Still failing? Auth is definitely dead.
+      clearStoredToken();
       window.dispatchEvent(new CustomEvent('talevox_auth_invalid'));
       throw new Error("Reconnect Google Drive");
     }
