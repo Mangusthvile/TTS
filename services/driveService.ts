@@ -113,7 +113,9 @@ export async function findFileSync(name: string, parentId?: string): Promise<str
   let qStr = `name = '${name.replace(/'/g, "\\'")}' and trashed = false`;
   if (parentId) qStr += ` and '${parentId}' in parents`;
   const q = encodeURIComponent(qStr);
-  const response = await driveFetch(`https://www.googleapis.com/v3/files?q=${q}&fields=files(id, name)&includeItemsFromAllDrives=true&supportsAllDrives=true`);
+  // Fixed: Corrected API base from v3 to drive/v3 to resolve CORS issues and added modifiedTime to fields as per newest requirements.
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, modifiedTime)&includeItemsFromAllDrives=true&supportsAllDrives=true`;
+  const response = await driveFetch(url);
   if (!response.ok) throw new Error("DRIVE_FIND_ERROR");
   const data = await response.json();
   return data.files && data.files.length > 0 ? data.files[0].id : null;
