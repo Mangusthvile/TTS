@@ -17,7 +17,7 @@ import { extractChapterWithAI } from './services/geminiService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud } from 'lucide-react';
 
-const STATE_FILENAME = 'talevox_state_v2714.json';
+const STATE_FILENAME = 'talevox_state_v2715.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -378,6 +378,7 @@ const App: React.FC = () => {
           isDirty: false, 
           cloudDirty: false,
           dirtySince: undefined,
+          // Fixed typo 'iAuto' to 'isAuto'
           lastCloudSaveTrigger: isAuto ? 'auto' : 'manual',
           lastCloudSaveAt: Date.now(),
           lastSyncSuccessAt: Date.now(),
@@ -767,7 +768,7 @@ const App: React.FC = () => {
               onDeleteChapter={id => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.filter(c => c.id !== id) } : b) })); markDirty(); }}
               onUpdateChapter={c => { setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(ch => ch.id === c.id ? c : ch) } : b) })); markDirty(); }}
               onUpdateBookSettings={s => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, ...s } } : b) })); markDirty(); }}
-              onBackToLibrary={() => setActiveTab('library')}
+              onBackToLibrary: () => setActiveTab('library')}
               onResetChapterProgress={handleResetChapterProgress}
             />
           )}

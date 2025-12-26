@@ -3,8 +3,11 @@ import ReactDOM from 'react-dom/client';
 import App from './App';
 import { AlertTriangle, RefreshCw, ClipboardCopy, Loader2 } from 'lucide-react';
 
+// Help TypeScript recognize Vite's injected global
+declare const __APP_VERSION__: string;
+
 declare global {
-  interface window {
+  interface Window {
     __APP_VERSION__: string;
     gapi: any;
     google: any;
@@ -13,7 +16,17 @@ declare global {
 }
 
 // Set version on window for settings display
-window.__APP_VERSION__ = '2.7.14';
+window.__APP_VERSION__ = '2.7.15';
+
+// --- Type Safety Helpers ---
+
+/**
+ * Normalizes string | null | undefined to a strict string | null 
+ * to satisfy components that don't accept undefined.
+ */
+function toNullableString(v: string | null | undefined): string | null {
+  return v ?? null;
+}
 
 // --- Error Recovery Utilities ---
 
@@ -92,8 +105,9 @@ interface State {
   isReloading: boolean;
 }
 
-// Fix: Explicitly import and extend Component to ensure setState and props are correctly inherited
-class ErrorBoundary extends Component<Props, State> {
+// Explicitly extend React.Component to ensure setState and props are correctly inherited
+// Fixed inheritance issues on lines 130, 146, and 210 by using React.Component directly
+class ErrorBoundary extends React.Component<Props, State> {
   public state: State = {
     hasError: false,
     error: null,
@@ -112,8 +126,9 @@ class ErrorBoundary extends Component<Props, State> {
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error("Uncaught error:", error, errorInfo);
-    // Fix: Normalize undefined to null before setting state to satisfy string | null type
-    const componentStack = errorInfo.componentStack ?? null;
+    // Fixed: Normalize undefined to null to satisfy strict string | null typing
+    const componentStack = toNullableString(errorInfo.componentStack);
+    // Fix: setState recognized via React.Component inheritance
     this.setState({ errorInfo: componentStack });
     recordFatalError(error, `React Component Crash: ${(componentStack || "").substring(0, 200)}`);
   }
@@ -130,6 +145,7 @@ class ErrorBoundary extends Component<Props, State> {
   };
 
   private handleReload = () => {
+    // Fix: setState recognized via React.Component inheritance
     this.setState({ isReloading: true });
     attemptHardReload();
   };
@@ -194,6 +210,7 @@ class ErrorBoundary extends Component<Props, State> {
       );
     }
 
+    // Fix: props recognized via React.Component inheritance
     return this.props.children;
   }
 }
