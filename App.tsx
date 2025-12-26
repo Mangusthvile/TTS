@@ -384,61 +384,6 @@ const App: React.FC = () => {
     }
   }, [handleSaveState, isAuthorized, updateChapterAudio]);
 
-  const handleSmartExtractChapter = useCallback(async (bookId: string, chapterId: string) => {
-    const s = stateRef.current;
-    const book = s.books.find(b => b.id === bookId);
-    const chapter = book?.chapters.find(c => c.id === chapterId);
-    if (!book || !chapter) return;
-
-    showToast("Starting Smart Extraction...", 0, 'info');
-    setIsLoadingChapter(true);
-
-    try {
-      let sourceText = chapter.content;
-      if (book.backend === StorageBackend.DRIVE && isAuthorized) {
-        let fileId = chapter.cloudTextFileId;
-        if (!fileId && book.driveFolderId) {
-          const expectedName = buildTextName(chapter.index, chapter.title);
-          fileId = await findFileSync(expectedName, book.driveFolderId) || undefined;
-        }
-        if (fileId) {
-          try { sourceText = await fetchDriveFile(fileId); } catch (e) { console.warn("Could not fetch drive file for smart extraction"); }
-        }
-      }
-
-      const extracted = await extractChapterWithAI(sourceText);
-      const updatedChapter: Chapter = {
-        ...chapter,
-        title: extracted.title,
-        content: extracted.content,
-        index: extracted.index,
-        wordCount: extracted.content.split(/\s+/).filter(Boolean).length,
-        audioStatus: AudioStatus.PENDING,
-        updatedAt: Date.now()
-      };
-
-      if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
-        const filename = buildTextName(extracted.index, extracted.title);
-        const newFileId = await uploadToDrive(book.driveFolderId, filename, extracted.content, chapter.cloudTextFileId, 'text/plain');
-        updatedChapter.cloudTextFileId = newFileId;
-        updatedChapter.hasTextOnDrive = true;
-      }
-
-      setState(prev => ({
-        ...prev,
-        books: prev.books.map(b => b.id === bookId ? { ...b, chapters: b.chapters.map(c => c.id === chapterId ? updatedChapter : c).sort((x, y) => x.index - y.index) } : b)
-      }));
-
-      showToast("Smart Extraction Successful", 0, 'success');
-      queueBackgroundTTS(bookId, chapterId, book.settings.defaultVoiceId, updatedChapter);
-
-    } catch (err: any) {
-      showToast("Extraction Failed", 0, 'error');
-    } finally {
-      setIsLoadingChapter(false);
-    }
-  }, [isAuthorized, queueBackgroundTTS]);
-
   const handleChapterExtracted = useCallback(async (data: { 
     title: string; content: string; url: string; index: number; voiceId: string; setAsDefault: boolean;
   }) => {
@@ -735,7 +680,6 @@ const App: React.FC = () => {
               onUpdateBookSettings={s => setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, ...s } } : b) }))}
               onBackToLibrary={() => setActiveTab('library')}
               onResetChapterProgress={handleResetChapterProgress}
-              onSmartExtractChapter={(cid) => handleSmartExtractChapter(activeBook.id, cid)}
             />
           )}
 

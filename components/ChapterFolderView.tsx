@@ -21,12 +21,10 @@ interface ChapterFolderViewProps {
   onUpdateBookSettings?: (settings: any) => void;
   onBackToLibrary: () => void;
   onResetChapterProgress: (bookId: string, chapterId: string) => void;
-  // Added onSmartExtractChapter to interface
-  onSmartExtractChapter: (chapterId: string) => void;
 }
 
 const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
-  book, theme, onAddChapter, onOpenChapter, onToggleFavorite, onUpdateChapterTitle, onDeleteChapter, onUpdateChapter, onUpdateBookSettings, onBackToLibrary, onResetChapterProgress, onSmartExtractChapter
+  book, theme, onAddChapter, onOpenChapter, onToggleFavorite, onUpdateChapterTitle, onDeleteChapter, onUpdateChapter, onUpdateBookSettings, onBackToLibrary, onResetChapterProgress
 }) => {
   const VIEW_MODE_KEY = `talevox:viewMode:${book.id}`;
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
@@ -264,11 +262,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                  <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg"><RefreshCw className="w-4 h-4" /></div>
                  Check Audio + Text
               </button>
-              {/* Added Smart AI Extract button to mobile menu */}
-              <button onClick={() => { setMobileMenuId(null); onSmartExtractChapter(ch.id); }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}>
-                 <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg"><Sparkles className="w-4 h-4" /></div>
-                 Smart AI Extract
-              </button>
               <button onClick={() => { setMobileMenuId(null); setEditingChapterId(ch.id); setTempTitle(ch.title); }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}>
                  <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg"><Edit2 className="w-4 h-4" /></div>
                  Edit Title
@@ -323,8 +316,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                       <RotateCcw className="w-4 h-4" />
                     </button>
                   )}
-                  {/* Added Smart AI Extract button to desktop action row */}
-                  <button onClick={(e) => { e.stopPropagation(); onSmartExtractChapter(c.id); }} className="p-2 opacity-40 hover:opacity-100" title="Smart AI Extract"><Sparkles className="w-4 h-4" /></button>
                   <button onClick={(e) => { e.stopPropagation(); setRememberAsDefault(false); setShowVoiceModal({ chapterId: c.id }); }} className="p-2 opacity-40 hover:opacity-100" title="Regenerate Audio"><RefreshCw className="w-4 h-4" /></button>
                   <button onClick={(e) => { e.stopPropagation(); setEditingChapterId(c.id); setTempTitle(c.title); }} className="p-2 opacity-40 hover:opacity-100" title="Edit Title"><Edit2 className="w-4 h-4" /></button>
                   <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete?')) onDeleteChapter(c.id); }} className="p-2 opacity-40 hover:opacity-100 hover:text-red-500" title="Delete"><Trash2 className="w-4 h-4" /></button>
