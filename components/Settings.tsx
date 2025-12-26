@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { ReaderSettings, Theme } from '../types';
-import { Type, RefreshCw, Smartphone, Cloud, CloudOff, Loader2, Key, LogOut, Save, LogIn, Palette, Eye, ShieldCheck, Clock, Sun, Coffee, Moon, Check, FolderSync, Wrench, AlertTriangle } from 'lucide-react';
+import { ReaderSettings, Theme, SyncDiagnostics } from '../types';
+import { Type, RefreshCw, Smartphone, Cloud, CloudOff, Loader2, Key, LogOut, Save, LogIn, Palette, Eye, ShieldCheck, Clock, Sun, Coffee, Moon, Check, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal } from 'lucide-react';
 import { getAuthSessionInfo, isTokenValid } from '../services/driveAuth';
 
 interface SettingsProps {
@@ -23,6 +23,7 @@ interface SettingsProps {
   driveRootName?: string;
   onSelectRoot?: () => void;
   onRunMigration?: () => void;
+  syncDiagnostics?: SyncDiagnostics;
 }
 
 const Settings: React.FC<SettingsProps> = ({ 
@@ -30,9 +31,11 @@ const Settings: React.FC<SettingsProps> = ({
   onLinkCloud, onSyncNow, isSyncing,
   googleClientId, onUpdateGoogleClientId, onClearAuth,
   onSaveState, lastSavedAt,
-  driveRootName, onSelectRoot, onRunMigration
+  driveRootName, onSelectRoot, onRunMigration,
+  syncDiagnostics
 }) => {
   const [session, setSession] = useState(getAuthSessionInfo());
+  const [isDiagExpanded, setIsDiagExpanded] = useState(false);
   
   useEffect(() => {
     const handleAuthChange = () => setSession(getAuthSessionInfo());
@@ -166,6 +169,47 @@ const Settings: React.FC<SettingsProps> = ({
              )}
           </div>
         </div>
+
+        {/* Sync Diagnostics */}
+        {isAuthorized && (
+          <div className={`p-5 rounded-[1.5rem] border shadow-sm ${cardBg}`}>
+            <button 
+              onClick={() => setIsDiagExpanded(!isDiagExpanded)}
+              className="w-full flex items-center justify-between font-black text-[11px] uppercase tracking-[0.2em] text-indigo-500"
+            >
+              <div className="flex items-center gap-2">
+                <Terminal className="w-4 h-4" /> Sync Diagnostics
+              </div>
+              {isDiagExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </button>
+            {isDiagExpanded && (
+              <div className="mt-6 space-y-4 animate-in slide-in-from-top-2 duration-200">
+                <div className="grid grid-cols-1 gap-2 text-[10px] font-mono p-4 bg-black/5 dark:bg-black/40 rounded-xl border border-black/5 overflow-x-auto whitespace-pre">
+                   <div>Attempt: {syncDiagnostics?.lastSyncAttemptAt ? new Date(syncDiagnostics.lastSyncAttemptAt).toLocaleString() : 'Never'}</div>
+                   <div>Success: {syncDiagnostics?.lastSyncSuccessAt ? new Date(syncDiagnostics.lastSyncSuccessAt).toLocaleString() : 'Never'}</div>
+                   {syncDiagnostics?.lastSyncError && <div className="text-red-500">Error: {syncDiagnostics.lastSyncError}</div>}
+                   <div className="opacity-50 mt-2 border-t border-black/5 pt-2">IDs:</div>
+                   <div>Root: {syncDiagnostics?.driveRootFolderId || 'N/A'}</div>
+                   <div>Saves: {syncDiagnostics?.resolvedCloudSavesFolderId || 'N/A'}</div>
+                   <div>Method: {syncDiagnostics?.folderChoiceMethod || 'Default'}</div>
+                   <div className="opacity-50 mt-2 border-t border-black/5 pt-2">File:</div>
+                   <div>Last: {syncDiagnostics?.lastCloudSaveFileName || 'None'}</div>
+                   <div>Time: {syncDiagnostics?.lastCloudSaveModifiedTime || 'N/A'}</div>
+                </div>
+                <button 
+                  onClick={() => {
+                    const text = JSON.stringify(syncDiagnostics, null, 2);
+                    navigator.clipboard.writeText(text);
+                    alert("Diagnostics copied to clipboard");
+                  }}
+                  className="w-full py-2 bg-indigo-600/10 text-indigo-600 rounded-lg text-[9px] font-black uppercase hover:bg-indigo-600/20"
+                >
+                  Copy JSON for Support
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* 3. Session Integrity */}
         <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm space-y-4 ${cardBg}`}>

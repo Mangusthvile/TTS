@@ -146,6 +146,17 @@ export interface ScanResult {
   totalChecked: number;
 }
 
+export interface SyncDiagnostics {
+  lastSyncAttemptAt?: number;
+  lastSyncSuccessAt?: number;
+  lastSyncError?: string;
+  driveRootFolderId?: string;
+  resolvedCloudSavesFolderId?: string;
+  folderChoiceMethod?: string;
+  lastCloudSaveFileName?: string;
+  lastCloudSaveModifiedTime?: string;
+}
+
 export interface SavedSnapshot {
   version: "v1";
   savedAt: number;
@@ -184,4 +195,5 @@ export interface AppState {
   driveRootFolderId?: string;
   driveRootFolderName?: string;
   driveSubfolders?: { booksId: string; trashId: string; savesId: string };
+  syncDiagnostics?: SyncDiagnostics;
 }

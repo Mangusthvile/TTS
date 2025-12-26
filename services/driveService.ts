@@ -109,11 +109,24 @@ export async function listFilesSortedByModified(folderId: string): Promise<{id: 
   return data.files || [];
 }
 
+/**
+ * Broad discovery logic for Cloud Save JSON files.
+ * Does not strictly require application/json.
+ */
+export async function listSaveFileCandidates(folderId: string): Promise<{id: string, name: string, modifiedTime: string}[]> {
+  const qStr = `'${folderId}' in parents and trashed = false and (name contains '.json' or name contains 'talevox')`;
+  const q = encodeURIComponent(qStr);
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, modifiedTime)&orderBy=modifiedTime desc&pageSize=50&includeItemsFromAllDrives=true&supportsAllDrives=true`;
+  const response = await driveFetch(url);
+  if (!response.ok) throw new Error("DRIVE_LIST_CANDIDATES_ERROR");
+  const data = await response.json();
+  return data.files || [];
+}
+
 export async function findFileSync(name: string, parentId?: string): Promise<string | null> {
   let qStr = `name = '${name.replace(/'/g, "\\'")}' and trashed = false`;
   if (parentId) qStr += ` and '${parentId}' in parents`;
   const q = encodeURIComponent(qStr);
-  // Fixed: Corrected API base from v3 to drive/v3 to resolve CORS issues and added modifiedTime to fields as per newest requirements.
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, modifiedTime)&includeItemsFromAllDrives=true&supportsAllDrives=true`;
   const response = await driveFetch(url);
   if (!response.ok) throw new Error("DRIVE_FIND_ERROR");
@@ -121,22 +134,70 @@ export async function findFileSync(name: string, parentId?: string): Promise<str
   return data.files && data.files.length > 0 ? data.files[0].id : null;
 }
 
+/**
+ * Robust folder resolution. 
+ * If multiple folders with same name exist, chooses the one with the newest JSON save.
+ */
+export async function resolveFolderIdByName(rootId: string, name: string): Promise<{id: string; method: string}> {
+  const qStr = `'${rootId}' in parents and name = '${name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+  const q = encodeURIComponent(qStr);
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, modifiedTime)&includeItemsFromAllDrives=true&supportsAllDrives=true`;
+  const response = await driveFetch(url);
+  if (!response.ok) throw new Error(`RESOLVE_FOLDER_ERROR: ${response.status}`);
+  const data = await response.json();
+  const folders = data.files || [];
+
+  if (folders.length === 0) {
+    const newId = await createDriveFolder(name, rootId);
+    return { id: newId, method: 'created' };
+  }
+
+  if (folders.length === 1) {
+    return { id: folders[0].id, method: 'single_match' };
+  }
+
+  // Duplicate detected - find the one with newest save
+  let bestId = folders[0].id;
+  let newestSaveTime = 0;
+
+  for (const folder of folders) {
+    try {
+      const candidates = await listSaveFileCandidates(folder.id);
+      if (candidates.length > 0) {
+        const time = new Date(candidates[0].modifiedTime).getTime();
+        if (time > newestSaveTime) {
+          newestSaveTime = time;
+          bestId = folder.id;
+        }
+      }
+    } catch (e) {
+      console.warn("Failed checking duplicate folder content:", folder.id);
+    }
+  }
+
+  return { id: bestId, method: `duplicate_resolved_newest_save_${bestId}` };
+}
+
 export async function fetchDriveFile(fileId: string): Promise<string> {
-  const response = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`);
-  if (!response.ok) throw new Error("FETCH_FAILED");
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
+  const response = await driveFetch(url);
+  if (!response.ok) throw new Error(`FETCH_FAILED: ${response.status}`);
   return response.text();
 }
 
 export async function fetchDriveBinary(fileId: string): Promise<Blob> {
-  const response = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`);
-  if (!response.ok) throw new Error("FETCH_FAILED");
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
+  const response = await driveFetch(url);
+  if (!response.ok) throw new Error(`FETCH_BINARY_FAILED: ${response.status}`);
   return response.blob();
 }
 
 export async function deleteDriveFile(fileId: string): Promise<void> {
-  const response = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`;
+  const response = await driveFetch(url, {
     method: 'DELETE'
   });
+  if (!response.ok && response.status !== 404) throw new Error(`DELETE_FAILED: ${response.status}`);
 }
 
 export async function uploadToDrive(
@@ -172,15 +233,18 @@ export async function uploadToDrive(
   bodyBuffer.set(mediaHeaderBuffer, offset); offset += mediaHeaderBuffer.byteLength;
   bodyBuffer.set(mediaBuffer, offset); offset += mediaBuffer.byteLength;
   bodyBuffer.set(footerBuffer, offset);
+  
   const url = existingFileId 
     ? `https://www.googleapis.com/upload/drive/v3/files/${existingFileId}?uploadType=multipart&supportsAllDrives=true`
     : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&supportsAllDrives=true';
+    
   const response = await driveFetch(url, {
     method: existingFileId ? 'PATCH' : 'POST',
     headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
     body: bodyBuffer
   });
-  if (!response.ok) throw new Error("UPLOAD_FAILED");
+  
+  if (!response.ok) throw new Error(`UPLOAD_FAILED: ${response.status}`);
   const data = await response.json();
   return data.id || existingFileId || '';
 }
@@ -193,7 +257,7 @@ export async function createDriveFolder(name: string, parentId?: string): Promis
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(metadata)
   });
-  if (!response.ok) throw new Error("FOLDER_CREATION_FAILED");
+  if (!response.ok) throw new Error(`FOLDER_CREATION_FAILED: ${response.status}`);
   const data = await response.json();
   return data.id;
 }
@@ -207,18 +271,16 @@ export async function ensureRootStructure(rootId: string) {
   ];
   
   for (const item of mapping) {
-    let id = await findFileSync(item.name, rootId);
-    if (!id) id = await createDriveFolder(item.name, rootId);
-    (subfolders as any)[item.key] = id;
+    const res = await resolveFolderIdByName(rootId, item.name);
+    (subfolders as any)[item.key] = res.id;
   }
   return subfolders;
 }
 
 export async function ensureBookFolder(booksId: string, bookTitle: string) {
   const safeName = bookTitle.trim() || 'Untitled Book';
-  let id = await findFileSync(safeName, booksId);
-  if (!id) id = await createDriveFolder(safeName, booksId);
-  return id;
+  const res = await resolveFolderIdByName(booksId, safeName);
+  return res.id;
 }
 
 export function revokeObjectUrl(url: string | null | undefined) {

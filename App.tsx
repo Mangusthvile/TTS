@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES } from './types';
+import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics } from './types';
 import Library from './components/Library';
 import Reader from './components/Reader';
 import Player from './components/Player';
@@ -9,7 +9,7 @@ import Extractor from './components/Extractor';
 import ChapterFolderView from './components/ChapterFolderView';
 import ChapterSidebar from './components/ChapterSidebar';
 import { speechController, applyRules, PROGRESS_STORE_V4 } from './services/speechService';
-import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, openFolderPicker, listFilesSortedByModified } from './services/driveService';
+import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, openFolderPicker, listFilesSortedByModified, resolveFolderIdByName, listSaveFileCandidates } from './services/driveService';
 import { initDriveAuth, getValidDriveToken, clearStoredToken, isTokenValid } from './services/driveAuth';
 import { saveChapterToFile } from './services/fileService';
 import { synthesizeChunk } from './services/cloudTtsService';
@@ -29,6 +29,8 @@ const App: React.FC = () => {
     
     const snapshotStr = localStorage.getItem(SNAPSHOT_KEY);
     const snapshot = snapshotStr ? JSON.parse(snapshotStr) as SavedSnapshot : null;
+
+    const savedDiag = localStorage.getItem('talevox_sync_diag');
 
     return {
       books: (parsed.books || []).map((b: any) => ({
@@ -62,7 +64,8 @@ const App: React.FC = () => {
       lastSavedAt: snapshot?.savedAt,
       driveRootFolderId: parsed.driveRootFolderId,
       driveRootFolderName: parsed.driveRootFolderName,
-      driveSubfolders: parsed.driveSubfolders
+      driveSubfolders: parsed.driveSubfolders,
+      syncDiagnostics: savedDiag ? JSON.parse(savedDiag) : {}
     };
   });
 
@@ -95,15 +98,33 @@ const App: React.FC = () => {
     const handleAuthEvent = () => setIsAuthorized(isTokenValid());
     window.addEventListener('talevox_auth_changed', handleAuthEvent);
     window.addEventListener('talevox_auth_invalid', handleAuthEvent);
+
+    // Global promise rejection handling for diagnostics
+    const handleRejection = (event: PromiseRejectionEvent) => {
+      console.error("Unhandled promise rejection:", event.reason);
+      const msg = event.reason?.message || String(event.reason);
+      setState(p => ({ ...p, syncDiagnostics: { ...p.syncDiagnostics, lastSyncError: `Global Error: ${msg}` } }));
+    };
+    window.addEventListener('unhandledrejection', handleRejection);
+
     return () => {
       window.removeEventListener('talevox_auth_changed', handleAuthEvent);
       window.removeEventListener('talevox_auth_invalid', handleAuthEvent);
+      window.removeEventListener('unhandledrejection', handleRejection);
     };
   }, [state.googleClientId]);
 
   const showToast = (title: string, number = 0, type: 'info' | 'success' | 'error' | 'reconnect' = 'info') => {
     setTransitionToast({ number, title, type });
     if (type !== 'reconnect') setTimeout(() => setTransitionToast(null), 3500);
+  };
+
+  const updateDiagnostics = (updates: Partial<SyncDiagnostics>) => {
+    setState(p => {
+      const next = { ...p.syncDiagnostics, ...updates };
+      localStorage.setItem('talevox_sync_diag', JSON.stringify(next));
+      return { ...p, syncDiagnostics: next };
+    });
   };
 
   const handleSaveState = useCallback(async (isCloudSave = true) => {
@@ -131,23 +152,21 @@ const App: React.FC = () => {
       setIsSyncing(true);
       try {
         const timestampedName = `talevox_state_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-        // Upload both timestamped and stable pointer
         await uploadToDrive(s.driveSubfolders.savesId, timestampedName, JSON.stringify(snapshot), undefined, 'application/json');
         const latestId = await findFileSync(STABLE_POINTER_NAME, s.driveSubfolders.savesId);
         await uploadToDrive(s.driveSubfolders.savesId, STABLE_POINTER_NAME, JSON.stringify(snapshot), latestId || undefined, 'application/json');
         showToast("Cloud State Saved", 0, 'success');
       } catch (e: any) {
         showToast("Cloud Save Failed", 0, 'error');
+        updateDiagnostics({ lastSyncError: `Save Failed: ${e.message}` });
       } finally { setIsSyncing(false); }
     }
   }, [isAuthorized]);
 
   const applySnapshot = useCallback((snapshot: SavedSnapshot) => {
     const s = stateRef.current;
-    // Non-destructive merge logic
     const { books: cloudBooks, readerSettings: cloudRS, activeBookId, playbackSpeed, selectedVoiceName, theme, progressStore: cloudProgress, driveRootFolderId, driveRootFolderName, driveSubfolders } = snapshot.state;
     
-    // Backup local state first
     localStorage.setItem(BACKUP_KEY, JSON.stringify({ state: s, progress: JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}') }));
 
     const mergedBooks = [...s.books];
@@ -157,10 +176,8 @@ const App: React.FC = () => {
         mergedBooks.push(cb);
       } else {
         const lb = mergedBooks[idx];
-        // Compare book level timestamps if they exist, otherwise trust cloud if newer
         const trustCloud = !lb.updatedAt || (cb.updatedAt && cb.updatedAt > lb.updatedAt);
         if (trustCloud) {
-           // Merge chapters additively
            const mergedChapters = [...lb.chapters];
            cb.chapters.forEach(cc => {
               const cIdx = mergedChapters.findIndex(lc => lc.id === cc.id || lc.index === cc.index);
@@ -180,7 +197,6 @@ const App: React.FC = () => {
 
     const localProgress = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
     const finalProgress = { ...cloudProgress };
-    // Additive progress merge
     Object.keys(localProgress).forEach(bookId => {
        if (!finalProgress[bookId]) finalProgress[bookId] = localProgress[bookId];
        else {
@@ -214,21 +230,33 @@ const App: React.FC = () => {
 
   const handleSync = useCallback(async (manual = false) => {
     const s = stateRef.current;
-    if (!isAuthorized || !s.driveSubfolders?.savesId) {
-      if (manual) showToast("Cloud setup required", 0, 'error');
+    if (!isAuthorized || !s.driveRootFolderId) {
+      if (manual) showToast("Setup Drive Root in Settings", 0, 'error');
       return;
     }
+    
     setIsSyncing(true);
+    updateDiagnostics({ lastSyncAttemptAt: Date.now(), lastSyncError: undefined });
     if (manual) showToast("Syncing with Drive...", 0, 'info');
+
     try {
-      // 1. Get Newest Save
-      const saves = await listFilesSortedByModified(s.driveSubfolders.savesId);
-      const newestSaveFile = saves.find(f => f.name === STABLE_POINTER_NAME) || saves[0];
+      // 1. Refresh Folder Structure (Ensure duplicates are resolved)
+      const sub = await ensureRootStructure(s.driveRootFolderId);
+      setState(p => ({ ...p, driveSubfolders: sub }));
+      updateDiagnostics({ driveRootFolderId: s.driveRootFolderId, resolvedCloudSavesFolderId: sub.savesId });
+
+      // 2. Discover newest save
+      const candidates = await listSaveFileCandidates(sub.savesId);
+      const newestSaveFile = candidates.find(f => f.name === STABLE_POINTER_NAME) || candidates[0];
       
       if (!newestSaveFile) {
-        if (manual) showToast("No backup found", 0, 'info');
+        if (manual) showToast("No cloud save found", 0, 'info');
+        updateDiagnostics({ lastSyncError: "No save found in folder" });
       } else {
+        updateDiagnostics({ lastCloudSaveFileName: newestSaveFile.name, lastCloudSaveModifiedTime: newestSaveFile.modifiedTime });
         const remoteContent = await fetchDriveFile(newestSaveFile.id);
+        if (!remoteContent || !remoteContent.startsWith('{')) throw new Error("Invalid Cloud JSON format");
+        
         const remoteSnapshot = JSON.parse(remoteContent) as SavedSnapshot;
         const localSnapshotStr = localStorage.getItem(SNAPSHOT_KEY);
         const localSnapshot = localSnapshotStr ? JSON.parse(localSnapshotStr) as SavedSnapshot : null;
@@ -239,8 +267,8 @@ const App: React.FC = () => {
         }
       }
 
-      // 2. Additive Drive File Discovery (Scan Books)
-      if (s.driveSubfolders.booksId) {
+      // 3. Scan books for new files
+      if (sub.booksId) {
          let foundCount = 0;
          const updatedBooks = [...stateRef.current.books];
          for (let i = 0; i < updatedBooks.length; i++) {
@@ -261,7 +289,7 @@ const App: React.FC = () => {
                            index,
                            title,
                            filename: f.name,
-                           content: '', // lazy load
+                           content: '', 
                            wordCount: 0,
                            progress: 0,
                            progressChars: 0,
@@ -283,17 +311,19 @@ const App: React.FC = () => {
             if (manual) showToast(`Discovered ${foundCount} new chapters`, 0, 'success');
          }
       }
+      updateDiagnostics({ lastSyncSuccessAt: Date.now() });
     } catch (err: any) { 
-      showToast("Sync Error", 0, 'error');
+      console.error("Sync Error:", err);
+      showToast(`Sync Failed: ${err.message}`, 0, 'error');
+      updateDiagnostics({ lastSyncError: err.message });
     } finally { setIsSyncing(false); }
   }, [applySnapshot, isAuthorized]);
 
-  // Initial Sync on Load
   useEffect(() => {
-    if (isAuthorized && state.driveSubfolders?.savesId) {
+    if (isAuthorized && state.driveRootFolderId) {
        handleSync(false);
     }
-  }, [isAuthorized, !!state.driveSubfolders?.savesId]);
+  }, [isAuthorized, state.driveRootFolderId]);
 
   const updateChapterAudio = useCallback((bookId: string, chapterId: string, updates: Partial<Chapter>) => {
     setState(prev => ({
@@ -335,13 +365,11 @@ const App: React.FC = () => {
     }
 
     updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.GENERATING });
-    showToast(`Generating audio: ${chapter.title.substring(0, 15)}...`, 0, 'info');
     try {
       const res = await synthesizeChunk(fullText, voice, 1.0);
       const fetchRes = await fetch(res.audioUrl);
       if (!fetchRes.ok) throw new Error("Synthesis output error");
       const audioBlob = await fetchRes.blob();
-      if (!audioBlob || audioBlob.size === 0) throw new Error("Empty audio output");
       
       await saveAudioToCache(cacheKey, audioBlob);
       let cloudId = undefined;
@@ -350,11 +378,9 @@ const App: React.FC = () => {
          cloudId = await uploadToDrive(book.driveFolderId, audioName, audioBlob, undefined, 'audio/mpeg');
       }
       updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, hasCachedAudio: true, cloudAudioFileId: cloudId });
-      showToast(`Audio ready: ${chapter.title.substring(0, 15)}`, 0, 'success');
       handleSaveState(true);
     } catch (e) { 
       updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.FAILED }); 
-      showToast(`Audio failed: ${chapter.title}`, 0, 'error');
     }
   }, [handleSaveState, isAuthorized, updateChapterAudio]);
 
@@ -537,7 +563,6 @@ const App: React.FC = () => {
       let audioBlob = await getAudioFromCache(cacheKey);
 
       if (!audioBlob && chapter.cloudAudioFileId && isAuthorized) {
-        showToast("Fetching cloud audio...", 0, 'info');
         try { audioBlob = await fetchDriveBinary(chapter.cloudAudioFileId); if (audioBlob) await saveAudioToCache(cacheKey, audioBlob); } catch(e) {}
       }
 
@@ -565,7 +590,6 @@ const App: React.FC = () => {
            setTimeout(() => handlePlay(), 100);
            return;
         }
-        showToast("Audio generating...", 0, 'info');
         await queueBackgroundTTS(s.activeBookId!, chapter.id);
         setTimeout(() => handlePlay(), 1000);
       }
@@ -587,12 +611,14 @@ const App: React.FC = () => {
     let driveId = undefined;
     let driveName = undefined;
     if (backend === StorageBackend.DRIVE) {
-      if (!s.driveSubfolders?.booksId) { showToast("Setup Drive Root in Settings", 0, 'error'); setActiveTab('settings'); return; }
+      if (!s.driveRootFolderId) { showToast("Setup Drive Root in Settings", 0, 'error'); setActiveTab('settings'); return; }
       showToast("Provisioning folder...", 0, 'info');
       try {
-        driveId = await ensureBookFolder(s.driveSubfolders.booksId, title);
+        const subFolders = await ensureRootStructure(s.driveRootFolderId);
+        driveId = await ensureBookFolder(subFolders.booksId, title);
         driveName = title;
-      } catch (e) { showToast("Folder creation failed", 0, 'error'); return; }
+        setState(p => ({ ...p, driveSubfolders: subFolders }));
+      } catch (e: any) { showToast(`Folder creation failed: ${e.message}`, 0, 'error'); return; }
     }
     const bk: Book = { id: crypto.randomUUID(), title, chapters: [], rules: [], backend, directoryHandle, driveFolderId: driveId, driveFolderName: driveName, settings: { useBookSettings: false, highlightMode: HighlightMode.WORD }, updatedAt: Date.now() };
     setState(p => ({ ...p, books: [...p.books, bk], activeBookId: bk.id }));
@@ -647,7 +673,7 @@ const App: React.FC = () => {
         {isSyncing && !transitionToast && (
           <div className="fixed top-20 right-4 z-[80] animate-in slide-in-from-right duration-300">
              <div className="bg-indigo-600 text-white px-4 py-2 rounded-xl shadow-2xl flex items-center gap-3 font-black text-[10px] uppercase tracking-widest">
-               <Loader2 className="w-3.5 h-3.5 animate-spin" /> Syncing with Drive...
+               <Loader2 className="w-3.5 h-3.5 animate-spin" /> Syncing...
              </div>
           </div>
         )}
@@ -741,6 +767,7 @@ const App: React.FC = () => {
               googleClientId={state.googleClientId} onUpdateGoogleClientId={id => setState(p => ({ ...p, googleClientId: id }))}
               onClearAuth={() => clearStoredToken()} onSaveState={() => handleSaveState(true)} lastSavedAt={state.lastSavedAt}
               driveRootName={state.driveRootFolderName} onSelectRoot={handleSelectRoot} onRunMigration={handleRunMigration}
+              syncDiagnostics={state.syncDiagnostics}
             />
           )}
         </div>
