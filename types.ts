@@ -160,6 +160,10 @@ export interface SyncDiagnostics {
   lastAutoSaveError?: string;
   isDirty?: boolean;
   intervalMinutes?: number;
+  cloudDirty?: boolean;
+  dirtySince?: number;
+  lastCloudSaveTrigger?: 'manual' | 'auto';
+  lastCloudSaveAt?: number;
 }
 
 export interface SavedSnapshot {

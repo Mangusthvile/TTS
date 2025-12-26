@@ -17,7 +17,7 @@ import { extractChapterWithAI } from './services/geminiService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud } from 'lucide-react';
 
-const STATE_FILENAME = 'talevox_state_v2710.json';
+const STATE_FILENAME = 'talevox_state_v2712.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -102,7 +102,6 @@ const App: React.FC = () => {
     window.addEventListener('talevox_auth_changed', handleAuthEvent);
     window.addEventListener('talevox_auth_invalid', handleAuthEvent);
 
-    // Global promise rejection handling for diagnostics
     const handleRejection = (event: PromiseRejectionEvent) => {
       console.error("Unhandled promise rejection:", event.reason);
       const msg = event.reason?.message || String(event.reason);
@@ -132,11 +131,40 @@ const App: React.FC = () => {
 
   const markDirty = useCallback(() => {
     setIsDirty(true);
-    updateDiagnostics({ isDirty: true });
+    setState(p => {
+      if (p.syncDiagnostics?.isDirty && p.syncDiagnostics?.cloudDirty) return p;
+      const nextDiag = { 
+        ...p.syncDiagnostics, 
+        isDirty: true, 
+        cloudDirty: true, 
+        dirtySince: p.syncDiagnostics?.dirtySince || Date.now() 
+      };
+      localStorage.setItem('talevox_sync_diag', JSON.stringify(nextDiag));
+      return { ...p, syncDiagnostics: nextDiag };
+    });
   }, []);
 
   const handleSaveState = useCallback(async (isCloudSave = true, isAuto = false) => {
     const s = stateRef.current;
+    
+    // Check if we should skip auto-save
+    if (isCloudSave && isAuto) {
+      if (!isDirty) {
+        console.log("CloudSave skipped: not dirty / no changes detected");
+        return;
+      }
+      if (!isAuthorized) {
+        console.log("CloudSave skipped: Drive not connected");
+        return;
+      }
+      if (isSyncing) {
+        console.log("CloudSave skipped: sync in progress");
+        return;
+      }
+    }
+
+    console.log(`CloudSave trigger=${isAuto ? 'auto' : 'manual'}`);
+
     const progressStore = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
     const snapshot: SavedSnapshot = {
       version: "v1", savedAt: Date.now(),
@@ -169,6 +197,10 @@ const App: React.FC = () => {
         setIsDirty(false);
         updateDiagnostics({ 
           isDirty: false, 
+          cloudDirty: false,
+          dirtySince: undefined,
+          lastCloudSaveTrigger: isAuto ? 'auto' : 'manual',
+          lastCloudSaveAt: Date.now(),
           lastSyncSuccessAt: Date.now(),
           ...(isAuto ? { lastAutoSaveSuccessAt: Date.now(), lastAutoSaveError: undefined } : {})
         });
@@ -183,19 +215,16 @@ const App: React.FC = () => {
       } finally { setIsSyncing(false); }
     } else if (isAuto && !isAuthorized) {
       updateDiagnostics({ lastAutoSaveError: "Skipped: Drive not connected", lastAutoSaveAttemptAt: Date.now() });
-      showToast("Auto-save skipped: Drive not connected", 0, 'info');
     }
-  }, [isAuthorized]);
+  }, [isAuthorized, isDirty, isSyncing]);
 
-  // Auto Cloud Save Scheduler
+  // Auto Cloud Save Scheduler - Fixed to honor interval and only trigger if dirty
   useEffect(() => {
-    if (!state.driveRootFolderId || !isAuthorized) return;
+    if (!state.driveRootFolderId || !isAuthorized || !isDirty || isSyncing) return;
     
     const intervalMs = state.autoSaveInterval * 60 * 1000;
     const timer = setTimeout(() => {
-      if (isDirty && !isSyncing) {
-        handleSaveState(true, true);
-      }
+      handleSaveState(true, true);
     }, intervalMs);
 
     return () => clearTimeout(timer);
@@ -279,12 +308,10 @@ const App: React.FC = () => {
     if (manual) showToast("Syncing with Drive...", 0, 'info');
 
     try {
-      // 1. Refresh Folder Structure (Ensure duplicates are resolved)
       const sub = await ensureRootStructure(s.driveRootFolderId);
       setState(p => ({ ...p, driveSubfolders: sub }));
       updateDiagnostics({ driveRootFolderId: s.driveRootFolderId, resolvedCloudSavesFolderId: sub.savesId });
 
-      // 2. Discover newest save
       const candidates = await listSaveFileCandidates(sub.savesId);
       const newestSaveFile = candidates.find(f => f.name === STABLE_POINTER_NAME) || candidates[0];
       
@@ -306,7 +333,6 @@ const App: React.FC = () => {
         }
       }
 
-      // 3. Scan books for new files
       if (sub.booksId) {
          let foundCount = 0;
          const updatedBooks = [...stateRef.current.books];
@@ -418,11 +444,11 @@ const App: React.FC = () => {
          cloudId = await uploadToDrive(book.driveFolderId, audioName, audioBlob, undefined, 'audio/mpeg');
       }
       updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.READY, hasCachedAudio: true, cloudAudioFileId: cloudId });
-      handleSaveState(true);
+      // Removed immediate cloud JSON save; markDirty handles it via auto-save
     } catch (e) { 
       updateChapterAudio(bookId, chapterId, { audioStatus: AudioStatus.FAILED }); 
     }
-  }, [handleSaveState, isAuthorized, updateChapterAudio]);
+  }, [isAuthorized, updateChapterAudio, markDirty]);
 
   const handleChapterExtracted = useCallback(async (data: { 
     title: string; content: string; url: string; index: number; voiceId: string; setAsDefault: boolean;
@@ -455,8 +481,8 @@ const App: React.FC = () => {
     
     markDirty();
     queueBackgroundTTS(s.activeBookId, newChapter.id, data.voiceId, newChapter);
-    handleSaveState(true);
-  }, [queueBackgroundTTS, isAuthorized, handleSaveState, markDirty]);
+    // Removed immediate cloud JSON save; markDirty handles it via auto-save
+  }, [queueBackgroundTTS, isAuthorized, markDirty]);
 
   const handleSelectRoot = useCallback(async () => {
     try {
@@ -627,9 +653,9 @@ const App: React.FC = () => {
     }
     window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: { bookId, chapterId } }));
     markDirty();
-    handleSaveState(true);
+    // Removed immediate cloud JSON save; markDirty handles it via auto-save
     showToast("Progress reset", 0, 'success');
-  }, [activeBook, state.activeBookId, handleSaveState, markDirty]);
+  }, [activeBook, state.activeBookId, markDirty]);
 
   useEffect(() => {
     localStorage.setItem('talevox_pro_v2', JSON.stringify({ ...state, books: state.books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined })) }));
@@ -659,7 +685,7 @@ const App: React.FC = () => {
           ) : (
             <button onClick={() => handleSync(true)} disabled={isSyncing} className={`flex items-center gap-2 px-3 py-2 bg-indigo-600/10 text-indigo-600 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-600/20 transition-all ${isSyncing ? 'animate-pulse' : ''}`}><RefreshCw className="w-3.5 h-3.5" /> <span className="hidden xs:inline">Sync</span></button>
           )}
-          <button onClick={() => handleSaveState(true)} className={`p-2.5 rounded-xl bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20 transition-all ${isDirty ? 'ring-2 ring-indigo-600 animate-pulse' : ''}`} title="Save State"><Save className="w-4 h-4" /></button>
+          <button onClick={() => handleSaveState(true, false)} className={`p-2.5 rounded-xl bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20 transition-all ${isDirty ? 'ring-2 ring-indigo-600 animate-pulse' : ''}`} title="Manual Cloud Save"><Save className="w-4 h-4" /></button>
         </div>
       </header>
 
@@ -759,7 +785,7 @@ const App: React.FC = () => {
               keepAwake={state.keepAwake} onSetKeepAwake={v => handleStateChangeWithDirty({ keepAwake: v })} onCheckForUpdates={() => window.location.reload()}
               onLinkCloud={() => getValidDriveToken({ interactive: true })} onSyncNow={() => handleSync(true)}
               googleClientId={state.googleClientId} onUpdateGoogleClientId={id => handleStateChangeWithDirty({ googleClientId: id })}
-              onClearAuth={() => clearStoredToken()} onSaveState={() => handleSaveState(true)} lastSavedAt={state.lastSavedAt}
+              onClearAuth={() => clearStoredToken()} onSaveState={() => handleSaveState(true, false)} lastSavedAt={state.lastSavedAt}
               driveRootName={state.driveRootFolderName} onSelectRoot={handleSelectRoot} onRunMigration={handleRunMigration}
               syncDiagnostics={state.syncDiagnostics}
               autoSaveInterval={state.autoSaveInterval}

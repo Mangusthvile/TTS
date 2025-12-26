@@ -12,7 +12,7 @@ declare global {
 }
 
 // Set version on window for settings display
-window.__APP_VERSION__ = '2.7.11';
+window.__APP_VERSION__ = '2.7.12';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {

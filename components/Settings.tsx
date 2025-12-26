@@ -73,7 +73,7 @@ const Settings: React.FC<SettingsProps> = ({
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
           <div>
             <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
-            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.7.11</p>
+            <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v2.7.12</p>
           </div>
           <button 
             onClick={onCheckForUpdates} 
@@ -204,15 +204,19 @@ const Settings: React.FC<SettingsProps> = ({
                 <Terminal className="w-4 h-4" /> Sync Diagnostics
               </div>
               <div className="flex items-center gap-3">
-                 {isDirty && <span className="bg-amber-500 text-white text-[8px] px-1.5 py-0.5 rounded-full animate-pulse">Unsaved Changes</span>}
+                 {syncDiagnostics?.cloudDirty && <span className="bg-amber-500 text-white text-[8px] px-1.5 py-0.5 rounded-full animate-pulse">Unsaved Changes</span>}
                  {isDiagExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
               </div>
             </button>
             {isDiagExpanded && (
               <div className="mt-6 space-y-4 animate-in slide-in-from-top-2 duration-200">
                 <div className="grid grid-cols-1 gap-2 text-[10px] font-mono p-4 bg-black/5 dark:bg-black/40 rounded-xl border border-black/5 overflow-x-auto whitespace-pre">
-                   <div>Dirty: {isDirty ? 'YES' : 'NO'}</div>
+                   <div>Dirty: {syncDiagnostics?.cloudDirty ? 'YES' : 'NO'}</div>
+                   <div>Dirty Since: {syncDiagnostics?.dirtySince ? new Date(syncDiagnostics.dirtySince).toLocaleTimeString() : 'N/A'}</div>
                    <div>Interval: {autoSaveInterval}m</div>
+                   <div>Last Save: {syncDiagnostics?.lastCloudSaveAt ? new Date(syncDiagnostics.lastCloudSaveAt).toLocaleString() : 'Never'}</div>
+                   <div>Trigger: {syncDiagnostics?.lastCloudSaveTrigger?.toUpperCase() || 'NONE'}</div>
+                   <div className="opacity-50 mt-2 border-t border-black/5 pt-2">Details:</div>
                    <div>Sync Attempt: {syncDiagnostics?.lastSyncAttemptAt ? new Date(syncDiagnostics.lastSyncAttemptAt).toLocaleString() : 'Never'}</div>
                    <div>Sync Success: {syncDiagnostics?.lastSyncSuccessAt ? new Date(syncDiagnostics.lastSyncSuccessAt).toLocaleString() : 'Never'}</div>
                    {syncDiagnostics?.lastSyncError && <div className="text-red-500">Sync Error: {syncDiagnostics.lastSyncError}</div>}
@@ -223,7 +227,6 @@ const Settings: React.FC<SettingsProps> = ({
                    <div className="opacity-50 mt-2 border-t border-black/5 pt-2">IDs:</div>
                    <div>Root: {syncDiagnostics?.driveRootFolderId || 'N/A'}</div>
                    <div>Saves: {syncDiagnostics?.resolvedCloudSavesFolderId || 'N/A'}</div>
-                   <div>Method: {syncDiagnostics?.folderChoiceMethod || 'Default'}</div>
                    <div className="opacity-50 mt-2 border-t border-black/5 pt-2">File:</div>
                    <div>Last: {syncDiagnostics?.lastCloudSaveFileName || 'None'}</div>
                    <div>Time: {syncDiagnostics?.lastCloudSaveModifiedTime || 'N/A'}</div>
