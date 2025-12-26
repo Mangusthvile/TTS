@@ -100,11 +100,20 @@ export async function listFilesInFolder(folderId: string): Promise<{id: string, 
   return data.files || [];
 }
 
+export async function listFilesSortedByModified(folderId: string): Promise<{id: string, name: string, mimeType: string, modifiedTime: string}[]> {
+  const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, mimeType, modifiedTime)&orderBy=modifiedTime desc&pageSize=1000&includeItemsFromAllDrives=true&supportsAllDrives=true`;
+  const response = await driveFetch(url);
+  if (!response.ok) throw new Error("DRIVE_LIST_FILES_ERROR");
+  const data = await response.json();
+  return data.files || [];
+}
+
 export async function findFileSync(name: string, parentId?: string): Promise<string | null> {
   let qStr = `name = '${name.replace(/'/g, "\\'")}' and trashed = false`;
   if (parentId) qStr += ` and '${parentId}' in parents`;
   const q = encodeURIComponent(qStr);
-  const response = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name)&includeItemsFromAllDrives=true&supportsAllDrives=true`);
+  const response = await driveFetch(`https://www.googleapis.com/v3/files?q=${q}&fields=files(id, name)&includeItemsFromAllDrives=true&supportsAllDrives=true`);
   if (!response.ok) throw new Error("DRIVE_FIND_ERROR");
   const data = await response.json();
   return data.files && data.files.length > 0 ? data.files[0].id : null;
@@ -152,7 +161,6 @@ export async function uploadToDrive(
   if (typeof content === 'string') {
     mediaBuffer = encoder.encode(content);
   } else {
-    // Correctly handle Blob to ArrayBuffer conversion
     const ab = await content.arrayBuffer();
     mediaBuffer = new Uint8Array(ab);
   }
@@ -190,7 +198,6 @@ export async function createDriveFolder(name: string, parentId?: string): Promis
 
 export async function ensureRootStructure(rootId: string) {
   const subfolders = { booksId: '', trashId: '', savesId: '' };
-  // Fixed mapping for clarity and persistence
   const mapping = [
     { name: 'Books', key: 'booksId' },
     { name: 'Trash', key: 'trashId' },

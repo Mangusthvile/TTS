@@ -9,23 +9,24 @@ import Extractor from './components/Extractor';
 import ChapterFolderView from './components/ChapterFolderView';
 import ChapterSidebar from './components/ChapterSidebar';
 import { speechController, applyRules, PROGRESS_STORE_V4 } from './services/speechService';
-import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, openFolderPicker } from './services/driveService';
+import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, openFolderPicker, listFilesSortedByModified } from './services/driveService';
 import { initDriveAuth, getValidDriveToken, clearStoredToken, isTokenValid } from './services/driveAuth';
 import { saveChapterToFile } from './services/fileService';
 import { synthesizeChunk } from './services/cloudTtsService';
 import { extractChapterWithAI } from './services/geminiService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
-import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle } from 'lucide-react';
+import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud } from 'lucide-react';
 
-const STATE_FILENAME = 'talevox_state_v279.json';
+const STATE_FILENAME = 'talevox_state_v2710.json';
+const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
+const BACKUP_KEY = "talevox_sync_backup";
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(() => {
     const saved = localStorage.getItem('talevox_pro_v2');
     const parsed = saved ? JSON.parse(saved) : {};
     
-    // Migration fallback for snapshot
     const snapshotStr = localStorage.getItem(SNAPSHOT_KEY);
     const snapshot = snapshotStr ? JSON.parse(snapshotStr) as SavedSnapshot : null;
 
@@ -129,14 +130,170 @@ const App: React.FC = () => {
     if (isCloudSave && isAuthorized && s.driveSubfolders?.savesId) {
       setIsSyncing(true);
       try {
-        const fileId = await findFileSync(STATE_FILENAME, s.driveSubfolders.savesId);
-        await uploadToDrive(s.driveSubfolders.savesId, STATE_FILENAME, JSON.stringify(snapshot), fileId || undefined, 'application/json');
+        const timestampedName = `talevox_state_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+        // Upload both timestamped and stable pointer
+        await uploadToDrive(s.driveSubfolders.savesId, timestampedName, JSON.stringify(snapshot), undefined, 'application/json');
+        const latestId = await findFileSync(STABLE_POINTER_NAME, s.driveSubfolders.savesId);
+        await uploadToDrive(s.driveSubfolders.savesId, STABLE_POINTER_NAME, JSON.stringify(snapshot), latestId || undefined, 'application/json');
         showToast("Cloud State Saved", 0, 'success');
       } catch (e: any) {
         showToast("Cloud Save Failed", 0, 'error');
       } finally { setIsSyncing(false); }
     }
   }, [isAuthorized]);
+
+  const applySnapshot = useCallback((snapshot: SavedSnapshot) => {
+    const s = stateRef.current;
+    // Non-destructive merge logic
+    const { books: cloudBooks, readerSettings: cloudRS, activeBookId, playbackSpeed, selectedVoiceName, theme, progressStore: cloudProgress, driveRootFolderId, driveRootFolderName, driveSubfolders } = snapshot.state;
+    
+    // Backup local state first
+    localStorage.setItem(BACKUP_KEY, JSON.stringify({ state: s, progress: JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}') }));
+
+    const mergedBooks = [...s.books];
+    cloudBooks.forEach(cb => {
+      const idx = mergedBooks.findIndex(b => b.id === cb.id || b.title === cb.title);
+      if (idx === -1) {
+        mergedBooks.push(cb);
+      } else {
+        const lb = mergedBooks[idx];
+        // Compare book level timestamps if they exist, otherwise trust cloud if newer
+        const trustCloud = !lb.updatedAt || (cb.updatedAt && cb.updatedAt > lb.updatedAt);
+        if (trustCloud) {
+           // Merge chapters additively
+           const mergedChapters = [...lb.chapters];
+           cb.chapters.forEach(cc => {
+              const cIdx = mergedChapters.findIndex(lc => lc.id === cc.id || lc.index === cc.index);
+              if (cIdx === -1) {
+                 mergedChapters.push(cc);
+              } else {
+                 const lc = mergedChapters[cIdx];
+                 if (!lc.updatedAt || (cc.updatedAt && cc.updatedAt > lc.updatedAt)) {
+                    mergedChapters[cIdx] = cc;
+                 }
+              }
+           });
+           mergedBooks[idx] = { ...lb, ...cb, chapters: mergedChapters.sort((a,b) => a.index-b.index) };
+        }
+      }
+    });
+
+    const localProgress = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
+    const finalProgress = { ...cloudProgress };
+    // Additive progress merge
+    Object.keys(localProgress).forEach(bookId => {
+       if (!finalProgress[bookId]) finalProgress[bookId] = localProgress[bookId];
+       else {
+          Object.keys(localProgress[bookId]).forEach(chId => {
+             const lp = localProgress[bookId][chId];
+             const cp = finalProgress[bookId][chId];
+             if (!cp || (lp.updatedAt && lp.updatedAt > (cp.updatedAt || 0))) {
+                finalProgress[bookId][chId] = lp;
+             }
+          });
+       }
+    });
+
+    setState(prev => ({ 
+      ...prev, 
+      books: mergedBooks, 
+      readerSettings: cloudRS || prev.readerSettings, 
+      activeBookId: activeBookId || prev.activeBookId, 
+      playbackSpeed: playbackSpeed || prev.playbackSpeed, 
+      selectedVoiceName: selectedVoiceName || prev.selectedVoiceName, 
+      theme: theme || prev.theme, 
+      lastSavedAt: snapshot.savedAt, 
+      driveRootFolderId: driveRootFolderId || prev.driveRootFolderId, 
+      driveRootFolderName: driveRootFolderName || prev.driveRootFolderName, 
+      driveSubfolders: driveSubfolders || prev.driveSubfolders 
+    }));
+    
+    localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(finalProgress));
+    window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: { bookId: activeBookId || stateRef.current.activeBookId } }));
+  }, []);
+
+  const handleSync = useCallback(async (manual = false) => {
+    const s = stateRef.current;
+    if (!isAuthorized || !s.driveSubfolders?.savesId) {
+      if (manual) showToast("Cloud setup required", 0, 'error');
+      return;
+    }
+    setIsSyncing(true);
+    if (manual) showToast("Syncing with Drive...", 0, 'info');
+    try {
+      // 1. Get Newest Save
+      const saves = await listFilesSortedByModified(s.driveSubfolders.savesId);
+      const newestSaveFile = saves.find(f => f.name === STABLE_POINTER_NAME) || saves[0];
+      
+      if (!newestSaveFile) {
+        if (manual) showToast("No backup found", 0, 'info');
+      } else {
+        const remoteContent = await fetchDriveFile(newestSaveFile.id);
+        const remoteSnapshot = JSON.parse(remoteContent) as SavedSnapshot;
+        const localSnapshotStr = localStorage.getItem(SNAPSHOT_KEY);
+        const localSnapshot = localSnapshotStr ? JSON.parse(localSnapshotStr) as SavedSnapshot : null;
+
+        if (!localSnapshot || remoteSnapshot.savedAt > localSnapshot.savedAt || manual) {
+          applySnapshot(remoteSnapshot);
+          if (manual) showToast("Cloud Save Applied", 0, 'success');
+        }
+      }
+
+      // 2. Additive Drive File Discovery (Scan Books)
+      if (s.driveSubfolders.booksId) {
+         let foundCount = 0;
+         const updatedBooks = [...stateRef.current.books];
+         for (let i = 0; i < updatedBooks.length; i++) {
+           const book = updatedBooks[i];
+           if (book.driveFolderId) {
+             const driveFiles = await listFilesInFolder(book.driveFolderId);
+             const mergedChapters = [...book.chapters];
+             driveFiles.forEach(f => {
+               if (f.name.endsWith('.txt')) {
+                  const match = f.name.match(/^(\d+)_/);
+                  if (match) {
+                     const index = parseInt(match[1]);
+                     const exists = mergedChapters.some(c => c.index === index);
+                     if (!exists) {
+                        const title = f.name.replace(/^\d+_/, '').replace(/\.txt$/, '').replace(/_/g, ' ');
+                        mergedChapters.push({
+                           id: crypto.randomUUID(),
+                           index,
+                           title,
+                           filename: f.name,
+                           content: '', // lazy load
+                           wordCount: 0,
+                           progress: 0,
+                           progressChars: 0,
+                           cloudTextFileId: f.id,
+                           hasTextOnDrive: true,
+                           audioStatus: AudioStatus.PENDING,
+                           updatedAt: Date.now()
+                        });
+                        foundCount++;
+                     }
+                  }
+               }
+             });
+             updatedBooks[i] = { ...book, chapters: mergedChapters.sort((a,b) => a.index-b.index) };
+           }
+         }
+         if (foundCount > 0) {
+            setState(p => ({ ...p, books: updatedBooks }));
+            if (manual) showToast(`Discovered ${foundCount} new chapters`, 0, 'success');
+         }
+      }
+    } catch (err: any) { 
+      showToast("Sync Error", 0, 'error');
+    } finally { setIsSyncing(false); }
+  }, [applySnapshot, isAuthorized]);
+
+  // Initial Sync on Load
+  useEffect(() => {
+    if (isAuthorized && state.driveSubfolders?.savesId) {
+       handleSync(false);
+    }
+  }, [isAuthorized, !!state.driveSubfolders?.savesId]);
 
   const updateChapterAudio = useCallback((bookId: string, chapterId: string, updates: Partial<Chapter>) => {
     setState(prev => ({
@@ -201,6 +358,61 @@ const App: React.FC = () => {
     }
   }, [handleSaveState, isAuthorized, updateChapterAudio]);
 
+  const handleSmartExtractChapter = useCallback(async (bookId: string, chapterId: string) => {
+    const s = stateRef.current;
+    const book = s.books.find(b => b.id === bookId);
+    const chapter = book?.chapters.find(c => c.id === chapterId);
+    if (!book || !chapter) return;
+
+    showToast("Starting Smart Extraction...", 0, 'info');
+    setIsLoadingChapter(true);
+
+    try {
+      let sourceText = chapter.content;
+      if (book.backend === StorageBackend.DRIVE && isAuthorized) {
+        let fileId = chapter.cloudTextFileId;
+        if (!fileId && book.driveFolderId) {
+          const expectedName = buildTextName(chapter.index, chapter.title);
+          fileId = await findFileSync(expectedName, book.driveFolderId) || undefined;
+        }
+        if (fileId) {
+          try { sourceText = await fetchDriveFile(fileId); } catch (e) { console.warn("Could not fetch drive file for smart extraction"); }
+        }
+      }
+
+      const extracted = await extractChapterWithAI(sourceText);
+      const updatedChapter: Chapter = {
+        ...chapter,
+        title: extracted.title,
+        content: extracted.content,
+        index: extracted.index,
+        wordCount: extracted.content.split(/\s+/).filter(Boolean).length,
+        audioStatus: AudioStatus.PENDING,
+        updatedAt: Date.now()
+      };
+
+      if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
+        const filename = buildTextName(extracted.index, extracted.title);
+        const newFileId = await uploadToDrive(book.driveFolderId, filename, extracted.content, chapter.cloudTextFileId, 'text/plain');
+        updatedChapter.cloudTextFileId = newFileId;
+        updatedChapter.hasTextOnDrive = true;
+      }
+
+      setState(prev => ({
+        ...prev,
+        books: prev.books.map(b => b.id === bookId ? { ...b, chapters: b.chapters.map(c => c.id === chapterId ? updatedChapter : c).sort((x, y) => x.index - y.index) } : b)
+      }));
+
+      showToast("Smart Extraction Successful", 0, 'success');
+      queueBackgroundTTS(bookId, chapterId, book.settings.defaultVoiceId, updatedChapter);
+
+    } catch (err: any) {
+      showToast("Extraction Failed", 0, 'error');
+    } finally {
+      setIsLoadingChapter(false);
+    }
+  }, [isAuthorized, queueBackgroundTTS]);
+
   const handleChapterExtracted = useCallback(async (data: { 
     title: string; content: string; url: string; index: number; voiceId: string; setAsDefault: boolean;
   }) => {
@@ -224,59 +436,15 @@ const App: React.FC = () => {
       try { await saveChapterToFile(book.directoryHandle, { id: 'tmp', index: data.index, title: data.title, content: data.content, filename, wordCount: 0, progress: 0, progressChars: 0 }); } catch (e) {}
     }
 
-    const newChapter: Chapter = { id: crypto.randomUUID(), index: data.index, title: data.title, content: data.content, filename, wordCount: data.content.split(/\s+/).filter(Boolean).length, progress: 0, progressChars: 0, audioStatus: AudioStatus.PENDING, cloudTextFileId: cloudTextId, hasTextOnDrive: !!cloudTextId };
+    const newChapter: Chapter = { id: crypto.randomUUID(), index: data.index, title: data.title, content: data.content, filename, wordCount: data.content.split(/\s+/).filter(Boolean).length, progress: 0, progressChars: 0, audioStatus: AudioStatus.PENDING, cloudTextFileId: cloudTextId, hasTextOnDrive: !!cloudTextId, updatedAt: Date.now() };
     
     setState(prev => ({ ...prev, books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, chapters: [...b.chapters, newChapter].sort((a,b) => a.index-b.index), currentChapterId: b.currentChapterId || newChapter.id } : b) }));
     setIsAddChapterOpen(false);
     showToast("Chapter Saved", 0, 'success');
     
-    // Trigger auto-creation of audio
     queueBackgroundTTS(s.activeBookId, newChapter.id, data.voiceId, newChapter);
     handleSaveState(true);
   }, [queueBackgroundTTS, isAuthorized, handleSaveState]);
-
-  const applySnapshot = useCallback((snapshot: SavedSnapshot) => {
-    const { books, readerSettings, activeBookId, playbackSpeed, selectedVoiceName, theme, progressStore, driveRootFolderId, driveRootFolderName, driveSubfolders } = snapshot.state;
-    const mergedBooks = [...books];
-    stateRef.current.books.forEach(lb => {
-      if (!mergedBooks.find(rb => rb.id === lb.id)) mergedBooks.push(lb);
-    });
-    const localProgress = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
-    const finalProgress = { ...progressStore, ...localProgress };
-    setState(prev => ({ ...prev, books: mergedBooks, readerSettings: readerSettings || prev.readerSettings, activeBookId: activeBookId || prev.activeBookId, playbackSpeed, selectedVoiceName, theme, lastSavedAt: snapshot.savedAt, driveRootFolderId: driveRootFolderId || prev.driveRootFolderId, driveRootFolderName: driveRootFolderName || prev.driveRootFolderName, driveSubfolders: driveSubfolders || prev.driveSubfolders }));
-    localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(finalProgress));
-    window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: { bookId: activeBookId || stateRef.current.activeBookId } }));
-  }, []);
-
-  const handleSync = useCallback(async (manual = false) => {
-    const s = stateRef.current;
-    if (!isAuthorized || !s.driveSubfolders?.savesId) {
-      if (manual) showToast("Cloud setup required", 0, 'error');
-      return;
-    }
-    setIsSyncing(true);
-    try {
-      const fileId = await findFileSync(STATE_FILENAME, s.driveSubfolders.savesId);
-      if (!fileId) {
-        if (manual) showToast("No backup found", 0, 'info');
-        setIsSyncing(false);
-        return;
-      }
-      const remoteContent = await fetchDriveFile(fileId);
-      const remoteSnapshot = JSON.parse(remoteContent) as SavedSnapshot;
-      const localSnapshotStr = localStorage.getItem(SNAPSHOT_KEY);
-      const localSnapshot = localSnapshotStr ? JSON.parse(localSnapshotStr) as SavedSnapshot : null;
-
-      if (!localSnapshot || remoteSnapshot.savedAt > localSnapshot.savedAt || manual) {
-        applySnapshot(remoteSnapshot);
-        if (manual) showToast("Cloud Sync Complete", 0, 'success');
-      } else {
-        if (manual) showToast("Local is newer", 0, 'info');
-      }
-    } catch (err: any) { 
-      showToast("Sync Error", 0, 'error');
-    } finally { setIsSyncing(false); }
-  }, [applySnapshot, isAuthorized]);
 
   const handleSelectRoot = useCallback(async () => {
     try {
@@ -387,11 +555,16 @@ const App: React.FC = () => {
           if (playErr.name === 'NotAllowedError') {
              setAutoplayBlocked(true);
              setIsPlaying(false);
-          } else {
-            throw playErr;
-          }
+          } else { throw playErr; }
         }
       } else {
+        if (chapter.cloudTextFileId && chapter.content === '') {
+           showToast("Loading text from cloud...", 0, 'info');
+           const content = await fetchDriveFile(chapter.cloudTextFileId);
+           setState(p => ({ ...p, books: p.books.map(b => b.id === book.id ? { ...b, chapters: b.chapters.map(c => c.id === chapter.id ? { ...c, content, wordCount: content.split(/\s+/).filter(Boolean).length } : c) } : b) }));
+           setTimeout(() => handlePlay(), 100);
+           return;
+        }
         showToast("Audio generating...", 0, 'info');
         await queueBackgroundTTS(s.activeBookId!, chapter.id);
         setTimeout(() => handlePlay(), 1000);
@@ -421,7 +594,7 @@ const App: React.FC = () => {
         driveName = title;
       } catch (e) { showToast("Folder creation failed", 0, 'error'); return; }
     }
-    const bk: Book = { id: crypto.randomUUID(), title, chapters: [], rules: [], backend, directoryHandle, driveFolderId: driveId, driveFolderName: driveName, settings: { useBookSettings: false, highlightMode: HighlightMode.WORD } };
+    const bk: Book = { id: crypto.randomUUID(), title, chapters: [], rules: [], backend, directoryHandle, driveFolderId: driveId, driveFolderName: driveName, settings: { useBookSettings: false, highlightMode: HighlightMode.WORD }, updatedAt: Date.now() };
     setState(p => ({ ...p, books: [...p.books, bk], activeBookId: bk.id }));
     setActiveTab('collection');
     showToast("Book added", 0, 'success');
@@ -471,6 +644,13 @@ const App: React.FC = () => {
 
       <div className="flex-1 overflow-y-auto relative flex">
         {isLoadingChapter && <div className="absolute inset-0 flex items-center justify-center bg-inherit z-[70]"><Loader2 className="w-10 h-10 text-indigo-600 animate-spin" /></div>}
+        {isSyncing && !transitionToast && (
+          <div className="fixed top-20 right-4 z-[80] animate-in slide-in-from-right duration-300">
+             <div className="bg-indigo-600 text-white px-4 py-2 rounded-xl shadow-2xl flex items-center gap-3 font-black text-[10px] uppercase tracking-widest">
+               <Loader2 className="w-3.5 h-3.5 animate-spin" /> Syncing with Drive...
+             </div>
+          </div>
+        )}
         {isAddChapterOpen && (
           <div className="absolute inset-0 z-[60] overflow-y-auto p-4 lg:p-12 backdrop-blur-md bg-black/10">
             <div className="max-w-4xl mx-auto relative">
@@ -529,6 +709,7 @@ const App: React.FC = () => {
               onUpdateBookSettings={s => setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, ...s } } : b) }))}
               onBackToLibrary={() => setActiveTab('library')}
               onResetChapterProgress={handleResetChapterProgress}
+              onSmartExtractChapter={(cid) => handleSmartExtractChapter(activeBook.id, cid)}
             />
           )}
 

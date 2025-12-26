@@ -95,7 +95,6 @@ export interface Chapter {
   audioChunkMap?: AudioChunkMetadata[]; 
   hasCachedAudio?: boolean;
   hasTextOnDrive?: boolean;
-  // Fix: Added updatedAt to allow timestamping chapter updates in App.tsx
   updatedAt?: number;
 }
 
@@ -129,6 +128,7 @@ export interface Book {
   driveFolderName?: string;
   backend: StorageBackend;
   settings: BookSettings;
+  updatedAt?: number;
 }
 
 export interface StrayFile {
