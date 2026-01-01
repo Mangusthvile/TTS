@@ -17,7 +17,7 @@ import { extractChapterWithAI } from './services/geminiService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud } from 'lucide-react';
 
-const STATE_FILENAME = 'talevox_state_v280.json';
+const STATE_FILENAME = 'talevox_state_v281.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -222,9 +222,6 @@ const App: React.FC = () => {
     safeSetLocalStorage(PROGRESS_STORE_V4, JSON.stringify(finalProgress));
     window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: { bookId: activeBookId || stateRef.current.activeBookId } }));
   }, []);
-
-  // Sync Logic, Init Logic, Toast Logic ... (omitted unmodified parts for brevity, using full replacement below)
-  // Re-including full critical logic blocks
 
   const handleSync = useCallback(async (manual = false) => {
     const s = stateRef.current;
@@ -539,7 +536,7 @@ const App: React.FC = () => {
   }, [isAuthorized, markDirty, queueBackgroundTTS]);
 
   const handleChapterExtracted = useCallback(async (data: { 
-    title: string; content: string; url: string; index: number; voiceId: string; setAsDefault: boolean;
+    title: string; content: string; url: string; index: number; voiceId: string; setAsDefault: boolean; keepOpen?: boolean;
   }) => {
     const s = stateRef.current;
     if (!s.activeBookId) return;
@@ -551,7 +548,7 @@ const App: React.FC = () => {
     const filename = buildTextName(data.index, data.title);
     let cloudTextId = undefined;
     if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
-      showToast("Saving source text...", 0, 'info');
+      if (!data.keepOpen) showToast("Saving source text...", 0, 'info'); // Reduce toast spam on bulk
       try { cloudTextId = await uploadToDrive(book.driveFolderId, filename, data.content, undefined, 'text/plain'); } catch (e) { showToast("Drive save failed", 0, 'error'); }
     }
     if (book.backend === StorageBackend.LOCAL && book.directoryHandle) {
@@ -559,8 +556,10 @@ const App: React.FC = () => {
     }
     const newChapter: Chapter = { id: crypto.randomUUID(), index: data.index, title: data.title, content: data.content, filename, wordCount: data.content.split(/\s+/).filter(Boolean).length, progress: 0, progressChars: 0, audioStatus: AudioStatus.PENDING, cloudTextFileId: cloudTextId, hasTextOnDrive: !!cloudTextId, updatedAt: Date.now() };
     setState(prev => ({ ...prev, books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, chapters: [...b.chapters, newChapter].sort((a,b) => a.index-b.index), currentChapterId: b.currentChapterId || newChapter.id } : b) }));
-    setIsAddChapterOpen(false);
-    showToast("Chapter Saved", 0, 'success');
+    if (!data.keepOpen) {
+      setIsAddChapterOpen(false);
+      showToast("Chapter Saved", 0, 'success');
+    }
     markDirty();
     queueBackgroundTTS(s.activeBookId, newChapter.id, data.voiceId, newChapter);
   }, [queueBackgroundTTS, isAuthorized, markDirty]);
@@ -760,6 +759,7 @@ const App: React.FC = () => {
                 suggestedIndex={activeBook?.chapters.length ? Math.max(...activeBook.chapters.map(c => c.index)) + 1 : 1} 
                 theme={state.theme} 
                 defaultVoiceId={activeBook?.settings.defaultVoiceId} 
+                existingChapters={activeBook?.chapters || []}
               />
             </div>
           </div>
