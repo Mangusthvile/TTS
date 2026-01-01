@@ -14,7 +14,8 @@ export function applyRules(text: string, rules: Rule[]): string {
     if (rule.wholeWord && !rule.matchExpression) pattern = `\\b${pattern}\\b`;
     try {
       const regex = new RegExp(pattern, flags);
-      const replacement = rule.ruleType === RuleType.REPLACE ? "" : (rule.speakAs || "");
+      // Fix: If REPLACE, use speakAs. If DELETE, use empty string.
+      const replacement = rule.ruleType === RuleType.DELETE ? "" : (rule.speakAs || "");
       processedText = processedText.replace(regex, replacement);
     } catch (e) {}
   });

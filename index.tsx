@@ -17,7 +17,7 @@ declare global {
 }
 
 // Set version on window for settings display
-window.__APP_VERSION__ = '2.7.15';
+window.__APP_VERSION__ = '2.8.0';
 
 // --- Type Safety Helpers ---
 

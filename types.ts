@@ -63,6 +63,8 @@ export interface Rule {
   enabled: boolean;
   phoneticHint?: string;
   caseMode?: CaseMode;
+  global?: boolean; // If true, applies to all books
+  bookIds?: string[]; // If global is false, applies to these books
 }
 
 export interface AudioChunkMetadata {
@@ -181,6 +183,7 @@ export interface SavedSnapshot {
     driveRootFolderName?: string;
     driveSubfolders?: { booksId: string; trashId: string; savesId: string };
     autoSaveInterval?: number;
+    globalRules?: Rule[];
   };
 }
 
@@ -196,15 +199,11 @@ export interface AppState {
   driveToken?: string;
   googleClientId?: string;
   keepAwake: boolean;
-  lastSession?: {
-    bookId: string;
-    chapterId: string;
-    offsetChars: number;
-  };
   lastSavedAt?: number;
   driveRootFolderId?: string;
   driveRootFolderName?: string;
   driveSubfolders?: { booksId: string; trashId: string; savesId: string };
   syncDiagnostics?: SyncDiagnostics;
   autoSaveInterval: number;
+  globalRules: Rule[];
 }

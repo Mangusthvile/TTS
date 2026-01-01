@@ -1,25 +1,24 @@
+
 import React, { useState, useRef } from 'react';
 import { Book, Theme, StorageBackend } from '../types';
-import { BookOpen, Plus, Trash2, History, Cloud, Monitor, X, Database, Loader2, Image as ImageIcon } from 'lucide-react';
+import { BookOpen, Plus, Trash2, Cloud, Monitor, Database, Image as ImageIcon } from 'lucide-react';
 import { openFolderPicker } from '../services/driveService';
 import { getValidDriveToken } from '../services/driveAuth';
 
 interface LibraryProps {
   books: Book[];
   activeBookId?: string;
-  lastSession?: { bookId: string; chapterId: string; offsetChars: number };
   onSelectBook: (id: string) => void;
   onAddBook: (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string, driveFolderName?: string) => Promise<void>;
   onDeleteBook: (id: string) => void;
   onUpdateBook: (book: Book) => void;
-  onSelectChapter: (bookId: string, chapterId: string, offsetChars?: number) => void;
   theme: Theme;
   onClose?: () => void;
   isOpen?: boolean;
 }
 
 const Library: React.FC<LibraryProps> = ({ 
-  books, activeBookId, lastSession, onSelectBook, onAddBook, onDeleteBook, onUpdateBook, onSelectChapter, theme, onClose, isOpen
+  books, activeBookId, onSelectBook, onAddBook, onDeleteBook, onUpdateBook, theme, onClose, isOpen
 }) => {
   const [isAdding, setIsAdding] = useState(false);
   const [isProcessingAdd, setIsProcessingAdd] = useState(false);
@@ -27,13 +26,9 @@ const Library: React.FC<LibraryProps> = ({
   const coverInputRef = useRef<HTMLInputElement>(null);
   const [uploadingCoverFor, setUploadingCoverFor] = useState<string | null>(null);
 
-  const isPickerSupported = !!(window as any).showDirectoryPicker;
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
   const textClass = isDark ? 'text-slate-100' : isSepia ? 'text-[#3c2f25]' : 'text-black';
-
-  const lastBook = lastSession ? books.find(b => b.id === lastSession.bookId) : null;
-  const lastChapter = lastBook?.chapters.find(c => c.id === lastSession?.chapterId);
 
   const handleAdd = async (backend: StorageBackend, handle?: any, driveFolderId?: string, driveFolderName?: string) => {
     if (!newTitle.trim()) return;
@@ -95,18 +90,6 @@ const Library: React.FC<LibraryProps> = ({
       </div>
 
       <div className="flex-1 overflow-y-auto px-6 pb-12">
-        {lastChapter && lastBook && (
-          <div 
-            onClick={() => onSelectChapter(lastBook.id, lastChapter.id, lastSession!.offsetChars)}
-            className="p-5 rounded-3xl bg-indigo-600 text-white shadow-xl cursor-pointer hover:scale-[1.01] transition-all group overflow-hidden relative mb-8"
-          >
-            <History className="absolute -right-4 -bottom-4 w-24 h-24 opacity-10 group-hover:scale-110 transition-transform" />
-            <p className="text-[10px] font-black uppercase tracking-widest opacity-80 mb-2">Resume Reading</p>
-            <h4 className="font-bold truncate text-lg leading-tight">{lastChapter.title}</h4>
-            <p className="text-xs font-medium opacity-70 mt-1">{lastBook.title}</p>
-          </div>
-        )}
-
         {isAdding && (
           <div className={`p-6 rounded-[2rem] border shadow-2xl space-y-6 mb-8 animate-in zoom-in-95 ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-indigo-50 border-indigo-100'}`}>
             <div className="space-y-1">

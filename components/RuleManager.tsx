@@ -1,21 +1,26 @@
+
 import React, { useState, useMemo, useRef } from 'react';
 import { Rule, RuleType, Scope, Theme } from '../types';
 import { applyRules, speechController } from '../services/speechService';
-import { Plus, Trash2, Zap, Download, Upload, Save, Volume2, Square, Wand2, Type as TypeIcon } from 'lucide-react';
+import { Plus, Trash2, Zap, Download, Upload, Save, Volume2, Square, Wand2, Type as TypeIcon, Globe, Book as BookIcon, Loader2, RefreshCw } from 'lucide-react';
 
 interface RuleManagerProps {
   rules: Rule[];
+  globalRules: Rule[];
   theme: Theme;
   onAddRule: (rule: Rule) => void;
   onUpdateRule: (rule: Rule) => void;
-  onDeleteRule: (id: string) => void;
+  onDeleteRule: (id: string, isGlobal: boolean) => void;
   onImportRules: (rules: Rule[]) => void;
   selectedVoice: string;
   playbackSpeed: number;
+  onScanAndRebuild: () => void;
+  isScanning?: boolean;
+  scanProgress?: string;
 }
 
 const RuleManager: React.FC<RuleManagerProps> = ({ 
-  rules, theme, onAddRule, onUpdateRule, onDeleteRule, onImportRules, selectedVoice, playbackSpeed 
+  rules, globalRules, theme, onAddRule, onUpdateRule, onDeleteRule, onImportRules, selectedVoice, playbackSpeed, onScanAndRebuild, isScanning, scanProgress 
 }) => {
   const [isAdding, setIsAdding] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
@@ -29,13 +34,16 @@ const RuleManager: React.FC<RuleManagerProps> = ({
     wholeWord: true, 
     scope: Scope.PHRASE, 
     priority: 1, 
-    enabled: true
+    enabled: true,
+    global: false
   });
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const allRules = [...globalRules, ...rules];
+
   const handleExport = () => {
-    const data = JSON.stringify(rules, null, 2);
+    const data = JSON.stringify(allRules, null, 2);
     const blob = new Blob([data], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -67,7 +75,7 @@ const RuleManager: React.FC<RuleManagerProps> = ({
       id: 'test-rule-id',
       enabled: true
     };
-    const testProcessed = applyRules(testText, [...rules, ruleToTest]);
+    const testProcessed = applyRules(testText, [...allRules, ruleToTest]);
     
     setIsTesting(true);
     speechController.speak(
@@ -103,20 +111,48 @@ const RuleManager: React.FC<RuleManagerProps> = ({
               <input type="file" ref={fileInputRef} onChange={handleImport} className="hidden" accept=".json" />
             </div>
           </div>
-          {!isAdding && (
-            <button 
-              onClick={() => setIsAdding(true)} 
-              className="px-6 py-4 sm:px-8 sm:py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase tracking-widest shadow-2xl shadow-indigo-600/30 flex items-center justify-center gap-2 hover:scale-105 active:scale-95 transition-all"
+          <div className="flex gap-3">
+             <button 
+              onClick={onScanAndRebuild} 
+              disabled={isScanning}
+              className={`px-4 py-3 bg-emerald-600 text-white rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-lg flex items-center justify-center gap-2 hover:bg-emerald-700 active:scale-95 transition-all disabled:opacity-50`}
             >
-              <Plus className="w-5 h-5" /> New Rule
+              {isScanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+              {isScanning ? (scanProgress || 'Scanning...') : 'Scan & Rebuild'}
             </button>
-          )}
+            {!isAdding && (
+              <button 
+                onClick={() => setIsAdding(true)} 
+                className="px-6 py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase tracking-widest shadow-2xl shadow-indigo-600/30 flex items-center justify-center gap-2 hover:scale-105 active:scale-95 transition-all"
+              >
+                <Plus className="w-5 h-5" /> New Rule
+              </button>
+            )}
+          </div>
         </div>
 
         {isAdding && (
           <div className={`p-5 sm:p-8 rounded-[1.5rem] sm:rounded-[2.5rem] border shadow-2xl animate-in zoom-in-95 duration-200 ${cardBg}`}>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 sm:gap-8 mb-8">
               <div className="space-y-4">
+                <div className="space-y-2">
+                  <label className={`text-[11px] font-black uppercase tracking-widest ml-1 ${labelColor}`}>Scope</label>
+                  <div className="flex gap-2 p-1 rounded-xl bg-black/5">
+                    <button 
+                      onClick={() => setNewRule({...newRule, global: true})}
+                      className={`flex-1 py-2 rounded-lg text-xs font-black transition-all flex items-center justify-center gap-2 ${newRule.global ? 'bg-indigo-600 text-white shadow-sm' : 'opacity-60'}`}
+                    >
+                      <Globe className="w-3 h-3" /> Global
+                    </button>
+                    <button 
+                      onClick={() => setNewRule({...newRule, global: false})}
+                      className={`flex-1 py-2 rounded-lg text-xs font-black transition-all flex items-center justify-center gap-2 ${!newRule.global ? 'bg-indigo-600 text-white shadow-sm' : 'opacity-60'}`}
+                    >
+                      <BookIcon className="w-3 h-3" /> This Book
+                    </button>
+                  </div>
+                </div>
+
                 <div className="space-y-2">
                   <label className={`text-[11px] font-black uppercase tracking-widest ml-1 ${labelColor}`}>Rule Type</label>
                   <div className="flex gap-2 p-1 rounded-xl bg-black/5">
@@ -209,7 +245,7 @@ const RuleManager: React.FC<RuleManagerProps> = ({
                 </div>
               </div>
               <div className="mt-3 text-[10px] font-black opacity-40 uppercase tracking-tighter line-clamp-1">
-                Preview result: <span className="opacity-100 italic">"{applyRules(testText, [...rules, {...(newRule as Rule), id: 'tmp', enabled: true}])}"</span>
+                Preview result: <span className="opacity-100 italic">"{applyRules(testText, [...allRules, {...(newRule as Rule), id: 'tmp', enabled: true}])}"</span>
               </div>
             </div>
 
@@ -230,7 +266,7 @@ const RuleManager: React.FC<RuleManagerProps> = ({
           </div>
         )}
 
-        {rules.length === 0 ? (
+        {allRules.length === 0 ? (
           <div className={`p-16 sm:p-20 text-center rounded-[2rem] sm:rounded-[3rem] border-2 border-dashed ${isDark ? 'border-slate-800' : 'border-indigo-600/10'}`}>
             <Zap className={`w-12 h-12 sm:w-16 sm:h-16 mx-auto mb-6 opacity-40 ${isDark ? 'text-slate-600' : 'text-indigo-600'}`} />
             <h3 className={`text-lg sm:text-xl font-black ${textClass}`}>Your Rulebook is Empty</h3>
@@ -238,7 +274,7 @@ const RuleManager: React.FC<RuleManagerProps> = ({
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
-            {rules.map(rule => (
+            {allRules.map(rule => (
               <div key={rule.id} className={`p-5 sm:p-7 rounded-[1.2rem] sm:rounded-[1.5rem] border transition-all hover:shadow-lg flex items-center justify-between group ${cardBg}`}>
                 <div className="flex flex-col gap-1 min-w-0">
                   <div className="flex items-center gap-3">
@@ -247,6 +283,7 @@ const RuleManager: React.FC<RuleManagerProps> = ({
                     </span>
                     <span className="text-indigo-500 font-black">→</span>
                     <div className="flex gap-1">
+                      {rule.global && <span className="bg-emerald-600/20 text-emerald-500 text-[8px] font-black px-1 rounded uppercase">Global</span>}
                       {rule.matchCase && <span className="bg-indigo-600/20 text-indigo-500 text-[8px] font-black px-1 rounded uppercase">Case</span>}
                       {rule.matchExpression && <span className="bg-emerald-600/20 text-emerald-500 text-[8px] font-black px-1 rounded uppercase">Regex</span>}
                     </div>
@@ -256,7 +293,7 @@ const RuleManager: React.FC<RuleManagerProps> = ({
                   </span>
                 </div>
                 <button 
-                  onClick={() => onDeleteRule(rule.id)} 
+                  onClick={() => onDeleteRule(rule.id, !!rule.global)} 
                   className={`p-3 rounded-xl transition-all ${isDark ? 'text-slate-500 hover:text-red-500 hover:bg-white/10' : 'text-slate-400 hover:text-red-600 hover:bg-black/5'} opacity-60 sm:opacity-0 sm:group-hover:opacity-100`}
                 >
                   <Trash2 className="w-5 h-5" />
