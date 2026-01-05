@@ -539,39 +539,23 @@ const App: React.FC = () => {
     title: string; content: string; url: string; index: number; voiceId: string; setAsDefault: boolean; keepOpen?: boolean;
   }) => {
     const s = stateRef.current;
-    if (!s.activeBookId) return; // Should return promise rejection or void? Assuming void compatible.
+    if (!s.activeBookId) return;
     const book = s.books.find(b => b.id === s.activeBookId);
     if (!book) return;
-
     if (data.setAsDefault) {
       setState(prev => ({ ...prev, books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, settings: { ...b.settings, defaultVoiceId: data.voiceId } } : b) }));
     }
     const filename = buildTextName(data.index, data.title);
     let cloudTextId = undefined;
-    
-    // Critical section for bulk import retry logic
-    try {
-        if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
-          if (!data.keepOpen) showToast("Saving source text...", 0, 'info'); 
-          try { 
-            cloudTextId = await uploadToDrive(book.driveFolderId, filename, data.content, undefined, 'text/plain'); 
-          } catch (e) { 
-            if (data.keepOpen) throw e; // Rethrow for bulk importer to catch
-            showToast("Drive save failed", 0, 'error'); 
-          }
-        }
-    } catch (e) {
-        throw e; // Propagate up
+    if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
+      if (!data.keepOpen) showToast("Saving source text...", 0, 'info'); // Reduce toast spam on bulk
+      try { cloudTextId = await uploadToDrive(book.driveFolderId, filename, data.content, undefined, 'text/plain'); } catch (e) { showToast("Drive save failed", 0, 'error'); }
     }
-
     if (book.backend === StorageBackend.LOCAL && book.directoryHandle) {
       try { await saveChapterToFile(book.directoryHandle, { id: 'tmp', index: data.index, title: data.title, content: data.content, filename, wordCount: 0, progress: 0, progressChars: 0 }); } catch (e) {}
     }
-    
     const newChapter: Chapter = { id: crypto.randomUUID(), index: data.index, title: data.title, content: data.content, filename, wordCount: data.content.split(/\s+/).filter(Boolean).length, progress: 0, progressChars: 0, audioStatus: AudioStatus.PENDING, cloudTextFileId: cloudTextId, hasTextOnDrive: !!cloudTextId, updatedAt: Date.now() };
-    
     setState(prev => ({ ...prev, books: prev.books.map(b => b.id === prev.activeBookId ? { ...b, chapters: [...b.chapters, newChapter].sort((a,b) => a.index-b.index), currentChapterId: b.currentChapterId || newChapter.id } : b) }));
-    
     if (!data.keepOpen) {
       setIsAddChapterOpen(false);
       showToast("Chapter Saved", 0, 'success');
@@ -776,7 +760,6 @@ const App: React.FC = () => {
                 theme={state.theme} 
                 defaultVoiceId={activeBook?.settings.defaultVoiceId} 
                 existingChapters={activeBook?.chapters || []}
-                onClose={() => setIsAddChapterOpen(false)}
               />
             </div>
           </div>

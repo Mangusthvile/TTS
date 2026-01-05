@@ -1,3 +1,4 @@
+
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile } from '../types';
 import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon, Sparkles } from 'lucide-react';
@@ -86,8 +87,23 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
     setIsCheckingDrive(true);
     try {
+      // Pagination handled in driveService now
       const driveFiles = await listFilesInFolder(book.driveFolderId);
-      const fileMap = new Map(driveFiles.map(f => [f.name, f]));
+      
+      // Sort by modifiedTime DESC (Newest first) so that if duplicates exist,
+      // the newest file is encountered first (or last, depending on iteration).
+      // We want to prefer the newest file for the map.
+      driveFiles.sort((a, b) => new Date(b.modifiedTime).getTime() - new Date(a.modifiedTime).getTime());
+
+      // Use a Map to find the newest file for each name.
+      // Since we sorted Newest -> Oldest, we check !has() to keep the first (newest).
+      const fileMap = new Map<string, typeof driveFiles[0]>();
+      for (const f of driveFiles) {
+        if (!fileMap.has(f.name)) {
+          fileMap.set(f.name, f);
+        }
+      }
+
       const scan: ScanResult = { missingTextIds: [], missingAudioIds: [], strayFiles: [], duplicates: [], totalChecked: chapters.length };
       const matchedFileIds = new Set<string>();
 
@@ -98,6 +114,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         let textFile = fileMap.get(expectedTextName);
         let audioFile = fileMap.get(expectedAudioName);
 
+        // Fallback: prefix search. 
+        // Note: driveFiles is sorted Newest->Oldest, so find() returns newest match.
         if (!textFile) {
             const prefix = `${chapter.index.toString().padStart(3, '0')}_`;
             textFile = driveFiles.find(f => f.name.startsWith(prefix) && f.name.endsWith('.txt'));

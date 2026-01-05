@@ -91,22 +91,43 @@ export async function openFolderPicker(title = 'Select TaleVox Root Folder'): Pr
   });
 }
 
+/**
+ * Helper to fetch all pages of a Drive API list request.
+ * Required for libraries > 1000 files.
+ */
+async function fetchAllPages(url: string): Promise<any[]> {
+  let files: any[] = [];
+  let pageToken: string | null = null;
+  
+  do {
+    // Append pageToken if it exists
+    const pageUrl: string = pageToken 
+      ? (url.includes('?') ? `${url}&pageToken=${pageToken}` : `${url}?pageToken=${pageToken}`) 
+      : url;
+      
+    const response = await driveFetch(pageUrl);
+    if (!response.ok) throw new Error(`DRIVE_LIST_ERROR: ${response.status}`);
+    
+    const data = await response.json();
+    if (data.files) files = files.concat(data.files);
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+  
+  return files;
+}
+
 export async function listFilesInFolder(folderId: string): Promise<{id: string, name: string, mimeType: string, modifiedTime: string}[]> {
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
-  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, mimeType, modifiedTime)&orderBy=name&pageSize=1000&includeItemsFromAllDrives=true&supportsAllDrives=true`;
-  const response = await driveFetch(url);
-  if (!response.ok) throw new Error("DRIVE_LIST_FILES_ERROR");
-  const data = await response.json();
-  return data.files || [];
+  // Ensure we ask for nextPageToken to support pagination
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id, name, mimeType, modifiedTime)&orderBy=name&pageSize=1000&includeItemsFromAllDrives=true&supportsAllDrives=true`;
+  return fetchAllPages(url);
 }
 
 export async function listFilesSortedByModified(folderId: string): Promise<{id: string, name: string, mimeType: string, modifiedTime: string}[]> {
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
-  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, mimeType, modifiedTime)&orderBy=modifiedTime desc&pageSize=1000&includeItemsFromAllDrives=true&supportsAllDrives=true`;
-  const response = await driveFetch(url);
-  if (!response.ok) throw new Error("DRIVE_LIST_FILES_ERROR");
-  const data = await response.json();
-  return data.files || [];
+  // Ensure we ask for nextPageToken to support pagination
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id, name, mimeType, modifiedTime)&orderBy=modifiedTime desc&pageSize=1000&includeItemsFromAllDrives=true&supportsAllDrives=true`;
+  return fetchAllPages(url);
 }
 
 /**

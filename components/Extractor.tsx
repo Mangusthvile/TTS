@@ -1,6 +1,6 @@
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Plus, AlertCircle, Trash2, Sparkles, FileText, Headphones, Check, X, Loader2, Files, RefreshCw } from 'lucide-react';
+import { Upload, Plus, AlertCircle, Trash2, Sparkles, FileText, Headphones, Check, X, Loader2, Files } from 'lucide-react';
 import { Theme, CLOUD_VOICES, Chapter } from '../types';
 
 interface ImporterProps {
@@ -12,12 +12,11 @@ interface ImporterProps {
     voiceId: string;
     setAsDefault: boolean;
     keepOpen?: boolean;
-  }) => Promise<void>;
+  }) => void;
   suggestedIndex: number;
   theme: Theme;
   defaultVoiceId?: string;
   existingChapters: Chapter[];
-  onClose: () => void;
 }
 
 interface SmartFile {
@@ -29,7 +28,7 @@ interface SmartFile {
   content: string | null;
 }
 
-const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex, theme, defaultVoiceId, existingChapters, onClose }) => {
+const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex, theme, defaultVoiceId, existingChapters }) => {
   const [activeTab, setActiveTab] = useState<'manual' | 'smart'>('manual');
   
   // Manual Tab State
@@ -86,28 +85,24 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
     e.target.value = '';
   };
 
-  const handleAddManual = async () => {
+  const handleAddManual = () => {
     if (!content.trim()) {
       setError("Please paste text or upload a file first.");
       return;
     }
     const finalTitle = title.trim() || `Chapter ${chapterNum}`;
-    try {
-        await onChapterExtracted({
-          title: finalTitle,
-          content: content,
-          url: 'text-import',
-          index: chapterNum,
-          voiceId: selectedVoiceId,
-          setAsDefault: setAsDefault,
-          keepOpen: false
-        });
-        setTitle('');
-        setContent('');
-        setError(null);
-    } catch(e) {
-        setError("Import failed. See toast.");
-    }
+    onChapterExtracted({
+      title: finalTitle,
+      content: content,
+      url: 'text-import',
+      index: chapterNum,
+      voiceId: selectedVoiceId,
+      setAsDefault: setAsDefault,
+      keepOpen: false
+    });
+    setTitle('');
+    setContent('');
+    setError(null);
   };
 
   // -- Smart Bulk Logic --
@@ -174,51 +169,34 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
   };
 
   const handleBulkImport = async () => {
-    const readyFiles = smartFiles.filter(f => f.status === 'ready' || f.status === 'error');
+    const readyFiles = smartFiles.filter(f => f.status === 'ready');
     if (readyFiles.length === 0) return;
     
     setIsImporting(true);
-    let errorCount = 0;
-
     // Process sequentially to ensure order and avoid overwhelming
     for (const f of readyFiles) {
       if (f.parsedIndex !== null && f.parsedTitle !== null && f.content) {
-        try {
-            await onChapterExtracted({
-              title: f.parsedTitle,
-              content: f.content,
-              url: 'bulk-import',
-              index: f.parsedIndex,
-              voiceId: selectedVoiceId,
-              setAsDefault: false, // Don't override defaults during bulk
-              keepOpen: true
-            });
-            // Mark locally as uploaded
-            setSmartFiles(prev => prev.map(pf => pf.id === f.id ? { ...pf, status: 'uploaded' } : pf));
-        } catch (e) {
-            // Mark as error
-            setSmartFiles(prev => prev.map(pf => pf.id === f.id ? { ...pf, status: 'error' } : pf));
-            errorCount++;
-        }
+        onChapterExtracted({
+          title: f.parsedTitle,
+          content: f.content,
+          url: 'bulk-import',
+          index: f.parsedIndex,
+          voiceId: selectedVoiceId,
+          setAsDefault: false, // Don't override defaults during bulk
+          keepOpen: true
+        });
+        // Mark locally as uploaded
+        setSmartFiles(prev => prev.map(pf => pf.id === f.id ? { ...pf, status: 'uploaded' } : pf));
         // Small delay to let app state update slightly
         await new Promise(r => setTimeout(r, 100));
       }
     }
     setIsImporting(false);
-
-    // Auto-close if everything succeeded
-    if (errorCount === 0) {
-        onClose();
-    }
   };
 
   const removeSmartFile = (id: string) => {
     setSmartFiles(prev => prev.filter(f => f.id !== id));
   };
-
-  const readyCount = smartFiles.filter(f => f.status === 'ready').length;
-  const errorCount = smartFiles.filter(f => f.status === 'error').length;
-  const isRetryMode = errorCount > 0;
 
   // -- Theme helpers --
   const isDark = theme === Theme.DARK;
@@ -418,11 +396,11 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
               <button onClick={() => setSmartFiles([])} className="px-6 py-3 text-xs font-black uppercase tracking-widest opacity-60 hover:opacity-100">Clear List</button>
               <button 
                 onClick={handleBulkImport}
-                disabled={isImporting || (readyCount === 0 && errorCount === 0)}
-                className={`px-8 py-4 text-white rounded-xl font-black uppercase tracking-widest shadow-xl flex items-center gap-2 transition-all disabled:opacity-50 ${isRetryMode ? 'bg-amber-600 hover:bg-amber-700' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                disabled={isImporting || smartFiles.filter(f => f.status === 'ready').length === 0}
+                className="px-8 py-4 bg-indigo-600 text-white rounded-xl font-black uppercase tracking-widest shadow-xl hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2"
               >
-                {isImporting ? <Loader2 className="w-4 h-4 animate-spin" /> : isRetryMode ? <RefreshCw className="w-4 h-4" /> : <Upload className="w-4 h-4" />}
-                {isImporting ? 'Importing...' : isRetryMode ? `Retry ${errorCount} Failed` : `Import ${readyCount} Files`}
+                {isImporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                Import {smartFiles.filter(f => f.status === 'ready').length} Ready Files
               </button>
             </div>
           </div>
