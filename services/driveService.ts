@@ -1,4 +1,5 @@
 
+
 import { driveFetch, getValidDriveToken } from './driveAuth';
 
 export function buildMp3Name(chapterIndex: number, title: string) {
@@ -137,6 +138,7 @@ export async function listFilesSortedByModified(folderId: string): Promise<{id: 
 export async function listSaveFileCandidates(folderId: string): Promise<{id: string, name: string, modifiedTime: string}[]> {
   const qStr = `'${folderId}' in parents and trashed = false and (name contains '.json' or name contains 'talevox')`;
   const q = encodeURIComponent(qStr);
+  // Sort by newest first to ensure we find the latest save quickly
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, modifiedTime)&orderBy=modifiedTime desc&pageSize=50&includeItemsFromAllDrives=true&supportsAllDrives=true`;
   const response = await driveFetch(url);
   if (!response.ok) throw new Error("DRIVE_LIST_CANDIDATES_ERROR");
@@ -144,11 +146,18 @@ export async function listSaveFileCandidates(folderId: string): Promise<{id: str
   return data.files || [];
 }
 
+/**
+ * Finds the latest file ID by name. 
+ * CRITICAL FIX: Uses 'orderBy=modifiedTime desc' to ensure we get the newest version 
+ * if duplicates exist. This fixes autoplay selecting old/broken files.
+ */
 export async function findFileSync(name: string, parentId?: string): Promise<string | null> {
   let qStr = `name = '${name.replace(/'/g, "\\'")}' and trashed = false`;
   if (parentId) qStr += ` and '${parentId}' in parents`;
   const q = encodeURIComponent(qStr);
-  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, modifiedTime)&includeItemsFromAllDrives=true&supportsAllDrives=true`;
+  
+  // Priority: Newest modified time
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, modifiedTime)&orderBy=modifiedTime desc&includeItemsFromAllDrives=true&supportsAllDrives=true`;
   const response = await driveFetch(url);
   if (!response.ok) throw new Error("DRIVE_FIND_ERROR");
   const data = await response.json();

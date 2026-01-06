@@ -1,3 +1,4 @@
+
 import React, { Component, ErrorInfo, ReactNode } from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
@@ -105,8 +106,7 @@ interface State {
   isReloading: boolean;
 }
 
-// Fixed: Use named 'Component' import to ensure proper TypeScript inheritance of setState and props
-class ErrorBoundary extends Component<Props, State> {
+class ErrorBoundary extends React.Component<Props, State> {
   public state: State = {
     hasError: false,
     error: null,
@@ -127,7 +127,6 @@ class ErrorBoundary extends Component<Props, State> {
     console.error("Uncaught error:", error, errorInfo);
     // Normalize undefined to null to satisfy strict string | null typing
     const componentStack = toNullableString(errorInfo.componentStack);
-    // Fixed: setState is correctly identified as a member of Component
     this.setState({ errorInfo: componentStack });
     recordFatalError(error, `React Component Crash: ${(componentStack || "").substring(0, 200)}`);
   }
@@ -144,7 +143,6 @@ class ErrorBoundary extends Component<Props, State> {
   };
 
   private handleReload = () => {
-    // Fixed: setState is correctly identified as a member of Component
     this.setState({ isReloading: true });
     attemptHardReload();
   };
@@ -209,7 +207,6 @@ class ErrorBoundary extends Component<Props, State> {
       );
     }
 
-    // Fixed: props correctly inherited from Component
     return this.props.children;
   }
 }
