@@ -98,6 +98,16 @@ class SpeechController {
         this.saveProgress(); 
         this.lastSaveTime = now;
       }
+
+      // Mobile fallback: some browsers throttle requestAnimationFrame; call syncCallback here
+      // Checks for typical touch/mobile environment
+      if (this.syncCallback && this.audio.duration && (('ontouchstart' in window) || navigator.maxTouchPoints > 0)) {
+         this.syncCallback({
+           currentTime: t,
+           duration: this.audio.duration,
+           charOffset: this.getOffsetFromTime(t, this.audio.duration)
+         });
+      }
     };
     this.audio.onerror = () => { if (this.onFetchStateChange) this.onFetchStateChange(false); };
   }
@@ -356,6 +366,7 @@ class SpeechController {
     this.audio.pause();
     this.audio.src = "";
     this.audio.removeAttribute("src");
+    this.audio.load(); // Force buffer reset to avoid glitching when starting new chapter
     // Only revoke if we created it
     revokeObjectUrl(this.currentBlobUrl);
     this.currentBlobUrl = null;
