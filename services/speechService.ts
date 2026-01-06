@@ -14,7 +14,6 @@ export function applyRules(text: string, rules: Rule[]): string {
     if (rule.wholeWord && !rule.matchExpression) pattern = `\\b${pattern}\\b`;
     try {
       const regex = new RegExp(pattern, flags);
-      // Fix: If REPLACE, use speakAs. If DELETE, use empty string.
       const replacement = rule.ruleType === RuleType.DELETE ? "" : (rule.speakAs || "");
       processedText = processedText.replace(regex, replacement);
     } catch (e) {}
@@ -41,9 +40,12 @@ class SpeechController {
   private onFetchStateChange: ((isFetching: boolean) => void) | null = null;
   private sessionToken: number = 0;
   private context: { bookId: string; chapterId: string } | null = null;
+  
+  // Track time manually to prevent browser GC resetting playhead on mobile
+  private lastKnownTime: number = 0;
   private lastSaveTime: number = 0;
 
-  // Highlight buffer to account for synthesis pauses and speech pacing (300ms)
+  // Highlight buffer to account for synthesis pauses and speech pacing (350ms)
   private readonly HIGHLIGHT_DELAY_SEC = 0.35;
 
   constructor() {
@@ -70,13 +72,26 @@ class SpeechController {
 
   private setupAudioListeners() {
     this.audio.onended = () => {
+      this.lastKnownTime = this.audio.duration || this.lastKnownTime;
       this.saveProgress(true);
       this.stopSyncLoop();
       if (this.onEndCallback) setTimeout(() => this.onEndCallback?.(), 0);
     };
-    this.audio.onplay = () => { this.applyRequestedSpeed(); this.startSyncLoop(); if (this.onFetchStateChange) this.onFetchStateChange(false); };
-    this.audio.onpause = () => { this.saveProgress(); this.stopSyncLoop(); };
-    this.audio.ontimeupdate = () => { if (Date.now() - this.lastSaveTime > 2000) this.saveProgress(); };
+    this.audio.onplay = () => { 
+      this.applyRequestedSpeed(); 
+      this.startSyncLoop(); 
+      if (this.onFetchStateChange) this.onFetchStateChange(false); 
+    };
+    this.audio.onpause = () => { 
+      this.lastKnownTime = this.audio.currentTime;
+      this.saveProgress(); 
+      this.stopSyncLoop(); 
+    };
+    this.audio.ontimeupdate = () => { 
+      // Keep track of time locally to survive browser aggressive memory management
+      if (this.audio.currentTime > 0) this.lastKnownTime = this.audio.currentTime;
+      if (Date.now() - this.lastSaveTime > 2000) this.saveProgress(); 
+    };
     this.audio.onerror = () => { if (this.onFetchStateChange) this.onFetchStateChange(false); };
   }
 
@@ -87,16 +102,37 @@ class SpeechController {
 
   public saveProgress(completed: boolean = false) {
     if (!this.context) return;
-    const curTime = this.audio.currentTime;
+    
+    // Safety: If audio.currentTime reports 0 but we have a significant lastKnownTime, use that.
+    // This happens when mobile browsers unload the media resource while paused.
+    let curTime = this.audio.currentTime;
+    if (curTime === 0 && this.lastKnownTime > 1 && !completed) {
+      curTime = this.lastKnownTime;
+    }
+
     const duration = isFinite(this.audio.duration) && this.audio.duration > 0 ? this.audio.duration : 0;
     if (duration === 0 && !completed) return;
+    
     const finalTime = completed ? duration : Math.min(curTime, duration || Infinity);
     const percent = duration > 0 ? Math.min(1, Math.max(0, finalTime / duration)) : (completed ? 1 : 0);
+    
+    // Safety: Don't overwrite valid progress with 0 unless we are at the very start
+    if (finalTime === 0 && !completed && this.lastKnownTime > 5) return;
+
     const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
     const store = storeRaw ? JSON.parse(storeRaw) : {};
     if (!store[this.context.bookId]) store[this.context.bookId] = {};
+    
     const existing = store[this.context.bookId][this.context.chapterId];
-    store[this.context.bookId][this.context.chapterId] = { timeSec: finalTime, durationSec: duration > 0 ? duration : (existing?.durationSec || 0), percent, completed: completed || existing?.completed || false, updatedAt: Date.now() };
+    
+    store[this.context.bookId][this.context.chapterId] = { 
+      timeSec: finalTime, 
+      durationSec: duration > 0 ? duration : (existing?.durationSec || 0), 
+      percent, 
+      completed: completed || existing?.completed || false, 
+      updatedAt: Date.now() 
+    };
+    
     localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(store));
     this.lastSaveTime = Date.now();
     window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: this.context }));
@@ -116,7 +152,6 @@ class SpeechController {
 
   public getOffsetFromTime(t: number, dur?: number): number {
     const duration = dur || this.audio.duration || 0;
-    // Buffer is only added if there's actually an intro duration recorded
     const effectiveIntroEnd = this.currentIntroDurSec > 0 ? (this.currentIntroDurSec + this.HIGHLIGHT_DELAY_SEC) : 0;
     
     if (duration === 0 || t < effectiveIntroEnd) return 0;
@@ -149,13 +184,19 @@ class SpeechController {
     this.audio.pause();
     this.audio.removeAttribute("src");
     this.audio.load();
+    
     if (!localUrl) revokeObjectUrl(this.currentBlobUrl);
     this.currentBlobUrl = null;
+    
     this.onEndCallback = onEnd;
     this.syncCallback = onSync;
     this.currentTextLength = totalContentChars;
     this.currentIntroDurSec = introDurSec;
     this.currentChunkMap = chunkMap || null;
+    
+    // Reset internal timer for new file
+    this.lastKnownTime = startTimeSec;
+
     if (this.onFetchStateChange) this.onFetchStateChange(true);
 
     try {
@@ -165,8 +206,10 @@ class SpeechController {
         url = res.url;
       }
       if (this.sessionToken !== session) { if (!localUrl) revokeObjectUrl(url); return; }
+      
       this.currentBlobUrl = url || null;
       this.audio.src = url || '';
+      
       await new Promise<void>((resolve, reject) => {
         const onReady = () => { cleanup(); resolve(); };
         const onErr = () => { cleanup(); reject(new Error("AUDIO_LOAD_ERROR")); };
@@ -175,14 +218,26 @@ class SpeechController {
         this.audio.addEventListener("error", onErr, { once: true });
         this.audio.load();
       });
+      
       if (this.sessionToken !== session) return;
       this.applyRequestedSpeed();
+      
       const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
       const store = storeRaw ? JSON.parse(storeRaw) : {};
       const saved = this.context ? store[this.context.bookId]?.[this.context.chapterId] : null;
-      // Prioritize saved time if it exists, otherwise use provided start time
-      const resumeTime = saved?.timeSec ?? startTimeSec;
-      if (resumeTime > 0) this.audio.currentTime = Math.min(resumeTime, Math.max(0, this.audio.duration - 0.25));
+      
+      // Fix: If the chapter was marked completed, force start from beginning to avoid loop
+      if (saved?.completed) {
+        this.audio.currentTime = 0;
+        this.lastKnownTime = 0;
+      } else {
+        const resumeTime = saved?.timeSec ?? startTimeSec;
+        if (resumeTime > 0) {
+          this.audio.currentTime = Math.min(resumeTime, Math.max(0, this.audio.duration - 0.25));
+          this.lastKnownTime = this.audio.currentTime;
+        }
+      }
+
       await this.audio.play();
     } catch (err) {
       if (this.onFetchStateChange) this.onFetchStateChange(false);
@@ -192,16 +247,19 @@ class SpeechController {
 
   public seekToTime(seconds: number) {
     if (!isFinite(seconds) || seconds < 0) return;
+    this.lastKnownTime = Math.min(seconds, this.audio.duration); // Update tracking immediately
+    
     if (this.audio.duration > 0) {
-      this.audio.currentTime = Math.min(seconds, this.audio.duration);
+      this.audio.currentTime = this.lastKnownTime;
       this.syncCallback?.({ currentTime: this.audio.currentTime, duration: this.audio.duration, charOffset: this.getOffsetFromTime(this.audio.currentTime) });
-      this.saveProgress(); // IMPORTANT: Save immediately so resume works correctly
+      this.saveProgress();
     }
   }
 
   public seekToOffset(offset: number) {
     const duration = this.audio.duration;
     if (!duration || this.currentTextLength <= 0) return;
+    
     let targetTime = 0;
     const effectiveIntroEnd = this.currentIntroDurSec > 0 ? (this.currentIntroDurSec + this.HIGHLIGHT_DELAY_SEC) : 0;
     
@@ -221,39 +279,46 @@ class SpeechController {
     } else {
       targetTime = effectiveIntroEnd + (Math.max(0, Math.min(1, offset / this.currentTextLength)) * Math.max(0.001, duration - effectiveIntroEnd));
     }
+    
+    this.lastKnownTime = targetTime; // Update tracking immediately
     this.audio.currentTime = targetTime;
     this.syncCallback?.({ currentTime: targetTime, duration, charOffset: offset });
-    this.saveProgress(); // IMPORTANT: Save immediately so resume works correctly
+    this.saveProgress(); 
   }
 
   private stopSyncLoop() { if (this.rafId !== null) { cancelAnimationFrame(this.rafId); this.rafId = null; } }
 
   speak(text: string, voiceName: string | undefined, rate: number, offset: number, onEnd: () => void, isIntro: boolean = false) {
     window.speechSynthesis.cancel();
-    
-    // For main reading flow with highlighting, handle buffer
     const executeUtterance = (txt: string, delay: number, callback: () => void) => {
       const utterance = new SpeechSynthesisUtterance(txt);
       const voice = window.speechSynthesis.getVoices().find(v => v.name === voiceName);
       if (voice) utterance.voice = voice;
       utterance.rate = rate;
-      utterance.onend = () => {
-        if (delay > 0) setTimeout(callback, delay * 1000);
-        else callback();
-      };
+      utterance.onend = () => { if (delay > 0) setTimeout(callback, delay * 1000); else callback(); };
       window.speechSynthesis.speak(utterance);
     };
-
-    if (isIntro) {
-      // Just speak it, don't trigger end callback for highlighting yet
-      executeUtterance(text, 0, onEnd);
-    } else {
-      executeUtterance(text, 0, onEnd);
-    }
+    executeUtterance(text, 0, onEnd);
   }
 
-  pause() { this.audio.pause(); window.speechSynthesis.pause(); }
-  resume() { if (this.audio.src) { this.applyRequestedSpeed(); this.audio.play().catch(() => {}); } window.speechSynthesis.resume(); }
+  pause() { 
+    this.audio.pause(); 
+    this.lastKnownTime = this.audio.currentTime; // Save state explicitly
+    window.speechSynthesis.pause(); 
+  }
+  
+  resume() { 
+    if (this.audio.src) { 
+      this.applyRequestedSpeed(); 
+      // Paranoid Resume: Mobile browsers often lose position. Restore from internal tracker if playhead is 0 but shouldn't be.
+      if (this.audio.currentTime === 0 && this.lastKnownTime > 0) {
+        this.audio.currentTime = this.lastKnownTime;
+      }
+      this.audio.play().catch(() => {}); 
+    } 
+    window.speechSynthesis.resume(); 
+  }
+  
   stop() {
     this.saveProgress();
     this.sessionToken++;
@@ -263,6 +328,7 @@ class SpeechController {
     this.audio.load();
     revokeObjectUrl(this.currentBlobUrl);
     this.currentBlobUrl = null;
+    this.lastKnownTime = 0;
     if (this.onFetchStateChange) this.onFetchStateChange(false);
     window.speechSynthesis.cancel();
   }

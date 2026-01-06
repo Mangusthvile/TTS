@@ -33,14 +33,14 @@ export default defineConfig({
       },
       workbox: {
         // Ensure cache is updated when version bumps
-        cacheId: 'talevox-v2.8.2',
+        cacheId: 'talevox-v2.8.3',
         cleanupOutdatedCaches: true
       }
     })
   ],
   define: {
     'process.env': {},
-    __APP_VERSION__: JSON.stringify('2.8.2'),
+    __APP_VERSION__: JSON.stringify('2.8.3'),
   },
   server: {
     port: 3000
