@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule } from './types';
 import Library from './components/Library';
@@ -17,7 +18,7 @@ import { extractChapterWithAI } from './services/geminiService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud } from 'lucide-react';
 
-const STATE_FILENAME = 'talevox_state_v281.json';
+const STATE_FILENAME = 'talevox_state_v282.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -625,6 +626,19 @@ const App: React.FC = () => {
     if (!book || !book.currentChapterId) return;
     const chapter = book.chapters.find(c => c.id === book.currentChapterId);
     if (!chapter) return;
+    
+    // SMART RESUME: If we are just paused on the same chapter, just resume instead of reloading.
+    // This fixes double-tap reset issues and is faster on mobile.
+    if (speechController.currentContext?.bookId === book.id && 
+        speechController.currentContext?.chapterId === chapter.id && 
+        speechController.isPaused &&
+        speechController.hasAudioSource) {
+        
+        speechController.resume();
+        setIsPlaying(true);
+        return;
+    }
+
     setIsPlaying(true);
     setAutoplayBlocked(false);
     const voice = book.settings.defaultVoiceId || 'en-US-Standard-C';

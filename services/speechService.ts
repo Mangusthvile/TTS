@@ -65,6 +65,9 @@ class SpeechController {
     this.context = ctx;
   }
 
+  get currentContext() { return this.context; }
+  get hasAudioSource() { return !!this.audio.src && this.audio.src !== '' && this.audio.src !== window.location.href; }
+
   private setupAudioListeners() {
     this.audio.onended = () => {
       this.saveProgress(true);
@@ -177,6 +180,7 @@ class SpeechController {
       const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
       const store = storeRaw ? JSON.parse(storeRaw) : {};
       const saved = this.context ? store[this.context.bookId]?.[this.context.chapterId] : null;
+      // Prioritize saved time if it exists, otherwise use provided start time
       const resumeTime = saved?.timeSec ?? startTimeSec;
       if (resumeTime > 0) this.audio.currentTime = Math.min(resumeTime, Math.max(0, this.audio.duration - 0.25));
       await this.audio.play();
@@ -191,6 +195,7 @@ class SpeechController {
     if (this.audio.duration > 0) {
       this.audio.currentTime = Math.min(seconds, this.audio.duration);
       this.syncCallback?.({ currentTime: this.audio.currentTime, duration: this.audio.duration, charOffset: this.getOffsetFromTime(this.audio.currentTime) });
+      this.saveProgress(); // IMPORTANT: Save immediately so resume works correctly
     }
   }
 
@@ -218,6 +223,7 @@ class SpeechController {
     }
     this.audio.currentTime = targetTime;
     this.syncCallback?.({ currentTime: targetTime, duration, charOffset: offset });
+    this.saveProgress(); // IMPORTANT: Save immediately so resume works correctly
   }
 
   private stopSyncLoop() { if (this.rafId !== null) { cancelAnimationFrame(this.rafId); this.rafId = null; } }
