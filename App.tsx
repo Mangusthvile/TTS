@@ -146,27 +146,42 @@ const App: React.FC = () => {
   useEffect(() => {
     const handleProgressUpdate = (e: any) => {
       const { bookId, chapterId } = e.detail;
-      if (!bookId || !chapterId) return;
-      const store = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
+      if (!bookId) return;
+      const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
+      if (!storeRaw) return;
+      const store = JSON.parse(storeRaw);
       const bData = store[bookId];
       if (!bData) return;
-      const cData = bData[chapterId];
-      if (!cData) return;
 
       setState(prev => {
         const bookIdx = prev.books.findIndex(b => b.id === bookId);
         if (bookIdx === -1) return prev;
         const newBooks = [...prev.books];
-        const newChapters = [...newBooks[bookIdx].chapters];
-        const chIdx = newChapters.findIndex(c => c.id === chapterId);
-        if (chIdx === -1) return prev;
+        const chapters = [...newBooks[bookIdx].chapters];
         
-        newChapters[chIdx] = { 
-          ...newChapters[chIdx], 
-          progress: cData.percent, 
-          isCompleted: cData.completed 
+        const updateSingleChapter = (cIdx: number) => {
+           const c = chapters[cIdx];
+           const data = bData[c.id];
+           if (data) {
+              chapters[cIdx] = {
+                 ...c,
+                 progress: data.percent !== undefined ? data.percent : c.progress,
+                 isCompleted: data.completed || c.isCompleted // Sticky completion
+              };
+           }
         };
-        newBooks[bookIdx] = { ...newBooks[bookIdx], chapters: newChapters };
+
+        if (chapterId) {
+           const cIdx = chapters.findIndex(c => c.id === chapterId);
+           if (cIdx !== -1) updateSingleChapter(cIdx);
+        } else {
+           // Bulk update
+           for (let i = 0; i < chapters.length; i++) {
+              updateSingleChapter(i);
+           }
+        }
+        
+        newBooks[bookIdx] = { ...newBooks[bookIdx], chapters };
         return { ...prev, books: newBooks };
       });
     };
@@ -179,6 +194,55 @@ const App: React.FC = () => {
   }, [state.readerSettings.highlightColor]);
 
   // --- Central Playback Logic ---
+
+  const loadingChapterTextRef = useRef<Set<string>>(new Set());
+
+  const ensureChapterContentLoaded = useCallback(async (bookId: string, chapterId: string) => {
+    const s = stateRef.current;
+    const book = s.books.find(b => b.id === bookId);
+    if (!book) return;
+    const chapter = book.chapters.find(c => c.id === chapterId);
+    if (!chapter) return;
+
+    if (chapter.content && chapter.content.trim().length > 0) return;
+    if (!chapter.cloudTextFileId) return;
+
+    const key = `${bookId}:${chapterId}`;
+    if (loadingChapterTextRef.current.has(key)) return;
+
+    loadingChapterTextRef.current.add(key);
+    setIsLoadingChapter(true);
+
+    try {
+      if (!isAuthorized) throw new Error("Drive auth required for text");
+      const text = await fetchDriveFile(chapter.cloudTextFileId);
+      
+      setState(prev => {
+        const bIdx = prev.books.findIndex(b => b.id === bookId);
+        if (bIdx === -1) return prev;
+        const newBooks = [...prev.books];
+        const newChs = [...newBooks[bIdx].chapters];
+        const cIdx = newChs.findIndex(c => c.id === chapterId);
+        if (cIdx !== -1) {
+          const wordCount = text.split(/\s+/).filter(Boolean).length;
+          newChs[cIdx] = { 
+            ...newChs[cIdx], 
+            content: text, 
+            wordCount,
+            hasTextOnDrive: true 
+          };
+          newBooks[bIdx] = { ...newBooks[bIdx], chapters: newChs };
+          return { ...prev, books: newBooks };
+        }
+        return prev;
+      });
+    } catch (e: any) {
+      showToast(`Failed to load text: ${e.message}`, 0, 'error');
+    } finally {
+      loadingChapterTextRef.current.delete(key);
+      setIsLoadingChapter(false);
+    }
+  }, [isAuthorized]);
 
   const startPlayback = useCallback(async (targetChapterId: string, reason: 'user' | 'auto') => {
     const s = stateRef.current;
@@ -284,6 +348,8 @@ const App: React.FC = () => {
     const book = s.books.find(b => b.id === s.activeBookId);
     if (!book) return;
 
+    ensureChapterContentLoaded(book.id, targetId);
+
     speechController.safeStop();
     setState(p => ({ ...p, books: p.books.map(b => b.id === book.id ? { ...b, currentChapterId: targetId } : b), currentOffsetChars: 0 }));
     
@@ -293,7 +359,7 @@ const App: React.FC = () => {
     } else {
        setIsPlaying(false);
     }
-  }, [startPlayback]);
+  }, [startPlayback, ensureChapterContentLoaded]);
 
   const handleNextChapter = useCallback((autoTrigger = false) => {
     const s = stateRef.current;
@@ -346,6 +412,9 @@ const App: React.FC = () => {
 
   const handleOpenChapter = (id: string) => {
     const shouldPlay = isPlayingRef.current;
+    if (activeBook) {
+       ensureChapterContentLoaded(activeBook.id, id);
+    }
     transitionToChapter(id, shouldPlay, 'user');
     setActiveTab('reader');
   };
@@ -444,7 +513,7 @@ const App: React.FC = () => {
     }));
     
     safeSetLocalStorage(PROGRESS_STORE_V4, JSON.stringify(finalProgress));
-    window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: { bookId: activeBookId || stateRef.current.activeBookId } }));
+    window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: { bookId: activeBookId || stateRef.current.activeBookId, chapterId: null } }));
   }, []);
 
   const handleSync = useCallback(async (manual = false) => {

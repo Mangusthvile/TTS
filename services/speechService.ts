@@ -121,23 +121,25 @@ class SpeechController {
     // Even if duration is unknown (0), save the timestamp if we have progress
     if (duration === 0 && curTime === 0 && !completed) return; 
     
-    const finalTime = completed ? duration : Math.min(curTime, duration || Infinity);
-    const percent = duration > 0 ? Math.min(1, Math.max(0, finalTime / duration)) : (completed ? 1 : 0);
+    const isEnd = completed || (duration > 0 && curTime >= duration - 0.5);
+    const finalTime = isEnd ? duration : Math.min(curTime, duration || Infinity);
+    const percent = duration > 0 ? Math.min(1, Math.max(0, finalTime / duration)) : (isEnd ? 1 : 0);
     
     // Safety: Don't overwrite valid progress with 0 unless we are at the very start
-    if (finalTime === 0 && !completed && this.lastKnownTime > 5) return;
+    if (finalTime === 0 && !isEnd && this.lastKnownTime > 5) return;
 
     const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
     const store = storeRaw ? JSON.parse(storeRaw) : {};
     if (!store[this.context.bookId]) store[this.context.bookId] = {};
     
     const existing = store[this.context.bookId][this.context.chapterId];
+    const wasCompleted = existing?.completed || false;
     
     store[this.context.bookId][this.context.chapterId] = { 
       timeSec: finalTime, 
       durationSec: duration > 0 ? duration : (existing?.durationSec || 0), 
       percent, 
-      completed: completed || existing?.completed || false, 
+      completed: isEnd || wasCompleted, 
       updatedAt: Date.now() 
     };
     
