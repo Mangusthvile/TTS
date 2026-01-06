@@ -51,7 +51,7 @@ class SpeechController {
   constructor() {
     this.audio = new Audio();
     this.audio.volume = 1.0;
-    this.audio.preload = 'auto';
+    this.audio.preload = 'auto'; // Ensure metadata loads
     this.setupAudioListeners();
   }
 
@@ -89,8 +89,15 @@ class SpeechController {
     };
     this.audio.ontimeupdate = () => { 
       // Keep track of time locally to survive browser aggressive memory management
-      if (this.audio.currentTime > 0) this.lastKnownTime = this.audio.currentTime;
-      if (Date.now() - this.lastSaveTime > 2000) this.saveProgress(); 
+      const t = this.audio.currentTime;
+      if (t > 0) this.lastKnownTime = t;
+      
+      // Throttle saves to every 2 seconds
+      const now = Date.now();
+      if (now - this.lastSaveTime > 2000) {
+        this.saveProgress(); 
+        this.lastSaveTime = now;
+      }
     };
     this.audio.onerror = () => { if (this.onFetchStateChange) this.onFetchStateChange(false); };
   }
@@ -104,19 +111,21 @@ class SpeechController {
     if (!this.context) return;
     
     // Safety: If audio.currentTime reports 0 but we have a significant lastKnownTime, use that.
-    // This happens when mobile browsers unload the media resource while paused.
     let curTime = this.audio.currentTime;
-    if (curTime === 0 && this.lastKnownTime > 1 && !completed) {
+    if ((curTime === 0 || isNaN(curTime)) && this.lastKnownTime > 1 && !completed) {
       curTime = this.lastKnownTime;
     }
 
-    const duration = isFinite(this.audio.duration) && this.audio.duration > 0 ? this.audio.duration : 0;
-    if (duration === 0 && !completed) return;
+    const duration = (isFinite(this.audio.duration) && this.audio.duration > 0) ? this.audio.duration : 0;
+    
+    // Even if duration is unknown (0), save the timestamp if we have progress
+    if (duration === 0 && curTime === 0 && !completed) return; 
     
     const finalTime = completed ? duration : Math.min(curTime, duration || Infinity);
     const percent = duration > 0 ? Math.min(1, Math.max(0, finalTime / duration)) : (completed ? 1 : 0);
     
     // Safety: Don't overwrite valid progress with 0 unless we are at the very start
+    // A glitch often sends 0 right before unload or error.
     if (finalTime === 0 && !completed && this.lastKnownTime > 5) return;
 
     const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
@@ -134,7 +143,7 @@ class SpeechController {
     };
     
     localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(store));
-    this.lastSaveTime = Date.now();
+    // Dispatch event for UI updates (handled in App.tsx)
     window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: this.context }));
   }
 
@@ -181,9 +190,10 @@ class SpeechController {
     this.sessionToken++;
     const session = this.sessionToken;
     this.requestedSpeed = playbackRate;
+    
+    // Reset
     this.audio.pause();
     this.audio.removeAttribute("src");
-    this.audio.load();
     
     if (!localUrl) revokeObjectUrl(this.currentBlobUrl);
     this.currentBlobUrl = null;
@@ -193,8 +203,6 @@ class SpeechController {
     this.currentTextLength = totalContentChars;
     this.currentIntroDurSec = introDurSec;
     this.currentChunkMap = chunkMap || null;
-    
-    // Reset internal timer for new file
     this.lastKnownTime = startTimeSec;
 
     if (this.onFetchStateChange) this.onFetchStateChange(true);
@@ -205,40 +213,51 @@ class SpeechController {
         const res = await getDriveAudioObjectUrl(fileId);
         url = res.url;
       }
-      if (this.sessionToken !== session) { if (!localUrl) revokeObjectUrl(url); return; }
+      
+      // If session changed while fetching, abort
+      if (this.sessionToken !== session) { 
+        if (!localUrl) revokeObjectUrl(url); 
+        return; 
+      }
       
       this.currentBlobUrl = url || null;
       this.audio.src = url || '';
-      
-      await new Promise<void>((resolve, reject) => {
-        const onReady = () => { cleanup(); resolve(); };
-        const onErr = () => { cleanup(); reject(new Error("AUDIO_LOAD_ERROR")); };
-        const cleanup = () => { this.audio.removeEventListener("canplay", onReady); this.audio.removeEventListener("error", onErr); };
-        this.audio.addEventListener("canplay", onReady, { once: true });
-        this.audio.addEventListener("error", onErr, { once: true });
-        this.audio.load();
-      });
-      
-      if (this.sessionToken !== session) return;
-      this.applyRequestedSpeed();
-      
+      this.audio.load();
+
+      // Retrieve resume time
       const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
       const store = storeRaw ? JSON.parse(storeRaw) : {};
       const saved = this.context ? store[this.context.bookId]?.[this.context.chapterId] : null;
       
-      // Fix: If the chapter was marked completed, force start from beginning to avoid loop
+      let resumeTime = startTimeSec;
       if (saved?.completed) {
-        this.audio.currentTime = 0;
-        this.lastKnownTime = 0;
-      } else {
-        const resumeTime = saved?.timeSec ?? startTimeSec;
-        if (resumeTime > 0) {
-          this.audio.currentTime = Math.min(resumeTime, Math.max(0, this.audio.duration - 0.25));
-          this.lastKnownTime = this.audio.currentTime;
-        }
+        resumeTime = 0; // Restart if finished
+      } else if (saved?.timeSec > 0) {
+        resumeTime = saved.timeSec;
       }
 
+      // Handler to set time safely once metadata is known
+      const applyResumeTime = () => {
+        if (resumeTime > 0 && isFinite(this.audio.duration)) {
+           // Clamp to duration to avoid seeking past end
+           const target = Math.min(resumeTime, Math.max(0, this.audio.duration - 0.5));
+           this.audio.currentTime = target;
+           this.lastKnownTime = target;
+        }
+      };
+
+      // Set up listeners BEFORE playing to ensure we catch events
+      if (this.audio.readyState >= 1) {
+        applyResumeTime();
+      } else {
+        this.audio.addEventListener('loadedmetadata', applyResumeTime, { once: true });
+      }
+
+      // Play immediately. Do NOT wait for 'canplay' via Promise, as that breaks 
+      // the "User Gesture" requirement on mobile Safari/Chrome.
       await this.audio.play();
+      this.applyRequestedSpeed();
+
     } catch (err) {
       if (this.onFetchStateChange) this.onFetchStateChange(false);
       throw err;
@@ -247,10 +266,11 @@ class SpeechController {
 
   public seekToTime(seconds: number) {
     if (!isFinite(seconds) || seconds < 0) return;
-    this.lastKnownTime = Math.min(seconds, this.audio.duration); // Update tracking immediately
+    this.lastKnownTime = Math.min(seconds, this.audio.duration || Infinity);
     
     if (this.audio.duration > 0) {
       this.audio.currentTime = this.lastKnownTime;
+      // Force an immediate UI sync
       this.syncCallback?.({ currentTime: this.audio.currentTime, duration: this.audio.duration, charOffset: this.getOffsetFromTime(this.audio.currentTime) });
       this.saveProgress();
     }
@@ -280,7 +300,7 @@ class SpeechController {
       targetTime = effectiveIntroEnd + (Math.max(0, Math.min(1, offset / this.currentTextLength)) * Math.max(0.001, duration - effectiveIntroEnd));
     }
     
-    this.lastKnownTime = targetTime; // Update tracking immediately
+    this.lastKnownTime = targetTime;
     this.audio.currentTime = targetTime;
     this.syncCallback?.({ currentTime: targetTime, duration, charOffset: offset });
     this.saveProgress(); 
@@ -303,14 +323,15 @@ class SpeechController {
 
   pause() { 
     this.audio.pause(); 
-    this.lastKnownTime = this.audio.currentTime; // Save state explicitly
+    this.lastKnownTime = this.audio.currentTime;
+    this.saveProgress();
     window.speechSynthesis.pause(); 
   }
   
   resume() { 
     if (this.audio.src) { 
       this.applyRequestedSpeed(); 
-      // Paranoid Resume: Mobile browsers often lose position. Restore from internal tracker if playhead is 0 but shouldn't be.
+      // Paranoid Resume: Mobile browsers often lose position.
       if (this.audio.currentTime === 0 && this.lastKnownTime > 0) {
         this.audio.currentTime = this.lastKnownTime;
       }
@@ -325,13 +346,14 @@ class SpeechController {
     this.stopSyncLoop();
     this.audio.pause();
     this.audio.removeAttribute("src");
-    this.audio.load();
+    // Don't call .load() on stop/unload on mobile as it might trigger errors if backgrounded
     revokeObjectUrl(this.currentBlobUrl);
     this.currentBlobUrl = null;
     this.lastKnownTime = 0;
     if (this.onFetchStateChange) this.onFetchStateChange(false);
     window.speechSynthesis.cancel();
   }
+  
   setPlaybackRate(rate: number) { this.requestedSpeed = rate; if (this.audio.src) this.applyRequestedSpeed(); }
   get isPaused() { return this.audio.paused && !window.speechSynthesis.speaking; }
   get currentTime() { return this.audio.currentTime; }
