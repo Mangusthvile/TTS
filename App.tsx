@@ -16,9 +16,10 @@ import { saveChapterToFile } from './services/fileService';
 import { synthesizeChunk } from './services/cloudTtsService';
 import { extractChapterWithAI } from './services/geminiService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
+import { idbSet } from './services/storageService';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud } from 'lucide-react';
 
-const STATE_FILENAME = 'talevox_state_v285.json';
+const STATE_FILENAME = 'talevox_state_v286.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -38,6 +39,29 @@ const safeSetLocalStorage = (key: string, value: string) => {
       } catch (inner) {}
     }
   }
+};
+
+const estimateBytes = (str: string): number => new Blob([str]).size;
+
+const buildQuotaSafeBackup = (state: AppState, progressStore: any) => {
+  return {
+    state: {
+      ...state,
+      books: state.books.map(b => ({
+        ...b,
+        directoryHandle: undefined, // Non-serializable
+        coverImage: b.coverImage && estimateBytes(b.coverImage) > 50000 ? undefined : b.coverImage, // Strip huge covers
+        chapters: b.chapters.map(c => ({
+          ...c,
+          content: '', // STRIP content to save space
+          // Keep metadata vital for structure recovery
+        }))
+      })),
+    },
+    progress: progressStore,
+    backupAt: Date.now(),
+    type: 'quota_safe_backup'
+  };
 };
 
 const App: React.FC = () => {
@@ -339,11 +363,28 @@ const App: React.FC = () => {
     });
   }, []);
 
-  const applySnapshot = useCallback((snapshot: SavedSnapshot) => {
+  const applySnapshot = useCallback(async (snapshot: SavedSnapshot) => {
     const s = stateRef.current;
     const { books: cloudBooks, readerSettings: cloudRS, activeBookId, playbackSpeed, selectedVoiceName, theme, progressStore: cloudProgress, driveRootFolderId, driveRootFolderName, driveSubfolders, autoSaveInterval, globalRules } = snapshot.state;
     
-    safeSetLocalStorage(BACKUP_KEY, JSON.stringify({ state: s, progress: JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}') }));
+    // SAFETY BACKUP BEFORE MERGE
+    // Use IDB for large backup to avoid quota errors
+    try {
+      const progressStore = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
+      const safeBackup = buildQuotaSafeBackup(s, progressStore);
+      const jsonBackup = JSON.stringify(safeBackup);
+      
+      // If small enough, use LS, else IDB (1MB threshold)
+      if (estimateBytes(jsonBackup) < 1000000) {
+         safeSetLocalStorage(BACKUP_KEY, jsonBackup);
+      } else {
+         await idbSet(BACKUP_KEY, safeBackup);
+         // Mark in LS that backup is in IDB
+         safeSetLocalStorage(BACKUP_KEY, JSON.stringify({ storage: 'idb', timestamp: Date.now(), idbKey: BACKUP_KEY }));
+      }
+    } catch (e) {
+      console.warn("Safety backup failed:", e);
+    }
 
     const mergedBooks = [...s.books];
     cloudBooks.forEach(cb => {
@@ -432,7 +473,7 @@ const App: React.FC = () => {
         const localSnapshotStr = localStorage.getItem(SNAPSHOT_KEY);
         const localSnapshot = localSnapshotStr ? JSON.parse(localSnapshotStr) as SavedSnapshot : null;
         if (!localSnapshot || remoteSnapshot.savedAt > localSnapshot.savedAt || manual) {
-          applySnapshot(remoteSnapshot);
+          await applySnapshot(remoteSnapshot);
           if (manual) showToast("Cloud Save Applied", 0, 'success');
         }
       }
@@ -945,64 +986,72 @@ const App: React.FC = () => {
                 if (isGlobal) {
                   setState(p => ({ ...p, globalRules: p.globalRules.filter(r => r.id !== id) }));
                 } else if (activeBook) {
-                  setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, rules: b.rules.filter(ru => ru.id !== id) } : b) })); 
+                  setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, rules: b.rules.filter(r => r.id !== id) } : b) })); 
                 }
                 markDirty(); 
               }}
-              onImportRules={nr => { 
-                // Default import to book rules for safety
-                if (activeBook) {
-                  setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, rules: nr } : b) })); 
-                  markDirty();
-                }
+              onImportRules={rules => {
+                 if (activeBook) {
+                    setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, rules: [...b.rules, ...rules] } : b) })); 
+                    markDirty();
+                 }
               }}
-              selectedVoice={state.selectedVoiceName || ''} playbackSpeed={state.playbackSpeed}
-              onScanAndRebuild={handleScanAndRebuild} isScanning={isScanningRules} scanProgress={scanProgress}
+              selectedVoice={activeBook?.settings.defaultVoiceId || 'en-US-Standard-C'}
+              playbackSpeed={activeBook?.settings.useBookSettings && activeBook.settings.playbackSpeed ? activeBook.settings.playbackSpeed : state.playbackSpeed}
+              onScanAndRebuild={handleScanAndRebuild}
+              isScanning={isScanningRules}
+              scanProgress={scanProgress}
             />
           )}
 
           {activeTab === 'settings' && (
             <Settings 
-              settings={state.readerSettings} onUpdate={s => handleStateChangeWithDirty({ readerSettings: { ...state.readerSettings, ...s } })} theme={state.theme} 
-              onSetTheme={t => handleStateChangeWithDirty({ theme: t })}
-              keepAwake={state.keepAwake} onSetKeepAwake={v => handleStateChangeWithDirty({ keepAwake: v })} onCheckForUpdates={() => window.location.reload()}
-              onLinkCloud={() => getValidDriveToken({ interactive: true })} onSyncNow={() => handleSync(true)}
-              googleClientId={state.googleClientId} onUpdateGoogleClientId={id => handleStateChangeWithDirty({ googleClientId: id })}
-              onClearAuth={() => clearStoredToken()} onSaveState={() => handleSaveState(true, false)} lastSavedAt={state.lastSavedAt}
-              driveRootName={state.driveRootFolderName} onSelectRoot={handleSelectRoot} onRunMigration={handleRunMigration}
+              settings={state.readerSettings} 
+              onUpdate={s => setState(p => ({ ...p, readerSettings: { ...p.readerSettings, ...s } }))}
+              theme={state.theme} 
+              onSetTheme={t => setState(p => ({ ...p, theme: t }))}
+              keepAwake={state.keepAwake}
+              onSetKeepAwake={k => setState(p => ({ ...p, keepAwake: k }))}
+              onCheckForUpdates={() => window.location.reload()}
+              isCloudLinked={!!state.driveRootFolderId}
+              onLinkCloud={handleSelectRoot}
+              onSyncNow={() => handleSync(true)}
+              isSyncing={isSyncing}
+              googleClientId={state.googleClientId}
+              onUpdateGoogleClientId={id => setState(p => ({ ...p, googleClientId: id }))}
+              onClearAuth={() => { clearStoredToken(); setState(p => ({ ...p, driveRootFolderId: undefined })); }}
+              onSaveState={() => handleSaveState(true, false)}
+              lastSavedAt={state.lastSavedAt}
+              driveRootName={state.driveRootFolderName}
+              onSelectRoot={handleSelectRoot}
+              onRunMigration={handleRunMigration}
               syncDiagnostics={state.syncDiagnostics}
               autoSaveInterval={state.autoSaveInterval}
-              onSetAutoSaveInterval={v => handleStateChangeWithDirty({ autoSaveInterval: v })}
+              onSetAutoSaveInterval={v => setState(p => ({ ...p, autoSaveInterval: v }))}
               isDirty={isDirty}
             />
           )}
         </div>
       </div>
 
-      {activeChapterMetadata && activeTab === 'reader' && (
+      {activeTab === 'reader' && (
         <Player 
-          isPlaying={isPlaying} 
-          onPlay={handleManualPlay} 
-          onPause={handleManualPause} 
-          onStop={handleManualStop} 
-          onNext={() => handleNextChapter(false)} 
-          onPrev={handlePrevChapter} 
-          onSeek={d => handleJumpToOffset(state.currentOffsetChars + d)}
-          speed={state.playbackSpeed} onSpeedChange={s => handleStateChangeWithDirty({ playbackSpeed: s })} selectedVoice={''} onVoiceChange={() => {}} theme={state.theme} onThemeChange={() => {}}
-          progressChars={state.currentOffsetChars} totalLengthChars={activeChapterMetadata.content.length} wordCount={activeChapterMetadata.wordCount} onSeekToOffset={handleJumpToOffset}
-          sleepTimer={sleepTimerSeconds} onSetSleepTimer={setSleepTimerSeconds} stopAfterChapter={stopAfterChapter} onSetStopAfterChapter={setStopAfterChapter}
-          useBookSettings={false} onSetUseBookSettings={() => {}} highlightMode={activeBook?.settings.highlightMode || HighlightMode.WORD} onSetHighlightMode={m => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook?.id ? { ...b, settings: { ...b.settings, highlightMode: m } } : b) })); markDirty(); }}
-          playbackCurrentTime={audioCurrentTime} playbackDuration={audioDuration} onSeekToTime={handleSeekToTime}
-          autoplayBlocked={autoplayBlocked}
+          isPlaying={isPlaying} onPlay={() => isPlayingRef.current ? handleManualPause() : handleManualPlay()} onPause={handleManualPause} onStop={handleManualStop}
+          onNext={() => handleNextChapter(false)} onPrev={handlePrevChapter} onSeek={delta => speechController.seekToTime(speechController.currentTime + delta)}
+          speed={state.playbackSpeed} onSpeedChange={s => setState(p => ({ ...p, playbackSpeed: s }))}
+          selectedVoice={state.selectedVoiceName || ''} onVoiceChange={() => {}}
+          theme={state.theme} onThemeChange={t => setState(p => ({ ...p, theme: t }))}
+          progressChars={state.currentOffsetChars} totalLengthChars={activeChapterMetadata?.content?.length || 0} wordCount={activeChapterMetadata?.wordCount || 0}
+          onSeekToOffset={handleJumpToOffset}
+          sleepTimer={sleepTimerSeconds} onSetSleepTimer={setSleepTimerSeconds}
+          stopAfterChapter={stopAfterChapter} onSetStopAfterChapter={setStopAfterChapter}
+          useBookSettings={activeBook?.settings.useBookSettings || false}
+          onSetUseBookSettings={v => { if(activeBook) setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, useBookSettings: v } } : b) })); }}
+          highlightMode={activeBook?.settings.highlightMode || HighlightMode.WORD}
+          onSetHighlightMode={v => { if(activeBook) setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, highlightMode: v } } : b) })); }}
+          playbackCurrentTime={audioCurrentTime} playbackDuration={audioDuration} isFetching={isLoadingChapter}
+          onSeekToTime={handleSeekToTime} autoplayBlocked={autoplayBlocked}
         />
-      )}
-      
-      {transitionToast && (
-        <div className={`fixed bottom-24 sm:bottom-32 left-1/2 -translate-x-1/2 z-[100] toast-animate`}>
-          <div className={`${transitionToast.type === 'success' ? 'bg-emerald-600' : transitionToast.type === 'error' ? 'bg-red-600' : transitionToast.type === 'reconnect' ? 'bg-amber-600' : 'bg-indigo-600'} text-white px-8 py-4 rounded-2xl shadow-2xl font-black text-sm flex items-center gap-4`}>
-            <span className="leading-tight">{transitionToast.number > 0 ? `Chapter ${transitionToast.number}: ${transitionToast.title}` : transitionToast.title}</span>
-          </div>
-        </div>
       )}
     </div>
   );
