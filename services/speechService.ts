@@ -125,7 +125,6 @@ class SpeechController {
     const percent = duration > 0 ? Math.min(1, Math.max(0, finalTime / duration)) : (completed ? 1 : 0);
     
     // Safety: Don't overwrite valid progress with 0 unless we are at the very start
-    // A glitch often sends 0 right before unload or error.
     if (finalTime === 0 && !completed && this.lastKnownTime > 5) return;
 
     const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
@@ -143,7 +142,6 @@ class SpeechController {
     };
     
     localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(store));
-    // Dispatch event for UI updates (handled in App.tsx)
     window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: this.context }));
   }
 
@@ -191,9 +189,10 @@ class SpeechController {
     const session = this.sessionToken;
     this.requestedSpeed = playbackRate;
     
-    // Reset
+    // Explicit reset for mobile browsers
     this.audio.pause();
     this.audio.removeAttribute("src");
+    this.audio.src = "";
     
     if (!localUrl) revokeObjectUrl(this.currentBlobUrl);
     this.currentBlobUrl = null;
@@ -214,7 +213,6 @@ class SpeechController {
         url = res.url;
       }
       
-      // If session changed while fetching, abort
       if (this.sessionToken !== session) { 
         if (!localUrl) revokeObjectUrl(url); 
         return; 
@@ -222,45 +220,40 @@ class SpeechController {
       
       this.currentBlobUrl = url || null;
       this.audio.src = url || '';
-      this.audio.load();
+      this.audio.load(); // Required to reset buffer on some Android/iOS webviews
 
-      // Retrieve resume time
       const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
       const store = storeRaw ? JSON.parse(storeRaw) : {};
       const saved = this.context ? store[this.context.bookId]?.[this.context.chapterId] : null;
       
       let resumeTime = startTimeSec;
       if (saved?.completed) {
-        resumeTime = 0; // Restart if finished
+        resumeTime = 0; 
       } else if (saved?.timeSec > 0) {
         resumeTime = saved.timeSec;
       }
 
-      // Handler to set time safely once metadata is known
       const applyResumeTime = () => {
         if (resumeTime > 0 && isFinite(this.audio.duration)) {
-           // Clamp to duration to avoid seeking past end
            const target = Math.min(resumeTime, Math.max(0, this.audio.duration - 0.5));
            this.audio.currentTime = target;
            this.lastKnownTime = target;
         }
       };
 
-      // Set up listeners BEFORE playing to ensure we catch events
       if (this.audio.readyState >= 1) {
         applyResumeTime();
       } else {
         this.audio.addEventListener('loadedmetadata', applyResumeTime, { once: true });
       }
 
-      // Play immediately. Do NOT wait for 'canplay' via Promise, as that breaks 
-      // the "User Gesture" requirement on mobile Safari/Chrome.
+      // Try playing. If it fails due to interaction, it will throw.
       await this.audio.play();
       this.applyRequestedSpeed();
 
     } catch (err) {
       if (this.onFetchStateChange) this.onFetchStateChange(false);
-      throw err;
+      throw err; // Propagate error (including NotAllowedError)
     }
   }
 
@@ -270,7 +263,6 @@ class SpeechController {
     
     if (this.audio.duration > 0) {
       this.audio.currentTime = this.lastKnownTime;
-      // Force an immediate UI sync
       this.syncCallback?.({ currentTime: this.audio.currentTime, duration: this.audio.duration, charOffset: this.getOffsetFromTime(this.audio.currentTime) });
       this.saveProgress();
     }
@@ -347,6 +339,22 @@ class SpeechController {
     this.audio.pause();
     this.audio.removeAttribute("src");
     // Don't call .load() on stop/unload on mobile as it might trigger errors if backgrounded
+    revokeObjectUrl(this.currentBlobUrl);
+    this.currentBlobUrl = null;
+    this.lastKnownTime = 0;
+    if (this.onFetchStateChange) this.onFetchStateChange(false);
+    window.speechSynthesis.cancel();
+  }
+
+  // Safe stop ensures we completely reset before starting something new
+  safeStop() {
+    this.saveProgress();
+    this.sessionToken++;
+    this.stopSyncLoop();
+    this.audio.pause();
+    this.audio.src = "";
+    this.audio.removeAttribute("src");
+    // Only revoke if we created it
     revokeObjectUrl(this.currentBlobUrl);
     this.currentBlobUrl = null;
     this.lastKnownTime = 0;

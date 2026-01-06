@@ -18,7 +18,7 @@ import { extractChapterWithAI } from './services/geminiService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud } from 'lucide-react';
 
-const STATE_FILENAME = 'talevox_state_v284.json';
+const STATE_FILENAME = 'talevox_state_v285.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -97,9 +97,14 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'library' | 'collection' | 'reader' | 'rules' | 'settings'>('library');
   const [isAddChapterOpen, setIsAddChapterOpen] = useState(false);
   const [isChapterSidebarOpen, setIsChapterSidebarOpen] = useState(false);
+  
+  // Playback State
   const [isPlaying, setIsPlaying] = useState(false);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const [isLoadingChapter, setIsLoadingChapter] = useState(false);
+  const isPlayingRef = useRef(isPlaying);
+  useEffect(() => { isPlayingRef.current = isPlaying }, [isPlaying]);
+
   const [transitionToast, setTransitionToast] = useState<{ number: number; title: string; type?: 'info' | 'success' | 'error' | 'reconnect' } | null>(null);
   const [sleepTimerSeconds, setSleepTimerSeconds] = useState<number | null>(null);
   const [stopAfterChapter, setStopAfterChapter] = useState(false);
@@ -148,6 +153,183 @@ const App: React.FC = () => {
   useEffect(() => {
     document.documentElement.style.setProperty('--highlight-color', state.readerSettings.highlightColor);
   }, [state.readerSettings.highlightColor]);
+
+  // --- Central Playback Logic ---
+
+  const startPlayback = useCallback(async (targetChapterId: string, reason: 'user' | 'auto') => {
+    const s = stateRef.current;
+    const book = s.books.find(b => b.id === s.activeBookId);
+    if (!book) return;
+    const chapter = book.chapters.find(c => c.id === targetChapterId);
+    if (!chapter) return;
+
+    // Logic: If user requested play and we are paused on the SAME chapter with valid audio, just resume.
+    if (reason === 'user' && 
+        speechController.currentContext?.bookId === book.id && 
+        speechController.currentContext?.chapterId === chapter.id && 
+        speechController.hasAudioSource && 
+        speechController.isPaused) {
+        
+        setIsPlaying(true);
+        speechController.resume();
+        return;
+    }
+
+    // Otherwise, full load
+    setIsPlaying(true);
+    setAutoplayBlocked(false);
+    
+    // If not same chapter, ensure audio is stopped cleanly first
+    if (speechController.currentContext?.chapterId !== chapter.id) {
+       speechController.safeStop();
+    }
+
+    const voice = book.settings.defaultVoiceId || 'en-US-Standard-C';
+    const allRules = [...s.globalRules, ...book.rules];
+    const text = applyRules(chapter.content, allRules);
+    const speed = (book.settings.useBookSettings && book.settings.playbackSpeed) ? book.settings.playbackSpeed : s.playbackSpeed;
+    const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
+    const introText = applyRules(rawIntro, allRules);
+    const estimatedIntroDurSec = (introText.length / (18 * speed)); 
+
+    try {
+      const cacheKey = generateAudioKey(introText + text, voice, 1.0);
+      let audioBlob = await getAudioFromCache(cacheKey);
+      
+      // If not in cache and we have a cloud ID, try fetching
+      if (!audioBlob && chapter.cloudAudioFileId && isAuthorized) {
+        try { 
+          audioBlob = await fetchDriveBinary(chapter.cloudAudioFileId); 
+          if (audioBlob) await saveAudioToCache(cacheKey, audioBlob); 
+        } catch(e) {}
+      }
+
+      if (audioBlob && audioBlob.size > 0) {
+        const url = URL.createObjectURL(audioBlob);
+        speechController.setContext({ bookId: book.id, chapterId: chapter.id });
+        
+        await speechController.loadAndPlayDriveFile(
+          '', 'LOCAL_ID', text.length, estimatedIntroDurSec, undefined, 0, speed, 
+          () => { 
+             // On End
+             if (stopAfterChapter) {
+                setIsPlaying(false);
+             } else {
+                handleNextChapter(true); // Auto transition
+             }
+          },
+          (meta) => { 
+             // On Sync
+             setAudioCurrentTime(meta.currentTime); 
+             setAudioDuration(meta.duration); 
+             setState(p => ({ ...p, currentOffsetChars: meta.charOffset })); 
+          },
+          url
+        );
+        // Success
+        setAutoplayBlocked(false);
+      } else {
+        // Fallback: Text only or generate
+        if (chapter.cloudTextFileId && chapter.content === '') {
+           showToast("Loading text...", 0, 'info');
+           const content = await fetchDriveFile(chapter.cloudTextFileId);
+           setState(p => ({ ...p, books: p.books.map(b => b.id === book.id ? { ...b, chapters: b.chapters.map(c => c.id === chapter.id ? { ...c, content, wordCount: content.split(/\s+/).filter(Boolean).length } : c) } : b) }));
+           // Retry playback after short delay
+           setTimeout(() => startPlayback(targetChapterId, reason), 200);
+           return;
+        }
+        
+        // If content exists but no audio, queue generation
+        await queueBackgroundTTS(book.id, chapter.id);
+        // Try again in a moment (simple poll)
+        setTimeout(() => startPlayback(targetChapterId, reason), 1500);
+      }
+    } catch (playErr: any) {
+      if (playErr.name === 'NotAllowedError') { 
+        setAutoplayBlocked(true); 
+        setIsPlaying(false); 
+      } else {
+        setIsPlaying(false);
+        showToast(`Playback Error: ${playErr.message}`, 0, 'error');
+      }
+    }
+  }, [stopAfterChapter, isAuthorized]);
+
+  const transitionToChapter = useCallback((targetId: string, shouldPlay: boolean, reason: 'user' | 'auto') => {
+    const s = stateRef.current;
+    const book = s.books.find(b => b.id === s.activeBookId);
+    if (!book) return;
+
+    speechController.safeStop();
+    setState(p => ({ ...p, books: p.books.map(b => b.id === book.id ? { ...b, currentChapterId: targetId } : b), currentOffsetChars: 0 }));
+    
+    if (shouldPlay) {
+       // Small timeout to allow state to settle / UI to update
+       setTimeout(() => startPlayback(targetId, reason), 50);
+    } else {
+       setIsPlaying(false);
+    }
+  }, [startPlayback]);
+
+  const handleNextChapter = useCallback((autoTrigger = false) => {
+    const s = stateRef.current;
+    const book = s.books.find(b => b.id === s.activeBookId);
+    if (!book || !book.currentChapterId) return;
+    const sorted = [...book.chapters].sort((a, b) => a.index - b.index);
+    const idx = sorted.findIndex(c => c.id === book.currentChapterId);
+    
+    if (idx >= 0 && idx < sorted.length - 1) {
+      const next = sorted[idx + 1];
+      const shouldPlay = autoTrigger || isPlayingRef.current;
+      transitionToChapter(next.id, shouldPlay, autoTrigger ? 'auto' : 'user');
+    } else {
+      setIsPlaying(false);
+      showToast("End of book reached", 0, 'success');
+    }
+  }, [transitionToChapter]);
+
+  const handlePrevChapter = useCallback(() => {
+    const s = stateRef.current;
+    const book = s.books.find(b => b.id === s.activeBookId);
+    if (!book || !book.currentChapterId) return;
+    const sorted = [...book.chapters].sort((a, b) => a.index - b.index);
+    const idx = sorted.findIndex(c => c.id === book.currentChapterId);
+    
+    if (idx > 0) {
+      const prev = sorted[idx - 1];
+      transitionToChapter(prev.id, isPlayingRef.current, 'user');
+    } else {
+      showToast("Start of book reached", 0, 'info');
+    }
+  }, [transitionToChapter]);
+
+  const handleManualPlay = () => {
+    const s = stateRef.current;
+    if (s.activeBookId && activeBook?.currentChapterId) {
+       startPlayback(activeBook.currentChapterId, 'user');
+    }
+  };
+
+  const handleManualPause = () => {
+    speechController.pause();
+    setIsPlaying(false);
+  };
+
+  const handleManualStop = () => {
+    speechController.stop();
+    setIsPlaying(false);
+  };
+
+  const handleOpenChapter = (id: string) => {
+    const shouldPlay = isPlayingRef.current;
+    transitionToChapter(id, shouldPlay, 'user');
+    setActiveTab('reader');
+  };
+
+  const handleSeekToTime = (t: number) => speechController.seekToTime(t);
+  const handleJumpToOffset = (o: number) => speechController.seekToOffset(o);
+
+  // --- End Playback Logic ---
 
   const updateDiagnostics = useCallback((updates: Partial<SyncDiagnostics>) => {
     setState(p => {
@@ -483,7 +665,6 @@ const App: React.FC = () => {
         
         if (!content) continue;
 
-        // Naive check: does content contain any rule 'find' text?
         const needsRebuild = allRules.some(r => {
            if (!r.enabled) return false;
            try {
@@ -497,16 +678,13 @@ const App: React.FC = () => {
            if (newContent !== content) {
               if (!trashId) trashId = await createDriveFolder('_trash', book.driveFolderId);
               
-              // Backup existing text
               if (ch.cloudTextFileId && trashId) {
                  await moveFile(ch.cloudTextFileId, book.driveFolderId, trashId);
               }
 
-              // Upload new text
               const textName = buildTextName(ch.index, ch.title);
               const newTextId = await uploadToDrive(book.driveFolderId, textName, newContent);
               
-              // Update state
               setState(prev => {
                  const bkIdx = prev.books.findIndex(b => b.id === book.id);
                  if (bkIdx === -1) return prev;
@@ -520,7 +698,6 @@ const App: React.FC = () => {
                  return { ...prev, books: newBks };
               });
 
-              // Regen audio
               await queueBackgroundTTS(book.id, ch.id);
               updatedCount++;
            }
@@ -549,7 +726,7 @@ const App: React.FC = () => {
     const filename = buildTextName(data.index, data.title);
     let cloudTextId = undefined;
     if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
-      if (!data.keepOpen) showToast("Saving source text...", 0, 'info'); // Reduce toast spam on bulk
+      if (!data.keepOpen) showToast("Saving source text...", 0, 'info'); 
       try { cloudTextId = await uploadToDrive(book.driveFolderId, filename, data.content, undefined, 'text/plain'); } catch (e) { showToast("Drive save failed", 0, 'error'); }
     }
     if (book.backend === StorageBackend.LOCAL && book.directoryHandle) {
@@ -604,88 +781,6 @@ const App: React.FC = () => {
       showToast("Migration Complete", 0, 'success');
     } catch (e: any) { showToast("Migration failed", 0, 'error'); } finally { setIsSyncing(false); }
   }, [isAuthorized, markDirty]);
-
-  const handleNextChapter = useCallback(() => {
-    const s = stateRef.current;
-    const book = s.books.find(b => b.id === s.activeBookId);
-    if (!book || !book.currentChapterId) return;
-    const sorted = [...book.chapters].sort((a, b) => a.index - b.index);
-    const idx = sorted.findIndex(c => c.id === book.currentChapterId);
-    if (idx >= 0 && idx < sorted.length - 1) {
-      const next = sorted[idx + 1];
-      setState(p => ({ ...p, books: p.books.map(b => b.id === book.id ? { ...b, currentChapterId: next.id } : b), currentOffsetChars: 0 }));
-    } else {
-      setIsPlaying(false);
-      showToast("End of book reached", 0, 'success');
-    }
-  }, []);
-
-  const handlePlay = useCallback(async () => {
-    const s = stateRef.current;
-    const book = s.books.find(b => b.id === s.activeBookId);
-    if (!book || !book.currentChapterId) return;
-    const chapter = book.chapters.find(c => c.id === book.currentChapterId);
-    if (!chapter) return;
-    
-    // SMART RESUME: If we are just paused on the same chapter, just resume instead of reloading.
-    // This fixes double-tap reset issues and is faster on mobile.
-    if (speechController.currentContext?.bookId === book.id && 
-        speechController.currentContext?.chapterId === chapter.id && 
-        speechController.isPaused &&
-        speechController.hasAudioSource) {
-        
-        speechController.resume();
-        setIsPlaying(true);
-        return;
-    }
-
-    setIsPlaying(true);
-    setAutoplayBlocked(false);
-    const voice = book.settings.defaultVoiceId || 'en-US-Standard-C';
-    const allRules = [...s.globalRules, ...book.rules];
-    const text = applyRules(chapter.content, allRules);
-    const speed = (book.settings.useBookSettings && book.settings.playbackSpeed) ? book.settings.playbackSpeed : s.playbackSpeed;
-    const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
-    const introText = applyRules(rawIntro, allRules);
-    const estimatedIntroDurSec = (introText.length / (18 * speed)); 
-    try {
-      const cacheKey = generateAudioKey(introText + text, voice, 1.0);
-      let audioBlob = await getAudioFromCache(cacheKey);
-      if (!audioBlob && chapter.cloudAudioFileId && isAuthorized) {
-        try { audioBlob = await fetchDriveBinary(chapter.cloudAudioFileId); if (audioBlob) await saveAudioToCache(cacheKey, audioBlob); } catch(e) {}
-      }
-      if (audioBlob && audioBlob.size > 0) {
-        const url = URL.createObjectURL(audioBlob);
-        speechController.setContext({ bookId: book.id, chapterId: chapter.id });
-        try {
-          await speechController.loadAndPlayDriveFile('', 'LOCAL_ID', text.length, estimatedIntroDurSec, undefined, 0, speed, 
-            () => { if (stopAfterChapter) setIsPlaying(false); else handleNextChapter(); },
-            (meta) => { setAudioCurrentTime(meta.currentTime); setAudioDuration(meta.duration); setState(p => ({ ...p, currentOffsetChars: meta.charOffset })); },
-            url
-          );
-          setAutoplayBlocked(false);
-        } catch (playErr: any) {
-          if (playErr.name === 'NotAllowedError') { setAutoplayBlocked(true); setIsPlaying(false); } else throw playErr;
-        }
-      } else {
-        if (chapter.cloudTextFileId && chapter.content === '') {
-           showToast("Loading text from cloud...", 0, 'info');
-           const content = await fetchDriveFile(chapter.cloudTextFileId);
-           setState(p => ({ ...p, books: p.books.map(b => b.id === book.id ? { ...b, chapters: b.chapters.map(c => c.id === chapter.id ? { ...c, content, wordCount: content.split(/\s+/).filter(Boolean).length } : c) } : b) }));
-           setTimeout(() => handlePlay(), 100);
-           return;
-        }
-        await queueBackgroundTTS(s.activeBookId!, chapter.id);
-        setTimeout(() => handlePlay(), 1000);
-      }
-    } catch (e) { setIsPlaying(false); showToast("Playback error", 0, 'error'); }
-  }, [queueBackgroundTTS, stopAfterChapter, handleNextChapter, isAuthorized]);
-
-  useEffect(() => { if (isPlaying && activeBook?.currentChapterId) handlePlay(); }, [activeBook?.currentChapterId, isPlaying, handlePlay]);
-
-  const handlePause = () => { speechController.pause(); setIsPlaying(false); };
-  const handleSeekToTime = (t: number) => speechController.seekToTime(t);
-  const handleJumpToOffset = (o: number) => speechController.seekToOffset(o);
 
   const handleAddBook = async (title: string, backend: StorageBackend, directoryHandle?: any) => {
     const s = stateRef.current;
@@ -782,7 +877,7 @@ const App: React.FC = () => {
         {activeTab === 'reader' && activeBook && (
           <aside className="hidden lg:block w-72 border-r border-black/5 bg-black/5 overflow-y-auto">
              <ChapterSidebar 
-               book={activeBook} theme={state.theme} onSelectChapter={(cid) => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, currentChapterId: cid } : b), currentOffsetChars: 0 })); }} 
+               book={activeBook} theme={state.theme} onSelectChapter={handleOpenChapter} 
                onClose={() => {}} isDrawer={false}
              />
           </aside>
@@ -793,7 +888,7 @@ const App: React.FC = () => {
             <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setIsChapterSidebarOpen(false)} />
             <div className={`relative w-[85%] max-sm max-w-sm h-full shadow-2xl animate-in slide-in-from-left duration-300 ${state.theme === Theme.DARK ? 'bg-slate-900' : state.theme === Theme.SEPIA ? 'bg-[#efe6d5]' : 'bg-white'}`}>
               <ChapterSidebar 
-                book={activeBook} theme={state.theme} onSelectChapter={(cid) => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, currentChapterId: cid } : b), currentOffsetChars: 0 })); setIsChapterSidebarOpen(false); }} 
+                book={activeBook} theme={state.theme} onSelectChapter={(id) => { handleOpenChapter(id); setIsChapterSidebarOpen(false); }} 
                 onClose={() => setIsChapterSidebarOpen(false)} isDrawer={true}
               />
             </div>
@@ -815,7 +910,7 @@ const App: React.FC = () => {
           {activeTab === 'collection' && activeBook && (
             <ChapterFolderView 
               book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)}
-              onOpenChapter={id => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, currentChapterId: id } : b) })); setActiveTab('reader'); }}
+              onOpenChapter={(id) => { handleOpenChapter(id); setActiveTab('reader'); }}
               onToggleFavorite={() => {}} onUpdateChapterTitle={(id, t) => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(c => c.id === id ? { ...c, title: t } : c) } : b) })); markDirty(); }}
               onDeleteChapter={id => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.filter(c => c.id !== id) } : b) })); markDirty(); }}
               onUpdateChapter={c => { setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(ch => ch.id === c.id ? c : ch) } : b) })); markDirty(); }}
@@ -886,7 +981,13 @@ const App: React.FC = () => {
 
       {activeChapterMetadata && activeTab === 'reader' && (
         <Player 
-          isPlaying={isPlaying} onPlay={handlePlay} onPause={handlePause} onStop={() => setIsPlaying(false)} onNext={handleNextChapter} onPrev={() => {}} onSeek={d => handleJumpToOffset(state.currentOffsetChars + d)}
+          isPlaying={isPlaying} 
+          onPlay={handleManualPlay} 
+          onPause={handleManualPause} 
+          onStop={handleManualStop} 
+          onNext={() => handleNextChapter(false)} 
+          onPrev={handlePrevChapter} 
+          onSeek={d => handleJumpToOffset(state.currentOffsetChars + d)}
           speed={state.playbackSpeed} onSpeedChange={s => handleStateChangeWithDirty({ playbackSpeed: s })} selectedVoice={''} onVoiceChange={() => {}} theme={state.theme} onThemeChange={() => {}}
           progressChars={state.currentOffsetChars} totalLengthChars={activeChapterMetadata.content.length} wordCount={activeChapterMetadata.wordCount} onSeekToOffset={handleJumpToOffset}
           sleepTimer={sleepTimerSeconds} onSetSleepTimer={setSleepTimerSeconds} stopAfterChapter={stopAfterChapter} onSetStopAfterChapter={setStopAfterChapter}
