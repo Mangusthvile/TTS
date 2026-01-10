@@ -99,14 +99,15 @@ class SpeechController {
         this.lastSaveTime = now;
       }
 
-      // Mobile fallback: some browsers throttle requestAnimationFrame; call syncCallback here
-      // Checks for typical touch/mobile environment
+      // Fallback sync for mobile / non-autoplay transitions
+      // Some mobile browsers throttle requestAnimationFrame; use timeupdate to move the highlight
       if (this.syncCallback && this.audio.duration && (('ontouchstart' in window) || navigator.maxTouchPoints > 0)) {
-         this.syncCallback({
-           currentTime: t,
-           duration: this.audio.duration,
-           charOffset: this.getOffsetFromTime(t, this.audio.duration)
-         });
+        const dur = this.audio.duration;
+        this.syncCallback({
+          currentTime: t,
+          duration: dur,
+          charOffset: this.getOffsetFromTime(t, dur),
+        });
       }
     };
     this.audio.onerror = () => { if (this.onFetchStateChange) this.onFetchStateChange(false); };

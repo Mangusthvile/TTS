@@ -19,7 +19,7 @@ import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './service
 import { idbSet } from './services/storageService';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud } from 'lucide-react';
 
-const STATE_FILENAME = 'talevox_state_v287.json';
+const STATE_FILENAME = 'talevox_state_v288.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
