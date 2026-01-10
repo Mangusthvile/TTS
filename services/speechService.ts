@@ -45,8 +45,8 @@ class SpeechController {
   private lastKnownTime: number = 0;
   private lastSaveTime: number = 0;
 
-  // Highlight buffer to account for synthesis pauses and speech pacing (350ms)
-  private readonly HIGHLIGHT_DELAY_SEC = 0.35;
+  // Highlight buffer to account for synthesis pauses and speech pacing (350ms -> 600ms)
+  private readonly HIGHLIGHT_DELAY_SEC = 0.6;
 
   constructor() {
     this.audio = new Audio();

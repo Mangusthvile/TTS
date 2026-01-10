@@ -19,7 +19,7 @@ import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './service
 import { idbSet } from './services/storageService';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud } from 'lucide-react';
 
-const STATE_FILENAME = 'talevox_state_v288.json';
+const STATE_FILENAME = 'talevox_state_v289.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -279,6 +279,7 @@ const App: React.FC = () => {
     const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
     const introText = applyRules(rawIntro, allRules);
     const estimatedIntroDurSec = (introText.length / (18 * speed)); 
+    const introDur = chapter.audioIntroDurSec ?? estimatedIntroDurSec;
 
     try {
       const cacheKey = generateAudioKey(introText + text, voice, 1.0);
@@ -295,9 +296,10 @@ const App: React.FC = () => {
       if (audioBlob && audioBlob.size > 0) {
         const url = URL.createObjectURL(audioBlob);
         speechController.setContext({ bookId: book.id, chapterId: chapter.id });
+        speechController.updateMetadata(text.length, introDur, chapter.audioChunkMap || []);
         
         await speechController.loadAndPlayDriveFile(
-          '', 'LOCAL_ID', text.length, estimatedIntroDurSec, undefined, 0, speed, 
+          '', 'LOCAL_ID', text.length, introDur, chapter.audioChunkMap, 0, speed, 
           () => { 
              // On End
              if (stopAfterChapter) {
@@ -351,6 +353,21 @@ const App: React.FC = () => {
     ensureChapterContentLoaded(book.id, targetId);
 
     speechController.safeStop();
+    speechController.setContext({ bookId: book.id, chapterId: targetId });
+
+    // Pre-calculate metadata for highlight stability
+    const nextCh = book.chapters.find(c => c.id === targetId);
+    if (nextCh) {
+        const allRules = [...s.globalRules, ...book.rules];
+        const text = applyRules(nextCh.content || '', allRules);
+        const rawIntro = `Chapter ${nextCh.index}. ${nextCh.title}. `;
+        const introText = applyRules(rawIntro, allRules);
+        const speed = (book.settings.useBookSettings && book.settings.playbackSpeed) ? book.settings.playbackSpeed : s.playbackSpeed;
+        const estimatedIntroDurSec = (introText.length / (18 * speed));
+        const introDur = nextCh.audioIntroDurSec ?? estimatedIntroDurSec;
+        speechController.updateMetadata(text.length, introDur, nextCh.audioChunkMap || []);
+    }
+
     setState(p => ({ ...p, books: p.books.map(b => b.id === book.id ? { ...b, currentChapterId: targetId } : b), currentOffsetChars: 0 }));
     
     if (shouldPlay) {
