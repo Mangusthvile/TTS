@@ -1,6 +1,7 @@
 import { Rule, RuleType, AudioChunkMetadata, PlaybackMetadata } from '../types';
 import { getDriveAudioObjectUrl, revokeObjectUrl } from "../services/driveService";
 import { trace, traceError } from '../utils/trace';
+import { isMobileMode } from '../utils/platform';
 
 export const PROGRESS_STORE_V4 = 'talevox_progress_v4';
 
@@ -44,6 +45,9 @@ class SpeechController {
   private lastKnownTime: number = 0;
   private lastSaveTime: number = 0;
   private lastThrottleTime: number = 0;
+  
+  // Dynamic Mobile Mode
+  private isMobileOptimized: boolean = false;
 
   // Highlight buffer to account for synthesis pauses and speech pacing (0.5s for smoother transition)
   private readonly HIGHLIGHT_DELAY_SEC = 0.5;
@@ -52,7 +56,27 @@ class SpeechController {
     this.audio = new Audio();
     this.audio.volume = 1.0;
     this.audio.preload = 'auto'; // Ensure metadata loads
+    // Initialize default mode based on environment
+    this.isMobileOptimized = isMobileMode();
     this.setupAudioListeners();
+  }
+
+  // Update sync strategy on the fly
+  public setMobileMode(isMobile: boolean) {
+    if (this.isMobileOptimized === isMobile) return;
+    this.isMobileOptimized = isMobile;
+    trace('speech:mode_changed', { isMobile });
+    
+    // If playing, switch strategies immediately
+    if (this.audio.src && !this.audio.paused) {
+      if (this.isMobileOptimized) {
+        this.stopSyncLoop(); // Stop rAF, switch to timeupdate
+      } else {
+        this.startSyncLoop(); // Start rAF
+      }
+    }
+    // Force immediate update to UI
+    this.emitSyncTick();
   }
 
   // Register a persistent callback for UI updates
@@ -81,7 +105,10 @@ class SpeechController {
       
       // Explicit tracing for seek events
       this.audio.addEventListener('seeking', () => trace('audio:event:seeking', { t: this.audio.currentTime }));
-      this.audio.addEventListener('seeked', () => trace('audio:event:seeked', { t: this.audio.currentTime }));
+      this.audio.addEventListener('seeked', () => {
+        trace('audio:event:seeked', { t: this.audio.currentTime });
+        this.emitSyncTick(); // Ensure UI updates immediately after seek
+      });
       
       events.forEach(e => {
         this.audio.addEventListener(e, (evt) => {
@@ -129,17 +156,14 @@ class SpeechController {
         this.lastSaveTime = now;
       }
 
-      // Fallback sync for mobile / non-autoplay transitions
-      // Throttle to ~10fps (100ms) to avoid overwhelming main thread
-      if (this.syncCallback && this.audio.duration && !this.audio.paused) {
-        if (now - this.lastThrottleTime > 100) {
-          const dur = this.audio.duration;
-          this.syncCallback({
-            currentTime: t,
-            duration: dur,
-            charOffset: this.getOffsetFromTime(t, dur),
-          });
-          this.lastThrottleTime = now;
+      // Mobile Sync Strategy: Use timeupdate instead of rAF to save battery and avoid background throttling
+      if (this.isMobileOptimized) {
+        if (this.syncCallback && this.audio.duration && !this.audio.paused) {
+          // Throttle to ~10fps (100ms) to avoid overwhelming main thread on weak devices
+          if (now - this.lastThrottleTime > 100) {
+            this.emitSyncTick();
+            this.lastThrottleTime = now;
+          }
         }
       }
     };
@@ -149,7 +173,7 @@ class SpeechController {
     };
   }
 
-  private emitSyncTick() {
+  public emitSyncTick() {
     if (this.syncCallback && this.audio.duration) {
        this.syncCallback({ 
            currentTime: this.audio.currentTime, 
@@ -185,30 +209,38 @@ class SpeechController {
     // Safety: Don't overwrite valid progress with 0 unless we are at the very start
     if (finalTime === 0 && !isEnd && this.lastKnownTime > 5) return;
 
-    const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
-    const store = storeRaw ? JSON.parse(storeRaw) : {};
-    if (!store[this.context.bookId]) store[this.context.bookId] = {};
-    
-    const existing = store[this.context.bookId][this.context.chapterId];
-    const wasCompleted = existing?.completed || false;
-    
-    store[this.context.bookId][this.context.chapterId] = { 
-      timeSec: finalTime, 
-      durationSec: duration > 0 ? duration : (existing?.durationSec || 0), 
-      percent, 
-      completed: isEnd || wasCompleted, 
-      updatedAt: Date.now() 
-    };
-    
-    localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(store));
-    window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: this.context }));
+    // Use Safe Storage Access
+    try {
+      const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
+      const store = storeRaw ? JSON.parse(storeRaw) : {};
+      if (!store[this.context.bookId]) store[this.context.bookId] = {};
+      
+      const existing = store[this.context.bookId][this.context.chapterId];
+      const wasCompleted = existing?.completed || false;
+      
+      store[this.context.bookId][this.context.chapterId] = { 
+        timeSec: finalTime, 
+        durationSec: duration > 0 ? duration : (existing?.durationSec || 0), 
+        percent, 
+        completed: isEnd || wasCompleted, 
+        updatedAt: Date.now() 
+      };
+      
+      localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(store));
+      window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: this.context }));
+    } catch (e) {
+      console.warn("Progress save failed (likely quota)", e);
+    }
   }
 
   private startSyncLoop() {
+    // Desktop: High precision rAF loop
+    // Mobile: Rely on timeupdate (handled in setupAudioListeners) to save battery/resources
+    if (this.isMobileOptimized) return;
+
     const sync = () => {
       if (this.syncCallback && this.audio.duration && !this.audio.paused) {
-        const t = this.audio.currentTime;
-        this.syncCallback({ currentTime: t, duration: this.audio.duration, charOffset: this.getOffsetFromTime(t, this.audio.duration) });
+        this.emitSyncTick();
       }
       this.rafId = requestAnimationFrame(sync);
     };
@@ -314,6 +346,7 @@ class SpeechController {
     this.audio.pause();
     this.audio.removeAttribute("src");
     this.audio.src = "";
+    this.audio.load(); // Important for mobile buffering reset
     
     if (!localUrl) revokeObjectUrl(this.currentBlobUrl);
     this.currentBlobUrl = null;
@@ -444,8 +477,25 @@ class SpeechController {
     try {
         await this.waitForAudioEvent('seeked', 5000, nonce);
     } catch (e) {
-        if (nonce !== this.seekNonce) return; // Silent preemption
-        throw e;
+        if (nonce !== this.seekNonce) return;
+        
+        // Fallback Poll: iOS sometimes swallows 'seeked' event but updates currentTime
+        // We poll for convergence to target time
+        trace('audio:seek:polling_fallback', { nonce });
+        const pollStart = Date.now();
+        let converged = false;
+        while (Date.now() - pollStart < 800) { // 800ms max poll
+            if (Math.abs(audio.currentTime - clamped) < 0.25) {
+               converged = true;
+               break;
+            }
+            await new Promise(r => setTimeout(r, 50));
+            if (nonce !== this.seekNonce) return;
+        }
+        
+        if (!converged) {
+           throw e; // Rethrow timeout if we didn't converge
+        }
     }
 
     if (nonce !== this.seekNonce) return;

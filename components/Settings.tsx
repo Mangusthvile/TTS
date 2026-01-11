@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { ReaderSettings, Theme, SyncDiagnostics } from '../types';
-import { RefreshCw, Cloud, CloudOff, Loader2, LogOut, Save, LogIn, Check, Sun, Coffee, Moon, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer, ClipboardCopy, FileWarning, Bug, Smartphone, Type, Palette } from 'lucide-react';
+import { ReaderSettings, Theme, SyncDiagnostics, UiMode } from '../types';
+import { RefreshCw, Cloud, CloudOff, Loader2, LogOut, Save, LogIn, Check, Sun, Coffee, Moon, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer, ClipboardCopy, FileWarning, Bug, Smartphone, Type, Palette, Monitor, LayoutTemplate } from 'lucide-react';
 import { getAuthSessionInfo, isTokenValid, getValidDriveToken } from '../services/driveAuth';
 import { getTraceDump } from '../utils/trace';
 
@@ -94,6 +94,10 @@ const Settings: React.FC<SettingsProps> = ({
     alert("Full playback trace copied to clipboard");
   };
 
+  const handleSetUiMode = (mode: UiMode) => {
+    onUpdate({ uiMode: mode });
+  };
+
   return (
     <div className={`p-4 sm:p-8 h-full overflow-y-auto transition-colors duration-500 ${isDark ? 'bg-slate-900' : isSepia ? 'bg-[#efe6d5]' : 'bg-slate-50'}`}>
       <div className="max-w-2xl mx-auto space-y-8 sm:space-y-12 pb-32">
@@ -128,6 +132,33 @@ const Settings: React.FC<SettingsProps> = ({
               </button>
             ))}
           </div>
+        </div>
+
+        {/* --- UI MODE --- */}
+        <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
+          <label className={labelClass}><LayoutTemplate className="w-3.5 h-3.5 inline mr-2" /> Interface Mode</label>
+          <div className={`flex p-1 rounded-xl gap-1 ${isDark ? 'bg-black/20' : 'bg-black/5'}`}>
+            {[
+              { id: 'auto' as const, label: 'Auto', icon: Smartphone },
+              { id: 'desktop' as const, label: 'Desktop', icon: Monitor },
+              { id: 'mobile' as const, label: 'Mobile', icon: Smartphone }
+            ].map(m => {
+              const isActive = settings.uiMode === m.id;
+              return (
+                <button
+                  key={m.id}
+                  onClick={() => handleSetUiMode(m.id)}
+                  className={`flex-1 py-2.5 rounded-lg text-xs font-black transition-all flex items-center justify-center gap-2 ${isActive ? 'bg-indigo-600 text-white shadow-md' : 'opacity-60 hover:opacity-100'}`}
+                >
+                  <m.icon className="w-3.5 h-3.5" />
+                  {m.label}
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-[10px] opacity-50 mt-3 px-1">
+            <b>Auto:</b> Detects device capabilities. <b>Mobile:</b> Enables touch gestures and battery-saving sync. <b>Desktop:</b> Enables precision sync and mouse interactions.
+          </p>
         </div>
 
         {/* --- TYPOGRAPHY --- */}

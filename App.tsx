@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, PlaybackPhase } from './types';
+import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, PlaybackPhase, UiMode, ReaderSettings } from './types';
 import Library from './components/Library';
 import Reader from './components/Reader';
 import Player from './components/Player';
@@ -18,11 +18,13 @@ import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './service
 import { idbSet } from './services/storageService';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud, Terminal } from 'lucide-react';
 import { trace, traceError } from './utils/trace';
+import { computeMobileMode } from './utils/platform';
 
-const STATE_FILENAME = 'talevox_state_v291.json';
+const STATE_FILENAME = 'talevox_state_v292.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
+const UI_MODE_KEY = "talevox_ui_mode";
 
 // --- Safe Storage Helper ---
 const safeSetLocalStorage = (key: string, value: string) => {
@@ -93,6 +95,18 @@ const App: React.FC = () => {
     }
   }, [playbackPhase]);
 
+  // Mobile Visibility Handling
+  useEffect(() => {
+    const handleVisChange = () => {
+      if (document.visibilityState === 'visible') {
+        // Force a sync tick when app comes to foreground to catch up UI
+        speechController.emitSyncTick();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisChange);
+    return () => document.removeEventListener('visibilitychange', handleVisChange);
+  }, []);
+
   const [state, setState] = useState<AppState>(() => {
     const saved = localStorage.getItem('talevox_pro_v2');
     const parsed = saved ? JSON.parse(saved) : {};
@@ -101,6 +115,9 @@ const App: React.FC = () => {
     const snapshot = snapshotStr ? JSON.parse(snapshotStr) as SavedSnapshot : null;
 
     const savedDiag = localStorage.getItem('talevox_sync_diag');
+    
+    // Load UI mode preference explicitly first
+    const savedUiMode = localStorage.getItem(UI_MODE_KEY) as UiMode | null;
 
     return {
       books: (parsed.books || []).map((b: any) => ({
@@ -128,7 +145,8 @@ const App: React.FC = () => {
         lineHeight: 1.8,
         paragraphSpacing: 1,
         highlightColor: '#4f46e5',
-        followHighlight: true
+        followHighlight: true,
+        uiMode: savedUiMode || 'auto'
       },
       googleClientId: parsed.googleClientId || (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID || '',
       lastSavedAt: snapshot?.savedAt,
@@ -141,6 +159,32 @@ const App: React.FC = () => {
       showDiagnostics: parsed.showDiagnostics || false
     };
   });
+
+  // Ensure local UI mode preference is synced if state loads differently
+  useEffect(() => {
+    const pref = state.readerSettings.uiMode || 'auto';
+    localStorage.setItem(UI_MODE_KEY, pref);
+  }, [state.readerSettings.uiMode]);
+
+  // Compute effective mobile mode
+  const [effectiveMobileMode, setEffectiveMobileMode] = useState(computeMobileMode(state.readerSettings.uiMode));
+
+  // Effect to recompute on resize if auto, or when setting changes
+  useEffect(() => {
+    const recompute = () => {
+      const isMob = computeMobileMode(state.readerSettings.uiMode);
+      setEffectiveMobileMode(isMob);
+      speechController.setMobileMode(isMob);
+    };
+    
+    recompute();
+    
+    // Only listen to resize if we are in auto mode
+    if (state.readerSettings.uiMode === 'auto') {
+      window.addEventListener('resize', recompute);
+      return () => window.removeEventListener('resize', recompute);
+    }
+  }, [state.readerSettings.uiMode]);
 
   const [activeTab, setActiveTab] = useState<'library' | 'collection' | 'reader' | 'rules' | 'settings'>('library');
   const [isAddChapterOpen, setIsAddChapterOpen] = useState(false);
@@ -200,6 +244,8 @@ const App: React.FC = () => {
 
     setAudioCurrentTime(meta.currentTime);
     setAudioDuration(meta.duration);
+    
+    // Mobile optimization: Only setState if charOffset actually changed significantly or forced
     setState(p => {
       if (p.currentOffsetChars === meta.charOffset) return p;
       return { ...p, currentOffsetChars: meta.charOffset };
@@ -215,43 +261,50 @@ const App: React.FC = () => {
     const handleProgressUpdate = (e: any) => {
       const { bookId, chapterId } = e.detail;
       if (!bookId) return;
-      const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
-      if (!storeRaw) return;
-      const store = JSON.parse(storeRaw);
-      const bData = store[bookId];
-      if (!bData) return;
+      
+      // On mobile, reading from localStorage in a loop can hit quota or perf issues
+      // Be defensive
+      try {
+        const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
+        if (!storeRaw) return;
+        const store = JSON.parse(storeRaw);
+        const bData = store[bookId];
+        if (!bData) return;
 
-      setState(prev => {
-        const bookIdx = prev.books.findIndex(b => b.id === bookId);
-        if (bookIdx === -1) return prev;
-        const newBooks = [...prev.books];
-        const chapters = [...newBooks[bookIdx].chapters];
-        
-        const updateSingleChapter = (cIdx: number) => {
-           const c = chapters[cIdx];
-           const data = bData[c.id];
-           if (data) {
-              chapters[cIdx] = {
-                 ...c,
-                 progress: data.percent !== undefined ? data.percent : c.progress,
-                 isCompleted: data.completed || c.isCompleted // Sticky completion
-              };
-           }
-        };
+        setState(prev => {
+          const bookIdx = prev.books.findIndex(b => b.id === bookId);
+          if (bookIdx === -1) return prev;
+          const newBooks = [...prev.books];
+          const chapters = [...newBooks[bookIdx].chapters];
+          
+          const updateSingleChapter = (cIdx: number) => {
+             const c = chapters[cIdx];
+             const data = bData[c.id];
+             if (data) {
+                chapters[cIdx] = {
+                   ...c,
+                   progress: data.percent !== undefined ? data.percent : c.progress,
+                   isCompleted: data.completed || c.isCompleted // Sticky completion
+                };
+             }
+          };
 
-        if (chapterId) {
-           const cIdx = chapters.findIndex(c => c.id === chapterId);
-           if (cIdx !== -1) updateSingleChapter(cIdx);
-        } else {
-           // Bulk update
-           for (let i = 0; i < chapters.length; i++) {
-              updateSingleChapter(i);
-           }
-        }
-        
-        newBooks[bookIdx] = { ...newBooks[bookIdx], chapters };
-        return { ...prev, books: newBooks };
-      });
+          if (chapterId) {
+             const cIdx = chapters.findIndex(c => c.id === chapterId);
+             if (cIdx !== -1) updateSingleChapter(cIdx);
+          } else {
+             // Bulk update
+             for (let i = 0; i < chapters.length; i++) {
+                updateSingleChapter(i);
+             }
+          }
+          
+          newBooks[bookIdx] = { ...newBooks[bookIdx], chapters };
+          return { ...prev, books: newBooks };
+        });
+      } catch (e) {
+        console.warn("Progress update read failed", e);
+      }
     };
     window.addEventListener('talevox_progress_updated', handleProgressUpdate);
     return () => window.removeEventListener('talevox_progress_updated', handleProgressUpdate);
@@ -321,6 +374,9 @@ const App: React.FC = () => {
     
     // Stop audio and clear state to prevent jumps
     speechController.safeStop();
+    // Mobile buffering reset
+    await new Promise(r => setTimeout(r, 80));
+
     // Keep UI duration valid to prevent retract, but reset offset
     setState(p => ({ ...p, currentOffsetChars: 0 }));
     
@@ -432,9 +488,11 @@ const App: React.FC = () => {
       updatePhase('ERROR');
       setLastPlaybackError(playErr.message);
       if (playErr.name === 'NotAllowedError') { 
+        // Mobile Autoplay Block logic
         setAutoplayBlocked(true); 
         setIsPlaying(false);
-        updatePhase('READY');
+        updatePhase('READY'); // Reset to Ready so user can tap Play
+        showToast("Tap Play to start", 0, 'info');
       } else {
         setIsPlaying(false);
         showToast(`Playback Error: ${playErr.message}`, 0, 'error');
@@ -1119,7 +1177,7 @@ const App: React.FC = () => {
         <div className="fixed top-20 right-4 z-[1000] p-4 bg-black/80 backdrop-blur-md text-white text-[10px] font-mono rounded-xl shadow-2xl border border-white/10 pointer-events-none opacity-80">
           <div className="flex items-center gap-2 mb-2 border-b border-white/20 pb-1">
             <Terminal className="w-3 h-3 text-indigo-400" />
-            <span className="font-bold">Playback Diagnostics</span>
+            <span className="font-bold">Playback Diagnostics {effectiveMobileMode ? '(Mobile)' : ''}</span>
           </div>
           <div>Phase: <span className="text-emerald-400">{playbackPhase}</span></div>
           <div>Scrubbing: {isScrubbing ? 'YES' : 'NO'}</div>
@@ -1229,6 +1287,7 @@ const App: React.FC = () => {
               debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset}
               onBackToCollection={() => setActiveTab('collection')} onAddChapter={() => setIsAddChapterOpen(true)}
               highlightMode={activeBook.settings.highlightMode} readerSettings={state.readerSettings}
+              isMobile={effectiveMobileMode}
             />
           )}
 
@@ -1317,6 +1376,7 @@ const App: React.FC = () => {
           onSeekToTime={handleSeekCommit} 
           autoplayBlocked={autoplayBlocked}
           onScrubStart={() => setIsScrubbing(true)}
+          isMobile={effectiveMobileMode}
         />
       )}
     </div>

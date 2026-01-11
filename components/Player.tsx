@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Play, Pause, SkipBack, SkipForward, FastForward, Rewind, Clock, Type, AlignLeft, Sparkles, Repeat, Loader2, ChevronUp, ChevronDown, X, Settings as SettingsIcon, AlertCircle } from 'lucide-react';
 import { Theme, HighlightMode } from '../types';
@@ -36,6 +35,7 @@ interface PlayerProps {
   onSeekToTime?: (seconds: number) => void;
   autoplayBlocked?: boolean;
   onScrubStart?: () => void;
+  isMobile: boolean;
 }
 
 const formatTime = (seconds: number) => {
@@ -51,7 +51,7 @@ const Player: React.FC<PlayerProps> = ({
   sleepTimer, onSetSleepTimer, stopAfterChapter, onSetStopAfterChapter,
   useBookSettings, onSetUseBookSettings, highlightMode, onSetHighlightMode,
   onNext, onPrev, onSeek, playbackCurrentTime, playbackDuration, isFetching,
-  onSeekToTime, autoplayBlocked, onScrubStart
+  onSeekToTime, autoplayBlocked, onScrubStart, isMobile
 }) => {
   const [showSleepMenu, setShowSleepMenu] = useState(false);
   const [isExpandedMobile, setIsExpandedMobile] = useState(false);
@@ -134,7 +134,7 @@ const Player: React.FC<PlayerProps> = ({
       {autoplayBlocked && (
         <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-4 animate-bounce z-30">
           <div className="bg-amber-600 text-white px-4 py-2 rounded-xl shadow-2xl flex items-center gap-2 font-black text-[10px] uppercase tracking-widest whitespace-nowrap">
-            <AlertCircle className="w-3.5 h-3.5" /> Autoplay blocked — tap Play
+            <AlertCircle className="w-3.5 h-3.5" /> Tap Play to Start
           </div>
         </div>
       )}
@@ -175,7 +175,10 @@ const Player: React.FC<PlayerProps> = ({
             {/* Centered Controls */}
             <div className="flex items-center gap-4 lg:gap-12 flex-1 justify-center">
               <button onClick={onPrev} className="p-3 hover:scale-110 transition-transform"><SkipBack className="w-7 h-7 lg:w-8 lg:h-8" /></button>
-              <button onClick={() => onSeek(-10)} className="hidden sm:block p-3 hover:scale-110 transition-transform opacity-60" title="Back 10s"><Rewind className="w-6 h-6 lg:w-7 lg:h-7" /></button>
+              
+              {/* Mobile Rewind */}
+              <button onClick={() => onSeek(-10)} className={`${isMobile ? 'block' : 'hidden sm:block'} p-3 hover:scale-110 transition-transform opacity-60`} title="Back 10s"><Rewind className="w-6 h-6 lg:w-7 lg:h-7" /></button>
+              
               <button 
                 disabled={isFetching}
                 onClick={isPlaying ? onPause : onPlay} 
@@ -190,7 +193,10 @@ const Player: React.FC<PlayerProps> = ({
                   </>
                 )}
               </button>
-              <button onClick={() => onSeek(10)} className="hidden sm:block p-3 hover:scale-110 transition-transform opacity-60" title="Forward 10s"><FastForward className="w-6 h-6 lg:w-7 lg:h-7" /></button>
+              
+              {/* Mobile Forward */}
+              <button onClick={() => onSeek(10)} className={`${isMobile ? 'block' : 'hidden sm:block'} p-3 hover:scale-110 transition-transform opacity-60`} title="Forward 10s"><FastForward className="w-6 h-6 lg:w-7 lg:h-7" /></button>
+              
               <button onClick={onNext} className="p-3 hover:scale-110 transition-transform"><SkipForward className="w-7 h-7 lg:w-8 lg:h-8" /></button>
             </div>
 

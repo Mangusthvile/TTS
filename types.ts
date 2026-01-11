@@ -42,6 +42,8 @@ export enum AudioStatus {
   FAILED = 'failed'
 }
 
+export type UiMode = 'auto' | 'desktop' | 'mobile';
+
 export const CLOUD_VOICES = [
   { id: 'en-US-Standard-C', name: 'Standard Female (US)' },
   { id: 'en-US-Standard-D', name: 'Standard Male (US)' },
@@ -134,6 +136,7 @@ export interface ReaderSettings {
   paragraphSpacing: number;
   highlightColor: string;
   followHighlight: boolean;
+  uiMode: UiMode;
 }
 
 export interface Book {

@@ -15,6 +15,7 @@ interface ReaderProps {
   onAddChapter?: () => void;
   highlightMode: HighlightMode;
   readerSettings: ReaderSettings;
+  isMobile: boolean;
 }
 
 const WordWrapper = React.memo(({ word, currentOffset, highlightMode, sentences }: { word: any, currentOffset: number, highlightMode: HighlightMode, sentences: any[] }) => {
@@ -47,7 +48,7 @@ const WordWrapper = React.memo(({ word, currentOffset, highlightMode, sentences 
 
 const Reader: React.FC<ReaderProps> = ({ 
   chapter, rules, currentOffsetChars, theme, debugMode, onToggleDebug, onJumpToOffset, 
-  onBackToCollection, onAddChapter, highlightMode, readerSettings
+  onBackToCollection, onAddChapter, highlightMode, readerSettings, isMobile
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const userScrollingRef = useRef<boolean>(false);
@@ -117,12 +118,15 @@ const Reader: React.FC<ReaderProps> = ({
   const handleScroll = () => {
     userScrollingRef.current = true;
     if (scrollTimeoutRef.current) window.clearTimeout(scrollTimeoutRef.current);
+    // Longer cooldown on mobile to prevent fighting with touch scrolling
+    const cooldown = isMobile ? 2500 : 1500;
     scrollTimeoutRef.current = window.setTimeout(() => {
       userScrollingRef.current = false;
-    }, 2000);
+    }, cooldown);
   };
 
   const triggerJump = () => {
+    if (isMobile) return; // Disable double-tap seek on mobile to prevent conflicts
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return;
     const range = selection.getRangeAt(0);
@@ -151,6 +155,7 @@ const Reader: React.FC<ReaderProps> = ({
       <div 
         ref={containerRef} 
         onScroll={handleScroll}
+        onTouchStart={() => { userScrollingRef.current = true; }}
         className="flex-1 overflow-y-auto px-4 lg:px-12 py-12 lg:py-24 scroll-smooth scrollbar-hide"
         onDoubleClick={triggerJump}
       >
