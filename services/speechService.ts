@@ -1,3 +1,4 @@
+
 import { Rule, RuleType, AudioChunkMetadata, PlaybackMetadata } from '../types';
 import { getDriveAudioObjectUrl, revokeObjectUrl } from "../services/driveService";
 import { trace, traceError } from '../utils/trace';
@@ -415,7 +416,7 @@ class SpeechController {
     const clamped = Math.min(Math.max(targetSec, 0), Math.max(dur - 0.05, 0));
     const current = audio.currentTime;
 
-    // NO-OP seek optimization
+    // NO-OP seek optimization (but always emit sync tick)
     if (Math.abs(clamped - current) < 0.05) {
         this.emitSyncTick();
         return;
@@ -446,7 +447,8 @@ class SpeechController {
         }
         
         if (!converged) {
-           throw e; // Rethrow timeout if we didn't converge
+           // On mobile, just logging warning and proceeding is often safer than crashing
+           traceError('audio:seek:converge_failed_but_proceeding', { actual: audio.currentTime, target: clamped });
         }
     }
 

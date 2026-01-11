@@ -21,7 +21,7 @@ import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library 
 import { trace, traceError } from './utils/trace';
 import { computeMobileMode } from './utils/platform';
 
-const STATE_FILENAME = 'talevox_state_v295.json';
+const STATE_FILENAME = 'talevox_state_v296.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -57,10 +57,13 @@ const App: React.FC = () => {
   const [currentIntroDurSec, setCurrentIntroDurSec] = useState(5);
   const [isScrubbing, setIsScrubbing] = useState(false);
   
-  // Ref to prevent overlapping transitions
+  // Ref to prevent overlapping transitions and manage scrub session
   const transitionTokenRef = useRef(0);
   const isInIntroRef = useRef(false);
   const lastProgressCommitTime = useRef(0);
+  const isScrubbingRef = useRef(false);
+  const scrubPreviewSecRef = useRef(0);
+  const scrubOwnerTokenRef = useRef(0);
 
   // Watchdog for stuck SEEKING state
   useEffect(() => {
@@ -215,7 +218,7 @@ const App: React.FC = () => {
   }, []);
 
   const updatePhase = useCallback((p: PlaybackPhase) => {
-    if (p !== 'IDLE' && p !== 'READY' && p !== 'LOADING_TEXT' && p !== 'LOADING_AUDIO' && p !== 'SEEKING' && p !== 'TRANSITIONING') {
+    if (p !== 'IDLE' && p !== 'READY' && p !== 'LOADING_TEXT' && p !== 'LOADING_AUDIO' && p !== 'SEEKING' && p !== 'TRANSITIONING' && p !== 'SCRUBBING') {
         // Just noise reduction
     } else {
         trace(`phase:change`, { from: playbackPhase, to: p });
@@ -327,11 +330,13 @@ const App: React.FC = () => {
 
   // Register Persistent Sync Callback
   const handleSyncUpdate = useCallback((meta: PlaybackMetadata & { completed?: boolean }) => {
+    // Gate sync updates during scrubbing
+    if (isScrubbingRef.current) return;
+
     const s = stateRef.current;
     
-    if (isScrubbing) return;
-
-    if (['LOADING_AUDIO', 'SEEKING', 'TRANSITIONING', 'LOADING_TEXT'].includes(playbackPhase)) {
+    // Also skip updates during critical phases to avoid jitter
+    if (['LOADING_AUDIO', 'SEEKING', 'TRANSITIONING', 'LOADING_TEXT', 'SCRUBBING'].includes(playbackPhase)) {
         return;
     }
     
@@ -360,7 +365,7 @@ const App: React.FC = () => {
        }
     }
 
-  }, [playbackPhase, currentIntroDurSec, updatePhase, isScrubbing, commitProgressUpdate]);
+  }, [playbackPhase, currentIntroDurSec, updatePhase, commitProgressUpdate]);
 
   useEffect(() => {
     speechController.setSyncCallback(handleSyncUpdate);
@@ -369,6 +374,39 @@ const App: React.FC = () => {
   useEffect(() => {
     document.documentElement.style.setProperty('--highlight-color', state.readerSettings.highlightColor);
   }, [state.readerSettings.highlightColor]);
+
+  // --- Scrubbing Handlers ---
+  const handleScrubStart = useCallback(() => {
+    isScrubbingRef.current = true;
+    setIsScrubbing(true);
+    scrubOwnerTokenRef.current++;
+    updatePhase('SCRUBBING');
+  }, [updatePhase]);
+
+  const handleScrubMove = useCallback((time: number) => {
+    if (!isScrubbingRef.current) return;
+    // Constrain time
+    const clamped = Math.min(Math.max(time, 0), audioDuration);
+    scrubPreviewSecRef.current = clamped;
+    // Update displayed time state (lightweight)
+    setAudioCurrentTime(clamped);
+  }, [audioDuration]);
+
+  const handleSeekCommit = useCallback(async (time: number) => {
+    isScrubbingRef.current = false;
+    setIsScrubbing(false);
+    updatePhase('SEEKING');
+    try {
+      await speechController.seekTo(time);
+      updatePhase(isPlayingRef.current ? 'PLAYING_BODY' : 'READY');
+      // Force immediate UI update after seek
+      speechController.emitSyncTick();
+    } catch (e: any) {
+      console.error("Seek failed", e);
+      // Fallback to safe state
+      updatePhase('READY');
+    }
+  }, [updatePhase]);
 
   const handleSaveState = useCallback(async (force = false, silent = false) => {
     if (!isAuthorized && !silent) {
@@ -598,11 +636,6 @@ const App: React.FC = () => {
   
   const handleJumpToOffset = (o: number) => { updatePhase('SEEKING'); speechController.seekToOffset(o); };
   
-  const handleSeekCommit = (time: number) => {
-    updatePhase('SEEKING');
-    speechController.seekTo(time).then(() => updatePhase(isPlayingRef.current ? 'PLAYING_BODY' : 'READY'));
-  };
-
   const handleAddBook = async (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string, driveFolderName?: string) => {
       const newBook: Book = {
           id: crypto.randomUUID(),
@@ -885,7 +918,9 @@ const App: React.FC = () => {
           playbackCurrentTime={audioCurrentTime} playbackDuration={audioDuration} isFetching={playbackPhase === 'LOADING_AUDIO' || playbackPhase === 'SEEKING'}
           onSeekToTime={handleSeekCommit} 
           autoplayBlocked={autoplayBlocked}
-          onScrubStart={() => setIsScrubbing(true)}
+          onScrubStart={handleScrubStart}
+          onScrubMove={handleScrubMove}
+          onScrubEnd={handleSeekCommit}
           isMobile={effectiveMobileMode}
         />
       )}

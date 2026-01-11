@@ -35,6 +35,8 @@ interface PlayerProps {
   onSeekToTime?: (seconds: number) => void;
   autoplayBlocked?: boolean;
   onScrubStart?: () => void;
+  onScrubMove?: (time: number) => void;
+  onScrubEnd?: (time: number) => void;
   isMobile: boolean;
 }
 
@@ -51,12 +53,12 @@ const Player: React.FC<PlayerProps> = ({
   sleepTimer, onSetSleepTimer, stopAfterChapter, onSetStopAfterChapter,
   useBookSettings, onSetUseBookSettings, highlightMode, onSetHighlightMode,
   onNext, onPrev, onSeek, playbackCurrentTime, playbackDuration, isFetching,
-  onSeekToTime, autoplayBlocked, onScrubStart, isMobile
+  onSeekToTime, autoplayBlocked, onScrubStart, onScrubMove, onScrubEnd, isMobile
 }) => {
   const [showSleepMenu, setShowSleepMenu] = useState(false);
   const [isExpandedMobile, setIsExpandedMobile] = useState(false);
   
-  // Local state for scrubbing
+  // Local state for scrubbing visualization
   const [isDragging, setIsDragging] = useState(false);
   const [dragTime, setDragTime] = useState(0);
 
@@ -96,33 +98,54 @@ const Player: React.FC<PlayerProps> = ({
     function ZV(v: number) { return v < 0 ? 0 : v; }
   }, [playbackDuration, playbackCurrentTime, progressChars, totalLengthChars, isDragging, dragTime]);
 
+  const calcTimeFromEvent = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!playbackDuration) return 0;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    return ratio * playbackDuration;
+  };
+
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!playbackDuration) return;
-    setIsDragging(true);
-    if(onScrubStart) onScrubStart();
+    
+    // Capture pointer to track movement even outside element
     e.currentTarget.setPointerCapture(e.pointerId);
-    calculateDrag(e);
+    
+    setIsDragging(true);
+    const t = calcTimeFromEvent(e);
+    setDragTime(t);
+    
+    if (onScrubStart) onScrubStart();
+    if (onScrubMove) onScrubMove(t);
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (isDragging) calculateDrag(e);
-  };
-
-  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (isDragging && playbackDuration && onSeekToTime) {
-      setIsDragging(false);
-      const rect = e.currentTarget.getBoundingClientRect();
-      const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-      onSeekToTime(ratio * playbackDuration);
-      e.currentTarget.releasePointerCapture(e.pointerId);
+    if (isDragging) {
+      const t = calcTimeFromEvent(e);
+      setDragTime(t);
+      if (onScrubMove) onScrubMove(t);
     }
   };
 
-  const calculateDrag = (e: React.PointerEvent<HTMLDivElement>) => {
-    if(!playbackDuration) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    setDragTime(ratio * playbackDuration);
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (isDragging) {
+      setIsDragging(false);
+      e.currentTarget.releasePointerCapture(e.pointerId);
+      const t = calcTimeFromEvent(e);
+      
+      // Commit scrub
+      if (onScrubEnd) onScrubEnd(t);
+      else if (onSeekToTime) onSeekToTime(t);
+    }
+  };
+
+  const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (isDragging) {
+        setIsDragging(false);
+        e.currentTarget.releasePointerCapture(e.pointerId);
+        // Revert or commit? Commit is safer to avoid stuck state
+        if (onScrubEnd) onScrubEnd(dragTime);
+    }
   };
 
   const isDark = theme === Theme.DARK;
@@ -144,16 +167,18 @@ const Player: React.FC<PlayerProps> = ({
         <div className="flex items-center gap-4 px-4 lg:px-8 pt-4 select-none">
           <span className="text-[11px] font-black font-mono opacity-60 min-w-[40px] text-left">{displayTime}</span>
           <div 
-            className={`flex-1 h-4 sm:h-3 rounded-full cursor-pointer relative flex items-center touch-none ${isDark ? 'bg-slate-800' : 'bg-black/5'}`}
+            className={`flex-1 h-4 sm:h-3 rounded-full cursor-pointer relative flex items-center touch-none ${isDark ? 'bg-slate-800' : 'bg-black/5'} ${isMobile ? 'touch-none' : ''}`}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
-            onPointerLeave={handlePointerUp}
+            onPointerCancel={handlePointerCancel}
+            onPointerLeave={undefined} // handled by capture
           >
             <div className={`h-1.5 rounded-full ${accentBg} transition-all duration-75 shadow-sm pointer-events-none`} style={{ width: `${progressPercent}%` }} />
+            {/* Visual thumb - larger on mobile */}
             {isDragging && (
                 <div 
-                    className="absolute h-5 w-5 bg-white rounded-full shadow-lg border border-black/10 transform -translate-x-1/2 pointer-events-none" 
+                    className={`absolute rounded-full shadow-lg border border-black/10 transform -translate-x-1/2 pointer-events-none bg-white ${isMobile ? 'h-6 w-6' : 'h-5 w-5'}`} 
                     style={{ left: `${progressPercent}%` }} 
                 />
             )}

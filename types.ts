@@ -67,6 +67,7 @@ export type PlaybackPhase =
   | 'READY'
   | 'LOADING_AUDIO'
   | 'SEEKING'
+  | 'SCRUBBING'
   | 'PLAYING_INTRO'
   | 'PLAYING_BODY'
   | 'ENDING_SETTLE'
