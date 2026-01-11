@@ -20,7 +20,7 @@ import { idbSet } from './services/storageService';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud, Terminal } from 'lucide-react';
 import { trace, traceError } from './utils/trace';
 
-const STATE_FILENAME = 'talevox_state_v2812.json';
+const STATE_FILENAME = 'talevox_state_v290.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -76,6 +76,7 @@ const App: React.FC = () => {
   const [phaseSince, setPhaseSince] = useState(Date.now());
   const [lastPlaybackError, setLastPlaybackError] = useState<string | null>(null);
   const [currentIntroDurSec, setCurrentIntroDurSec] = useState(5);
+  const [isScrubbing, setIsScrubbing] = useState(false);
   
   // Ref to prevent overlapping transitions
   const transitionTokenRef = useRef(0);
@@ -165,6 +166,9 @@ const App: React.FC = () => {
 
   // Register Persistent Sync Callback
   const handleSyncUpdate = useCallback((meta: PlaybackMetadata) => {
+    // If user is scrubbing, ignore audio engine updates to prevent fighting
+    if (isScrubbing) return;
+
     // Block sync updates during volatile phases to prevent jumping
     if (['LOADING_AUDIO', 'SEEKING', 'TRANSITIONING', 'LOADING_TEXT'].includes(playbackPhase)) {
         return;
@@ -186,7 +190,7 @@ const App: React.FC = () => {
       if (p.currentOffsetChars === meta.charOffset) return p;
       return { ...p, currentOffsetChars: meta.charOffset };
     });
-  }, [playbackPhase, currentIntroDurSec, updatePhase]);
+  }, [playbackPhase, currentIntroDurSec, updatePhase, isScrubbing]);
 
   useEffect(() => {
     speechController.setSyncCallback(handleSyncUpdate);
@@ -531,9 +535,28 @@ const App: React.FC = () => {
     setActiveTab('reader');
   };
 
-  const handleSeekToTime = (t: number) => {
+  const handleSeekCommit = async (time: number) => {
+    trace('seek:commit', { time });
+    setIsScrubbing(false);
     updatePhase('SEEKING');
-    speechController.seekToTime(t);
+    try {
+        await speechController.seekToTime(time);
+        if (isPlayingRef.current) {
+            updatePhase('PLAYING_BODY');
+        } else {
+            updatePhase('READY');
+        }
+    } catch (e: any) {
+        traceError('seek:commit:error', e);
+        showToast("Seek failed", 0, 'error');
+    }
+  };
+  
+  const handleSeekByDelta = (delta: number) => {
+    const current = audioCurrentTime;
+    const target = Math.max(0, current + delta);
+    // Don't scrub, just commit immediately
+    handleSeekCommit(target);
   };
   
   const handleJumpToOffset = (o: number) => {
@@ -1068,6 +1091,7 @@ const App: React.FC = () => {
             <span className="font-bold">Playback Diagnostics</span>
           </div>
           <div>Phase: <span className="text-emerald-400">{playbackPhase}</span></div>
+          <div>Scrubbing: {isScrubbing ? 'YES' : 'NO'}</div>
           <div>Since: {((Date.now() - phaseSince) / 1000).toFixed(1)}s</div>
           <div>Audio Time: {audioCurrentTime.toFixed(2)}s</div>
           <div>Audio Dur: {audioDuration.toFixed(2)}s</div>
@@ -1246,7 +1270,7 @@ const App: React.FC = () => {
       {activeTab === 'reader' && (
         <Player 
           isPlaying={isPlaying} onPlay={() => isPlayingRef.current ? handleManualPause() : handleManualPlay()} onPause={handleManualPause} onStop={handleManualStop}
-          onNext={() => handleNextChapter(false)} onPrev={handlePrevChapter} onSeek={handleSeekToTime}
+          onNext={() => handleNextChapter(false)} onPrev={handlePrevChapter} onSeek={handleSeekByDelta}
           speed={state.playbackSpeed} onSpeedChange={s => setState(p => ({ ...p, playbackSpeed: s }))}
           selectedVoice={state.selectedVoiceName || ''} onVoiceChange={() => {}}
           theme={state.theme} onThemeChange={t => setState(p => ({ ...p, theme: t }))}
@@ -1259,7 +1283,9 @@ const App: React.FC = () => {
           highlightMode={activeBook?.settings.highlightMode || HighlightMode.WORD}
           onSetHighlightMode={v => { if(activeBook) setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, highlightMode: v } } : b) })); }}
           playbackCurrentTime={audioCurrentTime} playbackDuration={audioDuration} isFetching={playbackPhase === 'LOADING_AUDIO' || playbackPhase === 'SEEKING'}
-          onSeekToTime={handleSeekToTime} autoplayBlocked={autoplayBlocked}
+          onSeekToTime={handleSeekCommit} 
+          autoplayBlocked={autoplayBlocked}
+          onScrubStart={() => setIsScrubbing(true)}
         />
       )}
     </div>

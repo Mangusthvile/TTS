@@ -206,6 +206,7 @@ class SpeechController {
     const duration = dur || this.audio.duration || 0;
     const effectiveIntroEnd = this.currentIntroDurSec > 0 ? (this.currentIntroDurSec + this.HIGHLIGHT_DELAY_SEC) : 0;
     
+    // Only move highlighting if we are PAST the intro
     if (duration === 0 || t < effectiveIntroEnd) return 0;
     
     const contentTime = t - effectiveIntroEnd;
@@ -342,8 +343,6 @@ class SpeechController {
     } catch (err: any) {
       if (err.name === 'NotAllowedError') {
          trace('audio:load:interaction_required');
-         // We allow the app to handle this via catch rethrow, but we should probably 
-         // NOT treat it as a hard failure that needs full reset, just a pause state.
          throw err; 
       }
       if (err.message === 'Playback session preempted') {
@@ -360,14 +359,33 @@ class SpeechController {
     }
   }
 
-  public seekToTime(seconds: number) {
-    if (!isFinite(seconds) || seconds < 0) return;
-    this.lastKnownTime = Math.min(seconds, this.audio.duration || Infinity);
+  public async seekToTime(seconds: number): Promise<void> {
+    const duration = this.audio.duration;
+    if (!isFinite(duration) || duration <= 0) {
+        trace('audio:seek:ignored', { reason: 'no_duration' });
+        return;
+    }
     
-    if (this.audio.duration > 0) {
-      this.audio.currentTime = this.lastKnownTime;
-      this.syncCallback?.({ currentTime: this.audio.currentTime, duration: this.audio.duration, charOffset: this.getOffsetFromTime(this.audio.currentTime) });
-      this.saveProgress();
+    // Clamp to valid range
+    const target = Math.max(0, Math.min(seconds, duration - 0.1));
+    this.lastKnownTime = target;
+    
+    trace('audio:seeking', { target });
+    this.audio.currentTime = target;
+    
+    try {
+        await this.waitForEvent(this.audio, 'seeked', 5000);
+        // Force immediate tick
+        if (this.syncCallback) {
+            this.syncCallback({ 
+                currentTime: this.audio.currentTime, 
+                duration: this.audio.duration, 
+                charOffset: this.getOffsetFromTime(this.audio.currentTime, this.audio.duration) 
+            });
+        }
+        this.saveProgress();
+    } catch (e) {
+        traceError('audio:seek:failed', e);
     }
   }
 
@@ -395,10 +413,7 @@ class SpeechController {
       targetTime = effectiveIntroEnd + (Math.max(0, Math.min(1, offset / this.currentTextLength)) * Math.max(0.001, duration - effectiveIntroEnd));
     }
     
-    this.lastKnownTime = targetTime;
-    this.audio.currentTime = targetTime;
-    this.syncCallback?.({ currentTime: targetTime, duration, charOffset: offset });
-    this.saveProgress(); 
+    this.seekToTime(targetTime);
   }
 
   private stopSyncLoop() { if (this.rafId !== null) { cancelAnimationFrame(this.rafId); this.rafId = null; } }

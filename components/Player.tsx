@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useMemo } from 'react';
+
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Play, Pause, SkipBack, SkipForward, FastForward, Rewind, Clock, Type, AlignLeft, Sparkles, Repeat, Loader2, ChevronUp, ChevronDown, X, Settings as SettingsIcon, AlertCircle } from 'lucide-react';
 import { Theme, HighlightMode } from '../types';
 import { speechController } from '../services/speechService';
@@ -34,6 +35,7 @@ interface PlayerProps {
   isFetching?: boolean;
   onSeekToTime?: (seconds: number) => void;
   autoplayBlocked?: boolean;
+  onScrubStart?: () => void;
 }
 
 const formatTime = (seconds: number) => {
@@ -49,17 +51,28 @@ const Player: React.FC<PlayerProps> = ({
   sleepTimer, onSetSleepTimer, stopAfterChapter, onSetStopAfterChapter,
   useBookSettings, onSetUseBookSettings, highlightMode, onSetHighlightMode,
   onNext, onPrev, onSeek, playbackCurrentTime, playbackDuration, isFetching,
-  onSeekToTime, autoplayBlocked
+  onSeekToTime, autoplayBlocked, onScrubStart
 }) => {
   const [showSleepMenu, setShowSleepMenu] = useState(false);
   const [isExpandedMobile, setIsExpandedMobile] = useState(false);
   
-  const displayTime = useMemo(() => {
-    if (playbackCurrentTime !== undefined && playbackCurrentTime > 0) {
-      return formatTime(playbackCurrentTime / speed);
+  // Local state for scrubbing
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragTime, setDragTime] = useState(0);
+
+  // When not dragging, sync local dragTime with actual prop
+  useEffect(() => {
+    if (!isDragging && playbackCurrentTime !== undefined) {
+      setDragTime(playbackCurrentTime);
     }
+  }, [playbackCurrentTime, isDragging]);
+
+  const displayTime = useMemo(() => {
+    // Show drag time while dragging, else show prop
+    const t = isDragging ? dragTime : (playbackCurrentTime || 0);
+    if (t > 0) return formatTime(t / speed);
     return "0:00";
-  }, [playbackCurrentTime, speed]);
+  }, [playbackCurrentTime, dragTime, isDragging, speed]);
 
   const displayTotal = useMemo(() => {
     if (playbackDuration !== undefined && playbackDuration > 0) {
@@ -74,21 +87,42 @@ const Player: React.FC<PlayerProps> = ({
   };
 
   const progressPercent = useMemo(() => {
-    if (playbackDuration && playbackDuration > 0 && playbackCurrentTime !== undefined) {
-      return (playbackCurrentTime / playbackDuration) * 100;
+    if (playbackDuration && playbackDuration > 0) {
+      const t = isDragging ? ZV(dragTime) : (playbackCurrentTime || 0);
+      return (t / playbackDuration) * 100;
     }
     return totalLengthChars > 0 ? (progressChars / totalLengthChars) * 100 : 0;
-  }, [playbackDuration, playbackCurrentTime, progressChars, totalLengthChars]);
-
-  const handleProgressAction = (e: React.PointerEvent<HTMLDivElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const ratio = (e.clientX - rect.left) / rect.width;
     
-    if (playbackDuration && onSeekToTime) {
+    function ZV(v: number) { return v < 0 ? 0 : v; }
+  }, [playbackDuration, playbackCurrentTime, progressChars, totalLengthChars, isDragging, dragTime]);
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!playbackDuration) return;
+    setIsDragging(true);
+    if(onScrubStart) onScrubStart();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    calculateDrag(e);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (isDragging) calculateDrag(e);
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (isDragging && playbackDuration && onSeekToTime) {
+      setIsDragging(false);
+      const rect = e.currentTarget.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
       onSeekToTime(ratio * playbackDuration);
-    } else {
-      onSeekToOffset(Math.floor(totalLengthChars * ratio));
+      e.currentTarget.releasePointerCapture(e.pointerId);
     }
+  };
+
+  const calculateDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    if(!playbackDuration) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    setDragTime(ratio * playbackDuration);
   };
 
   const isDark = theme === Theme.DARK;
@@ -107,13 +141,22 @@ const Player: React.FC<PlayerProps> = ({
       
       <div className="max-w-5xl mx-auto">
         {/* Progress Bar & Time */}
-        <div className="flex items-center gap-4 px-4 lg:px-8 pt-4">
+        <div className="flex items-center gap-4 px-4 lg:px-8 pt-4 select-none">
           <span className="text-[11px] font-black font-mono opacity-60 min-w-[40px] text-left">{displayTime}</span>
           <div 
-            className={`flex-1 h-3 rounded-full cursor-pointer relative flex items-center ${isDark ? 'bg-slate-800' : 'bg-black/5'}`}
-            onPointerDown={handleProgressAction}
+            className={`flex-1 h-3 rounded-full cursor-pointer relative flex items-center touch-none ${isDark ? 'bg-slate-800' : 'bg-black/5'}`}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerLeave={handlePointerUp}
           >
-            <div className={`h-1.5 rounded-full ${accentBg} transition-all duration-75 shadow-sm`} style={{ width: `${progressPercent}%` }} />
+            <div className={`h-1.5 rounded-full ${accentBg} transition-all duration-75 shadow-sm pointer-events-none`} style={{ width: `${progressPercent}%` }} />
+            {isDragging && (
+                <div 
+                    className="absolute h-4 w-4 bg-white rounded-full shadow-lg border border-black/10 transform -translate-x-1/2 pointer-events-none" 
+                    style={{ left: `${progressPercent}%` }} 
+                />
+            )}
           </div>
           <span className="text-[11px] font-black font-mono opacity-60 min-w-[40px] text-right">{displayTotal}</span>
         </div>
@@ -132,7 +175,7 @@ const Player: React.FC<PlayerProps> = ({
             {/* Centered Controls */}
             <div className="flex items-center gap-4 lg:gap-12 flex-1 justify-center">
               <button onClick={onPrev} className="p-3 hover:scale-110 transition-transform"><SkipBack className="w-7 h-7 lg:w-8 lg:h-8" /></button>
-              <button onClick={() => onSeek(-500)} className="hidden sm:block p-3 hover:scale-110 transition-transform opacity-60"><Rewind className="w-6 h-6 lg:w-7 lg:h-7" /></button>
+              <button onClick={() => onSeek(-10)} className="hidden sm:block p-3 hover:scale-110 transition-transform opacity-60" title="Back 10s"><Rewind className="w-6 h-6 lg:w-7 lg:h-7" /></button>
               <button 
                 disabled={isFetching}
                 onClick={isPlaying ? onPause : onPlay} 
@@ -147,7 +190,7 @@ const Player: React.FC<PlayerProps> = ({
                   </>
                 )}
               </button>
-              <button onClick={() => onSeek(500)} className="hidden sm:block p-3 hover:scale-110 transition-transform opacity-60"><FastForward className="w-6 h-6 lg:w-7 lg:h-7" /></button>
+              <button onClick={() => onSeek(10)} className="hidden sm:block p-3 hover:scale-110 transition-transform opacity-60" title="Forward 10s"><FastForward className="w-6 h-6 lg:w-7 lg:h-7" /></button>
               <button onClick={onNext} className="p-3 hover:scale-110 transition-transform"><SkipForward className="w-7 h-7 lg:w-8 lg:h-8" /></button>
             </div>
 
