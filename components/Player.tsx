@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Play, Pause, SkipBack, SkipForward, FastForward, Rewind, Clock, Type, AlignLeft, Sparkles, Repeat, Loader2, ChevronUp, ChevronDown, X, Settings as SettingsIcon, AlertCircle } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, FastForward, Rewind, Clock, Type, AlignLeft, Sparkles, Repeat, Loader2, ChevronUp, ChevronDown, X, Settings as SettingsIcon, AlertCircle, PlayCircle } from 'lucide-react';
 import { Theme, HighlightMode } from '../types';
 import { speechController } from '../services/speechService';
 
@@ -154,11 +154,21 @@ const Player: React.FC<PlayerProps> = ({
 
   return (
     <div className={`border-t transition-all duration-300 relative z-20 ${isDark ? 'bg-slate-900 border-slate-800 text-slate-100' : isSepia ? 'bg-[#efe6d5] border-[#d8ccb6] text-[#3c2f25]' : 'bg-white border-black/10 text-black'}`}>
+      
+      {/* Mobile Autoplay Blocker Overlay */}
       {autoplayBlocked && (
-        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-4 animate-bounce z-30">
-          <div className="bg-amber-600 text-white px-4 py-2 rounded-xl shadow-2xl flex items-center gap-2 font-black text-[10px] uppercase tracking-widest whitespace-nowrap">
-            <AlertCircle className="w-3.5 h-3.5" /> Tap Play to Start
-          </div>
+        <div className="absolute inset-0 z-50 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center animate-in fade-in duration-300">
+           <button 
+             onClick={onPlay}
+             className="flex flex-col items-center gap-4 group"
+           >
+             <div className="p-6 bg-indigo-600 text-white rounded-full shadow-2xl group-hover:scale-110 transition-transform animate-bounce">
+                <PlayCircle className="w-16 h-16" />
+             </div>
+             <div className="bg-white text-black px-6 py-3 rounded-2xl font-black uppercase text-xs tracking-widest shadow-xl">
+               Tap to Continue
+             </div>
+           </button>
         </div>
       )}
       

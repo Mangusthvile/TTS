@@ -390,6 +390,21 @@ class SpeechController {
     }
   }
 
+  // --- Mobile Safe Play ---
+  public async safePlay(): Promise<'playing' | 'blocked'> {
+    if (!this.audio.src) throw new Error('No audio source');
+    try {
+      await this.audio.play();
+      this.applyRequestedSpeed();
+      return 'playing';
+    } catch (err: any) {
+      if (err.name === 'NotAllowedError') {
+        return 'blocked';
+      }
+      throw err;
+    }
+  }
+
   // --- Robust SeekTo (replaces old logic) ---
   public async seekTo(targetSec: number): Promise<void> {
     const audio = this.audio;
