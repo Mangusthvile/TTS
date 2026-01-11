@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useMemo, useState } from 'react';
 import { Chapter, Rule, Theme, HighlightMode, ReaderSettings } from '../types';
 import { applyRules } from '../services/speechService';
-import { Bug, FolderOpen, Plus, ChevronLeft } from 'lucide-react';
+import { Bug, FolderOpen, Plus, ChevronLeft, ArrowDownCircle } from 'lucide-react';
 
 interface ReaderProps {
   chapter: Chapter | null;
@@ -53,6 +53,7 @@ const Reader: React.FC<ReaderProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const userScrollingRef = useRef<boolean>(false);
   const scrollTimeoutRef = useRef<number | null>(null);
+  const [showResumeButton, setShowResumeButton] = useState(false);
 
   const speakText = useMemo(() => {
     if (!chapter) return "";
@@ -109,20 +110,35 @@ const Reader: React.FC<ReaderProps> = ({
   // Screen follows highlight
   useEffect(() => {
     if (!readerSettings.followHighlight || userScrollingRef.current) return;
+    scrollToActive();
+  }, [currentOffsetChars, readerSettings.followHighlight]);
+
+  const scrollToActive = () => {
     const activeEl = containerRef.current?.querySelector('[data-active="true"]');
     if (activeEl) {
       activeEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
-  }, [currentOffsetChars, readerSettings.followHighlight]);
+  };
+
+  const handleResumeAutoScroll = () => {
+    userScrollingRef.current = false;
+    setShowResumeButton(false);
+    scrollToActive();
+  };
 
   const handleScroll = () => {
     userScrollingRef.current = true;
+    if (isMobile) setShowResumeButton(true);
+    
     if (scrollTimeoutRef.current) window.clearTimeout(scrollTimeoutRef.current);
-    // Longer cooldown on mobile to prevent fighting with touch scrolling
-    const cooldown = isMobile ? 2500 : 1500;
-    scrollTimeoutRef.current = window.setTimeout(() => {
-      userScrollingRef.current = false;
-    }, cooldown);
+    
+    // Only auto-reset on desktop. On mobile, we wait for explicit resume or new chapter.
+    if (!isMobile) {
+      const cooldown = 1500;
+      scrollTimeoutRef.current = window.setTimeout(() => {
+        userScrollingRef.current = false;
+      }, cooldown);
+    }
   };
 
   const triggerJump = () => {
@@ -152,10 +168,22 @@ const Reader: React.FC<ReaderProps> = ({
   return (
     <div className={`relative flex-1 flex flex-col min-h-0 overflow-hidden touch-manipulation ${theme === Theme.DARK ? 'text-slate-100' : theme === Theme.SEPIA ? 'text-[#3c2f25]' : 'text-black'}`}>
       <div className={`absolute top-0 left-0 right-0 h-16 lg:h-24 z-10 pointer-events-none bg-gradient-to-b ${fadeColor} to-transparent`} />
+      
+      {showResumeButton && isMobile && (
+        <div className="absolute bottom-6 right-6 z-50 animate-in zoom-in duration-200">
+          <button 
+            onClick={handleResumeAutoScroll}
+            className="flex items-center gap-2 px-4 py-3 bg-indigo-600 text-white rounded-full shadow-2xl font-black uppercase text-[10px] tracking-widest hover:scale-105 active:scale-95 transition-transform"
+          >
+            <ArrowDownCircle className="w-4 h-4" /> Resume
+          </button>
+        </div>
+      )}
+
       <div 
         ref={containerRef} 
         onScroll={handleScroll}
-        onTouchStart={() => { userScrollingRef.current = true; }}
+        onTouchStart={() => { userScrollingRef.current = true; if(isMobile) setShowResumeButton(true); }}
         className="flex-1 overflow-y-auto px-4 lg:px-12 py-12 lg:py-24 scroll-smooth scrollbar-hide"
         onDoubleClick={triggerJump}
       >

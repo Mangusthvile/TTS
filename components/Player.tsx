@@ -144,7 +144,7 @@ const Player: React.FC<PlayerProps> = ({
         <div className="flex items-center gap-4 px-4 lg:px-8 pt-4 select-none">
           <span className="text-[11px] font-black font-mono opacity-60 min-w-[40px] text-left">{displayTime}</span>
           <div 
-            className={`flex-1 h-3 rounded-full cursor-pointer relative flex items-center touch-none ${isDark ? 'bg-slate-800' : 'bg-black/5'}`}
+            className={`flex-1 h-4 sm:h-3 rounded-full cursor-pointer relative flex items-center touch-none ${isDark ? 'bg-slate-800' : 'bg-black/5'}`}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
@@ -153,7 +153,7 @@ const Player: React.FC<PlayerProps> = ({
             <div className={`h-1.5 rounded-full ${accentBg} transition-all duration-75 shadow-sm pointer-events-none`} style={{ width: `${progressPercent}%` }} />
             {isDragging && (
                 <div 
-                    className="absolute h-4 w-4 bg-white rounded-full shadow-lg border border-black/10 transform -translate-x-1/2 pointer-events-none" 
+                    className="absolute h-5 w-5 bg-white rounded-full shadow-lg border border-black/10 transform -translate-x-1/2 pointer-events-none" 
                     style={{ left: `${progressPercent}%` }} 
                 />
             )}
@@ -176,16 +176,22 @@ const Player: React.FC<PlayerProps> = ({
             <div className="flex items-center gap-4 lg:gap-12 flex-1 justify-center">
               <button onClick={onPrev} className="p-3 hover:scale-110 transition-transform"><SkipBack className="w-7 h-7 lg:w-8 lg:h-8" /></button>
               
-              {/* Mobile Rewind */}
-              <button onClick={() => onSeek(-10)} className={`${isMobile ? 'block' : 'hidden sm:block'} p-3 hover:scale-110 transition-transform opacity-60`} title="Back 10s"><Rewind className="w-6 h-6 lg:w-7 lg:h-7" /></button>
+              {/* Rewind: Always show on mobile (isMobile) OR on Desktop */}
+              <button 
+                onClick={() => onSeek(-10)} 
+                className={`p-3 hover:scale-110 transition-transform opacity-60 ${isMobile ? 'block' : 'hidden sm:block'}`} 
+                title="Back 10s"
+              >
+                <Rewind className="w-6 h-6 lg:w-7 lg:h-7" />
+              </button>
               
               <button 
                 disabled={isFetching}
                 onClick={isPlaying ? onPause : onPlay} 
-                className={`w-14 h-14 lg:w-20 lg:h-20 text-white rounded-full flex items-center justify-center shadow-2xl ${accentBg} transition-all active:scale-90 hover:scale-105 disabled:opacity-50`}
+                className={`w-16 h-16 lg:w-20 lg:h-20 text-white rounded-full flex items-center justify-center shadow-2xl ${accentBg} transition-all active:scale-90 hover:scale-105 disabled:opacity-50`}
               >
                 {isFetching ? (
-                  <Loader2 className="w-7 h-7 animate-spin" />
+                  <Loader2 className="w-8 h-8 animate-spin" />
                 ) : (
                   <>
                     <Play className={`w-8 h-8 lg:w-10 lg:h-10 fill-current ${isPlaying ? 'hidden' : 'block ml-1'}`} />
@@ -194,8 +200,14 @@ const Player: React.FC<PlayerProps> = ({
                 )}
               </button>
               
-              {/* Mobile Forward */}
-              <button onClick={() => onSeek(10)} className={`${isMobile ? 'block' : 'hidden sm:block'} p-3 hover:scale-110 transition-transform opacity-60`} title="Forward 10s"><FastForward className="w-6 h-6 lg:w-7 lg:h-7" /></button>
+              {/* Forward: Always show on mobile (isMobile) OR on Desktop */}
+              <button 
+                onClick={() => onSeek(10)} 
+                className={`p-3 hover:scale-110 transition-transform opacity-60 ${isMobile ? 'block' : 'hidden sm:block'}`} 
+                title="Forward 10s"
+              >
+                <FastForward className="w-6 h-6 lg:w-7 lg:h-7" />
+              </button>
               
               <button onClick={onNext} className="p-3 hover:scale-110 transition-transform"><SkipForward className="w-7 h-7 lg:w-8 lg:h-8" /></button>
             </div>
