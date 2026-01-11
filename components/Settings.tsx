@@ -55,7 +55,8 @@ const Settings: React.FC<SettingsProps> = ({
   }, []);
 
   useEffect(() => {
-    return authManager.subscribe(setAuthState);
+    const unsubscribe = authManager.subscribe(setAuthState);
+    return () => { unsubscribe(); };
   }, []);
 
   const isDark = theme === Theme.DARK;

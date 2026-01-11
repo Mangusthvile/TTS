@@ -209,7 +209,8 @@ const App: React.FC = () => {
   const isAuthorized = authState.status === 'signed_in';
 
   useEffect(() => {
-    return authManager.subscribe(setAuthState);
+    const unsubscribe = authManager.subscribe(setAuthState);
+    return () => { unsubscribe(); };
   }, []);
 
   useEffect(() => {
