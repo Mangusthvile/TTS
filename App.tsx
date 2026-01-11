@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, PlaybackPhase, UiMode, ReaderSettings } from './types';
 import Library from './components/Library';
@@ -100,11 +101,11 @@ const App: React.FC = () => {
       gestureArmedRef.current = true;
       lastGestureAt.current = Date.now();
     };
-    window.addEventListener('pointerdown', armGesture);
-    window.addEventListener('keydown', armGesture);
+    window.addEventListener('pointerdown', armGesture, { capture: true });
+    window.addEventListener('keydown', armGesture, { capture: true });
     return () => {
-      window.removeEventListener('pointerdown', armGesture);
-      window.removeEventListener('keydown', armGesture);
+      window.removeEventListener('pointerdown', armGesture, { capture: true });
+      window.removeEventListener('keydown', armGesture, { capture: true });
     };
   }, []);
 
@@ -608,6 +609,9 @@ const App: React.FC = () => {
     updatePhase('LOADING_AUDIO'); 
     speechController.safeStop();
     
+    // Set intro duration for the specific chapter to sync logic
+    setCurrentIntroDurSec(chapter.audioIntroDurSec || 5);
+
     try {
       const voice = book.settings.defaultVoiceId || 'en-US-Standard-C';
       const allRules = [...s.globalRules, ...book.rules];
@@ -624,11 +628,11 @@ const App: React.FC = () => {
       if (audioBlob && audioBlob.size > 0) {
         const url = URL.createObjectURL(audioBlob);
         speechController.setContext({ bookId: book.id, chapterId: chapter.id });
-        speechController.updateMetadata(text.length, 5, chapter.audioChunkMap || []);
+        speechController.updateMetadata(text.length, chapter.audioIntroDurSec || 5, chapter.audioChunkMap || []);
         let startSec = 0;
         if (!chapter.isCompleted && chapter.progressSec) startSec = chapter.progressSec;
         
-        await speechController.loadAndPlayDriveFile('', 'LOCAL_ID', text.length, 5, chapter.audioChunkMap, startSec, 1.0, 
+        await speechController.loadAndPlayDriveFile('', 'LOCAL_ID', text.length, chapter.audioIntroDurSec || 5, chapter.audioChunkMap, startSec, 1.0, 
           () => { updatePhase('IDLE'); setIsPlaying(false); handleNextChapterRef.current(true); }, // On End -> Next
           null, url, 
           () => { updatePhase('PLAYING_INTRO'); isInIntroRef.current = true; }
@@ -636,7 +640,8 @@ const App: React.FC = () => {
         
         // Mobile policy check for auto-start
         if (effectiveMobileMode && reason === 'auto') {
-           if (!gestureArmedRef.current) {
+           const timeSinceGesture = Date.now() - lastGestureAt.current;
+           if (!gestureArmedRef.current || timeSinceGesture > 60000) { // 1 minute timeout
               setAutoplayBlocked(true);
               setIsPlaying(false);
               updatePhase('READY');
@@ -656,6 +661,14 @@ const App: React.FC = () => {
         setTimeout(() => startPlayback(targetChapterId, reason), 1500);
       }
     } catch (err: any) {
+      // Robust error handling for mobile autoplay blocks
+      if (err.name === 'NotAllowedError' || err.message === 'Playback blocked' || (err.message && err.message.includes('interaction'))) {
+          setAutoplayBlocked(true);
+          updatePhase('READY');
+          setIsPlaying(false);
+          trace('autoplay:caught_block');
+          return;
+      }
       updatePhase('ERROR'); setLastPlaybackError(err.message); setIsPlaying(false);
       showToast(`Playback Error: ${err.message}`, 0, 'error');
     }
@@ -690,14 +703,14 @@ const App: React.FC = () => {
     if (idx >= 0 && idx < sorted.length - 1) {
       const next = sorted[idx + 1];
       showToast(`Next: Chapter ${next.index} - ${next.title}`, 2000, 'info');
-      // Settle delay
+      // End Settle Pause
       setTimeout(() => {
          goToChapter(next.id, { autoStart: true, reason: autoTrigger ? 'auto' : 'user' });
-      }, 300);
+      }, effectiveMobileMode ? 400 : 250);
     } else {
       setIsPlaying(false); updatePhase('IDLE'); showToast("End of book", 0, 'success');
     }
-  }, [goToChapter, updatePhase, showToast]);
+  }, [goToChapter, updatePhase, showToast, effectiveMobileMode]);
 
   // Update ref for circular dependency
   useEffect(() => { handleNextChapterRef.current = handleNextChapter; }, [handleNextChapter]);
@@ -788,7 +801,28 @@ const App: React.FC = () => {
 
   const handleRunMigration = () => showToast("Not implemented", 0, 'info');
   const handleRecalculateProgress = () => showToast("Recalculated", 0, 'success');
-  const handleScanAndRebuild = () => showToast("Scanning...", 0, 'info');
+  
+  const handleScanAndRebuild = useCallback(async () => {
+    setIsScanningRules(true);
+    setScanProgress('Updating...');
+    try {
+      const s = stateRef.current;
+      const book = s.books.find(b => b.id === s.activeBookId);
+      if (book && book.currentChapterId) {
+         // Refresh current chapter
+         await hardRefreshForChapter(book.id, book.currentChapterId);
+         showToast("Chapter Refreshed", 1000, 'success');
+      } else {
+         showToast("Refreshed", 1000, 'info');
+      }
+    } catch (e) {
+      console.warn(e);
+    } finally {
+      setIsScanningRules(false);
+      setScanProgress('');
+    }
+  }, [hardRefreshForChapter, showToast]);
+
   const handleResetChapterProgress = (bid: string, cid: string) => {
       commitProgressUpdate(bid, cid, { currentTime: 0, duration: 0, charOffset: 0, completed: false }, true);
       showToast("Reset", 1000, 'info');
@@ -813,6 +847,7 @@ const App: React.FC = () => {
           <div>Audio Time: {audioCurrentTime.toFixed(2)}s</div>
           <div>Gesture Armed: {gestureArmedRef.current ? 'YES' : 'NO'}</div>
           <div>Blocked: {autoplayBlocked ? 'YES' : 'NO'}</div>
+          <div>Policy: {effectiveMobileMode ? 'Mobile' : 'Desktop'}</div>
         </div>
       )}
 

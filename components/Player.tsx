@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Play, Pause, SkipBack, SkipForward, FastForward, Rewind, Clock, Type, AlignLeft, Sparkles, Repeat, Loader2, ChevronUp, ChevronDown, X, Settings as SettingsIcon, AlertCircle, PlayCircle } from 'lucide-react';
 import { Theme, HighlightMode } from '../types';
@@ -183,6 +184,7 @@ const Player: React.FC<PlayerProps> = ({
             onPointerUp={handlePointerUp}
             onPointerCancel={handlePointerCancel}
             onPointerLeave={undefined} // handled by capture
+            style={{ touchAction: 'none' }} // Critical for preventing scroll on mobile
           >
             <div className={`h-1.5 rounded-full ${accentBg} transition-all duration-75 shadow-sm pointer-events-none`} style={{ width: `${progressPercent}%` }} />
             {/* Visual thumb - larger on mobile */}
@@ -208,7 +210,7 @@ const Player: React.FC<PlayerProps> = ({
             </button>
 
             {/* Centered Controls */}
-            <div className="flex items-center gap-4 lg:gap-12 flex-1 justify-center">
+            <div className={`flex items-center ${isMobile ? 'gap-2' : 'gap-4 lg:gap-12'} flex-1 justify-center`}>
               <button onClick={onPrev} className="p-3 hover:scale-110 transition-transform"><SkipBack className="w-7 h-7 lg:w-8 lg:h-8" /></button>
               
               {/* Rewind: Always show on mobile (isMobile) OR on Desktop */}

@@ -44,7 +44,6 @@ class SpeechController {
   
   // Track time manually to prevent browser GC resetting playhead on mobile
   private lastKnownTime: number = 0;
-  private lastSaveTime: number = 0;
   private lastThrottleTime: number = 0;
   
   // Dynamic Mobile Mode
@@ -367,12 +366,21 @@ class SpeechController {
       }
 
       // Try playing. If it fails due to interaction, it will throw.
-      await this.audio.play();
+      try {
+        await this.audio.play();
+      } catch (e: any) {
+        // Specifically catch NotAllowedError to support 'safePlay' flow
+        if (e.name === 'NotAllowedError') {
+           throw new Error('Playback blocked');
+        }
+        throw e;
+      }
+      
       this.applyRequestedSpeed();
       trace('audio:load:success');
 
     } catch (err: any) {
-      if (err.name === 'NotAllowedError') {
+      if (err.name === 'NotAllowedError' || err.message === 'Playback blocked') {
          trace('audio:load:interaction_required');
          throw err; 
       }
@@ -512,6 +520,10 @@ class SpeechController {
   private stopSyncLoop() { if (this.rafId !== null) { cancelAnimationFrame(this.rafId); this.rafId = null; } }
 
   speak(text: string, voiceName: string | undefined, rate: number, offset: number, onEnd: () => void, isIntro: boolean = false) {
+    // IMPORTANT: Stop the main audio player before starting TTS to prevent overlap
+    this.audio.pause();
+    this.stopSyncLoop();
+    
     window.speechSynthesis.cancel();
     const executeUtterance = (txt: string, delay: number, callback: () => void) => {
       const utterance = new SpeechSynthesisUtterance(txt);
