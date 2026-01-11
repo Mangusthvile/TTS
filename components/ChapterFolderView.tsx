@@ -22,10 +22,11 @@ interface ChapterFolderViewProps {
   onUpdateBookSettings?: (settings: any) => void;
   onBackToLibrary: () => void;
   onResetChapterProgress: (bookId: string, chapterId: string) => void;
+  playbackSnapshot?: { chapterId: string, percent: number } | null;
 }
 
 const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
-  book, theme, onAddChapter, onOpenChapter, onToggleFavorite, onUpdateChapterTitle, onDeleteChapter, onUpdateChapter, onUpdateBookSettings, onBackToLibrary, onResetChapterProgress
+  book, theme, onAddChapter, onOpenChapter, onToggleFavorite, onUpdateChapterTitle, onDeleteChapter, onUpdateChapter, onUpdateBookSettings, onBackToLibrary, onResetChapterProgress, playbackSnapshot
 }) => {
   const VIEW_MODE_KEY = `talevox:viewMode:${book.id}`;
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
@@ -256,7 +257,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
            <div className="space-y-2">
               <button onClick={() => { setMobileMenuId(null); onResetChapterProgress(book.id, ch.id); }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}>
                  <div className="p-2 bg-emerald-600/10 text-emerald-600 rounded-lg"><RefreshCw className="w-4 h-4" /></div>
-                 Refresh Progress
+                 Reset Progress
               </button>
               <button onClick={() => { setMobileMenuId(null); setEditingChapterId(ch.id); setTempTitle(ch.title); }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}>
                  <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg"><Edit2 className="w-4 h-4" /></div>
@@ -280,8 +281,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       <div className="divide-y divide-black/5">
         {chapters.map(c => {
           const isCompleted = c.isCompleted || false;
-          // Use stored progress strictly
-          const percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
+          // Live progress logic: use snapshot if active chapter, else stored
+          let percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
+          if (playbackSnapshot && playbackSnapshot.chapterId === c.id) {
+             percent = Math.floor(playbackSnapshot.percent * 100);
+          }
+          
           const isEditing = editingChapterId === c.id;
 
           return (
@@ -299,7 +304,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                   <span className="md:inline hidden">{renderAudioStatusIcon(c)}</span>
                 </div>
                 <div className={`h-1 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-700' : 'bg-black/5'}`}>
-                   <div className={`h-full transition-all duration-500 ${isCompleted ? 'bg-emerald-500' : 'bg-indigo-500'}`} style={{ width: `${percent}%` }} />
+                   <div className={`h-full transition-all duration-300 ${isCompleted ? 'bg-emerald-500' : 'bg-indigo-500'}`} style={{ width: `${percent}%` }} />
                 </div>
               </div>
               <div className="text-right px-4">
@@ -307,8 +312,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               </div>
               <div className="flex justify-end items-center gap-2">
                 <div className="hidden md:flex items-center gap-2">
-                  <button onClick={(e) => { e.stopPropagation(); onResetChapterProgress(book.id, c.id); }} className="p-2 bg-indigo-600/10 text-indigo-600 rounded-xl hover:bg-indigo-600/20" title="Refresh Progress">
-                      <RefreshCw className="w-4 h-4" />
+                  <button onClick={(e) => { e.stopPropagation(); onResetChapterProgress(book.id, c.id); }} className="p-2 opacity-40 hover:opacity-100 hover:text-indigo-500" title="Reset Progress">
+                      <RotateCcw className="w-4 h-4" />
                   </button>
                   <button onClick={(e) => { e.stopPropagation(); setRememberAsDefault(false); setShowVoiceModal({ chapterId: c.id }); }} className="p-2 opacity-40 hover:opacity-100" title="Regenerate Audio"><Headphones className="w-4 h-4" /></button>
                   <button onClick={(e) => { e.stopPropagation(); setEditingChapterId(c.id); setTempTitle(c.title); }} className="p-2 opacity-40 hover:opacity-100" title="Edit Title"><Edit2 className="w-4 h-4" /></button>
@@ -330,7 +335,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const renderListView = () => (
     <div className="space-y-2">
       {chapters.map(c => {
-        const percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
+        let percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
+        if (playbackSnapshot && playbackSnapshot.chapterId === c.id) {
+             percent = Math.floor(playbackSnapshot.percent * 100);
+        }
         const isCompleted = c.isCompleted || false;
         return (
           <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`flex flex-col gap-2 p-4 rounded-2xl border cursor-pointer transition-all hover:translate-x-1 ${cardBg}`}>
@@ -348,7 +356,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               </div>
             </div>
             <div className={`h-0.5 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-700' : 'bg-black/5'}`}>
-               <div className="h-full bg-indigo-500" style={{ width: `${percent}%` }} />
+               <div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${percent}%` }} />
             </div>
           </div>
         );
@@ -359,7 +367,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const renderGridView = () => (
     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
       {chapters.map(c => {
-        const percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
+        let percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
+        if (playbackSnapshot && playbackSnapshot.chapterId === c.id) {
+             percent = Math.floor(playbackSnapshot.percent * 100);
+        }
         const isCompleted = c.isCompleted || false;
         return (
           <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`aspect-square p-4 rounded-3xl border flex flex-col items-center justify-center text-center gap-2 cursor-pointer transition-all hover:scale-105 group relative ${cardBg}`}>
@@ -367,7 +378,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-mono text-lg font-black mb-1 ${isDark ? 'bg-slate-950 text-indigo-400' : 'bg-indigo-50 text-indigo-600'}`}>{c.index}</div>
             <div className="font-black text-xs line-clamp-2 leading-tight px-1">{c.title}</div>
             <div className="mt-2 w-full px-4">
-               <div className={`h-1 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-700' : 'bg-black/5'}`}><div className="h-full bg-indigo-500" style={{ width: `${percent}%` }} /></div>
+               <div className={`h-1 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-700' : 'bg-black/5'}`}><div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${percent}%` }} /></div>
                <div className="text-[8px] font-black uppercase mt-1">{percent}%</div>
             </div>
             <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete?')) onDeleteChapter(c.id); }} className="hidden md:block absolute bottom-2 right-2 p-2 opacity-0 group-hover:opacity-100 text-red-500 transition-opacity"><Trash2 className="w-3.5 h-3.5" /></button>

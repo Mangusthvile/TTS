@@ -1,6 +1,7 @@
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { ReaderSettings, Theme, SyncDiagnostics, UiMode } from '../types';
-import { RefreshCw, Cloud, CloudOff, Loader2, LogOut, Save, LogIn, Check, Sun, Coffee, Moon, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer, ClipboardCopy, FileWarning, Bug, Smartphone, Type, Palette, Monitor, LayoutTemplate } from 'lucide-react';
+import { RefreshCw, Cloud, CloudOff, Loader2, LogOut, Save, LogIn, Check, Sun, Coffee, Moon, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer, ClipboardCopy, FileWarning, Bug, Smartphone, Type, Palette, Monitor, LayoutTemplate, Library } from 'lucide-react';
 import { getAuthSessionInfo, isTokenValid, getValidDriveToken } from '../services/driveAuth';
 import { authManager } from '../services/authManager';
 import { getTraceDump } from '../utils/trace';
@@ -304,17 +305,27 @@ const Settings: React.FC<SettingsProps> = ({
            )}
         </div>
 
+        {/* --- LIBRARY TOOLS --- */}
+        <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
+           <label className={labelClass}><Library className="w-3.5 h-3.5 inline mr-2" /> Library Tools</label>
+           
+           <div className="space-y-4">
+              {onRecalculateProgress && (
+                <button onClick={onRecalculateProgress} className="w-full py-3 rounded-xl bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20 text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 transition-all">
+                  <RefreshCw className="w-4 h-4" /> Reconcile Progress From Saves
+                </button>
+              )}
+              <p className="text-[10px] opacity-50 px-1">
+                Fix inconsistent progress bars or "Done" status without resetting your actual reading position.
+              </p>
+           </div>
+        </div>
+
         {/* --- SYSTEM --- */}
         <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
            <label className={labelClass}><Terminal className="w-3.5 h-3.5 inline mr-2" /> System</label>
            
            <div className="space-y-4">
-              {onRecalculateProgress && (
-                <button onClick={onRecalculateProgress} className="w-full py-3 rounded-xl bg-black/5 hover:bg-black/10 text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2">
-                  <RefreshCw className="w-4 h-4" /> Recalculate Progress
-                </button>
-              )}
-
               <label className="flex items-center justify-between cursor-pointer">
                  <div className="flex items-center gap-3">
                     <div className={`p-2 rounded-lg ${keepAwake ? 'bg-emerald-500 text-white' : 'bg-black/5'}`}><Smartphone className="w-4 h-4" /></div>

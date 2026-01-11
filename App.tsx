@@ -22,7 +22,7 @@ import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library 
 import { trace, traceError } from './utils/trace';
 import { computeMobileMode } from './utils/platform';
 
-const STATE_FILENAME = 'talevox_state_v299.json';
+const STATE_FILENAME = 'talevox_state_v2910.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -90,6 +90,10 @@ const App: React.FC = () => {
   const [currentIntroDurSec, setCurrentIntroDurSec] = useState(5);
   const [isScrubbing, setIsScrubbing] = useState(false);
   
+  // High-frequency playback state for UI
+  const [playbackSnapshot, setPlaybackSnapshot] = useState<{chapterId: string, percent: number} | null>(null);
+  const lastSnapshotRef = useRef(0);
+  
   // Ref to prevent overlapping transitions and manage scrub session
   const chapterSessionRef = useRef(0);
   const isInIntroRef = useRef(false);
@@ -145,7 +149,7 @@ const App: React.FC = () => {
     const savedDiag = localStorage.getItem('talevox_sync_diag');
     const savedUiMode = localStorage.getItem(UI_MODE_KEY) as UiMode | null;
 
-    // Normalize all loaded chapters immediately to fix "Done but not full"
+    // Normalize all loaded chapters immediately
     const books = (parsed.books || []).map((b: any) => ({
         ...b,
         directoryHandle: undefined,
@@ -388,7 +392,6 @@ const App: React.FC = () => {
     setAudioCurrentTime(meta.currentTime);
     setAudioDuration(meta.duration);
     
-    // Smooth highlighting is now handled by renderedOffset in speechController
     // Only update offset if meaningful change to avoid react churn
     if (Math.abs(meta.charOffset - stateRef.current.currentOffsetChars) > 5) {
         setState(p => ({ ...p, currentOffsetChars: meta.charOffset }));
@@ -398,6 +401,14 @@ const App: React.FC = () => {
     if (s.activeBookId && s.books) {
        const b = s.books.find(b => b.id === s.activeBookId);
        if (b && b.currentChapterId) {
+          // LIVE UI UPDATE: Update snapshot for progress bars (throttled slightly to 100ms)
+          const now = Date.now();
+          if (now - lastSnapshotRef.current > 100) {
+             const percent = meta.duration > 0 ? meta.currentTime / meta.duration : 0;
+             setPlaybackSnapshot({ chapterId: b.currentChapterId, percent });
+             lastSnapshotRef.current = now;
+          }
+          
           commitProgressUpdate(b.id, b.currentChapterId, meta, !!meta.completed);
        }
     }
@@ -530,29 +541,38 @@ const App: React.FC = () => {
        } catch (e) { console.warn("Hard refresh failed", e); }
   }, [isAuthorized]);
 
-  const handleRefreshChapter = useCallback((bookId: string, chapterId: string) => {
+  const handleReconcileProgress = useCallback(() => {
       const s = stateRef.current;
-      const bIdx = s.books.findIndex(b => b.id === bookId);
-      if (bIdx === -1) return;
-      const cIdx = s.books[bIdx].chapters.findIndex(c => c.id === chapterId);
-      if (cIdx === -1) return;
+      if (!s.activeBookId) return;
       
-      const chapter = s.books[bIdx].chapters[cIdx];
-      // Force correction of progress
-      let fixed = normalizeChapterProgress(chapter);
-      // If it was supposed to be done, force it fully
-      if (chapter.isCompleted) fixed = { ...fixed, progress: 1 };
-      
-      setState(p => {
-         const newBooks = [...p.books];
-         const newChapters = [...newBooks[bIdx].chapters];
-         newChapters[cIdx] = fixed;
-         newBooks[bIdx] = { ...newBooks[bIdx], chapters: newChapters };
-         return { ...p, books: newBooks };
+      let changedCount = 0;
+      const newBooks = s.books.map(b => {
+          if (b.id !== s.activeBookId) return b;
+          
+          const newChapters = b.chapters.map(c => {
+              const normalized = normalizeChapterProgress(c);
+              if (normalized.isCompleted !== c.isCompleted || Math.abs(normalized.progress - c.progress) > 0.01) {
+                  changedCount++;
+                  return normalized;
+              }
+              return c;
+          });
+          return { ...b, chapters: newChapters };
       });
-      markDirty();
-      showToast("Progress refreshed", 1000, 'success');
+      
+      if (changedCount > 0) {
+          setState(p => ({ ...p, books: newBooks }));
+          markDirty();
+          showToast(`Reconciled ${changedCount} chapters`, 2000, 'success');
+      } else {
+          showToast("Progress already consistent", 2000, 'info');
+      }
   }, [markDirty, showToast]);
+
+  const handleResetChapterProgress = (bid: string, cid: string) => {
+      commitProgressUpdate(bid, cid, { currentTime: 0, duration: 0, charOffset: 0, completed: false }, true);
+      showToast("Reset", 1000, 'info');
+  };
 
   // --- UNIFIED PLAYBACK SESSION PIPELINE ---
 
@@ -583,6 +603,7 @@ const App: React.FC = () => {
     }));
     setAudioCurrentTime(0);
     setAudioDuration(0);
+    setPlaybackSnapshot(null); // Clear snapshot on new load
 
     // 4. Ensure TEXT is loaded BEFORE audio
     const content = await ensureChapterContentLoaded(book.id, chapter.id, session);
@@ -694,6 +715,35 @@ const App: React.FC = () => {
 
   }, [isAuthorized, ensureChapterContentLoaded, showToast, updatePhase, effectiveMobileMode, state.playbackSpeed]);
 
+  // --- Smart Chapter Opening (Skip Complete) ---
+  const handleSmartOpenChapter = (id: string) => {
+    const s = stateRef.current;
+    const book = s.books.find(b => b.id === s.activeBookId);
+    if (!book) return;
+    
+    const clickedChapter = book.chapters.find(c => c.id === id);
+    if (!clickedChapter) return;
+
+    setActiveTab('reader');
+
+    if (clickedChapter.isCompleted) {
+        // Find next incomplete
+        const sorted = [...book.chapters].sort((a,b) => a.index - b.index);
+        const clickedIdx = sorted.findIndex(c => c.id === id);
+        const nextIncomplete = sorted.slice(clickedIdx + 1).find(c => !c.isCompleted);
+        
+        if (nextIncomplete) {
+            showToast(`Skipping completed ch.${clickedChapter.index} → ch.${nextIncomplete.index}`, 2000, 'info');
+            loadChapterSession(nextIncomplete.id, 'user');
+            return;
+        }
+        // If all done, just open the clicked one without reset
+        showToast("Re-opening completed chapter", 1000, 'info');
+    }
+    
+    loadChapterSession(id, 'user');
+  };
+
   const handleManualPlay = () => {
     gestureArmedRef.current = true;
     lastGestureAt.current = Date.now();
@@ -741,11 +791,6 @@ const App: React.FC = () => {
     }
   }, [loadChapterSession]);
 
-  const handleOpenChapter = (id: string) => {
-    setActiveTab('reader');
-    loadChapterSession(id, 'user');
-  };
-  
   const handleManualPause = () => { speechController.pause(); setIsPlaying(false); updatePhase('IDLE'); };
   const handleManualStop = () => { speechController.stop(); setIsPlaying(false); updatePhase('IDLE'); };
   
@@ -841,7 +886,6 @@ const App: React.FC = () => {
   };
 
   const handleRunMigration = () => showToast("Not implemented", 0, 'info');
-  const handleRecalculateProgress = () => showToast("Recalculated", 0, 'success');
   
   const handleScanAndRebuild = useCallback(async () => {
     setIsScanningRules(true);
@@ -862,11 +906,6 @@ const App: React.FC = () => {
       setScanProgress('');
     }
   }, [hardRefreshForChapter, showToast]);
-
-  const handleResetChapterProgress = (bid: string, cid: string) => {
-      commitProgressUpdate(bid, cid, { currentTime: 0, duration: 0, charOffset: 0, completed: false }, true);
-      showToast("Reset", 1000, 'info');
-  };
 
   useEffect(() => {
     safeSetLocalStorage('talevox_pro_v2', JSON.stringify({ ...state, books: state.books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined })) }));
@@ -963,7 +1002,7 @@ const App: React.FC = () => {
         {activeTab === 'reader' && activeBook && (
           <aside className="hidden lg:block w-72 border-r border-black/5 bg-black/5 overflow-y-auto">
              <ChapterSidebar 
-               book={activeBook} theme={state.theme} onSelectChapter={handleOpenChapter} 
+               book={activeBook} theme={state.theme} onSelectChapter={handleSmartOpenChapter} 
                onClose={() => {}} isDrawer={false}
              />
           </aside>
@@ -974,7 +1013,7 @@ const App: React.FC = () => {
             <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setIsChapterSidebarOpen(false)} />
             <div className={`relative w-[85%] max-sm max-w-sm h-full shadow-2xl animate-in slide-in-from-left duration-300 ${state.theme === Theme.DARK ? 'bg-slate-900' : state.theme === Theme.SEPIA ? 'bg-[#efe6d5]' : 'bg-white'}`}>
               <ChapterSidebar 
-                book={activeBook} theme={state.theme} onSelectChapter={(id) => { handleOpenChapter(id); setIsChapterSidebarOpen(false); }} 
+                book={activeBook} theme={state.theme} onSelectChapter={(id) => { handleSmartOpenChapter(id); setIsChapterSidebarOpen(false); }} 
                 onClose={() => setIsChapterSidebarOpen(false)} isDrawer={true}
               />
             </div>
@@ -996,13 +1035,14 @@ const App: React.FC = () => {
           {activeTab === 'collection' && activeBook && (
             <ChapterFolderView 
               book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)}
-              onOpenChapter={(id) => { handleOpenChapter(id); }}
+              onOpenChapter={handleSmartOpenChapter}
               onToggleFavorite={() => {}} onUpdateChapterTitle={(id, t) => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(c => c.id === id ? { ...c, title: t } : c) } : b) })); markDirty(); }}
               onDeleteChapter={id => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.filter(c => c.id !== id) } : b) })); markDirty(); }}
               onUpdateChapter={c => { setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(ch => ch.id === c.id ? c : ch) } : b) })); markDirty(); }}
               onUpdateBookSettings={s => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, ...s } } : b) })); markDirty(); }}
               onBackToLibrary={() => setActiveTab('library')}
-              onResetChapterProgress={(bid, cid) => { if(bid === activeBook.id) handleRefreshChapter(bid, cid); else handleResetChapterProgress(bid, cid); }}
+              onResetChapterProgress={handleResetChapterProgress}
+              playbackSnapshot={playbackSnapshot}
             />
           )}
 
@@ -1077,7 +1117,7 @@ const App: React.FC = () => {
               isDirty={isDirty}
               showDiagnostics={state.showDiagnostics}
               onSetShowDiagnostics={v => setState(p => ({ ...p, showDiagnostics: v }))}
-              onRecalculateProgress={handleRecalculateProgress}
+              onRecalculateProgress={handleReconcileProgress}
             />
           )}
         </div>
