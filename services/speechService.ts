@@ -342,9 +342,6 @@ class SpeechController {
       // Wait for metadata
       await this.waitForEvent(this.audio, 'loadedmetadata', 8000, isCurrentSession);
 
-      // Seek logic has moved to App.tsx / Caller mostly, but if startTimeSec is passed, use it.
-      // NOTE: We no longer read from localStorage here. We trust the caller (App.tsx) provided correct startTimeSec.
-      
       let resumeTime = startTimeSec;
       
       // Clamp resume time
@@ -556,7 +553,6 @@ class SpeechController {
   }
   
   stop() {
-    // Note: Removed saveProgress() call from here to rely on App.tsx commit logic
     this.sessionToken++;
     this.seekNonce++;
     this.stopSyncLoop();
@@ -573,7 +569,6 @@ class SpeechController {
   // Safe stop ensures we completely reset before starting something new
   safeStop() {
     trace('audio:safeStop');
-    // Note: Removed saveProgress() call from here
     this.sessionToken++;
     this.seekNonce++;
     this.stopSyncLoop();

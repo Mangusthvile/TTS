@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, PlaybackPhase, UiMode, ReaderSettings } from './types';
 import Library from './components/Library';
@@ -22,7 +21,7 @@ import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library 
 import { trace, traceError } from './utils/trace';
 import { computeMobileMode } from './utils/platform';
 
-const STATE_FILENAME = 'talevox_state_v297.json';
+const STATE_FILENAME = 'talevox_state_v298.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -59,12 +58,12 @@ const App: React.FC = () => {
   const [isScrubbing, setIsScrubbing] = useState(false);
   
   // Ref to prevent overlapping transitions and manage scrub session
-  const transitionTokenRef = useRef(0);
+  // This is the SINGLE SOURCE OF TRUTH for the current chapter loading session
+  const chapterSessionRef = useRef(0);
   const isInIntroRef = useRef(false);
   const lastProgressCommitTime = useRef(0);
   const isScrubbingRef = useRef(false);
   const scrubPreviewSecRef = useRef(0);
-  const scrubOwnerTokenRef = useRef(0);
   
   // Mobile Autoplay State
   const gestureArmedRef = useRef(false);
@@ -267,17 +266,26 @@ const App: React.FC = () => {
     force: boolean = false
   ) => {
     const now = Date.now();
-    const throttleMs = effectiveMobileMode ? 400 : 250;
+    const throttleMs = effectiveMobileMode ? 800 : 250;
     
+    // Ignore updates if we are not actually playing the requested chapter/session
+    // But since this callback is global, we rely on the stateRef's current chapter matches
+    const s = stateRef.current;
+    const bIdx = s.books.findIndex(b => b.id === bookId);
+    if (bIdx === -1) return;
+    const book = s.books[bIdx];
+    
+    // SAFETY: Don't commit progress for a chapter that isn't active (prevents "pull back" bug)
+    if (book.currentChapterId !== chapterId) {
+        trace('progress:ignored_stale', { target: chapterId, active: book.currentChapterId });
+        return;
+    }
+
     if (!force && !meta.completed && now - lastProgressCommitTime.current < throttleMs) {
       return;
     }
     lastProgressCommitTime.current = now;
 
-    const s = stateRef.current;
-    const bIdx = s.books.findIndex(b => b.id === bookId);
-    if (bIdx === -1) return;
-    const book = s.books[bIdx];
     const cIdx = book.chapters.findIndex(c => c.id === chapterId);
     if (cIdx === -1) return;
     
@@ -352,9 +360,7 @@ const App: React.FC = () => {
     // Gate sync updates during scrubbing
     if (isScrubbingRef.current) return;
 
-    const s = stateRef.current;
-    
-    // Also skip updates during critical phases to avoid jitter
+    // Filter noise
     if (['LOADING_AUDIO', 'SEEKING', 'TRANSITIONING', 'LOADING_TEXT', 'SCRUBBING'].includes(playbackPhase)) {
         return;
     }
@@ -372,11 +378,12 @@ const App: React.FC = () => {
     setAudioCurrentTime(meta.currentTime);
     setAudioDuration(meta.duration);
     
-    setState(p => {
-      if (p.currentOffsetChars === meta.charOffset) return p;
-      return { ...p, currentOffsetChars: meta.charOffset };
-    });
+    // Only update offset if meaningful change to avoid react churn
+    if (Math.abs(meta.charOffset - stateRef.current.currentOffsetChars) > 5) {
+        setState(p => ({ ...p, currentOffsetChars: meta.charOffset }));
+    }
 
+    const s = stateRef.current;
     if (s.activeBookId && s.books) {
        const b = s.books.find(b => b.id === s.activeBookId);
        if (b && b.currentChapterId) {
@@ -394,7 +401,7 @@ const App: React.FC = () => {
     document.documentElement.style.setProperty('--highlight-color', state.readerSettings.highlightColor);
   }, [state.readerSettings.highlightColor]);
 
-  // --- Implement missing functions ---
+  // --- Utility Functions ---
 
   const handleSaveState = useCallback(async (force = false, silent = false) => {
       if (!stateRef.current.driveRootFolderId) return;
@@ -404,17 +411,14 @@ const App: React.FC = () => {
       
       try {
           const s = stateRef.current;
-          // Ensure folders exist
           let savesId = s.driveSubfolders?.savesId;
           if (!savesId && s.driveRootFolderId) {
               const subs = await ensureRootStructure(s.driveRootFolderId);
               savesId = subs.savesId;
               setState(p => ({ ...p, driveSubfolders: subs }));
           }
-          
           if (!savesId) throw new Error("No saves folder");
 
-          // Prepare snapshot
           const snapshot: SavedSnapshot = {
               version: "v1",
               savedAt: Date.now(),
@@ -436,7 +440,6 @@ const App: React.FC = () => {
           };
           
           const content = JSON.stringify(snapshot);
-          
           await uploadToDrive(savesId, `talevox_state_${window.__APP_VERSION__}_${Date.now()}.json`, content, undefined, 'application/json');
           
           setState(p => ({ ...p, lastSavedAt: Date.now() }));
@@ -448,18 +451,25 @@ const App: React.FC = () => {
       }
   }, [isDirty, showToast]);
 
-  const ensureChapterContentLoaded = useCallback(async (bookId: string, chapterId: string) => {
+  const ensureChapterContentLoaded = useCallback(async (bookId: string, chapterId: string, session: number): Promise<string | null> => {
       const s = stateRef.current;
       const book = s.books.find(b => b.id === bookId);
       const chapter = book?.chapters.find(c => c.id === chapterId);
-      if (!book || !chapter) return;
+      if (!book || !chapter) return null;
 
-      if (chapter.content && chapter.content.length > 10) return; // Loaded
+      // If content is already present, return it
+      if (chapter.content && chapter.content.length > 10) return chapter.content;
 
+      // Otherwise, attempt fetch
       if (chapter.cloudTextFileId && isAuthorized) {
+           trace('text:load:start', { chapterId, fileId: chapter.cloudTextFileId, session });
            try {
                const text = await fetchDriveFile(chapter.cloudTextFileId);
                if (text) {
+                   if (chapterSessionRef.current !== session) {
+                       trace('text:load:aborted', { reason: 'stale_session' });
+                       return null;
+                   }
                    setState(p => ({
                        ...p,
                        books: p.books.map(b => b.id === bookId ? {
@@ -467,18 +477,21 @@ const App: React.FC = () => {
                            chapters: b.chapters.map(c => c.id === chapterId ? { ...c, content: text, textLength: text.length } : c)
                        } : b)
                    }));
+                   trace('text:load:success', { len: text.length });
+                   return text;
                }
-           } catch (e) {
-               console.error("Failed to load text", e);
+           } catch (e: any) {
+               traceError('text:load:failed', e);
+               showToast("Failed to load text: " + e.message, 0, 'error');
            }
       }
-  }, [isAuthorized]);
+      return null;
+  }, [isAuthorized, showToast]);
 
   const hardRefreshForChapter = useCallback(async (bookId: string, chapterId: string) => {
        const s = stateRef.current;
        const book = s.books.find(b => b.id === bookId);
        if (!book || !book.driveFolderId || !isAuthorized) return;
-       
        const chapter = book.chapters.find(c => c.id === chapterId);
        if (!chapter) return;
 
@@ -508,190 +521,169 @@ const App: React.FC = () => {
        } catch (e) { console.warn("Hard refresh failed", e); }
   }, [isAuthorized]);
 
-  const queueBackgroundTTS = useCallback(async (bookId: string, chapterId: string) => {
-       const s = stateRef.current;
-       const book = s.books.find(b => b.id === bookId);
-       const chapter = book?.chapters.find(c => c.id === chapterId);
-       if (!book || !chapter) return;
-       
-       if (chapter.content && !chapter.cloudAudioFileId && !chapter.hasCachedAudio) {
-           try {
-              const voice = book.settings.defaultVoiceId || 'en-US-Standard-C';
-              // Just a dummy call to trigger synthesis if implementing background queue
-              // For now, this acts as a placeholder or immediate trigger for one chunk to cache
-              // Real implementation would be more complex
-              console.log("Would trigger TTS for", chapter.title);
-           } catch (e) {}
-       }
-  }, []);
-
-  // --- Unified Playback Coordinator ---
-
-  const handleScrubStart = useCallback(() => {
-    isScrubbingRef.current = true;
-    setIsScrubbing(true);
-    scrubOwnerTokenRef.current++;
-    updatePhase('SCRUBBING');
-  }, [updatePhase]);
-
-  const handleScrubMove = useCallback((time: number) => {
-    if (!isScrubbingRef.current) return;
-    const clamped = Math.min(Math.max(time, 0), audioDuration);
-    scrubPreviewSecRef.current = clamped;
-    setAudioCurrentTime(clamped);
-  }, [audioDuration]);
-
-  const handleSeekCommit = useCallback(async (time: number) => {
-    isScrubbingRef.current = false;
-    setIsScrubbing(false);
-    updatePhase('SEEKING');
-    try {
-      await speechController.seekTo(time);
-      if (isPlayingRef.current) {
-         // Auto-resume if playing
-         await handlePlay('resume_after_seek');
-      } else {
-         updatePhase('READY');
-      }
-      speechController.emitSyncTick();
-    } catch (e: any) {
-      console.error("Seek failed", e);
-      updatePhase('READY');
-    }
-  }, []);
-
-  const handlePlay = useCallback(async (reason: string) => {
-    try {
-      const result = await speechController.safePlay();
-      if (result === 'blocked') {
-        setAutoplayBlocked(true);
-        setPlaybackPhase('READY');
-        setIsPlaying(false);
-        trace('autoplay:blocked', { reason });
-      } else {
-        setAutoplayBlocked(false);
-        setIsPlaying(true);
-        updatePhase('PLAYING_BODY');
-        trace('autoplay:success', { reason });
-      }
-    } catch (e: any) {
-      setLastPlaybackError(e.message);
-      setPlaybackPhase('ERROR');
-      setIsPlaying(false);
-      showToast("Play error: " + e.message, 0, 'error');
-    }
-  }, [updatePhase, showToast]);
-
-  const handleManualPlay = () => {
-    gestureArmedRef.current = true; // User tapped play, so arm gestures
-    lastGestureAt.current = Date.now();
-    handlePlay('user_manual');
-  };
+  // --- UNIFIED PLAYBACK SESSION PIPELINE ---
 
   // Fix circular dependency using ref
   const handleNextChapterRef = useRef<(autoTrigger?: boolean) => void>(() => {});
 
-  const startPlayback = useCallback(async (targetChapterId: string, reason: 'user' | 'auto') => {
+  const loadChapterSession = useCallback(async (targetChapterId: string, reason: 'user' | 'auto') => {
+    // 1. Establish Session Identity
+    const session = ++chapterSessionRef.current;
     const s = stateRef.current;
     const book = s.books.find(b => b.id === s.activeBookId);
     if (!book) return;
     const chapter = book.chapters.find(c => c.id === targetChapterId);
     if (!chapter) return;
 
-    // Check if we just need to resume
-    if (reason === 'user' && speechController.currentContext?.bookId === book.id && speechController.currentContext?.chapterId === chapter.id && speechController.hasAudioSource && speechController.isPaused) {
-        handleManualPlay();
+    updatePhase('LOADING_TEXT'); // Indicate we are busy
+    trace('chapter:load:start', { targetChapterId, reason, session });
+
+    // 2. HARD STOP + Buffer Reset
+    speechController.safeStop(); 
+    setAutoplayBlocked(false);
+    
+    // 3. Update active chapter state immediately
+    // This ensures the UI shows the correct title/number while loading
+    setState(p => ({ 
+        ...p, 
+        books: p.books.map(b => b.id === book.id ? { ...b, currentChapterId: targetChapterId } : b),
+        currentOffsetChars: 0 
+    }));
+    setAudioCurrentTime(0);
+    setAudioDuration(0);
+
+    // 4. Ensure TEXT is loaded BEFORE audio
+    const content = await ensureChapterContentLoaded(book.id, chapter.id, session);
+    
+    if (session !== chapterSessionRef.current) {
+        trace('chapter:load:aborted_after_text', { session });
         return;
     }
 
-    setIsPlaying(true); 
-    setAutoplayBlocked(false); 
-    updatePhase('LOADING_AUDIO'); 
-    speechController.safeStop();
+    if (!content && (!chapter.content || chapter.content.length < 10)) {
+        showToast("Chapter text missing. Check Drive.", 0, 'error');
+        updatePhase('READY');
+        return;
+    }
+
+    // 5. Load Audio
+    updatePhase('LOADING_AUDIO');
     
-    // Set intro duration for the specific chapter to sync logic
+    // Prepare metadata
     setCurrentIntroDurSec(chapter.audioIntroDurSec || 5);
+    const voice = book.settings.defaultVoiceId || 'en-US-Standard-C';
+    const allRules = [...s.globalRules, ...book.rules];
+    const textToSpeak = applyRules(content || chapter.content, allRules);
+    const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
+    const introText = applyRules(rawIntro, allRules);
+    
+    // Check Cache
+    const cacheKey = generateAudioKey(introText + textToSpeak, voice, 1.0);
+    let audioBlob = await getAudioFromCache(cacheKey);
+    
+    // Check Drive
+    if (!audioBlob && chapter.cloudAudioFileId && isAuthorized) {
+        try { 
+            audioBlob = await fetchDriveBinary(chapter.cloudAudioFileId); 
+            if (audioBlob) await saveAudioToCache(cacheKey, audioBlob); 
+        } catch(e) {}
+    }
 
-    try {
-      const voice = book.settings.defaultVoiceId || 'en-US-Standard-C';
-      const allRules = [...s.globalRules, ...book.rules];
-      const text = applyRules(chapter.content, allRules);
-      const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
-      const introText = applyRules(rawIntro, allRules);
-      const cacheKey = generateAudioKey(introText + text, voice, 1.0);
-      let audioBlob = await getAudioFromCache(cacheKey);
-      
-      if (!audioBlob && chapter.cloudAudioFileId && isAuthorized) {
-        try { audioBlob = await fetchDriveBinary(chapter.cloudAudioFileId); if (audioBlob) await saveAudioToCache(cacheKey, audioBlob); } catch(e) {}
-      }
+    if (session !== chapterSessionRef.current) return;
 
-      if (audioBlob && audioBlob.size > 0) {
+    if (audioBlob && audioBlob.size > 0) {
         const url = URL.createObjectURL(audioBlob);
         speechController.setContext({ bookId: book.id, chapterId: chapter.id });
-        speechController.updateMetadata(text.length, chapter.audioIntroDurSec || 5, chapter.audioChunkMap || []);
+        speechController.updateMetadata(textToSpeak.length, chapter.audioIntroDurSec || 5, chapter.audioChunkMap || []);
+        
         let startSec = 0;
-        if (!chapter.isCompleted && chapter.progressSec) startSec = chapter.progressSec;
+        // Resume from saved if user initiated, otherwise start at 0
+        if (reason === 'user' && !chapter.isCompleted && chapter.progressSec) startSec = chapter.progressSec;
         
-        await speechController.loadAndPlayDriveFile('', 'LOCAL_ID', text.length, chapter.audioIntroDurSec || 5, chapter.audioChunkMap, startSec, 1.0, 
-          () => { updatePhase('IDLE'); setIsPlaying(false); handleNextChapterRef.current(true); }, // On End -> Next
-          null, url, 
-          () => { updatePhase('PLAYING_INTRO'); isInIntroRef.current = true; }
+        // Pass callbacks
+        await speechController.loadAndPlayDriveFile(
+            '', 'LOCAL_ID', textToSpeak.length, chapter.audioIntroDurSec || 5, chapter.audioChunkMap, 
+            startSec, 
+            state.playbackSpeed, // Use current speed preference
+            () => { // onEnded
+                if (session === chapterSessionRef.current) {
+                    updatePhase('ENDING_SETTLE');
+                    // Settle pause for highlight catching up
+                    setTimeout(() => {
+                        if (session === chapterSessionRef.current) {
+                            handleNextChapterRef.current(true); 
+                        }
+                    }, 300);
+                }
+            }, 
+            null, url, 
+            () => { // onPlayStart
+                if (session === chapterSessionRef.current) {
+                    updatePhase('PLAYING_INTRO'); 
+                    isInIntroRef.current = true; 
+                }
+            }
         );
-        
-        // Mobile policy check for auto-start
+
+        if (session !== chapterSessionRef.current) return;
+
+        // 6. Handle Autoplay Policy
         if (effectiveMobileMode && reason === 'auto') {
            const timeSinceGesture = Date.now() - lastGestureAt.current;
-           if (!gestureArmedRef.current || timeSinceGesture > 60000) { // 1 minute timeout
+           if (!gestureArmedRef.current || timeSinceGesture > 60000) { 
               setAutoplayBlocked(true);
               setIsPlaying(false);
               updatePhase('READY');
               return;
            }
         }
-        
-        await handlePlay(reason);
 
-      } else {
-        if (chapter.cloudTextFileId && chapter.content === '') {
-           await ensureChapterContentLoaded(book.id, chapter.id);
-           setTimeout(() => startPlayback(targetChapterId, reason), 200);
-           return;
+        // 7. Attempt Play
+        try {
+            const result = await speechController.safePlay();
+            if (result === 'blocked') {
+                setAutoplayBlocked(true);
+                setIsPlaying(false);
+                updatePhase('READY');
+            } else {
+                setAutoplayBlocked(false);
+                setIsPlaying(true);
+                updatePhase('PLAYING_BODY');
+                // Ensure speed is applied
+                speechController.setPlaybackRate(state.playbackSpeed);
+            }
+        } catch (e: any) {
+            setAutoplayBlocked(true);
+            setIsPlaying(false);
+            updatePhase('READY');
         }
-        await queueBackgroundTTS(book.id, chapter.id);
-        setTimeout(() => startPlayback(targetChapterId, reason), 1500);
-      }
-    } catch (err: any) {
-      // Robust error handling for mobile autoplay blocks
-      if (err.name === 'NotAllowedError' || err.message === 'Playback blocked' || (err.message && err.message.includes('interaction'))) {
-          setAutoplayBlocked(true);
-          updatePhase('READY');
-          setIsPlaying(false);
-          trace('autoplay:caught_block');
-          return;
-      }
-      updatePhase('ERROR'); setLastPlaybackError(err.message); setIsPlaying(false);
-      showToast(`Playback Error: ${err.message}`, 0, 'error');
+
+    } else {
+        // No audio found
+        showToast("Audio not found. Try generating it.", 0, 'info');
+        updatePhase('READY');
+        setIsPlaying(false);
     }
-  }, [isAuthorized, ensureChapterContentLoaded, queueBackgroundTTS, showToast, updatePhase, effectiveMobileMode, handlePlay]);
 
-  const goToChapter = useCallback((targetId: string, options: any) => {
-     const s = stateRef.current;
-     const book = s.books.find(b => b.id === s.activeBookId);
-     if (!book) return;
-     transitionTokenRef.current++;
-     
-     hardRefreshForChapter(book.id, targetId).then(() => {
-        speechController.setContext({ bookId: book.id, chapterId: targetId });
-        setState(p => ({ ...p, books: p.books.map(b => b.id === book.id ? { ...b, currentChapterId: targetId } : b), currentOffsetChars: 0 }));
-        
-        if (options.autoStart) {
-           setTimeout(() => startPlayback(targetId, options.reason), 150);
-        } else { 
-           setIsPlaying(false); 
-           updatePhase('IDLE'); 
+  }, [isAuthorized, ensureChapterContentLoaded, showToast, updatePhase, effectiveMobileMode, state.playbackSpeed]);
+
+  const handleManualPlay = () => {
+    gestureArmedRef.current = true;
+    lastGestureAt.current = Date.now();
+    // Re-apply speed on manual play just in case
+    speechController.setPlaybackRate(state.playbackSpeed);
+    
+    speechController.safePlay().then(res => {
+        if (res === 'blocked') {
+            setAutoplayBlocked(true);
+            setIsPlaying(false);
+        } else {
+            setAutoplayBlocked(false);
+            setIsPlaying(true);
+            updatePhase('PLAYING_BODY');
         }
-     });
-  }, [hardRefreshForChapter, startPlayback, updatePhase]);
+    });
+  };
 
   const handleNextChapter = useCallback((autoTrigger = false) => {
     const s = stateRef.current;
@@ -702,15 +694,13 @@ const App: React.FC = () => {
     
     if (idx >= 0 && idx < sorted.length - 1) {
       const next = sorted[idx + 1];
-      showToast(`Next: Chapter ${next.index} - ${next.title}`, 2000, 'info');
-      // End Settle Pause
-      setTimeout(() => {
-         goToChapter(next.id, { autoStart: true, reason: autoTrigger ? 'auto' : 'user' });
-      }, effectiveMobileMode ? 400 : 250);
+      showToast(`Next: Chapter ${next.index}`, 2000, 'info');
+      // Use the unified pipeline
+      loadChapterSession(next.id, autoTrigger ? 'auto' : 'user');
     } else {
       setIsPlaying(false); updatePhase('IDLE'); showToast("End of book", 0, 'success');
     }
-  }, [goToChapter, updatePhase, showToast, effectiveMobileMode]);
+  }, [loadChapterSession, updatePhase, showToast]);
 
   // Update ref for circular dependency
   useEffect(() => { handleNextChapterRef.current = handleNextChapter; }, [handleNextChapter]);
@@ -723,13 +713,13 @@ const App: React.FC = () => {
     const idx = sorted.findIndex(c => c.id === book.currentChapterId);
     if (idx > 0) {
       const prev = sorted[idx - 1];
-      goToChapter(prev.id, { autoStart: true, reason: 'user' });
+      loadChapterSession(prev.id, 'user');
     }
-  }, [goToChapter]);
+  }, [loadChapterSession]);
 
   const handleOpenChapter = (id: string) => {
-    goToChapter(id, { autoStart: true, reason: 'user' });
     setActiveTab('reader');
+    loadChapterSession(id, 'user');
   };
   
   const handleManualPause = () => { speechController.pause(); setIsPlaying(false); updatePhase('IDLE'); };
@@ -738,12 +728,40 @@ const App: React.FC = () => {
   const handleSeekByDelta = (delta: number) => {
     const t = speechController.getCurrentTime() + delta;
     speechController.seekTo(t).then(() => {
-        if (isPlayingRef.current) handlePlay('resume_delta');
+        if (isPlayingRef.current) handleManualPlay();
     });
   };
   
   const handleJumpToOffset = (o: number) => { updatePhase('SEEKING'); speechController.seekToOffset(o); };
   
+  const handleSeekCommit = useCallback(async (time: number) => {
+    isScrubbingRef.current = false;
+    setIsScrubbing(false);
+    updatePhase('SEEKING');
+    try {
+      await speechController.seekTo(time);
+      if (isPlayingRef.current) {
+         handleManualPlay();
+      } else {
+         updatePhase('READY');
+      }
+      speechController.emitSyncTick();
+    } catch (e: any) {
+      console.error("Seek failed", e);
+      updatePhase('READY');
+    }
+  }, []);
+
+  const handleScrubStart = useCallback(() => {
+    isScrubbingRef.current = true;
+    setIsScrubbing(true);
+    updatePhase('SCRUBBING');
+  }, [updatePhase]);
+
+  const handleScrubMove = useCallback((time: number) => {
+    scrubPreviewSecRef.current = time;
+  }, []);
+
   const handleAddBook = async (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string, driveFolderName?: string) => {
       const newBook: Book = {
           id: crypto.randomUUID(),
@@ -843,11 +861,11 @@ const App: React.FC = () => {
             <span className="font-bold">Playback Diagnostics {effectiveMobileMode ? '(Mobile)' : ''}</span>
           </div>
           <div>Phase: <span className="text-emerald-400">{playbackPhase}</span></div>
-          <div>Auth: {authState.status}</div>
+          <div>Session: {chapterSessionRef.current}</div>
           <div>Audio Time: {audioCurrentTime.toFixed(2)}s</div>
+          <div>Duration: {audioDuration.toFixed(2)}s</div>
           <div>Gesture Armed: {gestureArmedRef.current ? 'YES' : 'NO'}</div>
           <div>Blocked: {autoplayBlocked ? 'YES' : 'NO'}</div>
-          <div>Policy: {effectiveMobileMode ? 'Mobile' : 'Desktop'}</div>
         </div>
       )}
 
@@ -886,7 +904,18 @@ const App: React.FC = () => {
       </header>
 
       <div className="flex-1 overflow-y-auto relative flex">
-        {isLoadingChapter && <div className="absolute inset-0 flex items-center justify-center bg-inherit z-[70]"><Loader2 className="w-10 h-10 text-indigo-600 animate-spin" /></div>}
+        {/* Loading Overlay */}
+        {(isLoadingChapter || playbackPhase === 'LOADING_TEXT' || playbackPhase === 'LOADING_AUDIO') && (
+            <div className="absolute inset-0 flex items-center justify-center bg-inherit z-[70]">
+                <div className="flex flex-col items-center gap-3">
+                    <Loader2 className="w-10 h-10 text-indigo-600 animate-spin" />
+                    <span className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                        {playbackPhase === 'LOADING_TEXT' ? 'Loading Text...' : 'Loading Audio...'}
+                    </span>
+                </div>
+            </div>
+        )}
+        
         {isSyncing && !toast && (
           <div className="fixed top-20 right-4 z-[80] animate-in slide-in-from-right duration-300">
              <div className="bg-indigo-600 text-white px-4 py-2 rounded-xl shadow-2xl flex items-center gap-3 font-black text-[10px] uppercase tracking-widest">
@@ -945,7 +974,7 @@ const App: React.FC = () => {
           {activeTab === 'collection' && activeBook && (
             <ChapterFolderView 
               book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)}
-              onOpenChapter={(id) => { handleOpenChapter(id); setActiveTab('reader'); }}
+              onOpenChapter={(id) => { handleOpenChapter(id); }}
               onToggleFavorite={() => {}} onUpdateChapterTitle={(id, t) => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(c => c.id === id ? { ...c, title: t } : c) } : b) })); markDirty(); }}
               onDeleteChapter={id => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.filter(c => c.id !== id) } : b) })); markDirty(); }}
               onUpdateChapter={c => { setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(ch => ch.id === c.id ? c : ch) } : b) })); markDirty(); }}
@@ -1047,7 +1076,7 @@ const App: React.FC = () => {
           onSetUseBookSettings={v => { if(activeBook) setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, useBookSettings: v } } : b) })); }}
           highlightMode={activeBook?.settings.highlightMode || HighlightMode.WORD}
           onSetHighlightMode={v => { if(activeBook) setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, highlightMode: v } } : b) })); }}
-          playbackCurrentTime={audioCurrentTime} playbackDuration={audioDuration} isFetching={playbackPhase === 'LOADING_AUDIO' || playbackPhase === 'SEEKING'}
+          playbackCurrentTime={audioCurrentTime} playbackDuration={audioDuration} isFetching={playbackPhase === 'LOADING_AUDIO' || playbackPhase === 'SEEKING' || playbackPhase === 'LOADING_TEXT'}
           onSeekToTime={handleSeekCommit} 
           autoplayBlocked={autoplayBlocked}
           onScrubStart={handleScrubStart}

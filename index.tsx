@@ -17,7 +17,7 @@ declare global {
 }
 
 // Set version on window for settings display
-window.__APP_VERSION__ = '2.9.7';
+window.__APP_VERSION__ = '2.9.8';
 
 // Install global trace listeners immediately
 installGlobalTraceHandlers();
@@ -109,7 +109,7 @@ interface State {
   isReloading: boolean;
 }
 
-class ErrorBoundary extends Component<Props, State> {
+class ErrorBoundary extends React.Component<Props, State> {
   public state: State = {
     hasError: false,
     error: null,
