@@ -30,6 +30,7 @@ interface SettingsProps {
   isDirty?: boolean;
   showDiagnostics: boolean;
   onSetShowDiagnostics: (v: boolean) => void;
+  onRecalculateProgress?: () => void;
 }
 
 const Settings: React.FC<SettingsProps> = ({ 
@@ -39,7 +40,8 @@ const Settings: React.FC<SettingsProps> = ({
   onSaveState, lastSavedAt,
   driveRootName, onSelectRoot, onRunMigration,
   syncDiagnostics, autoSaveInterval, onSetAutoSaveInterval, isDirty,
-  showDiagnostics, onSetShowDiagnostics
+  showDiagnostics, onSetShowDiagnostics,
+  onRecalculateProgress
 }) => {
   const [session, setSession] = useState(getAuthSessionInfo());
   const [isDiagExpanded, setIsDiagExpanded] = useState(false);
@@ -302,6 +304,12 @@ const Settings: React.FC<SettingsProps> = ({
            <label className={labelClass}><Terminal className="w-3.5 h-3.5 inline mr-2" /> System</label>
            
            <div className="space-y-4">
+              {onRecalculateProgress && (
+                <button onClick={onRecalculateProgress} className="w-full py-3 rounded-xl bg-black/5 hover:bg-black/10 text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2">
+                  <RefreshCw className="w-4 h-4" /> Recalculate Progress
+                </button>
+              )}
+
               <label className="flex items-center justify-between cursor-pointer">
                  <div className="flex items-center gap-3">
                     <div className={`p-2 rounded-lg ${keepAwake ? 'bg-emerald-500 text-white' : 'bg-black/5'}`}><Smartphone className="w-4 h-4" /></div>

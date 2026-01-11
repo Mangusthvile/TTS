@@ -31,6 +31,7 @@ const ChapterSidebar: React.FC<ChapterSidebarProps> = ({ book, theme, onSelectCh
       <div className="flex-1 overflow-y-auto py-2 scrollbar-hide">
         {book.chapters.map((chapter) => {
           const isCurrent = book.currentChapterId === chapter.id;
+          const pct = chapter.progress !== undefined ? Math.floor(chapter.progress * 100) : 0;
           return (
             <button
               key={chapter.id}
@@ -38,7 +39,7 @@ const ChapterSidebar: React.FC<ChapterSidebarProps> = ({ book, theme, onSelectCh
               className={`w-full flex items-center gap-3 px-6 py-3 text-left transition-all ${itemHover} ${isCurrent ? 'bg-indigo-600/10' : ''}`}
             >
               <div className={`w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 ${isCurrent ? 'bg-indigo-600 text-white' : 'bg-black/5 text-inherit'}`}>
-                 {chapter.isCompleted ? <CheckCircle2 className="w-3 h-3" /> : <span className="text-[10px] font-black">{chapter.index}</span>}
+                 {chapter.isCompleted ? <CheckCircle2 className="w-3 h-3" /> : <span className="text-[9px] font-black">{pct > 0 ? `${pct}%` : chapter.index}</span>}
               </div>
               <span className={`text-xs font-bold truncate ${isCurrent ? 'text-indigo-600' : textClass} ${chapter.isCompleted ? 'opacity-50' : ''}`}>
                 {chapter.title}

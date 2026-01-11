@@ -32,7 +32,7 @@ class SpeechController {
   private requestedSpeed: number = 1.0;
   private onEndCallback: (() => void) | null = null;
   private onPlayStartCallback: (() => void) | null = null;
-  private syncCallback: ((meta: PlaybackMetadata) => void) | null = null;
+  private syncCallback: ((meta: PlaybackMetadata & { completed?: boolean }) => void) | null = null;
   private onFetchStateChange: ((isFetching: boolean) => void) | null = null;
   private sessionToken: number = 0;
   private context: { bookId: string; chapterId: string } | null = null;
@@ -80,7 +80,7 @@ class SpeechController {
   }
 
   // Register a persistent callback for UI updates
-  public setSyncCallback(cb: ((meta: PlaybackMetadata) => void) | null) {
+  public setSyncCallback(cb: ((meta: PlaybackMetadata & { completed?: boolean }) => void) | null) {
     this.syncCallback = cb;
   }
 
@@ -92,7 +92,7 @@ class SpeechController {
   }
 
   setContext(ctx: { bookId: string; chapterId: string } | null) {
-    if (this.context && (this.context.chapterId !== ctx?.chapterId)) this.saveProgress();
+    // Context switch logic if needed
     this.context = ctx;
   }
 
@@ -125,7 +125,8 @@ class SpeechController {
     this.audio.onended = () => {
       trace('audio:ended');
       this.lastKnownTime = this.audio.duration || this.lastKnownTime;
-      this.saveProgress(true);
+      // Mark completed in the emit
+      this.emitSyncTick(true);
       this.stopSyncLoop();
       if (this.onEndCallback) setTimeout(() => this.onEndCallback?.(), 0);
     };
@@ -141,7 +142,7 @@ class SpeechController {
     this.audio.onpause = () => { 
       trace('audio:onpause', { t: this.audio.currentTime });
       this.lastKnownTime = this.audio.currentTime;
-      this.saveProgress(); 
+      this.emitSyncTick(); // Force update on pause
       this.stopSyncLoop(); 
     };
     this.audio.ontimeupdate = () => { 
@@ -150,11 +151,6 @@ class SpeechController {
       if (t > 0) this.lastKnownTime = t;
       
       const now = Date.now();
-      // Throttle saves to every 2 seconds
-      if (now - this.lastSaveTime > 2000) {
-        this.saveProgress(); 
-        this.lastSaveTime = now;
-      }
 
       // Mobile Sync Strategy: Use timeupdate instead of rAF to save battery and avoid background throttling
       if (this.isMobileOptimized) {
@@ -173,12 +169,14 @@ class SpeechController {
     };
   }
 
-  public emitSyncTick() {
-    if (this.syncCallback && this.audio.duration) {
+  public emitSyncTick(completed = false) {
+    if (this.syncCallback) {
        this.syncCallback({ 
            currentTime: this.audio.currentTime, 
            duration: this.audio.duration, 
-           charOffset: this.getOffsetFromTime(this.audio.currentTime, this.audio.duration) 
+           charOffset: this.getOffsetFromTime(this.audio.currentTime, this.audio.duration),
+           textLength: this.currentTextLength,
+           completed
        });
     }
   }
@@ -188,49 +186,9 @@ class SpeechController {
     this.audio.playbackRate = this.requestedSpeed;
   }
 
+  // Deprecated direct save - logic moved to App.tsx via sync callback
   public saveProgress(completed: boolean = false) {
-    if (!this.context) return;
-    
-    // Safety: If audio.currentTime reports 0 but we have a significant lastKnownTime, use that.
-    let curTime = this.audio.currentTime;
-    if ((curTime === 0 || isNaN(curTime)) && this.lastKnownTime > 1 && !completed) {
-      curTime = this.lastKnownTime;
-    }
-
-    const duration = (isFinite(this.audio.duration) && this.audio.duration > 0) ? this.audio.duration : 0;
-    
-    // Even if duration is unknown (0), save the timestamp if we have progress
-    if (duration === 0 && curTime === 0 && !completed) return; 
-    
-    const isEnd = completed || (duration > 0 && curTime >= duration - 0.5);
-    const finalTime = isEnd ? duration : Math.min(curTime, duration || Infinity);
-    const percent = duration > 0 ? Math.min(1, Math.max(0, finalTime / duration)) : (isEnd ? 1 : 0);
-    
-    // Safety: Don't overwrite valid progress with 0 unless we are at the very start
-    if (finalTime === 0 && !isEnd && this.lastKnownTime > 5) return;
-
-    // Use Safe Storage Access
-    try {
-      const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
-      const store = storeRaw ? JSON.parse(storeRaw) : {};
-      if (!store[this.context.bookId]) store[this.context.bookId] = {};
-      
-      const existing = store[this.context.bookId][this.context.chapterId];
-      const wasCompleted = existing?.completed || false;
-      
-      store[this.context.bookId][this.context.chapterId] = { 
-        timeSec: finalTime, 
-        durationSec: duration > 0 ? duration : (existing?.durationSec || 0), 
-        percent, 
-        completed: isEnd || wasCompleted, 
-        updatedAt: Date.now() 
-      };
-      
-      localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(store));
-      window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: this.context }));
-    } catch (e) {
-      console.warn("Progress save failed (likely quota)", e);
-    }
+     this.emitSyncTick(completed);
   }
 
   private startSyncLoop() {
@@ -331,7 +289,7 @@ class SpeechController {
   }
 
   async loadAndPlayDriveFile(
-    token: string, fileId: string, totalContentChars: number, introDurSec: number, chunkMap: AudioChunkMetadata[] | undefined, startTimeSec = 0, playbackRate = 1.0, onEnd: () => void, onSync: ((meta: PlaybackMetadata) => void) | null, localUrl?: string, onPlayStart?: () => void
+    token: string, fileId: string, totalContentChars: number, introDurSec: number, chunkMap: AudioChunkMetadata[] | undefined, startTimeSec = 0, playbackRate = 1.0, onEnd: () => void, onSync: ((meta: PlaybackMetadata & { completed?: boolean }) => void) | null, localUrl?: string, onPlayStart?: () => void
   ) {
     this.sessionToken++;
     this.seekNonce++; // Invalidate pending seeks
@@ -384,17 +342,11 @@ class SpeechController {
       // Wait for metadata
       await this.waitForEvent(this.audio, 'loadedmetadata', 8000, isCurrentSession);
 
-      const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
-      const store = storeRaw ? JSON.parse(storeRaw) : {};
-      const saved = this.context ? store[this.context.bookId]?.[this.context.chapterId] : null;
+      // Seek logic has moved to App.tsx / Caller mostly, but if startTimeSec is passed, use it.
+      // NOTE: We no longer read from localStorage here. We trust the caller (App.tsx) provided correct startTimeSec.
       
       let resumeTime = startTimeSec;
-      if (saved?.completed) {
-        resumeTime = 0; 
-      } else if (saved?.timeSec > 0) {
-        resumeTime = saved.timeSec;
-      }
-
+      
       // Clamp resume time
       if (isFinite(this.audio.duration)) {
          resumeTime = Math.min(resumeTime, Math.max(0, this.audio.duration - 0.5));
@@ -502,7 +454,6 @@ class SpeechController {
 
     trace('audio:seek:done', { now: audio.currentTime, target: clamped, nonce });
     this.emitSyncTick();
-    this.saveProgress();
   }
 
   // Backwards compat / alias
@@ -559,7 +510,7 @@ class SpeechController {
   pause() { 
     this.audio.pause(); 
     this.lastKnownTime = this.audio.currentTime;
-    this.saveProgress();
+    this.emitSyncTick();
     window.speechSynthesis.pause(); 
   }
   
@@ -576,7 +527,7 @@ class SpeechController {
   }
   
   stop() {
-    this.saveProgress();
+    // Note: Removed saveProgress() call from here to rely on App.tsx commit logic
     this.sessionToken++;
     this.seekNonce++;
     this.stopSyncLoop();
@@ -593,7 +544,7 @@ class SpeechController {
   // Safe stop ensures we completely reset before starting something new
   safeStop() {
     trace('audio:safeStop');
-    this.saveProgress();
+    // Note: Removed saveProgress() call from here
     this.sessionToken++;
     this.seekNonce++;
     this.stopSyncLoop();

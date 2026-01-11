@@ -2,7 +2,7 @@
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile } from '../types';
 import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon, Sparkles } from 'lucide-react';
-import { PROGRESS_STORE_V4, applyRules } from '../services/speechService';
+import { applyRules } from '../services/speechService';
 import { synthesizeChunk } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache } from '../services/audioCache';
 import { uploadToDrive, listFilesInFolder, buildMp3Name, buildTextName, createDriveFolder, findFileSync, moveFile } from '../services/driveService';
@@ -32,8 +32,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     const saved = localStorage.getItem(VIEW_MODE_KEY);
     return (saved === 'details' || saved === 'list' || saved === 'grid') ? (saved as ViewMode) : 'details';
   });
-
-  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => { localStorage.setItem(VIEW_MODE_KEY, viewMode); }, [viewMode, VIEW_MODE_KEY]);
 
@@ -66,18 +64,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const stickyHeaderBg = isDark ? 'bg-slate-900/90' : isSepia ? 'bg-[#f4ecd8]/90' : 'bg-white/90';
 
   const chapters = useMemo(() => [...(book.chapters || [])].sort((a, b) => a.index - b.index), [book.chapters]);
-  
-  const progressData = useMemo(() => {
-    void refreshKey;
-    const store = JSON.parse(localStorage.getItem(PROGRESS_STORE_V4) || '{}');
-    return store[book.id] || {};
-  }, [book.id, refreshKey]);
-
-  useEffect(() => {
-    const handleProgressUpdate = () => setRefreshKey(k => k + 1);
-    window.addEventListener('talevox_progress_updated', handleProgressUpdate);
-    return () => window.removeEventListener('talevox_progress_updated', handleProgressUpdate);
-  }, []);
 
   const handleCheckDriveIntegrity = useCallback(async () => {
     if (!book.driveFolderId) return;
@@ -87,16 +73,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
     setIsCheckingDrive(true);
     try {
-      // Pagination handled in driveService now
       const driveFiles = await listFilesInFolder(book.driveFolderId);
-      
-      // Sort by modifiedTime DESC (Newest first) so that if duplicates exist,
-      // the newest file is encountered first (or last, depending on iteration).
-      // We want to prefer the newest file for the map.
       driveFiles.sort((a, b) => new Date(b.modifiedTime).getTime() - new Date(a.modifiedTime).getTime());
 
-      // Use a Map to find the newest file for each name.
-      // Since we sorted Newest -> Oldest, we check !has() to keep the first (newest).
       const fileMap = new Map<string, typeof driveFiles[0]>();
       for (const f of driveFiles) {
         if (!fileMap.has(f.name)) {
@@ -114,8 +93,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         let textFile = fileMap.get(expectedTextName);
         let audioFile = fileMap.get(expectedAudioName);
 
-        // Fallback: prefix search. 
-        // Note: driveFiles is sorted Newest->Oldest, so find() returns newest match.
         if (!textFile) {
             const prefix = `${chapter.index.toString().padStart(3, '0')}_`;
             textFile = driveFiles.find(f => f.name.startsWith(prefix) && f.name.endsWith('.txt'));
@@ -301,9 +278,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       </div>
       <div className="divide-y divide-black/5">
         {chapters.map(c => {
-          const saved = progressData[c.id];
-          const isCompleted = saved?.completed || false;
-          const percent = saved?.percent !== undefined ? Math.floor(saved.percent * 100) : 0;
+          const isCompleted = c.isCompleted || false;
+          // Use stored progress strictly
+          const percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
           const isEditing = editingChapterId === c.id;
 
           return (
@@ -359,9 +336,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const renderListView = () => (
     <div className="space-y-2">
       {chapters.map(c => {
-        const saved = progressData[c.id];
-        const percent = saved?.percent !== undefined ? Math.floor(saved.percent * 100) : 0;
-        const isCompleted = saved?.completed || false;
+        const percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
+        const isCompleted = c.isCompleted || false;
         return (
           <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`flex flex-col gap-2 p-4 rounded-2xl border cursor-pointer transition-all hover:translate-x-1 ${cardBg}`}>
             <div className="flex items-center gap-4">
@@ -394,9 +370,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const renderGridView = () => (
     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
       {chapters.map(c => {
-        const saved = progressData[c.id];
-        const percent = saved?.percent !== undefined ? Math.floor(saved.percent * 100) : 0;
-        const isCompleted = saved?.completed || false;
+        const percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
+        const isCompleted = c.isCompleted || false;
         return (
           <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`aspect-square p-4 rounded-3xl border flex flex-col items-center justify-center text-center gap-2 cursor-pointer transition-all hover:scale-105 group relative ${cardBg}`}>
             <div className="absolute top-3 right-3 flex gap-1">{renderTextStatusIcon(c)}{renderAudioStatusIcon(c)}</div>
@@ -427,6 +402,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   return (
     <div className={`h-full min-h-0 flex flex-col ${isDark ? 'bg-slate-900 text-slate-100' : isSepia ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
+      {/* ... rest of the existing layout code remains unchanged ... */}
       {showVoiceModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
           <div className={`w-full max-w-md rounded-3xl shadow-2xl p-8 space-y-6 ${isDark ? 'bg-slate-900 border border-slate-800' : 'bg-white border border-black/5'}`}>

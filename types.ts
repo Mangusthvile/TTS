@@ -57,6 +57,8 @@ export interface PlaybackMetadata {
   currentTime: number;
   duration: number;
   charOffset: number;
+  // Added field to support robust text tracking
+  textLength?: number;
 }
 
 export type PlaybackPhase =
@@ -105,6 +107,11 @@ export interface Chapter {
   progress: number; // progress as ratio 0..1
   progressChars: number; // actual character offset
   progressTotalLength?: number;
+  // Canonical progress fields
+  progressSec?: number; 
+  durationSec?: number;
+  textLength?: number;
+  
   isFavorite?: boolean;
   isCompleted?: boolean;
   driveId?: string; // Legacy field
