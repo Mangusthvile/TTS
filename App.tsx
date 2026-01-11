@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, PlaybackPhase } from './types';
 import Library from './components/Library';
@@ -80,6 +79,19 @@ const App: React.FC = () => {
   
   // Ref to prevent overlapping transitions
   const transitionTokenRef = useRef(0);
+  const isInIntroRef = useRef(false);
+
+  // Watchdog for stuck SEEKING state
+  useEffect(() => {
+    if (playbackPhase === 'SEEKING') {
+      const timer = setTimeout(() => {
+        trace('watchdog:seek_timeout');
+        setPlaybackPhase('READY'); 
+        showToast("Seek timed out", 0, 'error');
+      }, 6000);
+      return () => clearTimeout(timer);
+    }
+  }, [playbackPhase]);
 
   const [state, setState] = useState<AppState>(() => {
     const saved = localStorage.getItem('talevox_pro_v2');
@@ -179,8 +191,10 @@ const App: React.FC = () => {
         // Simple heuristic: if time > intro duration + buffer, we are in body
         if (meta.currentTime > (currentIntroDurSec + 0.6) && playbackPhase !== 'PLAYING_BODY') {
             updatePhase('PLAYING_BODY');
+            isInIntroRef.current = false;
         } else if (meta.currentTime <= (currentIntroDurSec + 0.6) && playbackPhase !== 'PLAYING_INTRO') {
             updatePhase('PLAYING_INTRO');
+            isInIntroRef.current = true;
         }
     }
 
@@ -392,6 +406,7 @@ const App: React.FC = () => {
           url,
           () => { // onPlayStart (after seek)
              updatePhase('PLAYING_INTRO');
+             isInIntroRef.current = true;
           }
         );
         // If successful, phase is handled by callbacks
@@ -535,27 +550,43 @@ const App: React.FC = () => {
     setActiveTab('reader');
   };
 
+  // Robust Seek Coordination
   const handleSeekCommit = async (time: number) => {
+    const token = ++transitionTokenRef.current;
     trace('seek:commit', { time });
+    
+    // If transitioning, ignore or queue? Simple ignore for now or let robust seekTo handle it.
+    if (playbackPhase === 'TRANSITIONING' || playbackPhase === 'LOADING_AUDIO') {
+        return; // Don't interrupt hard loads with seeks
+    }
+
     setIsScrubbing(false);
-    updatePhase('SEEKING');
+    setPlaybackPhase('SEEKING');
+
     try {
-        await speechController.seekToTime(time);
+        await speechController.seekTo(time);
+        
+        // If a new transition started, abort UI update
+        if (token !== transitionTokenRef.current) return;
+
         if (isPlayingRef.current) {
-            updatePhase('PLAYING_BODY');
+            updatePhase(isInIntroRef.current ? 'PLAYING_INTRO' : 'PLAYING_BODY');
         } else {
             updatePhase('READY');
         }
     } catch (e: any) {
-        traceError('seek:commit:error', e);
-        showToast("Seek failed", 0, 'error');
+        if (token === transitionTokenRef.current) {
+            traceError('seek:commit:error', e);
+            // Even on error, clear SEEKING state
+            updatePhase('READY');
+            showToast("Seek failed", 0, 'error');
+        }
     }
   };
   
   const handleSeekByDelta = (delta: number) => {
-    const current = audioCurrentTime;
+    const current = speechController.getCurrentTime(); // Use direct getter for fresher value
     const target = Math.max(0, current + delta);
-    // Don't scrub, just commit immediately
     handleSeekCommit(target);
   };
   

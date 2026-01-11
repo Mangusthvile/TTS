@@ -1,4 +1,3 @@
-
 import { Rule, RuleType, AudioChunkMetadata, PlaybackMetadata } from '../types';
 import { getDriveAudioObjectUrl, revokeObjectUrl } from "../services/driveService";
 import { trace, traceError } from '../utils/trace';
@@ -38,6 +37,9 @@ class SpeechController {
   private context: { bookId: string; chapterId: string } | null = null;
   private audioEventsBound = false;
   
+  // Seek coordination
+  private seekNonce = 0;
+  
   // Track time manually to prevent browser GC resetting playhead on mobile
   private lastKnownTime: number = 0;
   private lastSaveTime: number = 0;
@@ -75,13 +77,17 @@ class SpeechController {
 
   private setupAudioListeners() {
     if (!this.audioEventsBound) {
-      const events = ['loadstart', 'loadedmetadata', 'canplay', 'canplaythrough', 'play', 'playing', 'pause', 'seeking', 'seeked', 'waiting', 'stalled', 'ended', 'error', 'abort', 'emptied'];
+      const events = ['loadstart', 'loadedmetadata', 'canplay', 'canplaythrough', 'play', 'playing', 'pause', 'waiting', 'stalled', 'ended', 'error', 'abort', 'emptied'];
+      
+      // Explicit tracing for seek events
+      this.audio.addEventListener('seeking', () => trace('audio:event:seeking', { t: this.audio.currentTime }));
+      this.audio.addEventListener('seeked', () => trace('audio:event:seeked', { t: this.audio.currentTime }));
+      
       events.forEach(e => {
         this.audio.addEventListener(e, (evt) => {
           if (e === 'error') {
             traceError(`audio:event:${e}`, this.audio.error);
-          } else if (e !== 'timeupdate') {
-            // Uncomment for super verbose debug
+          } else {
             // trace(`audio:event:${e}`, { t: this.audio.currentTime, ready: this.audio.readyState });
           }
         });
@@ -103,9 +109,7 @@ class SpeechController {
       if (this.onFetchStateChange) this.onFetchStateChange(false);
       
       // Force immediate sync update
-      if (this.syncCallback && this.audio.duration) {
-         this.syncCallback({ currentTime: this.audio.currentTime, duration: this.audio.duration, charOffset: this.getOffsetFromTime(this.audio.currentTime, this.audio.duration) });
-      }
+      this.emitSyncTick();
     };
     this.audio.onpause = () => { 
       trace('audio:onpause', { t: this.audio.currentTime });
@@ -143,6 +147,16 @@ class SpeechController {
       traceError('audio:onerror', this.audio.error);
       if (this.onFetchStateChange) this.onFetchStateChange(false); 
     };
+  }
+
+  private emitSyncTick() {
+    if (this.syncCallback && this.audio.duration) {
+       this.syncCallback({ 
+           currentTime: this.audio.currentTime, 
+           duration: this.audio.duration, 
+           charOffset: this.getOffsetFromTime(this.audio.currentTime, this.audio.duration) 
+       });
+    }
   }
 
   private applyRequestedSpeed() {
@@ -228,6 +242,36 @@ class SpeechController {
     return Math.max(0, Math.floor(this.currentTextLength * Math.min(1, contentTime / contentPortion)));
   }
 
+  // --- Robust Event Waiter ---
+  private waitForAudioEvent(event: string, timeoutMs: number, nonce: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+        let timer: any;
+        const handler = () => {
+            cleanup();
+            if (nonce === this.seekNonce) resolve();
+            else reject(new Error("Seek cancelled by newer operation"));
+        };
+        const cleanup = () => {
+            clearTimeout(timer);
+            this.audio.removeEventListener(event, handler);
+        };
+        timer = setTimeout(() => {
+            cleanup();
+            reject(new Error(`Timeout waiting for ${event}`));
+        }, timeoutMs);
+
+        // Pre-check
+        if (nonce !== this.seekNonce) {
+            cleanup();
+            reject(new Error("Seek cancelled before wait"));
+            return;
+        }
+
+        this.audio.addEventListener(event, handler, { once: true });
+    });
+  }
+
+  // --- Existing waitForEvent (legacy/internal usage) ---
   private waitForEvent(target: EventTarget, event: string, timeoutMs: number, tokenCheck?: () => boolean): Promise<void> {
     return new Promise((resolve, reject) => {
       let timer: any;
@@ -258,6 +302,7 @@ class SpeechController {
     token: string, fileId: string, totalContentChars: number, introDurSec: number, chunkMap: AudioChunkMetadata[] | undefined, startTimeSec = 0, playbackRate = 1.0, onEnd: () => void, onSync: ((meta: PlaybackMetadata) => void) | null, localUrl?: string, onPlayStart?: () => void
   ) {
     this.sessionToken++;
+    this.seekNonce++; // Invalidate pending seeks
     const session = this.sessionToken;
     const isCurrentSession = () => this.sessionToken === session;
 
@@ -359,34 +404,64 @@ class SpeechController {
     }
   }
 
-  public async seekToTime(seconds: number): Promise<void> {
-    const duration = this.audio.duration;
-    if (!isFinite(duration) || duration <= 0) {
-        trace('audio:seek:ignored', { reason: 'no_duration' });
+  // --- Robust SeekTo (replaces old logic) ---
+  public async seekTo(targetSec: number): Promise<void> {
+    const audio = this.audio;
+    const nonce = ++this.seekNonce;
+
+    // Ensure we have metadata first
+    if (!Number.isFinite(audio.duration) || audio.duration <= 0) {
+        if (!audio.src) throw new Error("No audio source to seek");
+        trace('audio:seek:waiting_metadata', { nonce });
+        try {
+            await this.waitForAudioEvent('loadedmetadata', 6000, nonce);
+        } catch (e) {
+            if (nonce !== this.seekNonce) return; // Silent preemption
+            throw e;
+        }
+    }
+
+    // Check nonce again
+    if (nonce !== this.seekNonce) return;
+
+    const dur = audio.duration;
+    if (!Number.isFinite(dur) || dur <= 0) throw new Error('seekTo: duration unavailable');
+
+    const clamped = Math.min(Math.max(targetSec, 0), Math.max(dur - 0.05, 0));
+    const current = audio.currentTime;
+
+    // NO-OP seek optimization
+    if (Math.abs(clamped - current) < 0.05) {
+        this.emitSyncTick();
         return;
     }
-    
-    // Clamp to valid range
-    const target = Math.max(0, Math.min(seconds, duration - 0.1));
-    this.lastKnownTime = target;
-    
-    trace('audio:seeking', { target });
-    this.audio.currentTime = target;
-    
+
+    trace('audio:seek:start', { from: current, to: clamped, dur, nonce });
+
+    audio.currentTime = clamped;
+    this.lastKnownTime = clamped;
+
     try {
-        await this.waitForEvent(this.audio, 'seeked', 5000);
-        // Force immediate tick
-        if (this.syncCallback) {
-            this.syncCallback({ 
-                currentTime: this.audio.currentTime, 
-                duration: this.audio.duration, 
-                charOffset: this.getOffsetFromTime(this.audio.currentTime, this.audio.duration) 
-            });
-        }
-        this.saveProgress();
+        await this.waitForAudioEvent('seeked', 5000, nonce);
     } catch (e) {
-        traceError('audio:seek:failed', e);
+        if (nonce !== this.seekNonce) return; // Silent preemption
+        throw e;
     }
+
+    if (nonce !== this.seekNonce) return;
+
+    trace('audio:seek:done', { now: audio.currentTime, target: clamped, nonce });
+    this.emitSyncTick();
+    this.saveProgress();
+  }
+
+  // Backwards compat / alias
+  public async seekToTime(seconds: number): Promise<void> {
+      return this.seekTo(seconds);
+  }
+
+  public getCurrentTime() {
+      return this.audio.currentTime;
   }
 
   public seekToOffset(offset: number) {
@@ -413,7 +488,7 @@ class SpeechController {
       targetTime = effectiveIntroEnd + (Math.max(0, Math.min(1, offset / this.currentTextLength)) * Math.max(0.001, duration - effectiveIntroEnd));
     }
     
-    this.seekToTime(targetTime);
+    this.seekTo(targetTime).catch(e => traceError('seek:offset:failed', e));
   }
 
   private stopSyncLoop() { if (this.rafId !== null) { cancelAnimationFrame(this.rafId); this.rafId = null; } }
@@ -453,6 +528,7 @@ class SpeechController {
   stop() {
     this.saveProgress();
     this.sessionToken++;
+    this.seekNonce++;
     this.stopSyncLoop();
     this.audio.pause();
     this.audio.removeAttribute("src");
@@ -469,6 +545,7 @@ class SpeechController {
     trace('audio:safeStop');
     this.saveProgress();
     this.sessionToken++;
+    this.seekNonce++;
     this.stopSyncLoop();
     this.audio.pause();
     this.audio.src = "";
