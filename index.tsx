@@ -1,7 +1,8 @@
-import React, { ErrorInfo, ReactNode } from 'react';
+import React, { Component, ErrorInfo, ReactNode } from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import { AlertTriangle, RefreshCw, ClipboardCopy, Loader2 } from 'lucide-react';
+import { installGlobalTraceHandlers } from './utils/trace';
 
 // Help TypeScript recognize Vite's injected global
 declare const __APP_VERSION__: string;
@@ -16,7 +17,10 @@ declare global {
 }
 
 // Set version on window for settings display
-window.__APP_VERSION__ = '2.8.11';
+window.__APP_VERSION__ = '2.8.12';
+
+// Install global trace listeners immediately
+installGlobalTraceHandlers();
 
 // --- Type Safety Helpers ---
 

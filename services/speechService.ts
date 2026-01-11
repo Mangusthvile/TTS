@@ -1,6 +1,7 @@
 
 import { Rule, RuleType, AudioChunkMetadata, PlaybackMetadata } from '../types';
 import { getDriveAudioObjectUrl, revokeObjectUrl } from "../services/driveService";
+import { trace, traceError } from '../utils/trace';
 
 export const PROGRESS_STORE_V4 = 'talevox_progress_v4';
 
@@ -35,6 +36,7 @@ class SpeechController {
   private onFetchStateChange: ((isFetching: boolean) => void) | null = null;
   private sessionToken: number = 0;
   private context: { bookId: string; chapterId: string } | null = null;
+  private audioEventsBound = false;
   
   // Track time manually to prevent browser GC resetting playhead on mobile
   private lastKnownTime: number = 0;
@@ -72,20 +74,41 @@ class SpeechController {
   get hasAudioSource() { return !!this.audio.src && this.audio.src !== '' && this.audio.src !== window.location.href; }
 
   private setupAudioListeners() {
+    if (!this.audioEventsBound) {
+      const events = ['loadstart', 'loadedmetadata', 'canplay', 'canplaythrough', 'play', 'playing', 'pause', 'seeking', 'seeked', 'waiting', 'stalled', 'ended', 'error', 'abort', 'emptied'];
+      events.forEach(e => {
+        this.audio.addEventListener(e, (evt) => {
+          if (e === 'error') {
+            traceError(`audio:event:${e}`, this.audio.error);
+          } else if (e !== 'timeupdate') {
+            // Uncomment for super verbose debug
+            // trace(`audio:event:${e}`, { t: this.audio.currentTime, ready: this.audio.readyState });
+          }
+        });
+      });
+      this.audioEventsBound = true;
+    }
+
     this.audio.onended = () => {
+      trace('audio:ended');
       this.lastKnownTime = this.audio.duration || this.lastKnownTime;
       this.saveProgress(true);
       this.stopSyncLoop();
       if (this.onEndCallback) setTimeout(() => this.onEndCallback?.(), 0);
     };
     this.audio.onplay = () => { 
+      trace('audio:onplay', { t: this.audio.currentTime });
       this.applyRequestedSpeed(); 
       this.startSyncLoop(); 
       if (this.onFetchStateChange) this.onFetchStateChange(false);
-      // We rely on 'seeked' for the true start resume in loadAndPlay, 
-      // but this handles manual play resume.
+      
+      // Force immediate sync update
+      if (this.syncCallback && this.audio.duration) {
+         this.syncCallback({ currentTime: this.audio.currentTime, duration: this.audio.duration, charOffset: this.getOffsetFromTime(this.audio.currentTime, this.audio.duration) });
+      }
     };
     this.audio.onpause = () => { 
+      trace('audio:onpause', { t: this.audio.currentTime });
       this.lastKnownTime = this.audio.currentTime;
       this.saveProgress(); 
       this.stopSyncLoop(); 
@@ -116,7 +139,10 @@ class SpeechController {
         }
       }
     };
-    this.audio.onerror = () => { if (this.onFetchStateChange) this.onFetchStateChange(false); };
+    this.audio.onerror = () => { 
+      traceError('audio:onerror', this.audio.error);
+      if (this.onFetchStateChange) this.onFetchStateChange(false); 
+    };
   }
 
   private applyRequestedSpeed() {
@@ -201,14 +227,44 @@ class SpeechController {
     return Math.max(0, Math.floor(this.currentTextLength * Math.min(1, contentTime / contentPortion)));
   }
 
+  private waitForEvent(target: EventTarget, event: string, timeoutMs: number, tokenCheck?: () => boolean): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let timer: any;
+      const handler = () => {
+        cleanup();
+        resolve();
+      };
+      const cleanup = () => {
+        clearTimeout(timer);
+        target.removeEventListener(event, handler);
+      };
+      
+      timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Timeout waiting for ${event}`));
+      }, timeoutMs);
+
+      if (tokenCheck && !tokenCheck()) {
+        cleanup();
+        return reject(new Error("Playback session preempted"));
+      }
+
+      target.addEventListener(event, handler, { once: true });
+    });
+  }
+
   async loadAndPlayDriveFile(
     token: string, fileId: string, totalContentChars: number, introDurSec: number, chunkMap: AudioChunkMetadata[] | undefined, startTimeSec = 0, playbackRate = 1.0, onEnd: () => void, onSync: ((meta: PlaybackMetadata) => void) | null, localUrl?: string, onPlayStart?: () => void
   ) {
     this.sessionToken++;
     const session = this.sessionToken;
+    const isCurrentSession = () => this.sessionToken === session;
+
+    trace('audio:load:start', { fileId: fileId || localUrl, startTimeSec, session });
+
     this.requestedSpeed = playbackRate;
     
-    // Explicit reset for mobile browsers
+    // Explicit reset
     this.audio.pause();
     this.audio.removeAttribute("src");
     this.audio.src = "";
@@ -236,14 +292,18 @@ class SpeechController {
         url = res.url;
       }
       
-      if (this.sessionToken !== session) { 
+      if (!isCurrentSession()) { 
         if (!localUrl) revokeObjectUrl(url); 
+        trace('audio:load:aborted', { reason: 'stale_session' });
         return; 
       }
       
       this.currentBlobUrl = url || null;
       this.audio.src = url || '';
-      this.audio.load(); // Required to reset buffer on some Android/iOS webviews
+      this.audio.load();
+      
+      // Wait for metadata
+      await this.waitForEvent(this.audio, 'loadedmetadata', 8000, isCurrentSession);
 
       const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
       const store = storeRaw ? JSON.parse(storeRaw) : {};
@@ -256,36 +316,47 @@ class SpeechController {
         resumeTime = saved.timeSec;
       }
 
-      const applyResumeTime = () => {
-        if (resumeTime > 0 && isFinite(this.audio.duration)) {
-           const target = Math.min(resumeTime, Math.max(0, this.audio.duration - 0.5));
-           this.audio.currentTime = target;
-           this.lastKnownTime = target;
-        }
-      };
+      // Clamp resume time
+      if (isFinite(this.audio.duration)) {
+         resumeTime = Math.min(resumeTime, Math.max(0, this.audio.duration - 0.5));
+      }
 
-      const handleSeeked = () => {
-        if (this.sessionToken === session && this.onPlayStartCallback) {
-          this.onPlayStartCallback();
-          this.onPlayStartCallback = null; // Fire once
-        }
-      };
+      if (resumeTime > 0) {
+         trace('audio:seeking', { resumeTime });
+         this.audio.currentTime = resumeTime;
+         this.lastKnownTime = resumeTime;
+         // Only wait for seeked if we actually moved the playhead
+         await this.waitForEvent(this.audio, 'seeked', 6000, isCurrentSession);
+      }
 
-      this.audio.addEventListener('seeked', handleSeeked, { once: true });
-
-      if (this.audio.readyState >= 1) {
-        applyResumeTime();
-      } else {
-        this.audio.addEventListener('loadedmetadata', applyResumeTime, { once: true });
+      if (this.onPlayStartCallback) {
+         this.onPlayStartCallback();
+         this.onPlayStartCallback = null;
       }
 
       // Try playing. If it fails due to interaction, it will throw.
       await this.audio.play();
       this.applyRequestedSpeed();
+      trace('audio:load:success');
 
-    } catch (err) {
+    } catch (err: any) {
+      if (err.name === 'NotAllowedError') {
+         trace('audio:load:interaction_required');
+         // We allow the app to handle this via catch rethrow, but we should probably 
+         // NOT treat it as a hard failure that needs full reset, just a pause state.
+         throw err; 
+      }
+      if (err.message === 'Playback session preempted') {
+         trace('audio:load:preempted');
+         return; // Silent exit
+      }
+      traceError('audio:load:failed', err);
+      // Ensure we don't leave zombie audio loading
+      this.audio.src = ""; 
+      throw err;
+    } finally {
+      // CRITICAL: Always clear loading state
       if (this.onFetchStateChange) this.onFetchStateChange(false);
-      throw err; // Propagate error (including NotAllowedError)
     }
   }
 
@@ -359,7 +430,7 @@ class SpeechController {
       if (this.audio.currentTime === 0 && this.lastKnownTime > 0) {
         this.audio.currentTime = this.lastKnownTime;
       }
-      this.audio.play().catch(() => {}); 
+      this.audio.play().catch(e => traceError('resume:error', e)); 
     } 
     window.speechSynthesis.resume(); 
   }
@@ -380,6 +451,7 @@ class SpeechController {
 
   // Safe stop ensures we completely reset before starting something new
   safeStop() {
+    trace('audio:safeStop');
     this.saveProgress();
     this.sessionToken++;
     this.stopSyncLoop();

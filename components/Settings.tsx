@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { ReaderSettings, Theme, SyncDiagnostics } from '../types';
 import { RefreshCw, Cloud, CloudOff, Loader2, LogOut, Save, LogIn, Check, Sun, Coffee, Moon, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer, ClipboardCopy, FileWarning, Bug, Smartphone, Type, Palette } from 'lucide-react';
 import { getAuthSessionInfo, isTokenValid, getValidDriveToken } from '../services/driveAuth';
+import { getTraceDump } from '../utils/trace';
 
 interface SettingsProps {
   settings: ReaderSettings;
@@ -85,7 +86,12 @@ const Settings: React.FC<SettingsProps> = ({
       userAgent: navigator.userAgent
     };
     navigator.clipboard.writeText(JSON.stringify(data, null, 2));
-    alert("Full diagnostics copied to clipboard");
+    alert("System diagnostics copied to clipboard");
+  };
+
+  const handleCopyTrace = () => {
+    navigator.clipboard.writeText(getTraceDump());
+    alert("Full playback trace copied to clipboard");
   };
 
   return (
@@ -98,238 +104,219 @@ const Settings: React.FC<SettingsProps> = ({
           </div>
           <button 
             onClick={onCheckForUpdates} 
-            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase transition-all shadow-sm ${isDark ? 'bg-slate-800 text-slate-100 hover:bg-slate-700' : isSepia ? 'bg-[#f4ecd8] text-[#3c2f25] hover:opacity-80' : 'bg-white text-slate-600 hover:bg-slate-50'}`}
+            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase transition-all shadow-sm ${isDark ? 'bg-slate-800 text-slate-100 hover:bg-slate-700' : isSepia ? 'bg-[#e6d8b5] text-[#3c2f25] hover:bg-[#d9cab0]' : 'bg-white text-black hover:bg-slate-50'}`}
           >
-            <RefreshCw className="w-3.5 h-3.5" /> Refresh
+            <RefreshCw className="w-3.5 h-3.5" /> Check Updates
           </button>
         </div>
 
-        {/* 1. Interface Appearance */}
-        <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm space-y-6 ${cardBg}`}>
-          <label className={labelClass}>Interface Appearance</label>
+        {/* --- APPEARANCE --- */}
+        <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
+          <label className={labelClass}><Palette className="w-3.5 h-3.5 inline mr-2" /> Appearance</label>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {themes.map((t) => {
-              const Icon = t.icon;
-              const isActive = theme === t.id;
-              return (
-                <button
-                  key={t.id}
-                  onClick={() => onSetTheme(t.id)}
-                  className={`flex flex-col items-center gap-3 p-5 rounded-2xl border-2 transition-all group relative ${t.color} ${isActive ? 'border-indigo-600 ring-4 ring-indigo-600/10' : 'hover:border-indigo-400 opacity-60 hover:opacity-100'}`}
-                >
-                  {isActive && <div className="absolute top-2 right-2 bg-indigo-600 text-white rounded-full p-0.5"><Check className="w-3 h-3" /></div>}
-                  <Icon className={`w-6 h-6 ${isActive ? 'text-indigo-600' : ''}`} />
-                  <div className="text-center">
-                    <div className={`text-[11px] font-black uppercase tracking-tight ${textClass}`}>{t.name}</div>
-                    <div className="text-[9px] font-bold opacity-40 mt-0.5">{t.desc}</div>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-          
-          <div className="pt-4 border-t border-black/5">
-             <label className="flex items-center justify-between cursor-pointer group">
-               <div className="flex items-center gap-3">
-                  <div className={`p-2.5 rounded-xl ${keepAwake ? 'bg-indigo-600 text-white' : 'bg-black/5 opacity-50'}`}><Smartphone className="w-4 h-4" /></div>
-                  <div>
-                     <div className={`text-sm font-black ${textClass}`}>Keep Awake</div>
-                     <div className="text-[10px] opacity-60 font-bold">Prevent screen from sleeping while reading</div>
-                  </div>
-               </div>
-               <div className={`w-12 h-6 rounded-full p-1 transition-all ${keepAwake ? 'bg-indigo-600' : 'bg-slate-200'}`}>
-                  <input type="checkbox" className="hidden" checked={keepAwake} onChange={e => onSetKeepAwake(e.target.checked)} />
-                  <div className={`w-4 h-4 rounded-full bg-white shadow-sm transition-all ${keepAwake ? 'translate-x-6' : ''}`} />
-               </div>
-             </label>
-          </div>
-        </div>
-        
-        {/* 2. Reading Experience */}
-        <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm space-y-6 ${cardBg}`}>
-          <label className={labelClass}>Reading Experience</label>
-          <div className="space-y-6">
-            <div className="space-y-3">
-               <div className="flex items-center justify-between">
-                  <span className={`text-xs font-black uppercase opacity-60 flex items-center gap-2`}><Type className="w-3.5 h-3.5" /> Font Size</span>
-                  <span className="text-xs font-black">{settings.fontSizePx}px</span>
-               </div>
-               <input type="range" min="14" max="32" step="1" value={settings.fontSizePx} onChange={e => onUpdate({ fontSizePx: parseInt(e.target.value) })} className="w-full h-1.5 bg-black/10 rounded-full appearance-none accent-indigo-600" />
-            </div>
-
-            <div className="space-y-3">
-               <div className="flex items-center justify-between">
-                  <span className={`text-xs font-black uppercase opacity-60 flex items-center gap-2`}><Palette className="w-3.5 h-3.5" /> Highlight Color</span>
-                  <div className="w-4 h-4 rounded-full" style={{ backgroundColor: settings.highlightColor }} />
-               </div>
-               <div className="flex gap-2 flex-wrap">
-                  {presetColors.map(c => (
-                     <button key={c} onClick={() => onUpdate({ highlightColor: c })} className={`w-8 h-8 rounded-full border-2 transition-all ${settings.highlightColor === c ? 'border-black scale-110 shadow-lg' : 'border-transparent opacity-60 hover:opacity-100'}`} style={{ backgroundColor: c }} />
-                  ))}
-                  <input type="color" value={settings.highlightColor} onChange={e => onUpdate({ highlightColor: e.target.value })} className="w-8 h-8 rounded-full overflow-hidden opacity-0 absolute" id="colorpicker" />
-                  <label htmlFor="colorpicker" className={`w-8 h-8 rounded-full border-2 flex items-center justify-center cursor-pointer ${isDark ? 'bg-white/10' : 'bg-black/5'}`}><span className="text-[8px] font-black opacity-50">Custom</span></label>
-               </div>
-            </div>
-
-             <label className="flex items-center justify-between cursor-pointer group pt-2">
-               <div className="flex items-center gap-3">
-                  <div className={`text-sm font-black ${textClass}`}>Auto-Scroll</div>
-                  <div className="text-[10px] opacity-60 font-bold">Follow text while playing</div>
-               </div>
-               <div className={`w-10 h-5 rounded-full p-1 transition-all ${settings.followHighlight ? 'bg-indigo-600' : 'bg-slate-200'}`}>
-                  <input type="checkbox" className="hidden" checked={settings.followHighlight} onChange={e => onUpdate({ followHighlight: e.target.checked })} />
-                  <div className={`w-3 h-3 rounded-full bg-white shadow-sm transition-all ${settings.followHighlight ? 'translate-x-5' : ''}`} />
-               </div>
-             </label>
+            {themes.map(t => (
+              <button 
+                key={t.id} 
+                onClick={() => onSetTheme(t.id)}
+                className={`flex flex-col items-center gap-3 p-4 rounded-2xl border-2 transition-all ${theme === t.id ? 'border-indigo-600 ring-1 ring-indigo-600/20' : 'border-transparent hover:border-black/5'} ${t.color}`}
+              >
+                <t.icon className={`w-6 h-6 ${theme === t.id ? 'text-indigo-600' : 'opacity-40'}`} />
+                <div className="text-center">
+                  <div className={`text-xs font-black ${textClass}`}>{t.name}</div>
+                  <div className="text-[10px] font-bold opacity-40">{t.desc}</div>
+                </div>
+              </button>
+            ))}
           </div>
         </div>
 
-        {/* 3. Cloud & Identity */}
-        <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm space-y-6 ${cardBg}`}>
-          <label className={labelClass}>Cloud & Identity</label>
+        {/* --- TYPOGRAPHY --- */}
+        <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
+          <label className={labelClass}><Type className="w-3.5 h-3.5 inline mr-2" /> Typography & Reading</label>
           <div className="space-y-6">
-             <div className="space-y-2">
-               <span className="text-[10px] font-black uppercase opacity-60">Google OAuth Client ID</span>
-               <input type="text" value={googleClientId || ''} onChange={e => onUpdateGoogleClientId?.(e.target.value.trim())} placeholder="Google OAuth Client ID" className={`w-full px-4 py-3 rounded-xl border-none outline-none font-mono text-[14px] ${isDark ? 'bg-slate-950 text-white' : 'bg-slate-50 text-black'}`} />
+             <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+               <div className="space-y-2">
+                 <span className="text-[10px] font-black uppercase opacity-50">Font Family</span>
+                 <select 
+                   value={settings.fontFamily} 
+                   onChange={e => onUpdate({ fontFamily: e.target.value })} 
+                   className={`w-full p-3 rounded-xl text-xs font-bold outline-none border ${isDark ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-slate-200'}`}
+                 >
+                   <option value="'Source Serif 4', serif">Source Serif 4 (Book)</option>
+                   <option value="'Inter', sans-serif">Inter (Modern)</option>
+                   <option value="'Lora', serif">Lora (Elegant)</option>
+                   <option value="'Merriweather', serif">Merriweather (Readability)</option>
+                   <option value="'Open Dyslexic', sans-serif">Open Dyslexic</option>
+                 </select>
+               </div>
+               <div className="space-y-2">
+                 <span className="text-[10px] font-black uppercase opacity-50">Base Size ({settings.fontSizePx}px)</span>
+                 <input 
+                   type="range" min="14" max="32" step="1" 
+                   value={settings.fontSizePx} 
+                   onChange={e => onUpdate({ fontSizePx: parseInt(e.target.value) })}
+                   className="w-full h-2 rounded-lg appearance-none bg-black/5 accent-indigo-600"
+                 />
+               </div>
              </div>
 
-             <div className="p-5 rounded-2xl bg-indigo-600/5 border border-indigo-600/10 space-y-4">
-                <div className="flex items-center justify-between">
-                   <div className="flex items-center gap-4">
-                      <div className={`p-3 rounded-xl ${isAuthorized ? 'bg-indigo-600 text-white shadow-lg' : 'bg-slate-200 text-slate-400'}`}>
-                         {isAuthorized ? <Cloud className="w-5 h-5" /> : <CloudOff className="w-5 h-5" />}
-                      </div>
-                      <div>
-                         <div className={`text-sm font-black ${textClass}`}>{isAuthorized ? 'Connected to Drive' : 'Disconnected'}</div>
-                         <div className="text-[9px] opacity-60 font-black uppercase tracking-tighter">
-                           {isAuthorized ? `Session expires in ${expiryMinutes}m` : 'Sign in to access cloud features'}
-                         </div>
-                      </div>
+             <div className="space-y-3">
+               <span className="text-[10px] font-black uppercase opacity-50">Highlight Color</span>
+               <div className="flex flex-wrap gap-2">
+                 {presetColors.map(c => (
+                   <button 
+                     key={c} 
+                     onClick={() => onUpdate({ highlightColor: c })}
+                     className={`w-8 h-8 rounded-full border-2 transition-transform hover:scale-110 ${settings.highlightColor === c ? 'border-white ring-2 ring-black/20' : 'border-transparent'}`}
+                     style={{ backgroundColor: c }}
+                   />
+                 ))}
+                 <input 
+                   type="color" 
+                   value={settings.highlightColor}
+                   onChange={e => onUpdate({ highlightColor: e.target.value })}
+                   className="w-8 h-8 rounded-full overflow-hidden border-0 p-0 cursor-pointer"
+                 />
+               </div>
+             </div>
+             
+             <label className="flex items-center gap-3 p-3 rounded-xl border border-dashed hover:bg-black/5 cursor-pointer">
+               <input type="checkbox" checked={settings.followHighlight} onChange={e => onUpdate({ followHighlight: e.target.checked })} className="w-4 h-4 accent-indigo-600" />
+               <div className="flex-1">
+                 <div className="text-xs font-black">Auto-Scroll</div>
+                 <div className="text-[10px] opacity-60">Keep highlighted text in view</div>
+               </div>
+             </label>
+          </div>
+        </div>
+
+        {/* --- CLOUD SYNC --- */}
+        <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
+           <div className="flex justify-between items-center mb-4">
+             <label className={`${labelClass} mb-0`}><Cloud className="w-3.5 h-3.5 inline mr-2" /> Google Drive Sync</label>
+             {isAuthorized && <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 text-[9px] font-black uppercase">Active</span>}
+           </div>
+
+           {!isAuthorized ? (
+             <div className="text-center py-8">
+               <p className="text-sm font-bold opacity-60 mb-6">Connect Google Drive to sync books and progress across devices.</p>
+               <button onClick={onLinkCloud} className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-black uppercase text-xs tracking-widest shadow-xl hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 mx-auto">
+                 <LogIn className="w-4 h-4" /> Connect Drive
+               </button>
+             </div>
+           ) : (
+             <div className="space-y-6">
+                <div className={`p-4 rounded-xl border flex flex-col gap-2 ${isDark ? 'bg-slate-950/50 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
+                   <div className="flex justify-between items-center">
+                     <span className="text-[10px] font-black uppercase opacity-50">Sync Status</span>
+                     <span className="text-[10px] font-mono opacity-50">Token expires in {expiryMinutes}m</span>
                    </div>
-                   {isAuthorized && onClearAuth && (
-                      <button onClick={onClearAuth} className="p-2 text-red-500 hover:bg-red-500/10 rounded-lg transition-all" title="Sign Out">
-                         <LogOut className="w-5 h-5" />
-                      </button>
-                   )}
+                   <div className="flex items-center gap-2">
+                      <div className={`w-2 h-2 rounded-full ${isSyncing ? 'bg-indigo-500 animate-pulse' : isDirty ? 'bg-amber-500' : 'bg-emerald-500'}`} />
+                      <span className="text-xs font-bold">{isSyncing ? 'Syncing...' : isDirty ? 'Changes Pending' : 'Up to Date'}</span>
+                   </div>
+                   {lastSavedAt && <div className="text-[10px] opacity-40">Last saved: {new Date(lastSavedAt).toLocaleString()}</div>}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                   <button onClick={onSyncNow} disabled={isSyncing} className="flex items-center justify-center gap-2 px-4 py-3 bg-indigo-600 text-white rounded-xl text-xs font-black uppercase tracking-widest hover:bg-indigo-700 disabled:opacity-50">
+                     {isSyncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} Sync Now
+                   </button>
+                   <button onClick={onSaveState} disabled={isSyncing} className="flex items-center justify-center gap-2 px-4 py-3 bg-indigo-600/10 text-indigo-600 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-indigo-600/20 disabled:opacity-50">
+                     <Save className="w-4 h-4" /> Force Cloud Save
+                   </button>
+                </div>
+
+                <div className="space-y-2 pt-2 border-t border-black/5">
+                   <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-black uppercase opacity-60">Root Folder</span>
+                      <button onClick={onSelectRoot} className="text-[10px] font-black uppercase text-indigo-600 hover:underline">Change</button>
+                   </div>
+                   <div className="text-xs font-mono truncate opacity-80 flex items-center gap-2">
+                      <FolderSync className="w-3 h-3" />
+                      {driveRootName || 'Not selected'}
+                   </div>
                 </div>
                 
-                {!isAuthorized ? (
-                  <button onClick={() => getValidDriveToken({ interactive: true })} className="w-full py-3 bg-indigo-600 text-white rounded-xl font-black uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-indigo-700 transition-all shadow-lg">
-                     <LogIn className="w-4 h-4" /> Sign In with Google
-                  </button>
-                ) : (
-                  <div className="space-y-3 pt-2">
-                     <div className="flex items-center justify-between p-3 bg-white/50 rounded-xl border border-indigo-600/10">
-                        <div className="flex items-center gap-2 overflow-hidden">
-                           <FolderSync className="w-4 h-4 text-indigo-600 flex-shrink-0" />
-                           <span className="text-xs font-bold truncate">{driveRootName || 'No Folder Linked'}</span>
-                        </div>
-                        <button onClick={onSelectRoot} className="text-[9px] font-black uppercase bg-indigo-600 text-white px-3 py-1.5 rounded-lg hover:bg-indigo-700 whitespace-nowrap">
-                           {driveRootName ? 'Change' : 'Link Folder'}
+                <div className="space-y-2">
+                   <span className="text-[10px] font-black uppercase opacity-60">Auto-Save Interval</span>
+                   <div className="flex gap-2">
+                      {[5, 15, 30].map(m => (
+                        <button 
+                          key={m} 
+                          onClick={() => onSetAutoSaveInterval(m)}
+                          className={`flex-1 py-2 rounded-lg text-[10px] font-black border transition-all ${autoSaveInterval === m ? 'bg-indigo-600 text-white border-indigo-600' : 'hover:bg-black/5 border-transparent'}`}
+                        >
+                          {m}m
                         </button>
-                     </div>
-                     
-                     {driveRootName && (
-                        <div className="grid grid-cols-2 gap-3">
-                           <button onClick={onSyncNow} disabled={isSyncing} className="py-3 bg-indigo-600 text-white rounded-xl font-black uppercase tracking-widest text-[10px] flex items-center justify-center gap-2 hover:bg-indigo-700 disabled:opacity-50">
-                              {isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} Sync Now
-                           </button>
-                           <button onClick={onSaveState} className="py-3 bg-emerald-600 text-white rounded-xl font-black uppercase tracking-widest text-[10px] flex items-center justify-center gap-2 hover:bg-emerald-700">
-                              <Save className="w-3.5 h-3.5" /> Manual Save
-                           </button>
-                        </div>
-                     )}
-                     
-                     {isDirty && <div className="text-[10px] text-amber-600 font-bold flex items-center gap-1"><AlertTriangle className="w-3 h-3" /> Unsaved changes pending upload</div>}
-                     {lastSavedAt && <div className="text-[9px] opacity-40 text-center font-mono pt-1">Last Saved: {new Date(lastSavedAt).toLocaleTimeString()}</div>}
-                  </div>
+                      ))}
+                   </div>
+                </div>
+
+                {onRunMigration && (
+                  <button onClick={onRunMigration} className="w-full py-3 rounded-xl border-2 border-dashed border-amber-500/30 text-amber-600 hover:bg-amber-50 text-[10px] font-black uppercase tracking-widest flex items-center justify-center gap-2">
+                    <Wrench className="w-3.5 h-3.5" /> Migrate Old Folder Structure
+                  </button>
                 )}
+
+                <button onClick={onClearAuth} className="w-full text-center text-red-500 text-[10px] font-black uppercase tracking-widest opacity-60 hover:opacity-100 mt-2">
+                   Sign Out / Unlink
+                </button>
              </div>
-          </div>
-        </div>
-
-        {/* 4. Storage & Advanced */}
-        <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm space-y-6 ${cardBg}`}>
-           <label className={labelClass}>Storage & System</label>
-           <div className="space-y-6">
-              <div className="flex items-center justify-between">
-                 <div className="space-y-1">
-                    <div className={`text-sm font-black ${textClass}`}>Auto-Save Interval</div>
-                    <div className="text-[10px] opacity-60 font-bold">Frequency of cloud backups</div>
-                 </div>
-                 <select value={autoSaveInterval} onChange={e => onSetAutoSaveInterval(parseInt(e.target.value))} className={`px-3 py-2 rounded-xl text-xs font-black border-none outline-none ${isDark ? 'bg-slate-950 text-white' : 'bg-slate-100 text-black'}`}>
-                    <option value={5}>5 Minutes</option>
-                    <option value={15}>15 Minutes</option>
-                    <option value={30}>30 Minutes</option>
-                    <option value={60}>1 Hour</option>
-                 </select>
-              </div>
-
-              {onRunMigration && isAuthorized && (
-                 <div className="p-4 rounded-xl border border-amber-500/20 bg-amber-500/5 space-y-3">
-                    <div className="flex items-center gap-2 text-amber-600 font-black text-xs uppercase tracking-widest">
-                       <Wrench className="w-4 h-4" /> Migration Tool
-                    </div>
-                    <p className="text-[10px] opacity-70 leading-relaxed">Use this if you are upgrading from v1 structure to organize books into subfolders.</p>
-                    <button onClick={onRunMigration} disabled={isSyncing} className="w-full py-2 bg-amber-600 text-white rounded-lg font-black uppercase text-[10px] hover:bg-amber-700 disabled:opacity-50">
-                       Run Folder Migration
-                    </button>
-                 </div>
-              )}
-           </div>
-        </div>
-
-        {/* 5. Diagnostics */}
-        <div className={`p-5 sm:p-8 rounded-[1.5rem] border shadow-sm space-y-4 ${cardBg}`}>
-           <div className="flex items-center justify-between cursor-pointer" onClick={() => setIsDiagExpanded(!isDiagExpanded)}>
-              <label className={labelClass.replace('mb-4', 'mb-0')}>Diagnostics & Logs</label>
-              {isDiagExpanded ? <ChevronUp className="w-4 h-4 opacity-40" /> : <ChevronDown className="w-4 h-4 opacity-40" />}
-           </div>
-           
-           {isDiagExpanded && (
-              <div className="space-y-6 animate-in slide-in-from-top-2">
-                 <label className="flex items-center justify-between cursor-pointer group">
-                   <div className="flex items-center gap-3">
-                      <div className={`p-2 rounded-xl ${showDiagnostics ? 'bg-indigo-600 text-white' : 'bg-black/5 opacity-50'}`}><Terminal className="w-4 h-4" /></div>
-                      <div>
-                         <div className={`text-sm font-black ${textClass}`}>Show Overlay</div>
-                         <div className="text-[10px] opacity-60 font-bold">Display tech specs during playback</div>
-                      </div>
-                   </div>
-                   <div className={`w-10 h-5 rounded-full p-1 transition-all ${showDiagnostics ? 'bg-indigo-600' : 'bg-slate-200'}`}>
-                      <input type="checkbox" className="hidden" checked={showDiagnostics} onChange={e => onSetShowDiagnostics(e.target.checked)} />
-                      <div className={`w-3 h-3 rounded-full bg-white shadow-sm transition-all ${showDiagnostics ? 'translate-x-5' : ''}`} />
-                   </div>
-                 </label>
-
-                 <div className="p-4 rounded-2xl bg-black/5 font-mono text-[10px] space-y-2 overflow-x-auto">
-                    <div className="flex items-center justify-between opacity-50 uppercase font-black mb-2">
-                       <span>Sync Status</span>
-                       <Timer className="w-3 h-3" />
-                    </div>
-                    <div>Last Success: {syncDiagnostics?.lastSyncSuccessAt ? new Date(syncDiagnostics.lastSyncSuccessAt).toLocaleString() : 'Never'}</div>
-                    <div>Last Attempt: {syncDiagnostics?.lastSyncAttemptAt ? new Date(syncDiagnostics.lastSyncAttemptAt).toLocaleString() : 'Never'}</div>
-                    <div className={`${syncDiagnostics?.isDirty ? 'text-amber-600 font-bold' : 'text-emerald-600 font-bold'}`}>State: {syncDiagnostics?.isDirty ? 'Dirty (Needs Save)' : 'Clean'}</div>
-                    {syncDiagnostics?.lastSyncError && (
-                       <div className="text-red-500 font-bold mt-2 pt-2 border-t border-black/5 flex items-start gap-2">
-                          <FileWarning className="w-3 h-3 mt-0.5 flex-shrink-0" />
-                          <span>Error: {syncDiagnostics.lastSyncError}</span>
-                       </div>
-                    )}
-                 </div>
-                 
-                 <div className="flex gap-3">
-                    <button onClick={handleCopyDiagnostics} className="flex-1 py-3 bg-slate-800 text-white rounded-xl font-black uppercase text-[10px] flex items-center justify-center gap-2 hover:bg-slate-700">
-                       <ClipboardCopy className="w-3.5 h-3.5" /> Copy Log
-                    </button>
-                    <button onClick={() => window.location.reload()} className="flex-1 py-3 bg-red-500/10 text-red-500 rounded-xl font-black uppercase text-[10px] flex items-center justify-center gap-2 hover:bg-red-500/20">
-                       <Bug className="w-3.5 h-3.5" /> Force Reload
-                    </button>
-                 </div>
-              </div>
            )}
         </div>
 
+        {/* --- SYSTEM --- */}
+        <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
+           <label className={labelClass}><Terminal className="w-3.5 h-3.5 inline mr-2" /> System</label>
+           
+           <div className="space-y-4">
+              <label className="flex items-center justify-between cursor-pointer">
+                 <div className="flex items-center gap-3">
+                    <div className={`p-2 rounded-lg ${keepAwake ? 'bg-emerald-500 text-white' : 'bg-black/5'}`}><Smartphone className="w-4 h-4" /></div>
+                    <div><div className="text-xs font-black">Keep Awake</div><div className="text-[10px] opacity-60">Prevent screen sleep</div></div>
+                 </div>
+                 <input type="checkbox" checked={keepAwake} onChange={e => onSetKeepAwake(e.target.checked)} className="w-5 h-5 accent-indigo-600" />
+              </label>
+
+              <label className="flex items-center justify-between cursor-pointer">
+                 <div className="flex items-center gap-3">
+                    <div className={`p-2 rounded-lg ${showDiagnostics ? 'bg-indigo-500 text-white' : 'bg-black/5'}`}><Bug className="w-4 h-4" /></div>
+                    <div><div className="text-xs font-black">Show Diagnostics</div><div className="text-[10px] opacity-60">Overlay debug info</div></div>
+                 </div>
+                 <input type="checkbox" checked={showDiagnostics} onChange={e => onSetShowDiagnostics(e.target.checked)} className="w-5 h-5 accent-indigo-600" />
+              </label>
+
+              <div className={`rounded-xl overflow-hidden border ${isDark ? 'bg-black/20 border-slate-800' : 'bg-black/5 border-black/5'}`}>
+                 <button onClick={() => setIsDiagExpanded(!isDiagExpanded)} className="w-full px-4 py-3 flex items-center justify-between text-[10px] font-black uppercase tracking-widest opacity-60 hover:opacity-100">
+                    <span>Debug Data</span>
+                    {isDiagExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                 </button>
+                 {isDiagExpanded && (
+                    <div className="p-4 pt-0 space-y-3">
+                       {syncDiagnostics && (
+                         <div className="space-y-1">
+                            <div className="text-[9px] font-black uppercase opacity-40">Sync State</div>
+                            <pre className="text-[9px] font-mono opacity-60 overflow-x-auto">{JSON.stringify(syncDiagnostics, null, 2)}</pre>
+                            {syncDiagnostics.lastSyncError && <div className="text-[10px] text-red-500 font-bold flex gap-1"><AlertTriangle className="w-3 h-3" /> {syncDiagnostics.lastSyncError}</div>}
+                         </div>
+                       )}
+                       {lastFatalError && (
+                          <div className="p-2 bg-red-500/10 rounded-lg border border-red-500/20">
+                             <div className="text-[9px] font-black uppercase text-red-500 mb-1">Last Crash</div>
+                             <div className="text-[10px] font-mono opacity-80">{lastFatalError.message}</div>
+                             <div className="text-[9px] opacity-50 mt-1">{new Date(lastFatalError.timestamp).toLocaleString()}</div>
+                          </div>
+                       )}
+                       <div className="grid grid-cols-2 gap-2 pt-2">
+                          <button onClick={handleCopyDiagnostics} className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg text-[10px] font-black uppercase flex items-center justify-center gap-2 hover:bg-indigo-600/20"><ClipboardCopy className="w-3 h-3" /> Copy Diag</button>
+                          <button onClick={handleCopyTrace} className="p-2 bg-emerald-600/10 text-emerald-600 rounded-lg text-[10px] font-black uppercase flex items-center justify-center gap-2 hover:bg-emerald-600/20"><FileWarning className="w-3 h-3" /> Copy Trace</button>
+                       </div>
+                    </div>
+                 )}
+              </div>
+           </div>
+        </div>
       </div>
     </div>
   );
