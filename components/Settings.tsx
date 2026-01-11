@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { ReaderSettings, Theme, SyncDiagnostics, UiMode } from '../types';
 import { RefreshCw, Cloud, CloudOff, Loader2, LogOut, Save, LogIn, Check, Sun, Coffee, Moon, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer, ClipboardCopy, FileWarning, Bug, Smartphone, Type, Palette, Monitor, LayoutTemplate } from 'lucide-react';
 import { getAuthSessionInfo, isTokenValid, getValidDriveToken } from '../services/driveAuth';
+import { authManager } from '../services/authManager';
 import { getTraceDump } from '../utils/trace';
 
 interface SettingsProps {
@@ -43,7 +44,7 @@ const Settings: React.FC<SettingsProps> = ({
   showDiagnostics, onSetShowDiagnostics,
   onRecalculateProgress
 }) => {
-  const [session, setSession] = useState(getAuthSessionInfo());
+  const [authState, setAuthState] = useState(authManager.getState());
   const [isDiagExpanded, setIsDiagExpanded] = useState(false);
   
   const lastFatalError = useMemo(() => {
@@ -54,13 +55,7 @@ const Settings: React.FC<SettingsProps> = ({
   }, []);
 
   useEffect(() => {
-    const handleAuthChange = () => setSession(getAuthSessionInfo());
-    window.addEventListener('talevox_auth_changed', handleAuthChange);
-    window.addEventListener('talevox_auth_invalid', handleAuthChange);
-    return () => {
-      window.removeEventListener('talevox_auth_changed', handleAuthChange);
-      window.removeEventListener('talevox_auth_invalid', handleAuthChange);
-    };
+    return authManager.subscribe(setAuthState);
   }, []);
 
   const isDark = theme === Theme.DARK;
@@ -69,8 +64,8 @@ const Settings: React.FC<SettingsProps> = ({
   const textClass = isDark ? 'text-slate-100' : isSepia ? 'text-[#3c2f25]' : 'text-black';
   const labelClass = `text-[11px] font-black uppercase tracking-[0.2em] mb-4 block ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`;
   
-  const isAuthorized = isTokenValid();
-  const expiryMinutes = session.expiresAt > 0 ? Math.max(0, Math.round((session.expiresAt - Date.now()) / 60000)) : 0;
+  const isAuthorized = authState.status === 'signed_in';
+  const expiryMinutes = authState.expiresAt > 0 ? Math.max(0, Math.round((authState.expiresAt - Date.now()) / 60000)) : 0;
 
   const themes = [
     { id: Theme.LIGHT, name: 'Light Mode', icon: Sun, desc: 'Clean high contrast', color: 'bg-white border-slate-200' },
@@ -84,6 +79,7 @@ const Settings: React.FC<SettingsProps> = ({
     const data = {
       sync: syncDiagnostics,
       fatal: lastFatalError,
+      auth: { status: authState.status, hasToken: !!authState.accessToken },
       version: window.__APP_VERSION__,
       userAgent: navigator.userAgent
     };
@@ -98,6 +94,10 @@ const Settings: React.FC<SettingsProps> = ({
 
   const handleSetUiMode = (mode: UiMode) => {
     onUpdate({ uiMode: mode });
+  };
+
+  const handleForceReauth = () => {
+    authManager.validateToken();
   };
 
   return (
@@ -233,9 +233,11 @@ const Settings: React.FC<SettingsProps> = ({
            {!isAuthorized ? (
              <div className="text-center py-8">
                <p className="text-sm font-bold opacity-60 mb-6">Connect Google Drive to sync books and progress across devices.</p>
-               <button onClick={onLinkCloud} className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-black uppercase text-xs tracking-widest shadow-xl hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 mx-auto">
+               <button onClick={() => authManager.signIn()} className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-black uppercase text-xs tracking-widest shadow-xl hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 mx-auto">
                  <LogIn className="w-4 h-4" /> Connect Drive
                </button>
+               {authState.status === 'signing_in' && <div className="mt-4 text-xs font-bold text-indigo-500 animate-pulse">Check popup window...</div>}
+               {authState.lastError && <div className="mt-4 text-xs font-bold text-red-500">{authState.lastError}</div>}
              </div>
            ) : (
              <div className="space-y-6">
@@ -248,6 +250,7 @@ const Settings: React.FC<SettingsProps> = ({
                       <div className={`w-2 h-2 rounded-full ${isSyncing ? 'bg-indigo-500 animate-pulse' : isDirty ? 'bg-amber-500' : 'bg-emerald-500'}`} />
                       <span className="text-xs font-bold">{isSyncing ? 'Syncing...' : isDirty ? 'Changes Pending' : 'Up to Date'}</span>
                    </div>
+                   {authState.userEmail && <div className="text-[10px] font-bold text-indigo-500">{authState.userEmail}</div>}
                    {lastSavedAt && <div className="text-[10px] opacity-40">Last saved: {new Date(lastSavedAt).toLocaleString()}</div>}
                 </div>
 
@@ -292,9 +295,10 @@ const Settings: React.FC<SettingsProps> = ({
                   </button>
                 )}
 
-                <button onClick={onClearAuth} className="w-full text-center text-red-500 text-[10px] font-black uppercase tracking-widest opacity-60 hover:opacity-100 mt-2">
-                   Sign Out / Unlink
-                </button>
+                <div className="flex flex-col gap-2 pt-4">
+                   <button onClick={handleForceReauth} className="w-full text-center text-[10px] font-black uppercase tracking-widest opacity-40 hover:opacity-100 hover:text-indigo-600">Re-check Connection</button>
+                   <button onClick={onClearAuth} className="w-full text-center text-red-500 text-[10px] font-black uppercase tracking-widest opacity-60 hover:opacity-100">Sign Out / Unlink</button>
+                </div>
              </div>
            )}
         </div>
