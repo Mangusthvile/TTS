@@ -1,4 +1,5 @@
 
+
 export enum CaseMode {
   EXACT = 'EXACT',
   IGNORE = 'IGNORE',
@@ -49,6 +50,12 @@ export const CLOUD_VOICES = [
   { id: 'en-GB-Wavenet-B', name: 'Premium Male (UK)' },
   { id: 'en-GB-Wavenet-A', name: 'Premium Female (UK)' },
 ];
+
+export interface PlaybackMetadata {
+  currentTime: number;
+  duration: number;
+  charOffset: number;
+}
 
 export interface Rule {
   id: string;

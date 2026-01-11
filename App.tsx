@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule } from './types';
+import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata } from './types';
 import Library from './components/Library';
 import Reader from './components/Reader';
 import Player from './components/Player';
@@ -19,7 +19,7 @@ import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './service
 import { idbSet } from './services/storageService';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud } from 'lucide-react';
 
-const STATE_FILENAME = 'talevox_state_v289.json';
+const STATE_FILENAME = 'talevox_state_v2810.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -193,6 +193,20 @@ const App: React.FC = () => {
     document.documentElement.style.setProperty('--highlight-color', state.readerSettings.highlightColor);
   }, [state.readerSettings.highlightColor]);
 
+  // Register Persistent Sync Callback
+  const handleSyncUpdate = useCallback((meta: PlaybackMetadata) => {
+    setAudioCurrentTime(meta.currentTime);
+    setAudioDuration(meta.duration);
+    setState(p => {
+      if (p.currentOffsetChars === meta.charOffset) return p;
+      return { ...p, currentOffsetChars: meta.charOffset };
+    });
+  }, []);
+
+  useEffect(() => {
+    speechController.setSyncCallback(handleSyncUpdate);
+  }, [handleSyncUpdate]);
+
   // --- Central Playback Logic ---
 
   const loadingChapterTextRef = useRef<Set<string>>(new Set());
@@ -267,10 +281,8 @@ const App: React.FC = () => {
     setIsPlaying(true);
     setAutoplayBlocked(false);
     
-    // If not same chapter, ensure audio is stopped cleanly first
-    if (speechController.currentContext?.chapterId !== chapter.id) {
-       speechController.safeStop();
-    }
+    // Ensure audio stops if switching context or hard starting
+    speechController.safeStop();
 
     const voice = book.settings.defaultVoiceId || 'en-US-Standard-C';
     const allRules = [...s.globalRules, ...book.rules];
@@ -308,12 +320,7 @@ const App: React.FC = () => {
                 handleNextChapter(true); // Auto transition
              }
           },
-          (meta) => { 
-             // On Sync
-             setAudioCurrentTime(meta.currentTime); 
-             setAudioDuration(meta.duration); 
-             setState(p => ({ ...p, currentOffsetChars: meta.charOffset })); 
-          },
+          null, // Use persistent sync callback
           url
         );
         // Success
@@ -352,7 +359,10 @@ const App: React.FC = () => {
 
     ensureChapterContentLoaded(book.id, targetId);
 
+    // Hard Stop to clear previous buffer
     speechController.safeStop();
+    
+    // Set context immediately so progress saves correctly
     speechController.setContext({ bookId: book.id, chapterId: targetId });
 
     // Pre-calculate metadata for highlight stability
@@ -387,8 +397,8 @@ const App: React.FC = () => {
     
     if (idx >= 0 && idx < sorted.length - 1) {
       const next = sorted[idx + 1];
-      const shouldPlay = autoTrigger || isPlayingRef.current;
-      transitionToChapter(next.id, shouldPlay, autoTrigger ? 'auto' : 'user');
+      const shouldResume = autoTrigger || isPlayingRef.current;
+      transitionToChapter(next.id, shouldResume, autoTrigger ? 'auto' : 'user');
     } else {
       setIsPlaying(false);
       showToast("End of book reached", 0, 'success');
@@ -404,7 +414,8 @@ const App: React.FC = () => {
     
     if (idx > 0) {
       const prev = sorted[idx - 1];
-      transitionToChapter(prev.id, isPlayingRef.current, 'user');
+      const shouldResume = isPlayingRef.current;
+      transitionToChapter(prev.id, shouldResume, 'user');
     } else {
       showToast("Start of book reached", 0, 'info');
     }

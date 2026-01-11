@@ -1,5 +1,5 @@
 
-import { Rule, RuleType, AudioChunkMetadata } from '../types';
+import { Rule, RuleType, AudioChunkMetadata, PlaybackMetadata } from '../types';
 import { getDriveAudioObjectUrl, revokeObjectUrl } from "../services/driveService";
 
 export const PROGRESS_STORE_V4 = 'talevox_progress_v4';
@@ -19,12 +19,6 @@ export function applyRules(text: string, rules: Rule[]): string {
     } catch (e) {}
   });
   return processedText;
-}
-
-export interface PlaybackMetadata {
-  currentTime: number;
-  duration: number;
-  charOffset: number;
 }
 
 class SpeechController {
@@ -53,6 +47,11 @@ class SpeechController {
     this.audio.volume = 1.0;
     this.audio.preload = 'auto'; // Ensure metadata loads
     this.setupAudioListeners();
+  }
+
+  // Register a persistent callback for UI updates
+  public setSyncCallback(cb: ((meta: PlaybackMetadata) => void) | null) {
+    this.syncCallback = cb;
   }
 
   public setFetchStateListener(cb: (isFetching: boolean) => void) { this.onFetchStateChange = cb; }
@@ -100,8 +99,8 @@ class SpeechController {
       }
 
       // Fallback sync for mobile / non-autoplay transitions
-      // Some mobile browsers throttle requestAnimationFrame; use timeupdate to move the highlight
-      if (this.syncCallback && this.audio.duration && (('ontouchstart' in window) || navigator.maxTouchPoints > 0)) {
+      // IMPORTANT: Use persistent syncCallback. Even if raf is throttled, this drives the highlight.
+      if (this.syncCallback && this.audio.duration && !this.audio.paused) {
         const dur = this.audio.duration;
         this.syncCallback({
           currentTime: t,
@@ -196,7 +195,7 @@ class SpeechController {
   }
 
   async loadAndPlayDriveFile(
-    token: string, fileId: string, totalContentChars: number, introDurSec: number, chunkMap: AudioChunkMetadata[] | undefined, startTimeSec = 0, playbackRate = 1.0, onEnd: () => void, onSync: (meta: PlaybackMetadata) => void, localUrl?: string
+    token: string, fileId: string, totalContentChars: number, introDurSec: number, chunkMap: AudioChunkMetadata[] | undefined, startTimeSec = 0, playbackRate = 1.0, onEnd: () => void, onSync: ((meta: PlaybackMetadata) => void) | null, localUrl?: string
   ) {
     this.sessionToken++;
     const session = this.sessionToken;
@@ -211,7 +210,9 @@ class SpeechController {
     this.currentBlobUrl = null;
     
     this.onEndCallback = onEnd;
-    this.syncCallback = onSync;
+    // Only replace if a specific callback was provided, otherwise respect the persistent one
+    if (onSync) this.syncCallback = onSync;
+    
     this.currentTextLength = totalContentChars;
     this.currentIntroDurSec = introDurSec;
     this.currentChunkMap = chunkMap || null;
