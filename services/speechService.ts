@@ -30,11 +30,14 @@ class SpeechController {
   private currentIntroDurSec: number = 0;
   private currentChunkMap: AudioChunkMetadata[] | null = null;
   private rafId: number | null = null;
+  private intervalId: any = null; // For mobile smoothing loop
+  
   private requestedSpeed: number = 1.0;
   private onEndCallback: (() => void) | null = null;
   private onPlayStartCallback: (() => void) | null = null;
   private syncCallback: ((meta: PlaybackMetadata & { completed?: boolean }) => void) | null = null;
   private onFetchStateChange: ((isFetching: boolean) => void) | null = null;
+  
   private sessionToken: number = 0;
   private context: { bookId: string; chapterId: string } | null = null;
   private audioEventsBound = false;
@@ -44,9 +47,10 @@ class SpeechController {
   
   // Track time manually to prevent browser GC resetting playhead on mobile
   private lastKnownTime: number = 0;
-  private lastThrottleTime: number = 0;
   
-  // Dynamic Mobile Mode
+  // Smoothing State
+  private renderedOffset: number = 0;
+  private targetOffset: number = 0;
   private isMobileOptimized: boolean = false;
 
   // Highlight buffer to account for synthesis pauses and speech pacing (0.5s for smoother transition)
@@ -67,16 +71,11 @@ class SpeechController {
     this.isMobileOptimized = isMobile;
     trace('speech:mode_changed', { isMobile });
     
-    // If playing, switch strategies immediately
+    // Restart loop if playing to switch strategies
     if (this.audio.src && !this.audio.paused) {
-      if (this.isMobileOptimized) {
-        this.stopSyncLoop(); // Stop rAF, switch to timeupdate
-      } else {
-        this.startSyncLoop(); // Start rAF
-      }
+      this.stopSyncLoop();
+      this.startSyncLoop();
     }
-    // Force immediate update to UI
-    this.emitSyncTick();
   }
 
   // Register a persistent callback for UI updates
@@ -89,10 +88,11 @@ class SpeechController {
     this.currentTextLength = textLen;
     this.currentIntroDurSec = introDurSec;
     this.currentChunkMap = chunkMap || null;
+    this.renderedOffset = 0;
+    this.targetOffset = 0;
   }
 
   setContext(ctx: { bookId: string; chapterId: string } | null) {
-    // Context switch logic if needed
     this.context = ctx;
   }
 
@@ -103,19 +103,19 @@ class SpeechController {
     if (!this.audioEventsBound) {
       const events = ['loadstart', 'loadedmetadata', 'canplay', 'canplaythrough', 'play', 'playing', 'pause', 'waiting', 'stalled', 'ended', 'error', 'abort', 'emptied'];
       
-      // Explicit tracing for seek events
       this.audio.addEventListener('seeking', () => trace('audio:event:seeking', { t: this.audio.currentTime }));
       this.audio.addEventListener('seeked', () => {
         trace('audio:event:seeked', { t: this.audio.currentTime });
-        this.emitSyncTick(); // Ensure UI updates immediately after seek
+        // On seek, jump smoothing instantly
+        this.updateTargetOffset(this.audio.currentTime);
+        this.renderedOffset = this.targetOffset; 
+        this.emitSyncTick(); 
       });
       
       events.forEach(e => {
         this.audio.addEventListener(e, (evt) => {
           if (e === 'error') {
             traceError(`audio:event:${e}`, this.audio.error);
-          } else {
-            // trace(`audio:event:${e}`, { t: this.audio.currentTime, ready: this.audio.readyState });
           }
         });
       });
@@ -126,6 +126,7 @@ class SpeechController {
       trace('audio:ended');
       this.lastKnownTime = this.audio.duration || this.lastKnownTime;
       // Mark completed in the emit
+      this.renderedOffset = this.currentTextLength; // Force full progress visually
       this.emitSyncTick(true);
       this.stopSyncLoop();
       if (this.onEndCallback) setTimeout(() => this.onEndCallback?.(), 0);
@@ -135,38 +136,67 @@ class SpeechController {
       this.applyRequestedSpeed(); 
       this.startSyncLoop(); 
       if (this.onFetchStateChange) this.onFetchStateChange(false);
-      
-      // Force immediate sync update
       this.emitSyncTick();
     };
     this.audio.onpause = () => { 
       trace('audio:onpause', { t: this.audio.currentTime });
       this.lastKnownTime = this.audio.currentTime;
-      this.emitSyncTick(); // Force update on pause
+      this.emitSyncTick(); 
       this.stopSyncLoop(); 
     };
+    
+    // Use timeupdate to drive the target offset, serving as a "clock nudge"
     this.audio.ontimeupdate = () => { 
-      // Keep track of time locally to survive browser aggressive memory management
       const t = this.audio.currentTime;
       if (t > 0) this.lastKnownTime = t;
-      
-      const now = Date.now();
-
-      // Mobile Sync Strategy: Use timeupdate instead of rAF to save battery and avoid background throttling
-      if (this.isMobileOptimized) {
-        if (this.syncCallback && this.audio.duration && !this.audio.paused) {
-          // Throttle to ~10fps (100ms) to avoid overwhelming main thread on weak devices
-          if (now - this.lastThrottleTime > 100) {
-            this.emitSyncTick();
-            this.lastThrottleTime = now;
-          }
-        }
-      }
+      this.updateTargetOffset(t);
     };
+    
     this.audio.onerror = () => { 
       traceError('audio:onerror', this.audio.error);
       if (this.onFetchStateChange) this.onFetchStateChange(false); 
     };
+  }
+
+  // --- Smoothing Logic ---
+  
+  private updateTargetOffset(time: number) {
+    this.targetOffset = this.getOffsetFromTime(time, this.audio.duration);
+  }
+
+  // Called frequently (by rAF or Interval) to interpolate renderedOffset
+  private smoothTick(deltaMs: number) {
+    if (!this.syncCallback) return;
+    
+    // 1. If in intro, stay at 0
+    if (this.audio.currentTime < this.currentIntroDurSec) {
+        this.renderedOffset = 0;
+        this.emitSyncTick();
+        return;
+    }
+
+    // 2. If jumped backward (loop/seek), snap instantly
+    if (this.targetOffset < this.renderedOffset) {
+        this.renderedOffset = this.targetOffset;
+    } 
+    // 3. Otherwise, smooth forward
+    else if (this.targetOffset > this.renderedOffset) {
+        const diff = this.targetOffset - this.renderedOffset;
+        
+        // Estimate chars per second
+        const contentDur = Math.max(1, (this.audio.duration || 0) - this.currentIntroDurSec);
+        const cps = this.currentTextLength / contentDur;
+        
+        // Allowed step: proportional to speed, clamped to avoid jumps
+        // Slightly fast (1.5x) to catch up if lagging
+        const maxStep = Math.max(1, cps * (deltaMs / 1000) * this.requestedSpeed * 1.5);
+        
+        // Move towards target, but don't overshoot
+        const step = Math.min(diff, Math.max(1, maxStep));
+        this.renderedOffset += step;
+    }
+    
+    this.emitSyncTick();
   }
 
   public emitSyncTick(completed = false) {
@@ -174,7 +204,7 @@ class SpeechController {
        this.syncCallback({ 
            currentTime: this.audio.currentTime, 
            duration: this.audio.duration, 
-           charOffset: this.getOffsetFromTime(this.audio.currentTime, this.audio.duration),
+           charOffset: Math.floor(this.renderedOffset), // Emit smoothed value
            textLength: this.currentTextLength,
            completed
        });
@@ -186,24 +216,25 @@ class SpeechController {
     this.audio.playbackRate = this.requestedSpeed;
   }
 
-  // Deprecated direct save - logic moved to App.tsx via sync callback
   public saveProgress(completed: boolean = false) {
      this.emitSyncTick(completed);
   }
 
   private startSyncLoop() {
-    // Desktop: High precision rAF loop
-    // Mobile: Rely on timeupdate (handled in setupAudioListeners) to save battery/resources
-    if (this.isMobileOptimized) return;
-
-    const sync = () => {
-      if (this.syncCallback && this.audio.duration && !this.audio.paused) {
-        this.emitSyncTick();
-      }
-      this.rafId = requestAnimationFrame(sync);
-    };
     this.stopSyncLoop();
-    this.rafId = requestAnimationFrame(sync);
+    
+    // Always use interval for smoothing logic, even on desktop, to decouple render from audio events
+    // 20fps (50ms) is good balance of smoothness and battery
+    this.intervalId = setInterval(() => {
+        if (!this.audio.paused) {
+            this.smoothTick(50);
+        }
+    }, 50);
+  }
+
+  private stopSyncLoop() {
+    if (this.rafId !== null) { cancelAnimationFrame(this.rafId); this.rafId = null; }
+    if (this.intervalId !== null) { clearInterval(this.intervalId); this.intervalId = null; }
   }
 
   public getOffsetFromTime(t: number, dur?: number): number {
@@ -250,7 +281,6 @@ class SpeechController {
             reject(new Error(`Timeout waiting for ${event}`));
         }, timeoutMs);
 
-        // Pre-check
         if (nonce !== this.seekNonce) {
             cleanup();
             reject(new Error("Seek cancelled before wait"));
@@ -292,7 +322,7 @@ class SpeechController {
     token: string, fileId: string, totalContentChars: number, introDurSec: number, chunkMap: AudioChunkMetadata[] | undefined, startTimeSec = 0, playbackRate = 1.0, onEnd: () => void, onSync: ((meta: PlaybackMetadata & { completed?: boolean }) => void) | null, localUrl?: string, onPlayStart?: () => void
   ) {
     this.sessionToken++;
-    this.seekNonce++; // Invalidate pending seeks
+    this.seekNonce++; 
     const session = this.sessionToken;
     const isCurrentSession = () => this.sessionToken === session;
 
@@ -300,11 +330,10 @@ class SpeechController {
 
     this.requestedSpeed = playbackRate;
     
-    // Explicit reset
     this.audio.pause();
     this.audio.removeAttribute("src");
     this.audio.src = "";
-    this.audio.load(); // Important for mobile buffering reset
+    this.audio.load();
     
     if (!localUrl) revokeObjectUrl(this.currentBlobUrl);
     this.currentBlobUrl = null;
@@ -312,13 +341,15 @@ class SpeechController {
     this.onEndCallback = onEnd;
     this.onPlayStartCallback = onPlayStart || null;
     
-    // Only replace if a specific callback was provided, otherwise respect the persistent one
     if (onSync) this.syncCallback = onSync;
     
     this.currentTextLength = totalContentChars;
     this.currentIntroDurSec = introDurSec;
     this.currentChunkMap = chunkMap || null;
     this.lastKnownTime = startTimeSec;
+    // Reset offset smoothing
+    this.renderedOffset = 0;
+    this.targetOffset = 0;
 
     if (this.onFetchStateChange) this.onFetchStateChange(true);
 
@@ -339,12 +370,10 @@ class SpeechController {
       this.audio.src = url || '';
       this.audio.load();
       
-      // Wait for metadata
       await this.waitForEvent(this.audio, 'loadedmetadata', 8000, isCurrentSession);
 
       let resumeTime = startTimeSec;
       
-      // Clamp resume time
       if (isFinite(this.audio.duration)) {
          resumeTime = Math.min(resumeTime, Math.max(0, this.audio.duration - 0.5));
       }
@@ -353,7 +382,9 @@ class SpeechController {
          trace('audio:seeking', { resumeTime });
          this.audio.currentTime = resumeTime;
          this.lastKnownTime = resumeTime;
-         // Only wait for seeked if we actually moved the playhead
+         // Pre-calculate target offset so highlight starts correctly
+         this.updateTargetOffset(resumeTime);
+         this.renderedOffset = this.targetOffset;
          await this.waitForEvent(this.audio, 'seeked', 6000, isCurrentSession);
       }
 
@@ -362,11 +393,9 @@ class SpeechController {
          this.onPlayStartCallback = null;
       }
 
-      // Try playing. If it fails due to interaction, it will throw.
       try {
         await this.audio.play();
       } catch (e: any) {
-        // Specifically catch NotAllowedError to support 'safePlay' flow
         if (e.name === 'NotAllowedError') {
            throw new Error('Playback blocked');
         }
@@ -383,14 +412,12 @@ class SpeechController {
       }
       if (err.message === 'Playback session preempted') {
          trace('audio:load:preempted');
-         return; // Silent exit
+         return; 
       }
       traceError('audio:load:failed', err);
-      // Ensure we don't leave zombie audio loading
       this.audio.src = ""; 
       throw err;
     } finally {
-      // CRITICAL: Always clear loading state
       if (this.onFetchStateChange) this.onFetchStateChange(false);
     }
   }
@@ -410,75 +437,48 @@ class SpeechController {
     }
   }
 
-  // --- Robust SeekTo (replaces old logic) ---
+  // --- Robust SeekTo ---
   public async seekTo(targetSec: number): Promise<void> {
     const audio = this.audio;
     const nonce = ++this.seekNonce;
 
-    // Ensure we have metadata first
     if (!Number.isFinite(audio.duration) || audio.duration <= 0) {
         if (!audio.src) throw new Error("No audio source to seek");
         trace('audio:seek:waiting_metadata', { nonce });
         try {
             await this.waitForAudioEvent('loadedmetadata', 6000, nonce);
         } catch (e) {
-            if (nonce !== this.seekNonce) return; // Silent preemption
+            if (nonce !== this.seekNonce) return; 
             throw e;
         }
     }
 
-    // Check nonce again
     if (nonce !== this.seekNonce) return;
 
     const dur = audio.duration;
-    if (!Number.isFinite(dur) || dur <= 0) throw new Error('seekTo: duration unavailable');
-
     const clamped = Math.min(Math.max(targetSec, 0), Math.max(dur - 0.05, 0));
-    const current = audio.currentTime;
-
-    // NO-OP seek optimization (but always emit sync tick)
-    if (Math.abs(clamped - current) < 0.05) {
-        this.emitSyncTick();
-        return;
-    }
-
-    trace('audio:seek:start', { from: current, to: clamped, dur, nonce });
+    
+    trace('audio:seek:start', { to: clamped, nonce });
 
     audio.currentTime = clamped;
     this.lastKnownTime = clamped;
+    
+    // Snap highlight instantly
+    this.updateTargetOffset(clamped);
+    this.renderedOffset = this.targetOffset;
+    this.emitSyncTick();
 
     try {
         await this.waitForAudioEvent('seeked', 5000, nonce);
     } catch (e) {
         if (nonce !== this.seekNonce) return;
-        
-        // Fallback Poll: iOS sometimes swallows 'seeked' event but updates currentTime
-        // We poll for convergence to target time
-        trace('audio:seek:polling_fallback', { nonce });
-        const pollStart = Date.now();
-        let converged = false;
-        while (Date.now() - pollStart < 800) { // 800ms max poll
-            if (Math.abs(audio.currentTime - clamped) < 0.25) {
-               converged = true;
-               break;
-            }
-            await new Promise(r => setTimeout(r, 50));
-            if (nonce !== this.seekNonce) return;
-        }
-        
-        if (!converged) {
-           // On mobile, just logging warning and proceeding is often safer than crashing
-           traceError('audio:seek:converge_failed_but_proceeding', { actual: audio.currentTime, target: clamped });
-        }
+        traceError('audio:seek:converge_failed_but_proceeding', { actual: audio.currentTime, target: clamped });
     }
 
     if (nonce !== this.seekNonce) return;
-
-    trace('audio:seek:done', { now: audio.currentTime, target: clamped, nonce });
     this.emitSyncTick();
   }
 
-  // Backwards compat / alias
   public async seekToTime(seconds: number): Promise<void> {
       return this.seekTo(seconds);
   }
@@ -514,13 +514,9 @@ class SpeechController {
     this.seekTo(targetTime).catch(e => traceError('seek:offset:failed', e));
   }
 
-  private stopSyncLoop() { if (this.rafId !== null) { cancelAnimationFrame(this.rafId); this.rafId = null; } }
-
   speak(text: string, voiceName: string | undefined, rate: number, offset: number, onEnd: () => void, isIntro: boolean = false) {
-    // IMPORTANT: Stop the main audio player before starting TTS to prevent overlap
     this.audio.pause();
     this.stopSyncLoop();
-    
     window.speechSynthesis.cancel();
     const executeUtterance = (txt: string, delay: number, callback: () => void) => {
       const utterance = new SpeechSynthesisUtterance(txt);
@@ -543,7 +539,6 @@ class SpeechController {
   resume() { 
     if (this.audio.src) { 
       this.applyRequestedSpeed(); 
-      // Paranoid Resume: Mobile browsers often lose position.
       if (this.audio.currentTime === 0 && this.lastKnownTime > 0) {
         this.audio.currentTime = this.lastKnownTime;
       }
@@ -558,15 +553,14 @@ class SpeechController {
     this.stopSyncLoop();
     this.audio.pause();
     this.audio.removeAttribute("src");
-    // Don't call .load() on stop/unload on mobile as it might trigger errors if backgrounded
     revokeObjectUrl(this.currentBlobUrl);
     this.currentBlobUrl = null;
     this.lastKnownTime = 0;
+    this.renderedOffset = 0;
     if (this.onFetchStateChange) this.onFetchStateChange(false);
     window.speechSynthesis.cancel();
   }
 
-  // Safe stop ensures we completely reset before starting something new
   safeStop() {
     trace('audio:safeStop');
     this.sessionToken++;
@@ -575,11 +569,11 @@ class SpeechController {
     this.audio.pause();
     this.audio.src = "";
     this.audio.removeAttribute("src");
-    this.audio.load(); // Force buffer reset to avoid glitching when starting new chapter
-    // Only revoke if we created it
+    this.audio.load();
     revokeObjectUrl(this.currentBlobUrl);
     this.currentBlobUrl = null;
     this.lastKnownTime = 0;
+    this.renderedOffset = 0;
     if (this.onFetchStateChange) this.onFetchStateChange(false);
     window.speechSynthesis.cancel();
   }

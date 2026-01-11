@@ -65,6 +65,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const chapters = useMemo(() => [...(book.chapters || [])].sort((a, b) => a.index - b.index), [book.chapters]);
 
+  // ... (Integrity check and Audio generation logic remains same) ...
   const handleCheckDriveIntegrity = useCallback(async () => {
     if (!book.driveFolderId) return;
     if (!isTokenValid()) {
@@ -253,9 +254,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               <button onClick={() => setMobileMenuId(null)} className="p-2 opacity-40"><X className="w-5 h-5" /></button>
            </div>
            <div className="space-y-2">
-              <button onClick={() => { setMobileMenuId(null); handleCheckDriveIntegrity(); }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}>
-                 <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg"><RefreshCw className="w-4 h-4" /></div>
-                 Check Audio + Text
+              <button onClick={() => { setMobileMenuId(null); onResetChapterProgress(book.id, ch.id); }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}>
+                 <div className="p-2 bg-emerald-600/10 text-emerald-600 rounded-lg"><RefreshCw className="w-4 h-4" /></div>
+                 Refresh Progress
               </button>
               <button onClick={() => { setMobileMenuId(null); setEditingChapterId(ch.id); setTempTitle(ch.title); }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}>
                  <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg"><Edit2 className="w-4 h-4" /></div>
@@ -306,21 +307,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               </div>
               <div className="flex justify-end items-center gap-2">
                 <div className="hidden md:flex items-center gap-2">
-                  {isCompleted && (
-                    <button onClick={(e) => { e.stopPropagation(); onResetChapterProgress(book.id, c.id); }} className="p-2 bg-indigo-600/10 text-indigo-600 rounded-xl hover:bg-indigo-600/20" title="Reset Progress">
-                      <RotateCcw className="w-4 h-4" />
-                    </button>
-                  )}
-                  <button onClick={(e) => { e.stopPropagation(); setRememberAsDefault(false); setShowVoiceModal({ chapterId: c.id }); }} className="p-2 opacity-40 hover:opacity-100" title="Regenerate Audio"><RefreshCw className="w-4 h-4" /></button>
+                  <button onClick={(e) => { e.stopPropagation(); onResetChapterProgress(book.id, c.id); }} className="p-2 bg-indigo-600/10 text-indigo-600 rounded-xl hover:bg-indigo-600/20" title="Refresh Progress">
+                      <RefreshCw className="w-4 h-4" />
+                  </button>
+                  <button onClick={(e) => { e.stopPropagation(); setRememberAsDefault(false); setShowVoiceModal({ chapterId: c.id }); }} className="p-2 opacity-40 hover:opacity-100" title="Regenerate Audio"><Headphones className="w-4 h-4" /></button>
                   <button onClick={(e) => { e.stopPropagation(); setEditingChapterId(c.id); setTempTitle(c.title); }} className="p-2 opacity-40 hover:opacity-100" title="Edit Title"><Edit2 className="w-4 h-4" /></button>
                   <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete?')) onDeleteChapter(c.id); }} className="p-2 opacity-40 hover:opacity-100 hover:text-red-500" title="Delete"><Trash2 className="w-4 h-4" /></button>
                 </div>
                 <div className="md:hidden flex items-center gap-2">
-                   {isCompleted && (
-                    <button onClick={(e) => { e.stopPropagation(); onResetChapterProgress(book.id, c.id); }} className="p-1.5 text-indigo-600" title="Reset Progress">
-                      <RotateCcw className="w-4 h-4" />
-                    </button>
-                  )}
                   <button onClick={(e) => { e.stopPropagation(); setMobileMenuId(c.id); }} className="p-1.5 opacity-40">
                     <GearIcon className="w-4 h-4" />
                   </button>
@@ -347,11 +341,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                 <span className="text-[9px] font-black opacity-40 uppercase">{percent}%</span>
                 {renderAudioStatusIcon(c)}
                 <div className="flex md:hidden gap-1 items-center">
-                  {isCompleted && (
-                    <button onClick={(e) => { e.stopPropagation(); onResetChapterProgress(book.id, c.id); }} className="p-1.5 text-indigo-600">
-                      <RotateCcw className="w-3.5 h-3.5" />
-                    </button>
-                  )}
                   <button onClick={(e) => { e.stopPropagation(); setMobileMenuId(c.id); }} className="p-1.5 opacity-40">
                     <GearIcon className="w-3.5 h-3.5" />
                   </button>
@@ -383,11 +372,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             </div>
             <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete?')) onDeleteChapter(c.id); }} className="hidden md:block absolute bottom-2 right-2 p-2 opacity-0 group-hover:opacity-100 text-red-500 transition-opacity"><Trash2 className="w-3.5 h-3.5" /></button>
             <div className="md:hidden absolute bottom-2 left-0 right-0 flex justify-center gap-2 px-2">
-               {isCompleted && (
-                 <button onClick={(e) => { e.stopPropagation(); onResetChapterProgress(book.id, c.id); }} className="p-2 bg-indigo-600/10 text-indigo-600 rounded-xl">
-                   <RotateCcw className="w-3.5 h-3.5" />
-                 </button>
-               )}
                <button onClick={(e) => { e.stopPropagation(); setMobileMenuId(c.id); }} className="p-2 bg-black/5 rounded-xl opacity-60">
                  <GearIcon className="w-3.5 h-3.5" />
                </button>

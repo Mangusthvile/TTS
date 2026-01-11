@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, PlaybackPhase, UiMode, ReaderSettings } from './types';
 import Library from './components/Library';
@@ -21,7 +22,7 @@ import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library 
 import { trace, traceError } from './utils/trace';
 import { computeMobileMode } from './utils/platform';
 
-const STATE_FILENAME = 'talevox_state_v298.json';
+const STATE_FILENAME = 'talevox_state_v299.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -29,6 +30,11 @@ const UI_MODE_KEY = "talevox_ui_mode";
 
 // --- Safe Storage Helper ---
 const safeSetLocalStorage = (key: string, value: string) => {
+  // Safe limit for backups to prevent quota exceeded errors crashing the app
+  if (value.length > 250000 && (key === BACKUP_KEY || key.includes('backup'))) {
+     console.warn(`[SafeStorage] Skipping backup write for ${key} (size ${value.length} > 250kb) to prevent quota issues.`);
+     return;
+  }
   try {
     localStorage.setItem(key, value);
   } catch (e: any) {
@@ -42,6 +48,33 @@ const safeSetLocalStorage = (key: string, value: string) => {
       } catch (inner) {}
     }
   }
+};
+
+// --- Progress Normalization Helper ---
+const normalizeChapterProgress = (c: Chapter): Chapter => {
+  let percent = 0;
+  // Priority: explicit percentage > time > chars
+  if (c.progress !== undefined) percent = c.progress;
+  else if (c.progressSec && c.durationSec) percent = c.progressSec / c.durationSec;
+  else if (c.progressChars && c.textLength) percent = c.progressChars / c.textLength;
+  
+  // Clamp
+  percent = Math.min(Math.max(percent, 0), 1);
+  
+  // Force consistency
+  let isCompleted = c.isCompleted;
+  
+  // If explicitly complete, force bar to full
+  if (isCompleted) {
+    percent = 1;
+  } 
+  // If very close to end, mark complete
+  else if (percent >= 0.99) {
+    isCompleted = true;
+    percent = 1;
+  }
+  
+  return { ...c, progress: percent, isCompleted };
 };
 
 const App: React.FC = () => {
@@ -58,7 +91,6 @@ const App: React.FC = () => {
   const [isScrubbing, setIsScrubbing] = useState(false);
   
   // Ref to prevent overlapping transitions and manage scrub session
-  // This is the SINGLE SOURCE OF TRUTH for the current chapter loading session
   const chapterSessionRef = useRef(0);
   const isInIntroRef = useRef(false);
   const lastProgressCommitTime = useRef(0);
@@ -86,7 +118,6 @@ const App: React.FC = () => {
   useEffect(() => {
     const handleVisChange = () => {
       if (document.visibilityState === 'visible') {
-        // Force a sync tick when app comes to foreground to catch up UI
         speechController.emitSyncTick();
       }
     };
@@ -112,15 +143,14 @@ const App: React.FC = () => {
     const saved = localStorage.getItem('talevox_pro_v2');
     const parsed = saved ? JSON.parse(saved) : {};
     const savedDiag = localStorage.getItem('talevox_sync_diag');
-    
-    // Load UI mode preference explicitly first
     const savedUiMode = localStorage.getItem(UI_MODE_KEY) as UiMode | null;
 
-    return {
-      books: (parsed.books || []).map((b: any) => ({
+    // Normalize all loaded chapters immediately to fix "Done but not full"
+    const books = (parsed.books || []).map((b: any) => ({
         ...b,
         directoryHandle: undefined,
         settings: b.settings || { useBookSettings: false, highlightMode: HighlightMode.WORD },
+        chapters: (b.chapters || []).map((c: Chapter) => normalizeChapterProgress(c)),
         rules: (b.rules || []).map((r: any) => ({
           ...r,
           matchCase: r.matchCase ?? (r.caseMode === 'EXACT'),
@@ -128,7 +158,10 @@ const App: React.FC = () => {
           ruleType: r.ruleType ?? RuleType.REPLACE,
           global: r.global ?? false
         }))
-      })),
+    }));
+
+    return {
+      books,
       activeBookId: parsed.activeBookId,
       playbackSpeed: parsed.playbackSpeed || 1.0,
       selectedVoiceName: parsed.selectedVoiceName,
@@ -173,10 +206,7 @@ const App: React.FC = () => {
       setEffectiveMobileMode(isMob);
       speechController.setMobileMode(isMob);
     };
-    
     recompute();
-    
-    // Only listen to resize if we are in auto mode
     if (state.readerSettings.uiMode === 'auto') {
       window.addEventListener('resize', recompute);
       return () => window.removeEventListener('resize', recompute);
@@ -268,16 +298,13 @@ const App: React.FC = () => {
     const now = Date.now();
     const throttleMs = effectiveMobileMode ? 800 : 250;
     
-    // Ignore updates if we are not actually playing the requested chapter/session
-    // But since this callback is global, we rely on the stateRef's current chapter matches
     const s = stateRef.current;
     const bIdx = s.books.findIndex(b => b.id === bookId);
     if (bIdx === -1) return;
     const book = s.books[bIdx];
     
-    // SAFETY: Don't commit progress for a chapter that isn't active (prevents "pull back" bug)
+    // SAFETY: Don't commit progress for a chapter that isn't active
     if (book.currentChapterId !== chapterId) {
-        trace('progress:ignored_stale', { target: chapterId, active: book.currentChapterId });
         return;
     }
 
@@ -296,39 +323,24 @@ const App: React.FC = () => {
     const progressChars = Math.max(meta.charOffset || 0, 0);
     const textLength = Math.max(meta.textLength || 0, chapter.textLength || chapter.content?.length || 0);
 
-    let pct = 0;
-    if (durationSec > 0) {
-      pct = progressSec / durationSec;
-    } else if (textLength > 0) {
-      pct = progressChars / textLength;
-    }
-    pct = Math.min(Math.max(pct, 0), 1);
+    const rawChapter = {
+        ...chapter,
+        progressSec,
+        progressChars,
+        durationSec,
+        textLength,
+        isCompleted: meta.completed || chapter.isCompleted || false
+    };
 
-    let isComplete = meta.completed || false;
-    if (!isComplete) {
-      if (durationSec > 0) {
-        if (progressSec >= durationSec - 0.5) isComplete = true;
-      } else {
-        if (textLength > 0 && progressChars >= textLength - 5) isComplete = true;
-      }
-    }
+    // Apply normalization logic to ensure consistent percent/done status
+    const normalized = normalizeChapterProgress(rawChapter);
     
-    const finalComplete = isComplete || chapter.isCompleted || false;
-    const pctDiff = Math.abs(pct - (chapter.progress || 0));
-    const secDiff = Math.abs(progressSec - (chapter.progressSec || 0));
-    
-    if (force || finalComplete !== chapter.isCompleted || secDiff > 1 || pctDiff > 0.01) {
+    if (force || normalized.isCompleted !== chapter.isCompleted || Math.abs(normalized.progress - chapter.progress) > 0.01) {
        setState(prev => {
          const newBooks = [...prev.books];
          const newChapters = [...newBooks[bIdx].chapters];
          newChapters[cIdx] = {
-           ...chapter,
-           progress: pct,
-           progressSec,
-           progressChars, 
-           durationSec,
-           textLength,
-           isCompleted: finalComplete,
+           ...normalized,
            updatedAt: now
          };
          newBooks[bIdx] = { ...newBooks[bIdx], chapters: newChapters };
@@ -340,14 +352,12 @@ const App: React.FC = () => {
          const store = storeRaw ? JSON.parse(storeRaw) : {};
          if (!store[bookId]) store[bookId] = {};
          store[bookId][chapterId] = {
-           timeSec: progressSec,
-           durationSec,
-           percent: pct,
-           completed: finalComplete,
+           timeSec: normalized.progressSec,
+           percent: normalized.progress,
+           completed: normalized.isCompleted,
            updatedAt: now
          };
          localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(store));
-         window.dispatchEvent(new CustomEvent('talevox_progress_updated', { detail: { bookId, chapterId } }));
        } catch (e) { console.warn("Progress write failed", e); }
        
        markDirty();
@@ -378,6 +388,7 @@ const App: React.FC = () => {
     setAudioCurrentTime(meta.currentTime);
     setAudioDuration(meta.duration);
     
+    // Smooth highlighting is now handled by renderedOffset in speechController
     // Only update offset if meaningful change to avoid react churn
     if (Math.abs(meta.charOffset - stateRef.current.currentOffsetChars) > 5) {
         setState(p => ({ ...p, currentOffsetChars: meta.charOffset }));
@@ -457,10 +468,8 @@ const App: React.FC = () => {
       const chapter = book?.chapters.find(c => c.id === chapterId);
       if (!book || !chapter) return null;
 
-      // If content is already present, return it
       if (chapter.content && chapter.content.length > 10) return chapter.content;
 
-      // Otherwise, attempt fetch
       if (chapter.cloudTextFileId && isAuthorized) {
            trace('text:load:start', { chapterId, fileId: chapter.cloudTextFileId, session });
            try {
@@ -521,6 +530,30 @@ const App: React.FC = () => {
        } catch (e) { console.warn("Hard refresh failed", e); }
   }, [isAuthorized]);
 
+  const handleRefreshChapter = useCallback((bookId: string, chapterId: string) => {
+      const s = stateRef.current;
+      const bIdx = s.books.findIndex(b => b.id === bookId);
+      if (bIdx === -1) return;
+      const cIdx = s.books[bIdx].chapters.findIndex(c => c.id === chapterId);
+      if (cIdx === -1) return;
+      
+      const chapter = s.books[bIdx].chapters[cIdx];
+      // Force correction of progress
+      let fixed = normalizeChapterProgress(chapter);
+      // If it was supposed to be done, force it fully
+      if (chapter.isCompleted) fixed = { ...fixed, progress: 1 };
+      
+      setState(p => {
+         const newBooks = [...p.books];
+         const newChapters = [...newBooks[bIdx].chapters];
+         newChapters[cIdx] = fixed;
+         newBooks[bIdx] = { ...newBooks[bIdx], chapters: newChapters };
+         return { ...p, books: newBooks };
+      });
+      markDirty();
+      showToast("Progress refreshed", 1000, 'success');
+  }, [markDirty, showToast]);
+
   // --- UNIFIED PLAYBACK SESSION PIPELINE ---
 
   // Fix circular dependency using ref
@@ -535,7 +568,7 @@ const App: React.FC = () => {
     const chapter = book.chapters.find(c => c.id === targetChapterId);
     if (!chapter) return;
 
-    updatePhase('LOADING_TEXT'); // Indicate we are busy
+    updatePhase('LOADING_TEXT');
     trace('chapter:load:start', { targetChapterId, reason, session });
 
     // 2. HARD STOP + Buffer Reset
@@ -543,7 +576,6 @@ const App: React.FC = () => {
     setAutoplayBlocked(false);
     
     // 3. Update active chapter state immediately
-    // This ensures the UI shows the correct title/number while loading
     setState(p => ({ 
         ...p, 
         books: p.books.map(b => b.id === book.id ? { ...b, currentChapterId: targetChapterId } : b),
@@ -555,10 +587,7 @@ const App: React.FC = () => {
     // 4. Ensure TEXT is loaded BEFORE audio
     const content = await ensureChapterContentLoaded(book.id, chapter.id, session);
     
-    if (session !== chapterSessionRef.current) {
-        trace('chapter:load:aborted_after_text', { session });
-        return;
-    }
+    if (session !== chapterSessionRef.current) return;
 
     if (!content && (!chapter.content || chapter.content.length < 10)) {
         showToast("Chapter text missing. Check Drive.", 0, 'error');
@@ -604,11 +633,10 @@ const App: React.FC = () => {
         await speechController.loadAndPlayDriveFile(
             '', 'LOCAL_ID', textToSpeak.length, chapter.audioIntroDurSec || 5, chapter.audioChunkMap, 
             startSec, 
-            state.playbackSpeed, // Use current speed preference
+            state.playbackSpeed, 
             () => { // onEnded
                 if (session === chapterSessionRef.current) {
                     updatePhase('ENDING_SETTLE');
-                    // Settle pause for highlight catching up
                     setTimeout(() => {
                         if (session === chapterSessionRef.current) {
                             handleNextChapterRef.current(true); 
@@ -649,7 +677,6 @@ const App: React.FC = () => {
                 setAutoplayBlocked(false);
                 setIsPlaying(true);
                 updatePhase('PLAYING_BODY');
-                // Ensure speed is applied
                 speechController.setPlaybackRate(state.playbackSpeed);
             }
         } catch (e: any) {
@@ -670,7 +697,6 @@ const App: React.FC = () => {
   const handleManualPlay = () => {
     gestureArmedRef.current = true;
     lastGestureAt.current = Date.now();
-    // Re-apply speed on manual play just in case
     speechController.setPlaybackRate(state.playbackSpeed);
     
     speechController.safePlay().then(res => {
@@ -695,14 +721,12 @@ const App: React.FC = () => {
     if (idx >= 0 && idx < sorted.length - 1) {
       const next = sorted[idx + 1];
       showToast(`Next: Chapter ${next.index}`, 2000, 'info');
-      // Use the unified pipeline
       loadChapterSession(next.id, autoTrigger ? 'auto' : 'user');
     } else {
       setIsPlaying(false); updatePhase('IDLE'); showToast("End of book", 0, 'success');
     }
   }, [loadChapterSession, updatePhase, showToast]);
 
-  // Update ref for circular dependency
   useEffect(() => { handleNextChapterRef.current = handleNextChapter; }, [handleNextChapter]);
 
   const handlePrevChapter = useCallback(() => {
@@ -747,7 +771,6 @@ const App: React.FC = () => {
       }
       speechController.emitSyncTick();
     } catch (e: any) {
-      console.error("Seek failed", e);
       updatePhase('READY');
     }
   }, []);
@@ -827,7 +850,6 @@ const App: React.FC = () => {
       const s = stateRef.current;
       const book = s.books.find(b => b.id === s.activeBookId);
       if (book && book.currentChapterId) {
-         // Refresh current chapter
          await hardRefreshForChapter(book.id, book.currentChapterId);
          showToast("Chapter Refreshed", 1000, 'success');
       } else {
@@ -846,7 +868,6 @@ const App: React.FC = () => {
       showToast("Reset", 1000, 'info');
   };
 
-  // Safe localStorage for large state
   useEffect(() => {
     safeSetLocalStorage('talevox_pro_v2', JSON.stringify({ ...state, books: state.books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined })) }));
   }, [state]);
@@ -879,6 +900,7 @@ const App: React.FC = () => {
       )}
 
       <header className={`h-16 border-b flex items-center justify-between px-4 lg:px-8 z-10 sticky top-0 transition-colors ${state.theme === Theme.DARK ? 'border-slate-800 bg-slate-900/80 backdrop-blur-md' : state.theme === Theme.SEPIA ? 'border-[#d8ccb6] bg-[#efe6d5]/90 backdrop-blur-md' : 'border-black/5 bg-white/90 backdrop-blur-md'}`}>
+        {/* ... Header Content ... */}
         <div className="flex items-center gap-4">
           {activeTab === 'reader' && (
             <button onClick={() => setIsChapterSidebarOpen(true)} className="flex items-center gap-2 px-3 py-2 bg-black/5 rounded-xl text-[10px] font-black uppercase tracking-widest lg:hidden hover:bg-black/10">
@@ -980,7 +1002,7 @@ const App: React.FC = () => {
               onUpdateChapter={c => { setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(ch => ch.id === c.id ? c : ch) } : b) })); markDirty(); }}
               onUpdateBookSettings={s => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, ...s } } : b) })); markDirty(); }}
               onBackToLibrary={() => setActiveTab('library')}
-              onResetChapterProgress={handleResetChapterProgress}
+              onResetChapterProgress={(bid, cid) => { if(bid === activeBook.id) handleRefreshChapter(bid, cid); else handleResetChapterProgress(bid, cid); }}
             />
           )}
 
