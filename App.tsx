@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata } from './types';
+import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, PlaybackPhase } from './types';
 import Library from './components/Library';
 import Reader from './components/Reader';
 import Player from './components/Player';
@@ -17,9 +17,9 @@ import { synthesizeChunk } from './services/cloudTtsService';
 import { extractChapterWithAI } from './services/geminiService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
 import { idbSet } from './services/storageService';
-import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud } from 'lucide-react';
+import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud, Terminal } from 'lucide-react';
 
-const STATE_FILENAME = 'talevox_state_v2810.json';
+const STATE_FILENAME = 'talevox_state_v2811.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -70,6 +70,12 @@ const App: React.FC = () => {
   const [isScanningRules, setIsScanningRules] = useState(false);
   const [scanProgress, setScanProgress] = useState('');
 
+  // --- Playback State Machine ---
+  const [playbackPhase, setPlaybackPhase] = useState<PlaybackPhase>('IDLE');
+  const [phaseSince, setPhaseSince] = useState(Date.now());
+  const [lastPlaybackError, setLastPlaybackError] = useState<string | null>(null);
+  const [currentIntroDurSec, setCurrentIntroDurSec] = useState(5);
+
   const [state, setState] = useState<AppState>(() => {
     const saved = localStorage.getItem('talevox_pro_v2');
     const parsed = saved ? JSON.parse(saved) : {};
@@ -114,7 +120,8 @@ const App: React.FC = () => {
       driveSubfolders: parsed.driveSubfolders,
       syncDiagnostics: savedDiag ? JSON.parse(savedDiag) : {},
       autoSaveInterval: parsed.autoSaveInterval || 30,
-      globalRules: parsed.globalRules || []
+      globalRules: parsed.globalRules || [],
+      showDiagnostics: parsed.showDiagnostics || false
     };
   });
 
@@ -141,6 +148,41 @@ const App: React.FC = () => {
 
   const activeBook = useMemo(() => state.books.find(b => b.id === state.activeBookId), [state.books, state.activeBookId]);
   const activeChapterMetadata = useMemo(() => activeBook?.chapters.find(c => c.id === activeBook.currentChapterId), [activeBook]);
+
+  const updatePhase = useCallback((p: PlaybackPhase) => {
+    setPlaybackPhase(p);
+    setPhaseSince(Date.now());
+  }, []);
+
+  // Register Persistent Sync Callback
+  const handleSyncUpdate = useCallback((meta: PlaybackMetadata) => {
+    // Block sync updates during volatile phases to prevent jumping
+    if (['LOADING_AUDIO', 'SEEKING', 'TRANSITIONING', 'LOADING_TEXT'].includes(playbackPhase)) {
+        return;
+    }
+    
+    // Only update phase if we are safely playing
+    if (playbackPhase === 'READY' || playbackPhase === 'PLAYING_INTRO' || playbackPhase === 'PLAYING_BODY') {
+        // Simple heuristic: if time > intro duration + buffer, we are in body
+        // The service handles offset pinning during intro
+        if (meta.currentTime > (currentIntroDurSec + 0.6) && playbackPhase !== 'PLAYING_BODY') {
+            updatePhase('PLAYING_BODY');
+        } else if (meta.currentTime <= (currentIntroDurSec + 0.6) && playbackPhase !== 'PLAYING_INTRO') {
+            updatePhase('PLAYING_INTRO');
+        }
+    }
+
+    setAudioCurrentTime(meta.currentTime);
+    setAudioDuration(meta.duration);
+    setState(p => {
+      if (p.currentOffsetChars === meta.charOffset) return p;
+      return { ...p, currentOffsetChars: meta.charOffset };
+    });
+  }, [playbackPhase, currentIntroDurSec, updatePhase]);
+
+  useEffect(() => {
+    speechController.setSyncCallback(handleSyncUpdate);
+  }, [handleSyncUpdate]);
 
   // LIVE PROGRESS LISTENER
   useEffect(() => {
@@ -193,20 +235,6 @@ const App: React.FC = () => {
     document.documentElement.style.setProperty('--highlight-color', state.readerSettings.highlightColor);
   }, [state.readerSettings.highlightColor]);
 
-  // Register Persistent Sync Callback
-  const handleSyncUpdate = useCallback((meta: PlaybackMetadata) => {
-    setAudioCurrentTime(meta.currentTime);
-    setAudioDuration(meta.duration);
-    setState(p => {
-      if (p.currentOffsetChars === meta.charOffset) return p;
-      return { ...p, currentOffsetChars: meta.charOffset };
-    });
-  }, []);
-
-  useEffect(() => {
-    speechController.setSyncCallback(handleSyncUpdate);
-  }, [handleSyncUpdate]);
-
   // --- Central Playback Logic ---
 
   const loadingChapterTextRef = useRef<Set<string>>(new Set());
@@ -258,6 +286,22 @@ const App: React.FC = () => {
     }
   }, [isAuthorized]);
 
+  const hardRefreshForChapter = useCallback(async (bookId: string, chapterId: string) => {
+    updatePhase('TRANSITIONING');
+    
+    // Stop audio and clear state to prevent jumps
+    speechController.safeStop();
+    setAudioDuration(0);
+    // Don't reset currentOffsetChars to 0 yet if we want to hold the previous screen, 
+    // but typically a hard refresh implies a new chapter, so reset is correct.
+    setState(p => ({ ...p, currentOffsetChars: 0 }));
+    
+    updatePhase('LOADING_TEXT');
+    await ensureChapterContentLoaded(bookId, chapterId);
+    
+    updatePhase('READY');
+  }, [ensureChapterContentLoaded, updatePhase]);
+
   const startPlayback = useCallback(async (targetChapterId: string, reason: 'user' | 'auto') => {
     const s = stateRef.current;
     const book = s.books.find(b => b.id === s.activeBookId);
@@ -273,6 +317,7 @@ const App: React.FC = () => {
         speechController.isPaused) {
         
         setIsPlaying(true);
+        updatePhase('SEEKING'); // Will transition to PLAYING... via sync callback
         speechController.resume();
         return;
     }
@@ -280,6 +325,7 @@ const App: React.FC = () => {
     // Otherwise, full load
     setIsPlaying(true);
     setAutoplayBlocked(false);
+    updatePhase('LOADING_AUDIO');
     
     // Ensure audio stops if switching context or hard starting
     speechController.safeStop();
@@ -292,6 +338,7 @@ const App: React.FC = () => {
     const introText = applyRules(rawIntro, allRules);
     const estimatedIntroDurSec = (introText.length / (18 * speed)); 
     const introDur = chapter.audioIntroDurSec ?? estimatedIntroDurSec;
+    setCurrentIntroDurSec(introDur);
 
     try {
       const cacheKey = generateAudioKey(introText + text, voice, 1.0);
@@ -314,16 +361,22 @@ const App: React.FC = () => {
           '', 'LOCAL_ID', text.length, introDur, chapter.audioChunkMap, 0, speed, 
           () => { 
              // On End
+             updatePhase('ENDING_SETTLE');
              if (stopAfterChapter) {
                 setIsPlaying(false);
+                updatePhase('IDLE');
              } else {
-                handleNextChapter(true); // Auto transition
+                // Settle pause
+                setTimeout(() => handleNextChapter(true), 300);
              }
           },
           null, // Use persistent sync callback
-          url
+          url,
+          () => { // onPlayStart (after seek)
+             updatePhase('PLAYING_INTRO');
+          }
         );
-        // Success
+        updatePhase('SEEKING'); // It's loading metadata now
         setAutoplayBlocked(false);
       } else {
         // Fallback: Text only or generate
@@ -337,11 +390,14 @@ const App: React.FC = () => {
         }
         
         // If content exists but no audio, queue generation
+        updatePhase('LOADING_AUDIO');
         await queueBackgroundTTS(book.id, chapter.id);
         // Try again in a moment (simple poll)
         setTimeout(() => startPlayback(targetChapterId, reason), 1500);
       }
     } catch (playErr: any) {
+      updatePhase('ERROR');
+      setLastPlaybackError(playErr.message);
       if (playErr.name === 'NotAllowedError') { 
         setAutoplayBlocked(true); 
         setIsPlaying(false); 
@@ -350,19 +406,17 @@ const App: React.FC = () => {
         showToast(`Playback Error: ${playErr.message}`, 0, 'error');
       }
     }
-  }, [stopAfterChapter, isAuthorized]);
+  }, [stopAfterChapter, isAuthorized, updatePhase]);
 
-  const transitionToChapter = useCallback((targetId: string, shouldPlay: boolean, reason: 'user' | 'auto') => {
+  const goToChapter = useCallback(async (targetId: string, options: { autoStart: boolean, reason: 'user' | 'auto' }) => {
     const s = stateRef.current;
     const book = s.books.find(b => b.id === s.activeBookId);
     if (!book) return;
 
-    ensureChapterContentLoaded(book.id, targetId);
+    // Hard refresh resets phase, stops audio, clears highlight
+    await hardRefreshForChapter(book.id, targetId);
 
-    // Hard Stop to clear previous buffer
-    speechController.safeStop();
-    
-    // Set context immediately so progress saves correctly
+    // Update context immediately so progress saves correctly
     speechController.setContext({ bookId: book.id, chapterId: targetId });
 
     // Pre-calculate metadata for highlight stability
@@ -375,18 +429,21 @@ const App: React.FC = () => {
         const speed = (book.settings.useBookSettings && book.settings.playbackSpeed) ? book.settings.playbackSpeed : s.playbackSpeed;
         const estimatedIntroDurSec = (introText.length / (18 * speed));
         const introDur = nextCh.audioIntroDurSec ?? estimatedIntroDurSec;
-        speechController.updateMetadata(text.length, introDur, nextCh.audioChunkMap || []);
+        // Don't update speechController metadata yet, wait for playback to start, 
+        // BUT update local state introDur for UI
+        setCurrentIntroDurSec(introDur);
     }
 
     setState(p => ({ ...p, books: p.books.map(b => b.id === book.id ? { ...b, currentChapterId: targetId } : b), currentOffsetChars: 0 }));
     
-    if (shouldPlay) {
-       // Small timeout to allow state to settle / UI to update
-       setTimeout(() => startPlayback(targetId, reason), 50);
+    if (options.autoStart) {
+       // Small timeout to allow state to settle
+       setTimeout(() => startPlayback(targetId, options.reason), 150);
     } else {
        setIsPlaying(false);
+       updatePhase('IDLE');
     }
-  }, [startPlayback, ensureChapterContentLoaded]);
+  }, [startPlayback, hardRefreshForChapter, updatePhase]);
 
   const handleNextChapter = useCallback((autoTrigger = false) => {
     const s = stateRef.current;
@@ -398,12 +455,14 @@ const App: React.FC = () => {
     if (idx >= 0 && idx < sorted.length - 1) {
       const next = sorted[idx + 1];
       const shouldResume = autoTrigger || isPlayingRef.current;
-      transitionToChapter(next.id, shouldResume, autoTrigger ? 'auto' : 'user');
+      if (autoTrigger) showToast(`Next: Chapter ${next.index}`, 0, 'info');
+      goToChapter(next.id, { autoStart: shouldResume, reason: autoTrigger ? 'auto' : 'user' });
     } else {
       setIsPlaying(false);
+      updatePhase('IDLE');
       showToast("End of book reached", 0, 'success');
     }
-  }, [transitionToChapter]);
+  }, [goToChapter, updatePhase]);
 
   const handlePrevChapter = useCallback(() => {
     const s = stateRef.current;
@@ -415,11 +474,11 @@ const App: React.FC = () => {
     if (idx > 0) {
       const prev = sorted[idx - 1];
       const shouldResume = isPlayingRef.current;
-      transitionToChapter(prev.id, shouldResume, 'user');
+      goToChapter(prev.id, { autoStart: shouldResume, reason: 'user' });
     } else {
       showToast("Start of book reached", 0, 'info');
     }
-  }, [transitionToChapter]);
+  }, [goToChapter]);
 
   const handleManualPlay = () => {
     const s = stateRef.current;
@@ -431,24 +490,30 @@ const App: React.FC = () => {
   const handleManualPause = () => {
     speechController.pause();
     setIsPlaying(false);
+    updatePhase('IDLE'); // Paused is essentially idle/ready
   };
 
   const handleManualStop = () => {
     speechController.stop();
     setIsPlaying(false);
+    updatePhase('IDLE');
   };
 
   const handleOpenChapter = (id: string) => {
     const shouldPlay = isPlayingRef.current;
-    if (activeBook) {
-       ensureChapterContentLoaded(activeBook.id, id);
-    }
-    transitionToChapter(id, shouldPlay, 'user');
+    goToChapter(id, { autoStart: shouldPlay, reason: 'user' });
     setActiveTab('reader');
   };
 
-  const handleSeekToTime = (t: number) => speechController.seekToTime(t);
-  const handleJumpToOffset = (o: number) => speechController.seekToOffset(o);
+  const handleSeekToTime = (t: number) => {
+    updatePhase('SEEKING');
+    speechController.seekToTime(t);
+  };
+  
+  const handleJumpToOffset = (o: number) => {
+    updatePhase('SEEKING');
+    speechController.seekToOffset(o);
+  };
 
   // --- End Playback Logic ---
 
@@ -462,7 +527,7 @@ const App: React.FC = () => {
 
   const applySnapshot = useCallback(async (snapshot: SavedSnapshot) => {
     const s = stateRef.current;
-    const { books: cloudBooks, readerSettings: cloudRS, activeBookId, playbackSpeed, selectedVoiceName, theme, progressStore: cloudProgress, driveRootFolderId, driveRootFolderName, driveSubfolders, autoSaveInterval, globalRules } = snapshot.state;
+    const { books: cloudBooks, readerSettings: cloudRS, activeBookId, playbackSpeed, selectedVoiceName, theme, progressStore: cloudProgress, driveRootFolderId, driveRootFolderName, driveSubfolders, autoSaveInterval, globalRules, showDiagnostics } = snapshot.state;
     
     // SAFETY BACKUP BEFORE MERGE
     // Use IDB for large backup to avoid quota errors
@@ -537,7 +602,8 @@ const App: React.FC = () => {
       driveRootFolderName: driveRootFolderName || prev.driveRootFolderName, 
       driveSubfolders: driveSubfolders || prev.driveSubfolders,
       autoSaveInterval: autoSaveInterval || prev.autoSaveInterval,
-      globalRules: globalRules || prev.globalRules || []
+      globalRules: globalRules || prev.globalRules || [],
+      showDiagnostics: showDiagnostics || prev.showDiagnostics
     }));
     
     safeSetLocalStorage(PROGRESS_STORE_V4, JSON.stringify(finalProgress));
@@ -687,7 +753,8 @@ const App: React.FC = () => {
         driveRootFolderName: s.driveRootFolderName,
         driveSubfolders: s.driveSubfolders,
         autoSaveInterval: s.autoSaveInterval,
-        globalRules: s.globalRules
+        globalRules: s.globalRules,
+        showDiagnostics: s.showDiagnostics
       }
     };
     safeSetLocalStorage(SNAPSHOT_KEY, JSON.stringify(snapshot));
@@ -967,6 +1034,23 @@ const App: React.FC = () => {
 
   return (
     <div className={`flex flex-col h-screen overflow-hidden font-sans transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-950 text-slate-100' : state.theme === Theme.SEPIA ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
+      
+      {state.showDiagnostics && (
+        <div className="fixed top-20 right-4 z-[1000] p-4 bg-black/80 backdrop-blur-md text-white text-[10px] font-mono rounded-xl shadow-2xl border border-white/10 pointer-events-none opacity-80">
+          <div className="flex items-center gap-2 mb-2 border-b border-white/20 pb-1">
+            <Terminal className="w-3 h-3 text-indigo-400" />
+            <span className="font-bold">Playback Diagnostics</span>
+          </div>
+          <div>Phase: <span className="text-emerald-400">{playbackPhase}</span></div>
+          <div>Since: {((Date.now() - phaseSince) / 1000).toFixed(1)}s</div>
+          <div>Audio Time: {audioCurrentTime.toFixed(2)}s</div>
+          <div>Audio Dur: {audioDuration.toFixed(2)}s</div>
+          <div>Intro Dur: {currentIntroDurSec.toFixed(2)}s</div>
+          <div>Highlight Offset: {state.currentOffsetChars}</div>
+          {lastPlaybackError && <div className="text-red-400 mt-2 border-t border-white/20 pt-1">Error: {lastPlaybackError}</div>}
+        </div>
+      )}
+
       <header className={`h-16 border-b flex items-center justify-between px-4 lg:px-8 z-10 sticky top-0 transition-colors ${state.theme === Theme.DARK ? 'border-slate-800 bg-slate-900/80 backdrop-blur-md' : state.theme === Theme.SEPIA ? 'border-[#d8ccb6] bg-[#efe6d5]/90 backdrop-blur-md' : 'border-black/5 bg-white/90 backdrop-blur-md'}`}>
         <div className="flex items-center gap-4">
           {activeTab === 'reader' && (
@@ -1126,6 +1210,8 @@ const App: React.FC = () => {
               autoSaveInterval={state.autoSaveInterval}
               onSetAutoSaveInterval={v => setState(p => ({ ...p, autoSaveInterval: v }))}
               isDirty={isDirty}
+              showDiagnostics={state.showDiagnostics}
+              onSetShowDiagnostics={v => setState(p => ({ ...p, showDiagnostics: v }))}
             />
           )}
         </div>
@@ -1134,7 +1220,7 @@ const App: React.FC = () => {
       {activeTab === 'reader' && (
         <Player 
           isPlaying={isPlaying} onPlay={() => isPlayingRef.current ? handleManualPause() : handleManualPlay()} onPause={handleManualPause} onStop={handleManualStop}
-          onNext={() => handleNextChapter(false)} onPrev={handlePrevChapter} onSeek={delta => speechController.seekToTime(speechController.currentTime + delta)}
+          onNext={() => handleNextChapter(false)} onPrev={handlePrevChapter} onSeek={handleSeekToTime}
           speed={state.playbackSpeed} onSpeedChange={s => setState(p => ({ ...p, playbackSpeed: s }))}
           selectedVoice={state.selectedVoiceName || ''} onVoiceChange={() => {}}
           theme={state.theme} onThemeChange={t => setState(p => ({ ...p, theme: t }))}
@@ -1146,7 +1232,7 @@ const App: React.FC = () => {
           onSetUseBookSettings={v => { if(activeBook) setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, useBookSettings: v } } : b) })); }}
           highlightMode={activeBook?.settings.highlightMode || HighlightMode.WORD}
           onSetHighlightMode={v => { if(activeBook) setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, highlightMode: v } } : b) })); }}
-          playbackCurrentTime={audioCurrentTime} playbackDuration={audioDuration} isFetching={isLoadingChapter}
+          playbackCurrentTime={audioCurrentTime} playbackDuration={audioDuration} isFetching={playbackPhase === 'LOADING_AUDIO' || playbackPhase === 'SEEKING'}
           onSeekToTime={handleSeekToTime} autoplayBlocked={autoplayBlocked}
         />
       )}

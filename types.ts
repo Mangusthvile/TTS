@@ -57,6 +57,18 @@ export interface PlaybackMetadata {
   charOffset: number;
 }
 
+export type PlaybackPhase =
+  | 'IDLE'
+  | 'LOADING_TEXT'
+  | 'READY'
+  | 'LOADING_AUDIO'
+  | 'SEEKING'
+  | 'PLAYING_INTRO'
+  | 'PLAYING_BODY'
+  | 'ENDING_SETTLE'
+  | 'TRANSITIONING'
+  | 'ERROR';
+
 export interface Rule {
   id: string;
   find: string;
@@ -191,6 +203,7 @@ export interface SavedSnapshot {
     driveSubfolders?: { booksId: string; trashId: string; savesId: string };
     autoSaveInterval?: number;
     globalRules?: Rule[];
+    showDiagnostics?: boolean;
   };
 }
 
@@ -213,4 +226,5 @@ export interface AppState {
   syncDiagnostics?: SyncDiagnostics;
   autoSaveInterval: number;
   globalRules: Rule[];
+  showDiagnostics: boolean;
 }

@@ -30,6 +30,7 @@ class SpeechController {
   private rafId: number | null = null;
   private requestedSpeed: number = 1.0;
   private onEndCallback: (() => void) | null = null;
+  private onPlayStartCallback: (() => void) | null = null;
   private syncCallback: ((meta: PlaybackMetadata) => void) | null = null;
   private onFetchStateChange: ((isFetching: boolean) => void) | null = null;
   private sessionToken: number = 0;
@@ -38,9 +39,10 @@ class SpeechController {
   // Track time manually to prevent browser GC resetting playhead on mobile
   private lastKnownTime: number = 0;
   private lastSaveTime: number = 0;
+  private lastThrottleTime: number = 0;
 
-  // Highlight buffer to account for synthesis pauses and speech pacing (350ms -> 600ms)
-  private readonly HIGHLIGHT_DELAY_SEC = 0.6;
+  // Highlight buffer to account for synthesis pauses and speech pacing (0.5s for smoother transition)
+  private readonly HIGHLIGHT_DELAY_SEC = 0.5;
 
   constructor() {
     this.audio = new Audio();
@@ -79,7 +81,9 @@ class SpeechController {
     this.audio.onplay = () => { 
       this.applyRequestedSpeed(); 
       this.startSyncLoop(); 
-      if (this.onFetchStateChange) this.onFetchStateChange(false); 
+      if (this.onFetchStateChange) this.onFetchStateChange(false);
+      // We rely on 'seeked' for the true start resume in loadAndPlay, 
+      // but this handles manual play resume.
     };
     this.audio.onpause = () => { 
       this.lastKnownTime = this.audio.currentTime;
@@ -91,22 +95,25 @@ class SpeechController {
       const t = this.audio.currentTime;
       if (t > 0) this.lastKnownTime = t;
       
-      // Throttle saves to every 2 seconds
       const now = Date.now();
+      // Throttle saves to every 2 seconds
       if (now - this.lastSaveTime > 2000) {
         this.saveProgress(); 
         this.lastSaveTime = now;
       }
 
       // Fallback sync for mobile / non-autoplay transitions
-      // IMPORTANT: Use persistent syncCallback. Even if raf is throttled, this drives the highlight.
+      // Throttle to ~10fps (100ms) to avoid overwhelming main thread
       if (this.syncCallback && this.audio.duration && !this.audio.paused) {
-        const dur = this.audio.duration;
-        this.syncCallback({
-          currentTime: t,
-          duration: dur,
-          charOffset: this.getOffsetFromTime(t, dur),
-        });
+        if (now - this.lastThrottleTime > 100) {
+          const dur = this.audio.duration;
+          this.syncCallback({
+            currentTime: t,
+            duration: dur,
+            charOffset: this.getOffsetFromTime(t, dur),
+          });
+          this.lastThrottleTime = now;
+        }
       }
     };
     this.audio.onerror = () => { if (this.onFetchStateChange) this.onFetchStateChange(false); };
@@ -195,7 +202,7 @@ class SpeechController {
   }
 
   async loadAndPlayDriveFile(
-    token: string, fileId: string, totalContentChars: number, introDurSec: number, chunkMap: AudioChunkMetadata[] | undefined, startTimeSec = 0, playbackRate = 1.0, onEnd: () => void, onSync: ((meta: PlaybackMetadata) => void) | null, localUrl?: string
+    token: string, fileId: string, totalContentChars: number, introDurSec: number, chunkMap: AudioChunkMetadata[] | undefined, startTimeSec = 0, playbackRate = 1.0, onEnd: () => void, onSync: ((meta: PlaybackMetadata) => void) | null, localUrl?: string, onPlayStart?: () => void
   ) {
     this.sessionToken++;
     const session = this.sessionToken;
@@ -210,6 +217,8 @@ class SpeechController {
     this.currentBlobUrl = null;
     
     this.onEndCallback = onEnd;
+    this.onPlayStartCallback = onPlayStart || null;
+    
     // Only replace if a specific callback was provided, otherwise respect the persistent one
     if (onSync) this.syncCallback = onSync;
     
@@ -254,6 +263,15 @@ class SpeechController {
            this.lastKnownTime = target;
         }
       };
+
+      const handleSeeked = () => {
+        if (this.sessionToken === session && this.onPlayStartCallback) {
+          this.onPlayStartCallback();
+          this.onPlayStartCallback = null; // Fire once
+        }
+      };
+
+      this.audio.addEventListener('seeked', handleSeeked, { once: true });
 
       if (this.audio.readyState >= 1) {
         applyResumeTime();
