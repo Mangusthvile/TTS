@@ -17,7 +17,7 @@ declare global {
 }
 
 // Set version on window for settings display
-window.__APP_VERSION__ = '2.9.10';
+window.__APP_VERSION__ = '2.9.11';
 
 // Install global trace listeners immediately
 installGlobalTraceHandlers();

@@ -22,7 +22,7 @@ import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library 
 import { trace, traceError } from './utils/trace';
 import { computeMobileMode } from './utils/platform';
 
-const STATE_FILENAME = 'talevox_state_v2910.json';
+const STATE_FILENAME = 'talevox_state_v2911.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -123,10 +123,49 @@ const App: React.FC = () => {
     const handleVisChange = () => {
       if (document.visibilityState === 'visible') {
         speechController.emitSyncTick();
+      } else {
+        // Force save on background
+        const s = stateRef.current;
+        if (s.activeBookId && s.books) {
+           const b = s.books.find(bk => bk.id === s.activeBookId);
+           if (b && b.currentChapterId) {
+              const meta = speechController.getMetadata();
+              commitProgressUpdate(b.id, b.currentChapterId, meta, false, true);
+           }
+        }
       }
     };
     document.addEventListener('visibilitychange', handleVisChange);
     return () => document.removeEventListener('visibilitychange', handleVisChange);
+  }, []);
+
+  // Force save on unload
+  useEffect(() => {
+    const handleUnload = () => {
+        const s = stateRef.current;
+        if (s.activeBookId && s.books) {
+           const b = s.books.find(bk => bk.id === s.activeBookId);
+           if (b && b.currentChapterId) {
+              const meta = speechController.getMetadata();
+              // Synchronous write attempt if possible or beacon
+              try {
+                 const storeRaw = localStorage.getItem(PROGRESS_STORE_V4);
+                 const store = storeRaw ? JSON.parse(storeRaw) : {};
+                 if (!store[b.id]) store[b.id] = {};
+                 store[b.id][b.currentChapterId] = {
+                   timeSec: meta.currentTime,
+                   durationSec: meta.duration,
+                   percent: meta.duration ? meta.currentTime/meta.duration : 0,
+                   completed: false,
+                   updatedAt: Date.now()
+                 };
+                 localStorage.setItem(PROGRESS_STORE_V4, JSON.stringify(store));
+              } catch(e) {}
+           }
+        }
+    };
+    window.addEventListener('beforeunload', handleUnload);
+    return () => window.removeEventListener('beforeunload', handleUnload);
   }, []);
 
   // Global Interaction Listener for Arming Gestures
@@ -297,7 +336,8 @@ const App: React.FC = () => {
     bookId: string, 
     chapterId: string, 
     meta: PlaybackMetadata & { completed?: boolean }, 
-    force: boolean = false
+    force: boolean = false,
+    bypassThrottle: boolean = false
   ) => {
     const now = Date.now();
     const throttleMs = effectiveMobileMode ? 800 : 250;
@@ -312,7 +352,7 @@ const App: React.FC = () => {
         return;
     }
 
-    if (!force && !meta.completed && now - lastProgressCommitTime.current < throttleMs) {
+    if (!force && !bypassThrottle && !meta.completed && now - lastProgressCommitTime.current < throttleMs) {
       return;
     }
     lastProgressCommitTime.current = now;
@@ -339,7 +379,7 @@ const App: React.FC = () => {
     // Apply normalization logic to ensure consistent percent/done status
     const normalized = normalizeChapterProgress(rawChapter);
     
-    if (force || normalized.isCompleted !== chapter.isCompleted || Math.abs(normalized.progress - chapter.progress) > 0.01) {
+    if (force || normalized.isCompleted !== chapter.isCompleted || Math.abs(normalized.progress - chapter.progress) > 0.01 || Math.abs((normalized.progressSec || 0) - (chapter.progressSec || 0)) > 2) {
        setState(prev => {
          const newBooks = [...prev.books];
          const newChapters = [...newBooks[bIdx].chapters];
@@ -357,6 +397,7 @@ const App: React.FC = () => {
          if (!store[bookId]) store[bookId] = {};
          store[bookId][chapterId] = {
            timeSec: normalized.progressSec,
+           durationSec: normalized.durationSec,
            percent: normalized.progress,
            completed: normalized.isCompleted,
            updatedAt: now
@@ -376,6 +417,15 @@ const App: React.FC = () => {
 
     // Filter noise
     if (['LOADING_AUDIO', 'SEEKING', 'TRANSITIONING', 'LOADING_TEXT', 'SCRUBBING'].includes(playbackPhase)) {
+        // Still update snapshot for responsiveness during seek
+        if (playbackPhase === 'SEEKING') {
+             const now = Date.now();
+             if (now - lastSnapshotRef.current > 50) {
+                 const percent = meta.duration > 0 ? meta.currentTime / meta.duration : 0;
+                 setPlaybackSnapshot({ chapterId: stateRef.current.activeBookId || '', percent }); // ID might be incomplete here but snapshot needs ID
+                 lastSnapshotRef.current = now;
+             }
+        }
         return;
     }
     
@@ -570,7 +620,7 @@ const App: React.FC = () => {
   }, [markDirty, showToast]);
 
   const handleResetChapterProgress = (bid: string, cid: string) => {
-      commitProgressUpdate(bid, cid, { currentTime: 0, duration: 0, charOffset: 0, completed: false }, true);
+      commitProgressUpdate(bid, cid, { currentTime: 0, duration: 0, charOffset: 0, completed: false }, true, true);
       showToast("Reset", 1000, 'info');
   };
 
@@ -646,9 +696,20 @@ const App: React.FC = () => {
         speechController.setContext({ bookId: book.id, chapterId: chapter.id });
         speechController.updateMetadata(textToSpeak.length, chapter.audioIntroDurSec || 5, chapter.audioChunkMap || []);
         
+        // RESUME LOGIC (Corrected)
         let startSec = 0;
-        // Resume from saved if user initiated, otherwise start at 0
-        if (reason === 'user' && !chapter.isCompleted && chapter.progressSec) startSec = chapter.progressSec;
+        // Only try to resume if incomplete. If complete, start at 0 (restart).
+        if (!chapter.isCompleted) {
+            // Prioritize progressSec, fallback to percent calc
+            if (chapter.progressSec && chapter.progressSec > 0) {
+                startSec = chapter.progressSec;
+            } else if (chapter.progress && chapter.durationSec && chapter.progress < 0.99) {
+                startSec = chapter.durationSec * chapter.progress;
+            }
+        }
+        
+        // If startSec is invalid, clamp to 0
+        if (!isFinite(startSec) || startSec < 0) startSec = 0;
         
         // Pass callbacks
         await speechController.loadAndPlayDriveFile(
@@ -668,8 +729,15 @@ const App: React.FC = () => {
             null, url, 
             () => { // onPlayStart
                 if (session === chapterSessionRef.current) {
-                    updatePhase('PLAYING_INTRO'); 
-                    isInIntroRef.current = true; 
+                    // Skip INTRO phase if we are resuming mid-chapter
+                    // Use a threshold (e.g. > 1s) to determine if it's a resume or start
+                    if (startSec > 1) {
+                       updatePhase('PLAYING_BODY');
+                       isInIntroRef.current = false;
+                    } else {
+                       updatePhase('PLAYING_INTRO'); 
+                       isInIntroRef.current = true; 
+                    }
                 }
             }
         );
@@ -791,7 +859,22 @@ const App: React.FC = () => {
     }
   }, [loadChapterSession]);
 
-  const handleManualPause = () => { speechController.pause(); setIsPlaying(false); updatePhase('IDLE'); };
+  const handleManualPause = () => { 
+      speechController.pause(); 
+      setIsPlaying(false); 
+      updatePhase('IDLE'); 
+      
+      // Force immediate progress save on pause
+      const s = stateRef.current;
+      if (s.activeBookId && s.books) {
+         const b = s.books.find(bk => bk.id === s.activeBookId);
+         if (b && b.currentChapterId) {
+            const meta = speechController.getMetadata();
+            commitProgressUpdate(b.id, b.currentChapterId, meta, false, true); // true = bypass throttle
+         }
+      }
+  };
+  
   const handleManualStop = () => { speechController.stop(); setIsPlaying(false); updatePhase('IDLE'); };
   
   const handleSeekByDelta = (delta: number) => {

@@ -99,6 +99,16 @@ class SpeechController {
   get currentContext() { return this.context; }
   get hasAudioSource() { return !!this.audio.src && this.audio.src !== '' && this.audio.src !== window.location.href; }
 
+  // Expose immediate metadata for synchronous state saving
+  public getMetadata(): PlaybackMetadata {
+    return {
+        currentTime: this.audio.currentTime,
+        duration: this.audio.duration,
+        charOffset: Math.floor(this.renderedOffset),
+        textLength: this.currentTextLength
+    };
+  }
+
   private setupAudioListeners() {
     if (!this.audioEventsBound) {
       const events = ['loadstart', 'loadedmetadata', 'canplay', 'canplaythrough', 'play', 'playing', 'pause', 'waiting', 'stalled', 'ended', 'error', 'abort', 'emptied'];
