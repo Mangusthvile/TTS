@@ -1,7 +1,7 @@
-<?xml version='1.0' encoding='utf-8'?>
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">talevox</string>
-    <string name="title_activity_main">talevox</string>
-    <string name="package_name">com.cmwil.talevox</string>
-    <string name="custom_url_scheme">com.cmwil.talevox</string>
+  <string name="app_name">TaleVox</string>
+  <string name="title_activity_main">TaleVox</string>
+  <string name="package_name">com.cmwil.talevox</string>
+  <string name="custom_url_scheme">com.cmwil.talevox</string>
 </resources>

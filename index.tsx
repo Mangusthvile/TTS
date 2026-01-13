@@ -4,6 +4,8 @@ import App from "./App";
 import { AlertTriangle, RefreshCw, ClipboardCopy, Loader2 } from "lucide-react";
 import { installGlobalTraceHandlers } from "./utils/trace";
 import { initStorage } from "./services/storageSingleton";
+import { SocialLogin } from "@capgo/capacitor-social-login";
+import { Capacitor } from "@capacitor/core";
 
 // Help TypeScript recognize Vite's injected global
 declare const __APP_VERSION__: string;
@@ -15,6 +17,7 @@ declare global {
     google: any;
     Capacitor: any;
     __TALEVOX_FATAL_ERROR__?: any;
+    __TALEVOX_SOCIALLOGIN_READY__?: Promise<void>;
   }
 }
 
@@ -34,6 +37,40 @@ installGlobalTraceHandlers();
 initStorage().catch((e) => {
   console.error("[TaleVox][Storage] init failed:", e);
 });
+
+// Initialize SocialLogin early (native only). Do NOT block render.
+const initSocialLogin = async () => {
+  try {
+    if (!Capacitor.isNativePlatform()) {
+      console.log("[TaleVox][Auth] SocialLogin init skipped (web)");
+      return;
+    }
+
+    // Prefer env var so you don't hardcode secrets in code
+    const webClientId = (import.meta as any).env?.VITE_GOOGLE_WEB_CLIENT_ID || "";
+
+    if (!webClientId) {
+      console.warn(
+        "[TaleVox][Auth] Missing VITE_GOOGLE_WEB_CLIENT_ID (Google login will fail)"
+      );
+      return;
+    }
+
+    await SocialLogin.initialize({
+      google: {
+        webClientId,
+        mode: "online",
+      },
+    });
+
+    console.log("[TaleVox][Auth] SocialLogin initialized");
+  } catch (e) {
+    console.error("[TaleVox][Auth] SocialLogin init failed:", e);
+  }
+};
+
+// Kick off init now (and store promise so sign-in can await it)
+window.__TALEVOX_SOCIALLOGIN_READY__ = initSocialLogin();
 
 // ---------------------------
 // Type Safety Helpers
@@ -62,8 +99,10 @@ function safeStringify(obj: any, maxBytes: number): string {
     const info = String(trimmed.info ?? "");
 
     // Keep stacks reasonably sized
-    if (stack.length > 12_000) trimmed.stack = stack.slice(0, 12_000) + "\n…(truncated)";
-    if (info.length > 2_000) trimmed.info = info.slice(0, 2_000) + "\n…(truncated)";
+    if (stack.length > 12_000)
+      trimmed.stack = stack.slice(0, 12_000) + "\n…(truncated)";
+    if (info.length > 2_000)
+      trimmed.info = info.slice(0, 2_000) + "\n…(truncated)";
 
     let raw = JSON.stringify(trimmed);
 

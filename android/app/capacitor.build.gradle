@@ -13,6 +13,7 @@ dependencies {
     implementation project(':capacitor-app')
     implementation project(':capacitor-filesystem')
     implementation project(':capacitor-network')
+    implementation project(':capgo-capacitor-social-login')
 
 }
 

@@ -6,18 +6,14 @@
   "scripts": {
     "dev": "vite",
     "dev:cap": "vite --mode capacitor",
-
     "build": "tsc && vite build --mode capacitor",
     "build:web": "tsc && vite build",
-
     "cap:copy": "npx cap copy android",
     "cap:sync": "npx cap sync android",
     "cap:open": "npx cap open android",
-
     "android:copy": "npm run build && npm run cap:copy",
     "android:sync": "npm run build && npm run cap:sync",
     "android:open": "npm run cap:open",
-
     "preview": "vite preview"
   },
   "dependencies": {
@@ -28,6 +24,7 @@
     "@capacitor/core": "^8.0.0",
     "@capacitor/filesystem": "^8.0.0",
     "@capacitor/network": "^8.0.0",
+    "@capgo/capacitor-social-login": "^8.2.13",
     "@google/genai": "^1.34.0",
     "jeep-sqlite": "^2.8.0",
     "lucide-react": "0.561.0",
