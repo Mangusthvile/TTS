@@ -1,8 +1,9 @@
-import React, { Component, ErrorInfo, ReactNode } from 'react';
-import ReactDOM from 'react-dom/client';
-import App from './App';
-import { AlertTriangle, RefreshCw, ClipboardCopy, Loader2 } from 'lucide-react';
-import { installGlobalTraceHandlers } from './utils/trace';
+import React, { ErrorInfo, ReactNode } from "react";
+import ReactDOM from "react-dom/client";
+import App from "./App";
+import { AlertTriangle, RefreshCw, ClipboardCopy, Loader2 } from "lucide-react";
+import { installGlobalTraceHandlers } from "./utils/trace";
+import { initStorage } from "./services/storageSingleton";
 
 // Help TypeScript recognize Vite's injected global
 declare const __APP_VERSION__: string;
@@ -13,56 +14,130 @@ declare global {
     gapi: any;
     google: any;
     Capacitor: any;
+    __TALEVOX_FATAL_ERROR__?: any;
   }
 }
 
-// Set version on window for settings display
-window.__APP_VERSION__ = '2.9.11';
+// ---------------------------
+// Version + Early Init
+// ---------------------------
+
+// Prefer Vite-injected version; fallback only if somehow missing.
+window.__APP_VERSION__ =
+  (typeof __APP_VERSION__ !== "undefined" && __APP_VERSION__) || "2.9.11";
 
 // Install global trace listeners immediately
 installGlobalTraceHandlers();
 
-// --- Type Safety Helpers ---
+// Initialize durable storage early (SQLite on native, safe fallback on web)
+// Do NOT block render; just log results for debugging.
+initStorage().catch((e) => {
+  console.error("[TaleVox][Storage] init failed:", e);
+});
+
+// ---------------------------
+// Type Safety Helpers
+// ---------------------------
 
 /**
- * Normalizes string | null | undefined to a strict string | null 
+ * Normalizes string | null | undefined to a strict string | null
  * to satisfy components that don't accept undefined.
  */
 function toNullableString(v: string | null | undefined): string | null {
   return v ?? null;
 }
 
-// --- Error Recovery Utilities ---
+// ---------------------------
+// Error Recovery Utilities
+// ---------------------------
 
 const FATAL_ERROR_KEY = "talevox_last_fatal_error";
 
-const recordFatalError = (error: any, info?: string) => {
+function safeStringify(obj: any, maxBytes: number): string {
+  // Try best-effort stringify, truncating big fields to avoid quota crashes.
   try {
-    const errorData = {
-      message: error?.message || String(error),
-      stack: error?.stack || "No stack trace",
-      info: info || "",
+    const trimmed = { ...obj };
+
+    const stack = String(trimmed.stack ?? "");
+    const info = String(trimmed.info ?? "");
+
+    // Keep stacks reasonably sized
+    if (stack.length > 12_000) trimmed.stack = stack.slice(0, 12_000) + "\n…(truncated)";
+    if (info.length > 2_000) trimmed.info = info.slice(0, 2_000) + "\n…(truncated)";
+
+    let raw = JSON.stringify(trimmed);
+
+    // If still too large, aggressively shrink
+    if (raw.length * 2 > maxBytes) {
+      trimmed.stack = String(trimmed.stack ?? "").slice(0, 4_000) + "\n…(truncated)";
+      trimmed.info = String(trimmed.info ?? "").slice(0, 600) + "\n…(truncated)";
+      raw = JSON.stringify(trimmed);
+    }
+
+    // Final fallback: minimal payload
+    if (raw.length * 2 > maxBytes) {
+      raw = JSON.stringify({
+        message: String(obj?.message ?? obj),
+        timestamp: Date.now(),
+        version: window.__APP_VERSION__,
+      });
+    }
+
+    return raw;
+  } catch {
+    return JSON.stringify({
+      message: String(obj?.message ?? obj),
       timestamp: Date.now(),
       version: window.__APP_VERSION__,
-      userAgent: navigator.userAgent
-    };
-    localStorage.setItem(FATAL_ERROR_KEY, JSON.stringify(errorData));
-  } catch (e) {
-    console.error("Failed to record fatal error to localStorage", e);
+    });
+  }
+}
+
+const recordFatalError = (error: any, info?: string) => {
+  const errorData = {
+    message: error?.message || String(error),
+    stack: error?.stack || "No stack trace",
+    info: info || "",
+    timestamp: Date.now(),
+    version: window.__APP_VERSION__,
+    userAgent: navigator.userAgent,
+  };
+
+  // Keep an in-memory copy so we never lose the details even if storage fails
+  window.__TALEVOX_FATAL_ERROR__ = errorData;
+
+  // Avoid quota crashes: cap payload and handle QUOTA_EXCEEDED gracefully
+  const payload = safeStringify(errorData, 120_000); // ~120KB max
+
+  try {
+    localStorage.setItem(FATAL_ERROR_KEY, payload);
+  } catch (e1) {
+    // If quota exceeded, try deleting old key and retry once
+    try {
+      localStorage.removeItem(FATAL_ERROR_KEY);
+      localStorage.setItem(FATAL_ERROR_KEY, payload);
+    } catch (e2) {
+      // Final fallback: sessionStorage (may still fail, but won't crash app)
+      try {
+        sessionStorage.setItem(FATAL_ERROR_KEY, payload);
+      } catch (e3) {
+        console.error("Failed to record fatal error to storage", e1, e2, e3);
+      }
+    }
   }
 };
 
 const attemptHardReload = async () => {
   try {
     // 1. Unregister all service workers
-    if ('serviceWorker' in navigator) {
+    if ("serviceWorker" in navigator) {
       const registrations = await navigator.serviceWorker.getRegistrations();
       for (const registration of registrations) {
         await registration.unregister();
       }
     }
     // 2. Clear all caches
-    if ('caches' in window) {
+    if ("caches" in window) {
       const cacheNames = await caches.keys();
       for (const name of cacheNames) {
         await caches.delete(name);
@@ -71,23 +146,30 @@ const attemptHardReload = async () => {
   } catch (e) {
     console.error("Cleanup before reload failed", e);
   } finally {
-    // 3. Force reload from server
+    // 3. Force reload
     window.location.reload();
   }
 };
 
-// --- Global Handlers for Non-React Errors ---
+// ---------------------------
+// Global Handlers for Non-React Errors
+// ---------------------------
 
 window.onerror = (message, source, lineno, colno, error) => {
   const msg = String(message);
   // Detect chunk/module load failures (common on mobile cache mismatch)
-  if (msg.includes('Loading chunk') || 
-      msg.includes('ChunkLoadError') || 
-      msg.includes('Failed to fetch dynamically imported module') || 
-      msg.includes('Importing a module script failed')) {
+  if (
+    msg.includes("Loading chunk") ||
+    msg.includes("ChunkLoadError") ||
+    msg.includes("Failed to fetch dynamically imported module") ||
+    msg.includes("Importing a module script failed")
+  ) {
     recordFatalError(error || message, "ChunkLoadError Detected");
   } else {
-    recordFatalError(error || message, `Global Window Error: ${source}:${lineno}`);
+    recordFatalError(
+      error || message,
+      `Global Window Error: ${source}:${lineno}:${colno}`
+    );
   }
 };
 
@@ -95,7 +177,9 @@ window.onunhandledrejection = (event) => {
   recordFatalError(event.reason, "Unhandled Promise Rejection");
 };
 
-// --- Error Boundary Component ---
+// ---------------------------
+// Error Boundary Component
+// ---------------------------
 
 interface Props {
   children?: ReactNode;
@@ -115,23 +199,26 @@ class ErrorBoundary extends React.Component<Props, State> {
     error: null,
     errorInfo: null,
     isChunkError: false,
-    isReloading: false
+    isReloading: false,
   };
 
   public static getDerivedStateFromError(error: Error): Partial<State> {
-    const isChunk = error.message.includes('Loading chunk') || 
-                    error.message.includes('ChunkLoadError') || 
-                    error.message.includes('Failed to fetch dynamically imported module') || 
-                    error.message.includes('Importing a module script failed');
+    const isChunk =
+      error.message.includes("Loading chunk") ||
+      error.message.includes("ChunkLoadError") ||
+      error.message.includes("Failed to fetch dynamically imported module") ||
+      error.message.includes("Importing a module script failed");
     return { hasError: true, error, isChunkError: isChunk };
   }
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error("Uncaught error:", error, errorInfo);
-    // Normalize undefined to null to satisfy strict string | null typing
     const componentStack = toNullableString(errorInfo.componentStack);
     this.setState({ errorInfo: componentStack });
-    recordFatalError(error, `React Component Crash: ${(componentStack || "").substring(0, 200)}`);
+    recordFatalError(
+      error,
+      `React Component Crash: ${(componentStack || "").substring(0, 200)}`
+    );
   }
 
   private handleCopy = () => {
@@ -139,7 +226,7 @@ class ErrorBoundary extends React.Component<Props, State> {
       error: this.state.error?.message,
       stack: this.state.error?.stack,
       componentStack: this.state.errorInfo,
-      version: window.__APP_VERSION__
+      version: window.__APP_VERSION__,
     };
     navigator.clipboard.writeText(JSON.stringify(details, null, 2));
     alert("Error details copied to clipboard");
@@ -159,25 +246,30 @@ class ErrorBoundary extends React.Component<Props, State> {
               <div className="p-4 bg-red-500/10 rounded-3xl">
                 <AlertTriangle className="w-12 h-12 text-red-500" />
               </div>
-              <h1 className="text-2xl font-black tracking-tight">App crashed after sign-in</h1>
+              <h1 className="text-2xl font-black tracking-tight">
+                App crashed after sign-in
+              </h1>
               <p className="text-slate-400 text-sm font-medium">
-                {this.state.isChunkError 
+                {this.state.isChunkError
                   ? "A module failed to load. This usually happens after an update. A clean reload is required."
                   : "An unexpected error occurred. We've recorded the details to help fix this."}
               </p>
             </div>
 
             <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
-              <button 
+              <button
                 onClick={() => {
-                  const el = document.getElementById('error-stack');
-                  if (el) el.classList.toggle('hidden');
+                  const el = document.getElementById("error-stack");
+                  if (el) el.classList.toggle("hidden");
                 }}
                 className="w-full px-4 py-3 text-left text-[10px] font-black uppercase tracking-widest bg-slate-800/50 flex justify-between items-center"
               >
                 Error Details <span>Show/Hide</span>
               </button>
-              <div id="error-stack" className="hidden p-4 text-[10px] font-mono text-red-400 overflow-x-auto whitespace-pre-wrap max-h-40 border-t border-slate-800">
+              <div
+                id="error-stack"
+                className="hidden p-4 text-[10px] font-mono text-red-400 overflow-x-auto whitespace-pre-wrap max-h-40 border-t border-slate-800"
+              >
                 {this.state.error?.toString()}
                 {"\n\n"}
                 {this.state.error?.stack}
@@ -185,15 +277,19 @@ class ErrorBoundary extends React.Component<Props, State> {
             </div>
 
             <div className="grid grid-cols-1 gap-3">
-              <button 
+              <button
                 onClick={this.handleReload}
                 disabled={this.state.isReloading}
                 className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-600/20 active:scale-[0.98] disabled:opacity-50"
               >
-                {this.state.isReloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                {this.state.isReloading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-4 h-4" />
+                )}
                 Reload to update
               </button>
-              <button 
+              <button
                 onClick={this.handleCopy}
                 className="w-full py-4 bg-slate-800 text-slate-100 rounded-2xl font-black uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-slate-700 transition-all active:scale-[0.98]"
               >
@@ -201,7 +297,7 @@ class ErrorBoundary extends React.Component<Props, State> {
                 Copy error details
               </button>
             </div>
-            
+
             <p className="text-center text-[10px] font-bold text-slate-600 uppercase tracking-tighter">
               TaleVox v{window.__APP_VERSION__}
             </p>
@@ -214,7 +310,11 @@ class ErrorBoundary extends React.Component<Props, State> {
   }
 }
 
-const rootElement = document.getElementById('root');
+// ---------------------------
+// Mount React
+// ---------------------------
+
+const rootElement = document.getElementById("root");
 if (!rootElement) {
   throw new Error("Could not find root element to mount to");
 }

@@ -1,8 +1,10 @@
-
 import { Rule, RuleType, AudioChunkMetadata, PlaybackMetadata } from '../types';
 import { getDriveAudioObjectUrl, revokeObjectUrl } from "../services/driveService";
 import { trace, traceError } from '../utils/trace';
 import { isMobileMode } from '../utils/platform';
+
+// Phase 2 local-first progress (SQLite-backed on Android via StorageDriver)
+import { commitProgressLocal, loadProgressLocal } from "../services/progressStore";
 
 export const PROGRESS_STORE_V4 = 'talevox_progress_v4';
 
@@ -30,39 +32,46 @@ class SpeechController {
   private currentIntroDurSec: number = 0;
   private currentChunkMap: AudioChunkMetadata[] | null = null;
   private rafId: number | null = null;
-  private intervalId: any = null; // For mobile smoothing loop
-  
+  private intervalId: any = null; // For smoothing loop
+
   private requestedSpeed: number = 1.0;
   private onEndCallback: (() => void) | null = null;
   private onPlayStartCallback: (() => void) | null = null;
   private syncCallback: ((meta: PlaybackMetadata & { completed?: boolean }) => void) | null = null;
   private onFetchStateChange: ((isFetching: boolean) => void) | null = null;
-  
+
   private sessionToken: number = 0;
   private context: { bookId: string; chapterId: string } | null = null;
   private audioEventsBound = false;
-  
+
   // Seek coordination
   private seekNonce = 0;
-  
+
   // Track time manually to prevent browser GC resetting playhead on mobile
   private lastKnownTime: number = 0;
-  
+
   // Smoothing State
   private renderedOffset: number = 0;
   private targetOffset: number = 0;
   private isMobileOptimized: boolean = false;
 
-  // Highlight buffer to account for synthesis pauses and speech pacing (0.5s for smoother transition)
+  // Highlight buffer to account for synthesis pauses and speech pacing
   private readonly HIGHLIGHT_DELAY_SEC = 0.5;
+
+  // Local progress commit guard (extra protection; commitProgressLocal also throttles)
+  private lastLocalCommitAt = 0;
+
+  // Lifecycle listeners bound once
+  private lifecycleBound = false;
 
   constructor() {
     this.audio = new Audio();
     this.audio.volume = 1.0;
-    this.audio.preload = 'auto'; // Ensure metadata loads
-    // Initialize default mode based on environment
+    this.audio.preload = 'auto';
     this.isMobileOptimized = isMobileMode();
+
     this.setupAudioListeners();
+    this.bindLifecycleListeners();
   }
 
   // Update sync strategy on the fly
@@ -70,20 +79,19 @@ class SpeechController {
     if (this.isMobileOptimized === isMobile) return;
     this.isMobileOptimized = isMobile;
     trace('speech:mode_changed', { isMobile });
-    
-    // Restart loop if playing to switch strategies
+
     if (this.audio.src && !this.audio.paused) {
       this.stopSyncLoop();
       this.startSyncLoop();
     }
   }
 
-  // Register a persistent callback for UI updates
   public setSyncCallback(cb: ((meta: PlaybackMetadata & { completed?: boolean }) => void) | null) {
     this.syncCallback = cb;
   }
 
   public setFetchStateListener(cb: (isFetching: boolean) => void) { this.onFetchStateChange = cb; }
+
   public updateMetadata(textLen: number, introDurSec: number, chunkMap: AudioChunkMetadata[]) {
     this.currentTextLength = textLen;
     this.currentIntroDurSec = introDurSec;
@@ -99,125 +107,241 @@ class SpeechController {
   get currentContext() { return this.context; }
   get hasAudioSource() { return !!this.audio.src && this.audio.src !== '' && this.audio.src !== window.location.href; }
 
-  // Expose immediate metadata for synchronous state saving
   public getMetadata(): PlaybackMetadata {
     return {
-        currentTime: this.audio.currentTime,
-        duration: this.audio.duration,
-        charOffset: Math.floor(this.renderedOffset),
-        textLength: this.currentTextLength
+      currentTime: this.audio.currentTime,
+      duration: this.audio.duration,
+      charOffset: Math.floor(this.renderedOffset),
+      textLength: this.currentTextLength
     };
   }
+
+  // ----------------------------
+  // Local-first progress helpers
+  // ----------------------------
+
+  private getActiveChapterId(): string | null {
+    return this.context?.chapterId ?? null;
+  }
+
+  private commitLocalProgress(completed: boolean, reason: string) {
+    const chapterId = this.getActiveChapterId();
+    if (!chapterId) {
+      // Make missing-context failures visible (this was a common “silent” reason resume failed)
+      if (reason === "resume_seeked" || reason === "timeupdate" || reason === "pause" || reason === "ended") {
+        traceError("progress:commit_local:no_context", new Error(`No context.chapterId for reason=${reason}`));
+      }
+      return;
+    }
+
+    // Guard against super-spam (commitProgressLocal already throttles per chapter too)
+    const now = Date.now();
+    if (now - this.lastLocalCommitAt < 500) return;
+    this.lastLocalCommitAt = now;
+
+    const t = (Number.isFinite(this.audio.currentTime) ? this.audio.currentTime : this.lastKnownTime) || 0;
+    const dur = Number.isFinite(this.audio.duration) ? this.audio.duration : undefined;
+
+    void commitProgressLocal({
+      chapterId,
+      timeSec: Math.max(0, t),
+      durationSec: dur,
+      isComplete: completed ? true : undefined,
+    });
+
+    trace('progress:commit_local', { reason, chapterId, t, dur, completed });
+  }
+
+  // Ensure we flush progress when app backgrounds / tab hidden
+  private bindLifecycleListeners() {
+    if (this.lifecycleBound) return;
+    this.lifecycleBound = true;
+
+    const flush = (reason: string) => {
+      // commit even if paused; lastKnownTime should be correct
+      this.commitLocalProgress(false, reason);
+    };
+
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "hidden") flush("visibilitychange:hidden");
+      });
+    }
+
+    if (typeof window !== "undefined") {
+      window.addEventListener("pagehide", () => flush("pagehide"));
+      window.addEventListener("beforeunload", () => flush("beforeunload"));
+    }
+  }
+
+  // ----------------------------
+  // Audio listeners
+  // ----------------------------
 
   private setupAudioListeners() {
     if (!this.audioEventsBound) {
       const events = ['loadstart', 'loadedmetadata', 'canplay', 'canplaythrough', 'play', 'playing', 'pause', 'waiting', 'stalled', 'ended', 'error', 'abort', 'emptied'];
-      
-      this.audio.addEventListener('seeking', () => trace('audio:event:seeking', { t: this.audio.currentTime }));
+
+      this.audio.addEventListener('seeking', () => {
+        trace('audio:event:seeking', { t: this.audio.currentTime });
+      });
+
       this.audio.addEventListener('seeked', () => {
         trace('audio:event:seeked', { t: this.audio.currentTime });
-        // On seek, jump smoothing instantly
-        this.updateTargetOffset(this.audio.currentTime);
-        this.renderedOffset = this.targetOffset; 
-        this.emitSyncTick(); 
+        this.lastKnownTime = this.audio.currentTime || this.lastKnownTime;
+
+        // Snap smoothing instantly
+        this.updateTargetOffset(this.lastKnownTime);
+        this.renderedOffset = this.targetOffset;
+        this.emitSyncTick();
+
+        // Persist seek result locally (resume reliability)
+        this.commitLocalProgress(false, "seeked");
       });
-      
+
       events.forEach(e => {
-        this.audio.addEventListener(e, (evt) => {
+        this.audio.addEventListener(e, () => {
           if (e === 'error') {
             traceError(`audio:event:${e}`, this.audio.error);
           }
         });
       });
+
       this.audioEventsBound = true;
     }
 
     this.audio.onended = () => {
       trace('audio:ended');
       this.lastKnownTime = this.audio.duration || this.lastKnownTime;
-      // Mark completed in the emit
-      this.renderedOffset = this.currentTextLength; // Force full progress visually
+
+      // Force full progress visually
+      this.renderedOffset = this.currentTextLength;
       this.emitSyncTick(true);
+
+      // Save completion locally
+      this.commitLocalProgress(true, "ended");
+
       this.stopSyncLoop();
       if (this.onEndCallback) setTimeout(() => this.onEndCallback?.(), 0);
     };
-    this.audio.onplay = () => { 
-      trace('audio:onplay', { t: this.audio.currentTime });
-      this.applyRequestedSpeed(); 
-      this.startSyncLoop(); 
+
+    this.audio.onplay = () => {
+      const t = this.audio.currentTime;
+      trace('audio:onplay', { t });
+
+      if (t > 0) this.lastKnownTime = t;
+      this.applyRequestedSpeed();
+      this.startSyncLoop();
+
       if (this.onFetchStateChange) this.onFetchStateChange(false);
+
       this.emitSyncTick();
+      this.commitLocalProgress(false, "play");
     };
-    this.audio.onpause = () => { 
-      trace('audio:onpause', { t: this.audio.currentTime });
-      this.lastKnownTime = this.audio.currentTime;
-      this.emitSyncTick(); 
-      this.stopSyncLoop(); 
+
+    this.audio.onpause = () => {
+      const t = this.audio.currentTime;
+      trace('audio:onpause', { t });
+
+      this.lastKnownTime = t || this.lastKnownTime;
+      this.emitSyncTick();
+      this.stopSyncLoop();
+
+      // Persist paused time locally (critical for resume)
+      this.commitLocalProgress(false, "pause");
     };
-    
-    // Use timeupdate to drive the target offset, serving as a "clock nudge"
-    this.audio.ontimeupdate = () => { 
+
+    // Timeupdate: nudge time + persist progress
+    this.audio.ontimeupdate = () => {
       const t = this.audio.currentTime;
       if (t > 0) this.lastKnownTime = t;
-      this.updateTargetOffset(t);
+
+      // Keep target in sync as a "clock nudge"
+      this.updateTargetOffset(this.lastKnownTime);
+
+      // Persist progress locally (throttled inside commitProgressLocal)
+      this.commitLocalProgress(false, "timeupdate");
     };
-    
-    this.audio.onerror = () => { 
+
+    this.audio.onerror = () => {
       traceError('audio:onerror', this.audio.error);
-      if (this.onFetchStateChange) this.onFetchStateChange(false); 
+      if (this.onFetchStateChange) this.onFetchStateChange(false);
     };
   }
 
-  // --- Smoothing Logic ---
-  
+  // ----------------------------
+  // Smoothing / highlight logic
+  // ----------------------------
+
   private updateTargetOffset(time: number) {
     this.targetOffset = this.getOffsetFromTime(time, this.audio.duration);
   }
 
-  // Called frequently (by rAF or Interval) to interpolate renderedOffset
   private smoothTick(deltaMs: number) {
     if (!this.syncCallback) return;
-    
-    // 1. If in intro, stay at 0
-    if (this.audio.currentTime < this.currentIntroDurSec) {
-        this.renderedOffset = 0;
-        this.emitSyncTick();
-        return;
+
+    // Use lastKnownTime as the authoritative clock when mobile throttles events
+    const t = (Number.isFinite(this.audio.currentTime) ? this.audio.currentTime : this.lastKnownTime) || 0;
+    if (t > 0) this.lastKnownTime = t;
+
+    // Always refresh target from clock (not just from timeupdate)
+    this.updateTargetOffset(this.lastKnownTime);
+
+    // 1) Intro/title: keep highlight at 0
+    if (this.lastKnownTime < this.currentIntroDurSec) {
+      this.renderedOffset = 0;
+      this.emitSyncTick();
+      return;
     }
 
-    // 2. If jumped backward (loop/seek), snap instantly
+    // 2) Backward jump: snap instantly
     if (this.targetOffset < this.renderedOffset) {
-        this.renderedOffset = this.targetOffset;
-    } 
-    // 3. Otherwise, smooth forward
-    else if (this.targetOffset > this.renderedOffset) {
-        const diff = this.targetOffset - this.renderedOffset;
-        
-        // Estimate chars per second
-        const contentDur = Math.max(1, (this.audio.duration || 0) - this.currentIntroDurSec);
-        const cps = this.currentTextLength / contentDur;
-        
-        // Allowed step: proportional to speed, clamped to avoid jumps
-        // Slightly fast (1.5x) to catch up if lagging
-        const maxStep = Math.max(1, cps * (deltaMs / 1000) * this.requestedSpeed * 1.5);
-        
-        // Move towards target, but don't overshoot
-        const step = Math.min(diff, Math.max(1, maxStep));
-        this.renderedOffset += step;
+      this.renderedOffset = this.targetOffset;
+      this.emitSyncTick();
+      return;
     }
-    
+
+    // 3) Forward: smooth toward target with easing (reduces “skipping words”)
+    const diff = this.targetOffset - this.renderedOffset;
+    if (diff <= 0) {
+      this.emitSyncTick();
+      return;
+    }
+
+    const duration = (Number.isFinite(this.audio.duration) ? this.audio.duration : 0) || 0;
+    const contentDur = Math.max(1, duration - this.currentIntroDurSec);
+    const cps = this.currentTextLength > 0 ? (this.currentTextLength / contentDur) : 20;
+
+    // Base step based on time and speed
+    const baseStep = cps * (deltaMs / 1000) * Math.max(0.5, this.requestedSpeed);
+
+    // Easing factor (more responsive when behind, but still smooth)
+    const behindSec = cps > 0 ? diff / cps : 0;
+    const alpha =
+      behindSec > 2.5 ? 0.35 :
+      behindSec > 1.5 ? 0.28 :
+      behindSec > 0.8 ? 0.22 : 0.16;
+
+    let step = diff * alpha;
+
+    // Clamp to avoid big jumps that look like word-skips
+    const maxStep = Math.max(1, baseStep * 1.5);
+    step = Math.max(1, Math.min(step, maxStep));
+
+    this.renderedOffset += step;
+
     this.emitSyncTick();
   }
 
   public emitSyncTick(completed = false) {
     if (this.syncCallback) {
-       this.syncCallback({ 
-           currentTime: this.audio.currentTime, 
-           duration: this.audio.duration, 
-           charOffset: Math.floor(this.renderedOffset), // Emit smoothed value
-           textLength: this.currentTextLength,
-           completed
-       });
+      this.syncCallback({
+        currentTime: this.audio.currentTime,
+        duration: this.audio.duration,
+        charOffset: Math.floor(this.renderedOffset),
+        textLength: this.currentTextLength,
+        completed
+      });
     }
   }
 
@@ -227,18 +351,19 @@ class SpeechController {
   }
 
   public saveProgress(completed: boolean = false) {
-     this.emitSyncTick(completed);
+    this.emitSyncTick(completed);
+    // Also persist locally whenever the app requests a save tick
+    this.commitLocalProgress(!!completed, completed ? "saveProgress:completed" : "saveProgress");
   }
 
   private startSyncLoop() {
     this.stopSyncLoop();
-    
-    // Always use interval for smoothing logic, even on desktop, to decouple render from audio events
-    // 20fps (50ms) is good balance of smoothness and battery
+
+    // 20fps smoothing loop (50ms)
     this.intervalId = setInterval(() => {
-        if (!this.audio.paused) {
-            this.smoothTick(50);
-        }
+      if (!this.audio.paused) {
+        this.smoothTick(50);
+      }
     }, 50);
   }
 
@@ -250,15 +375,16 @@ class SpeechController {
   public getOffsetFromTime(t: number, dur?: number): number {
     const duration = dur || this.audio.duration || 0;
     const effectiveIntroEnd = this.currentIntroDurSec > 0 ? (this.currentIntroDurSec + this.HIGHLIGHT_DELAY_SEC) : 0;
-    
-    // Only move highlighting if we are PAST the intro
+
     if (duration === 0 || t < effectiveIntroEnd) return 0;
-    
+
     const contentTime = t - effectiveIntroEnd;
+
     if (this.currentChunkMap && this.currentChunkMap.length > 0) {
       const mapTotalDur = this.currentChunkMap.reduce((acc, c) => acc + c.durSec, 0);
       const totalContentDur = Math.max(0.1, duration - effectiveIntroEnd);
       const scale = totalContentDur / Math.max(0.1, mapTotalDur);
+
       let cumulativeTime = 0;
       for (const chunk of this.currentChunkMap) {
         const scaledDur = chunk.durSec * scale;
@@ -269,39 +395,42 @@ class SpeechController {
         cumulativeTime += scaledDur;
       }
     }
+
     const contentPortion = Math.max(0.001, duration - effectiveIntroEnd);
     return Math.max(0, Math.floor(this.currentTextLength * Math.min(1, contentTime / contentPortion)));
   }
 
-  // --- Robust Event Waiter ---
+  // ----------------------------
+  // Robust event waiting / seeking
+  // ----------------------------
+
   private waitForAudioEvent(event: string, timeoutMs: number, nonce: number): Promise<void> {
     return new Promise((resolve, reject) => {
-        let timer: any;
-        const handler = () => {
-            cleanup();
-            if (nonce === this.seekNonce) resolve();
-            else reject(new Error("Seek cancelled by newer operation"));
-        };
-        const cleanup = () => {
-            clearTimeout(timer);
-            this.audio.removeEventListener(event, handler);
-        };
-        timer = setTimeout(() => {
-            cleanup();
-            reject(new Error(`Timeout waiting for ${event}`));
-        }, timeoutMs);
+      let timer: any;
+      const handler = () => {
+        cleanup();
+        if (nonce === this.seekNonce) resolve();
+        else reject(new Error("Seek cancelled by newer operation"));
+      };
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.audio.removeEventListener(event, handler);
+      };
+      timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Timeout waiting for ${event}`));
+      }, timeoutMs);
 
-        if (nonce !== this.seekNonce) {
-            cleanup();
-            reject(new Error("Seek cancelled before wait"));
-            return;
-        }
+      if (nonce !== this.seekNonce) {
+        cleanup();
+        reject(new Error("Seek cancelled before wait"));
+        return;
+      }
 
-        this.audio.addEventListener(event, handler, { once: true });
+      this.audio.addEventListener(event, handler, { once: true });
     });
   }
 
-  // --- Existing waitForEvent (legacy/internal usage) ---
   private waitForEvent(target: EventTarget, event: string, timeoutMs: number, tokenCheck?: () => boolean): Promise<void> {
     return new Promise((resolve, reject) => {
       let timer: any;
@@ -313,7 +442,7 @@ class SpeechController {
         clearTimeout(timer);
         target.removeEventListener(event, handler);
       };
-      
+
       timer = setTimeout(() => {
         cleanup();
         reject(new Error(`Timeout waiting for ${event}`));
@@ -328,35 +457,58 @@ class SpeechController {
     });
   }
 
+  // ----------------------------
+  // Load + play (Drive/local URL)
+  // ----------------------------
+
   async loadAndPlayDriveFile(
-    token: string, fileId: string, totalContentChars: number, introDurSec: number, chunkMap: AudioChunkMetadata[] | undefined, startTimeSec = 0, playbackRate = 1.0, onEnd: () => void, onSync: ((meta: PlaybackMetadata & { completed?: boolean }) => void) | null, localUrl?: string, onPlayStart?: () => void
+    token: string,
+    fileId: string,
+    totalContentChars: number,
+    introDurSec: number,
+    chunkMap: AudioChunkMetadata[] | undefined,
+    startTimeSec = 0,
+    playbackRate = 1.0,
+    onEnd: () => void,
+    onSync: ((meta: PlaybackMetadata & { completed?: boolean }) => void) | null,
+    localUrl?: string,
+    onPlayStart?: () => void,
+    ctx?: { bookId: string; chapterId: string } // ✅ Optional: prevents “silent resume failure”
   ) {
+    // If caller passed context, set it immediately so resume works
+    if (ctx) this.setContext(ctx);
+
     this.sessionToken++;
-    this.seekNonce++; 
+    this.seekNonce++;
     const session = this.sessionToken;
     const isCurrentSession = () => this.sessionToken === session;
 
     trace('audio:load:start', { fileId: fileId || localUrl, startTimeSec, session });
 
     this.requestedSpeed = playbackRate;
-    
+
+    // Flush local progress for previous chapter before we wipe audio
+    this.commitLocalProgress(false, "before_load_new_audio");
+
     this.audio.pause();
     this.audio.removeAttribute("src");
     this.audio.src = "";
     this.audio.load();
-    
-    if (!localUrl) revokeObjectUrl(this.currentBlobUrl);
+
+    // Always try to revoke previous object URL safely (no-op for non-blob urls)
+    revokeObjectUrl(this.currentBlobUrl);
     this.currentBlobUrl = null;
-    
+
     this.onEndCallback = onEnd;
     this.onPlayStartCallback = onPlayStart || null;
-    
+
     if (onSync) this.syncCallback = onSync;
-    
+
     this.currentTextLength = totalContentChars;
     this.currentIntroDurSec = introDurSec;
     this.currentChunkMap = chunkMap || null;
     this.lastKnownTime = startTimeSec;
+
     // Reset offset smoothing
     this.renderedOffset = 0;
     this.targetOffset = 0;
@@ -369,70 +521,104 @@ class SpeechController {
         const res = await getDriveAudioObjectUrl(fileId);
         url = res.url;
       }
-      
-      if (!isCurrentSession()) { 
-        if (!localUrl) revokeObjectUrl(url); 
+
+      if (!isCurrentSession()) {
+        revokeObjectUrl(url);
         trace('audio:load:aborted', { reason: 'stale_session' });
-        return; 
+        return;
       }
-      
+
       this.currentBlobUrl = url || null;
       this.audio.src = url || '';
       this.audio.load();
-      
+
       await this.waitForEvent(this.audio, 'loadedmetadata', 8000, isCurrentSession);
 
+      // ----------------------------
+      // RESUME: prefer local SQLite progress if it exists and differs meaningfully
+      // ----------------------------
       let resumeTime = startTimeSec;
-      
-      if (isFinite(this.audio.duration)) {
-         resumeTime = Math.min(resumeTime, Math.max(0, this.audio.duration - 0.5));
+      const chapterId = this.getActiveChapterId();
+
+      if (!chapterId) {
+        traceError("audio:resume:no_context", new Error("Missing context.chapterId before resume"));
+      } else {
+        try {
+          const local = await loadProgressLocal(chapterId);
+          if (local?.timeSec != null && local.timeSec > 0) {
+            // Prefer local resume unless caller explicitly asked for a different time
+            if (resumeTime <= 0.01 || Math.abs(local.timeSec - resumeTime) > 2) {
+              resumeTime = local.timeSec;
+              trace('audio:resume:local', { chapterId, resumeTime });
+            }
+          }
+        } catch (e: any) {
+          traceError('audio:resume:local_failed', e);
+        }
+      }
+
+      if (Number.isFinite(this.audio.duration)) {
+        resumeTime = Math.min(resumeTime, Math.max(0, this.audio.duration - 0.5));
       }
 
       if (resumeTime > 0) {
-         trace('audio:seeking', { resumeTime });
-         this.audio.currentTime = resumeTime;
-         this.lastKnownTime = resumeTime;
-         // Pre-calculate target offset so highlight starts correctly
-         this.updateTargetOffset(resumeTime);
-         this.renderedOffset = this.targetOffset;
-         await this.waitForEvent(this.audio, 'seeked', 6000, isCurrentSession);
+        trace('audio:seeking', { resumeTime });
+        this.audio.currentTime = resumeTime;
+        this.lastKnownTime = resumeTime;
+
+        this.updateTargetOffset(resumeTime);
+        this.renderedOffset = this.targetOffset;
+
+        await this.waitForEvent(this.audio, 'seeked', 6000, isCurrentSession);
+
+        // Persist resumed position locally (so it never snaps back)
+        this.commitLocalProgress(false, "resume_seeked");
+      } else {
+        // Ensure intro highlight starts at 0
+        this.lastKnownTime = 0;
+        this.updateTargetOffset(0);
+        this.renderedOffset = 0;
+        this.emitSyncTick();
       }
 
       if (this.onPlayStartCallback) {
-         this.onPlayStartCallback();
-         this.onPlayStartCallback = null;
+        this.onPlayStartCallback();
+        this.onPlayStartCallback = null;
       }
 
       try {
         await this.audio.play();
       } catch (e: any) {
         if (e.name === 'NotAllowedError') {
-           throw new Error('Playback blocked');
+          throw new Error('Playback blocked');
         }
         throw e;
       }
-      
+
       this.applyRequestedSpeed();
       trace('audio:load:success');
 
     } catch (err: any) {
       if (err.name === 'NotAllowedError' || err.message === 'Playback blocked') {
-         trace('audio:load:interaction_required');
-         throw err; 
+        trace('audio:load:interaction_required');
+        throw err;
       }
       if (err.message === 'Playback session preempted') {
-         trace('audio:load:preempted');
-         return; 
+        trace('audio:load:preempted');
+        return;
       }
       traceError('audio:load:failed', err);
-      this.audio.src = ""; 
+      this.audio.src = "";
       throw err;
     } finally {
       if (this.onFetchStateChange) this.onFetchStateChange(false);
     }
   }
 
-  // --- Mobile Safe Play ---
+  // ----------------------------
+  // Playback controls
+  // ----------------------------
+
   public async safePlay(): Promise<'playing' | 'blocked'> {
     if (!this.audio.src) throw new Error('No audio source');
     try {
@@ -447,67 +633,68 @@ class SpeechController {
     }
   }
 
-  // --- Robust SeekTo ---
   public async seekTo(targetSec: number): Promise<void> {
     const audio = this.audio;
     const nonce = ++this.seekNonce;
 
     if (!Number.isFinite(audio.duration) || audio.duration <= 0) {
-        if (!audio.src) throw new Error("No audio source to seek");
-        trace('audio:seek:waiting_metadata', { nonce });
-        try {
-            await this.waitForAudioEvent('loadedmetadata', 6000, nonce);
-        } catch (e) {
-            if (nonce !== this.seekNonce) return; 
-            throw e;
-        }
+      if (!audio.src) throw new Error("No audio source to seek");
+      trace('audio:seek:waiting_metadata', { nonce });
+      try {
+        await this.waitForAudioEvent('loadedmetadata', 6000, nonce);
+      } catch (e) {
+        if (nonce !== this.seekNonce) return;
+        throw e;
+      }
     }
 
     if (nonce !== this.seekNonce) return;
 
     const dur = audio.duration;
     const clamped = Math.min(Math.max(targetSec, 0), Math.max(dur - 0.05, 0));
-    
+
     trace('audio:seek:start', { to: clamped, nonce });
 
     audio.currentTime = clamped;
     this.lastKnownTime = clamped;
-    
-    // Snap highlight instantly
+
     this.updateTargetOffset(clamped);
     this.renderedOffset = this.targetOffset;
     this.emitSyncTick();
 
     try {
-        await this.waitForAudioEvent('seeked', 5000, nonce);
+      await this.waitForAudioEvent('seeked', 5000, nonce);
     } catch (e) {
-        if (nonce !== this.seekNonce) return;
-        traceError('audio:seek:converge_failed_but_proceeding', { actual: audio.currentTime, target: clamped });
+      if (nonce !== this.seekNonce) return;
+      traceError('audio:seek:converge_failed_but_proceeding', { actual: audio.currentTime, target: clamped });
     }
 
     if (nonce !== this.seekNonce) return;
+
     this.emitSyncTick();
+    this.commitLocalProgress(false, "seekTo");
   }
 
   public async seekToTime(seconds: number): Promise<void> {
-      return this.seekTo(seconds);
+    return this.seekTo(seconds);
   }
 
   public getCurrentTime() {
-      return this.audio.currentTime;
+    return this.audio.currentTime;
   }
 
   public seekToOffset(offset: number) {
     const duration = this.audio.duration;
     if (!duration || this.currentTextLength <= 0) return;
-    
+
     let targetTime = 0;
     const effectiveIntroEnd = this.currentIntroDurSec > 0 ? (this.currentIntroDurSec + this.HIGHLIGHT_DELAY_SEC) : 0;
-    
+
     if (this.currentChunkMap && this.currentChunkMap.length > 0) {
       const mapTotalDur = this.currentChunkMap.reduce((acc, c) => acc + c.durSec, 0);
       const totalContentDur = Math.max(0.1, duration - effectiveIntroEnd);
       const scale = totalContentDur / Math.max(0.1, mapTotalDur);
+
       let cumulativeTime = 0;
       for (const chunk of this.currentChunkMap) {
         if (offset >= chunk.startChar && offset <= chunk.endChar) {
@@ -518,9 +705,12 @@ class SpeechController {
         cumulativeTime += chunk.durSec * scale;
       }
     } else {
-      targetTime = effectiveIntroEnd + (Math.max(0, Math.min(1, offset / this.currentTextLength)) * Math.max(0.001, duration - effectiveIntroEnd));
+      targetTime =
+        effectiveIntroEnd +
+        (Math.max(0, Math.min(1, offset / this.currentTextLength)) *
+          Math.max(0.001, duration - effectiveIntroEnd));
     }
-    
+
     this.seekTo(targetTime).catch(e => traceError('seek:offset:failed', e));
   }
 
@@ -528,6 +718,7 @@ class SpeechController {
     this.audio.pause();
     this.stopSyncLoop();
     window.speechSynthesis.cancel();
+
     const executeUtterance = (txt: string, delay: number, callback: () => void) => {
       const utterance = new SpeechSynthesisUtterance(txt);
       const voice = window.speechSynthesis.getVoices().find(v => v.name === voiceName);
@@ -536,33 +727,42 @@ class SpeechController {
       utterance.onend = () => { if (delay > 0) setTimeout(callback, delay * 1000); else callback(); };
       window.speechSynthesis.speak(utterance);
     };
+
     executeUtterance(text, 0, onEnd);
   }
 
-  pause() { 
-    this.audio.pause(); 
-    this.lastKnownTime = this.audio.currentTime;
+  pause() {
+    this.audio.pause();
+    this.lastKnownTime = this.audio.currentTime || this.lastKnownTime;
     this.emitSyncTick();
-    window.speechSynthesis.pause(); 
+    this.commitLocalProgress(false, "pause(method)");
+    window.speechSynthesis.pause();
   }
-  
-  resume() { 
-    if (this.audio.src) { 
-      this.applyRequestedSpeed(); 
+
+  resume() {
+    if (this.audio.src) {
+      this.applyRequestedSpeed();
       if (this.audio.currentTime === 0 && this.lastKnownTime > 0) {
         this.audio.currentTime = this.lastKnownTime;
       }
-      this.audio.play().catch(e => traceError('resume:error', e)); 
-    } 
-    window.speechSynthesis.resume(); 
+      this.audio.play().catch(e => traceError('resume:error', e));
+      this.commitLocalProgress(false, "resume(method)");
+    }
+    window.speechSynthesis.resume();
   }
-  
+
   stop() {
+    trace('audio:stop');
+    this.commitLocalProgress(false, "stop");
+
     this.sessionToken++;
     this.seekNonce++;
     this.stopSyncLoop();
     this.audio.pause();
     this.audio.removeAttribute("src");
+    this.audio.src = "";
+    this.audio.load();
+
     revokeObjectUrl(this.currentBlobUrl);
     this.currentBlobUrl = null;
     this.lastKnownTime = 0;
@@ -573,6 +773,8 @@ class SpeechController {
 
   safeStop() {
     trace('audio:safeStop');
+    this.commitLocalProgress(false, "safeStop");
+
     this.sessionToken++;
     this.seekNonce++;
     this.stopSyncLoop();
@@ -580,6 +782,7 @@ class SpeechController {
     this.audio.src = "";
     this.audio.removeAttribute("src");
     this.audio.load();
+
     revokeObjectUrl(this.currentBlobUrl);
     this.currentBlobUrl = null;
     this.lastKnownTime = 0;
@@ -587,7 +790,7 @@ class SpeechController {
     if (this.onFetchStateChange) this.onFetchStateChange(false);
     window.speechSynthesis.cancel();
   }
-  
+
   setPlaybackRate(rate: number) { this.requestedSpeed = rate; if (this.audio.src) this.applyRequestedSpeed(); }
   get isPaused() { return this.audio.paused && !window.speechSynthesis.speaking; }
   get currentTime() { return this.audio.currentTime; }
