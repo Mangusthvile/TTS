@@ -184,6 +184,12 @@ export async function listFilesInFolder(folderId: string): Promise<{ id: string,
   return fetchAllPages(url);
 }
 
+export async function listFoldersInFolder(folderId: string): Promise<{ id: string, name: string, modifiedTime: string }[]> {
+  const q = encodeURIComponent(`'${folderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id, name, modifiedTime)&orderBy=name&pageSize=1000&includeItemsFromAllDrives=true&supportsAllDrives=true`;
+  return fetchAllPages(url);
+}
+
 export async function listFilesSortedByModified(folderId: string): Promise<{ id: string, name: string, mimeType: string, modifiedTime: string }[]> {
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id, name, mimeType, modifiedTime)&orderBy=modifiedTime desc&pageSize=1000&includeItemsFromAllDrives=true&supportsAllDrives=true`;
@@ -198,6 +204,23 @@ export async function listSaveFileCandidates(folderId: string): Promise<{ id: st
   if (!response.ok) throw new Error("DRIVE_LIST_CANDIDATES_ERROR");
   const data = await response.json();
   return data.files || [];
+}
+
+export async function findTaleVoxRoots(): Promise<{ id: string, name: string, hasState: boolean }[]> {
+  const qStr = `mimeType = 'application/vnd.google-apps.folder' and trashed = false and (name contains 'TaleVox' or name contains 'talevox')`;
+  const q = encodeURIComponent(qStr);
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, modifiedTime)&orderBy=modifiedTime desc&pageSize=20&includeItemsFromAllDrives=true&supportsAllDrives=true`;
+  const response = await driveFetch(url);
+  if (!response.ok) throw new Error("DRIVE_ROOT_SEARCH_ERROR");
+  const data = await response.json();
+  const folders = data.files || [];
+
+  const results = [];
+  for (const f of folders) {
+    const saves = await listSaveFileCandidates(f.id).catch(() => []);
+    results.push({ id: f.id, name: f.name, hasState: saves.length > 0 });
+  }
+  return results;
 }
 
 export async function findFileSync(name: string, parentId?: string): Promise<string | null> {
@@ -340,9 +363,9 @@ export async function createDriveFolder(name: string, parentId?: string): Promis
 export async function ensureRootStructure(rootId: string) {
   const subfolders = { booksId: '', trashId: '', savesId: '' };
   const mapping = [
-    { name: 'Books', key: 'booksId' },
-    { name: 'Trash', key: 'trashId' },
-    { name: 'Cloud Saves', key: 'savesId' }
+    { name: 'books', key: 'booksId' },
+    { name: 'trash', key: 'trashId' },
+    { name: 'saves', key: 'savesId' }
   ];
 
   for (const item of mapping) {

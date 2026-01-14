@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { Book, Theme } from '../types';
 import { ChevronRight, X, CheckCircle2 } from 'lucide-react';
@@ -9,9 +8,10 @@ interface ChapterSidebarProps {
   onSelectChapter: (id: string) => void;
   onClose: () => void;
   isDrawer: boolean;
+  playbackSnapshot?: { chapterId: string, percent: number } | null;
 }
 
-const ChapterSidebar: React.FC<ChapterSidebarProps> = ({ book, theme, onSelectChapter, onClose, isDrawer }) => {
+const ChapterSidebar: React.FC<ChapterSidebarProps> = ({ book, theme, onSelectChapter, onClose, isDrawer, playbackSnapshot }) => {
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
   const textClass = isDark ? 'text-slate-100' : isSepia ? 'text-[#3c2f25]' : 'text-black';
@@ -31,7 +31,11 @@ const ChapterSidebar: React.FC<ChapterSidebarProps> = ({ book, theme, onSelectCh
       <div className="flex-1 overflow-y-auto py-2 scrollbar-hide">
         {book.chapters.map((chapter) => {
           const isCurrent = book.currentChapterId === chapter.id;
-          const pct = chapter.progress !== undefined ? Math.floor(chapter.progress * 100) : 0;
+          let pct = chapter.progress !== undefined ? Math.floor(chapter.progress * 100) : 0;
+          if (playbackSnapshot && playbackSnapshot.chapterId === chapter.id) {
+            pct = Math.floor(playbackSnapshot.percent * 100);
+          }
+          
           return (
             <button
               key={chapter.id}

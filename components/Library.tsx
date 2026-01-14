@@ -1,7 +1,6 @@
-
 import React, { useState, useRef } from 'react';
 import { Book, Theme, StorageBackend } from '../types';
-import { BookOpen, Plus, Trash2, Cloud, Monitor, Database, Image as ImageIcon } from 'lucide-react';
+import { BookOpen, Plus, Trash2, Cloud, Monitor, Database, Image as ImageIcon, FolderSync } from 'lucide-react';
 import { openFolderPicker } from '../services/driveService';
 import { getValidDriveToken } from '../services/driveAuth';
 
@@ -15,10 +14,12 @@ interface LibraryProps {
   theme: Theme;
   onClose?: () => void;
   isOpen?: boolean;
+  isCloudLinked?: boolean;
+  onLinkCloud?: () => void;
 }
 
 const Library: React.FC<LibraryProps> = ({ 
-  books, activeBookId, onSelectBook, onAddBook, onDeleteBook, onUpdateBook, theme, onClose, isOpen
+  books, activeBookId, onSelectBook, onAddBook, onDeleteBook, onUpdateBook, theme, onClose, isOpen, isCloudLinked, onLinkCloud
 }) => {
   const [isAdding, setIsAdding] = useState(false);
   const [isProcessingAdd, setIsProcessingAdd] = useState(false);
@@ -46,6 +47,10 @@ const Library: React.FC<LibraryProps> = ({
 
   const handleStartDrivePick = async () => {
     if (!newTitle.trim()) return;
+    if (!isCloudLinked && onLinkCloud) {
+      onLinkCloud();
+      return;
+    }
     setIsProcessingAdd(true);
     try {
       await getValidDriveToken();
@@ -106,7 +111,7 @@ const Library: React.FC<LibraryProps> = ({
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <button onClick={() => handleAdd(StorageBackend.MEMORY)} className={`flex flex-col items-center gap-2 p-4 rounded-2xl text-[10px] font-black uppercase border transition-all ${isDark ? 'bg-slate-900 border-slate-700' : 'bg-white'}`}><Database className="w-5 h-5 text-emerald-500" /> Memory</button>
-              <button onClick={handleStartDrivePick} className={`flex flex-col items-center gap-2 p-4 rounded-2xl text-[10px] font-black uppercase border transition-all ${isDark ? 'bg-slate-900 border-slate-700' : 'bg-white'}`}><Cloud className="w-5 h-5 text-indigo-500" /> {isProcessingAdd ? 'Loading...' : 'Drive'}</button>
+              <button onClick={handleStartDrivePick} className={`flex flex-col items-center gap-2 p-4 rounded-2xl text-[10px] font-black uppercase border transition-all ${isDark ? 'bg-slate-900 border-slate-700' : 'bg-white'}`}><Cloud className="w-5 h-5 text-indigo-500" /> {isProcessingAdd ? 'Loading...' : isCloudLinked ? 'Drive' : 'Link Drive'}</button>
               <button onClick={async () => { const h = await (window as any).showDirectoryPicker({ mode: "readwrite" }); handleAdd(StorageBackend.LOCAL, h); }} className={`flex flex-col items-center gap-2 p-4 rounded-2xl text-[10px] font-black uppercase border transition-all ${isDark ? 'bg-slate-900 border-slate-700' : 'bg-white'}`}><Monitor className="w-5 h-5 text-slate-400" /> Local</button>
             </div>
             <button onClick={() => setIsAdding(false)} className={`w-full py-2 text-[10px] font-black uppercase tracking-widest opacity-60`}>Cancel</button>
