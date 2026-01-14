@@ -236,7 +236,7 @@ export async function findFileSync(name: string, parentId?: string): Promise<str
 }
 
 export async function resolveFolderIdByName(rootId: string, name: string): Promise<{ id: string; method: string }> {
-  const qStr = `'${rootId}' in parents and name = '${name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+  const qStr = `'${rootId}' in parents and name = '${name.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
   const q = encodeURIComponent(qStr);
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, modifiedTime)&includeItemsFromAllDrives=true&supportsAllDrives=true`;
   const response = await driveFetch(url);

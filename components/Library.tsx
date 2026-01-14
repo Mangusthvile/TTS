@@ -51,16 +51,10 @@ const Library: React.FC<LibraryProps> = ({
       onLinkCloud();
       return;
     }
-    setIsProcessingAdd(true);
-    try {
-      await getValidDriveToken();
-      const selected = await openFolderPicker();
-      if (selected) handleAdd(StorageBackend.DRIVE, null, selected.id, selected.name);
-    } catch (e: any) {
-      alert("Drive Access Failed: " + (e.message.includes('Reconnect') ? 'Please reconnect Google Drive in Settings' : e.message));
-    } finally {
-      setIsProcessingAdd(false);
-    }
+    
+    // If cloud is linked, we create the book folder automatically under TaleVox/books
+    // instead of opening a manual folder picker.
+    handleAdd(StorageBackend.DRIVE);
   };
 
   const handleCoverUpload = (e: React.ChangeEvent<HTMLInputElement>) => {

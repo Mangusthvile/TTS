@@ -474,7 +474,13 @@ const App: React.FC = () => {
           };
           
           const content = JSON.stringify(snapshot);
+          
+          // 1. Upload timestamped snapshot
           await uploadToDrive(savesId, `talevox_state_${window.__APP_VERSION__}_${Date.now()}.json`, content, undefined, 'application/json');
+          
+          // 2. Upload/Overwrite stable pointer file
+          const existingPointerId = await findFileSync(STABLE_POINTER_NAME, savesId);
+          await uploadToDrive(savesId, STABLE_POINTER_NAME, content, existingPointerId || undefined, 'application/json');
           
           setState(p => ({ ...p, lastSavedAt: Date.now() }));
           setIsDirty(false);
@@ -895,7 +901,7 @@ const App: React.FC = () => {
       
       try {
          const s = stateRef.current;
-         const { booksId, savesId } = await ensureRootStructure(s.driveRootFolderId);
+         const { booksId, savesId, trashId } = await ensureRootStructure(s.driveRootFolderId);
          const driveBooks = await listFoldersInFolder(booksId);
          
          const updatedBooks = [...s.books];
@@ -973,7 +979,7 @@ const App: React.FC = () => {
              }
          }
          
-         setState(p => ({ ...p, books: updatedBooks, driveSubfolders: { booksId, savesId, trashId: '' } }));
+         setState(p => ({ ...p, books: updatedBooks, driveSubfolders: { booksId, savesId, trashId } }));
          markDirty();
          setIsSyncing(false);
          if(manual) showToast("Sync Complete", 2000, 'success');
@@ -1010,7 +1016,21 @@ const App: React.FC = () => {
   }, [hardRefreshForChapter, showToast]);
 
   useEffect(() => {
-    safeSetLocalStorage('talevox_pro_v2', JSON.stringify({ ...state, books: state.books.map(({ directoryHandle, ...b }) => ({ ...b, directoryHandle: undefined })) }));
+    // Strip heavy fields before saving to localStorage to prevent quota issues
+    const strippedBooks = state.books.map(({ directoryHandle, ...b }) => ({
+      ...b,
+      directoryHandle: undefined,
+      chapters: b.chapters.map(({ content, audioChunkMap, ...c }) => ({
+        ...c,
+        content: undefined,
+        audioChunkMap: undefined
+      }))
+    }));
+
+    safeSetLocalStorage('talevox_pro_v2', JSON.stringify({ 
+      ...state, 
+      books: strippedBooks 
+    }));
   }, [state]);
 
   const LinkCloudModal = () => {
