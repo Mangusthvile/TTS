@@ -1,6 +1,5 @@
-import React from 'react';
-import { Book, Theme } from '../types';
-import { ChevronRight, X, CheckCircle2 } from 'lucide-react';
+import React, { useEffect, useRef } from 'react';
+import { Book, Chapter, Theme } from '../types';
 
 interface ChapterSidebarProps {
   book: Book;
@@ -9,49 +8,91 @@ interface ChapterSidebarProps {
   onClose: () => void;
   isDrawer: boolean;
   playbackSnapshot?: { chapterId: string, percent: number } | null;
+
+  // Phase One: paging support
+  onLoadMoreChapters?: () => void;
+  hasMoreChapters?: boolean;
+  isLoadingMoreChapters?: boolean;
 }
 
-const ChapterSidebar: React.FC<ChapterSidebarProps> = ({ book, theme, onSelectChapter, onClose, isDrawer, playbackSnapshot }) => {
+const ChapterSidebar: React.FC<ChapterSidebarProps> = ({ book, theme, onSelectChapter, onClose, isDrawer, playbackSnapshot, onLoadMoreChapters, hasMoreChapters, isLoadingMoreChapters }) => {
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
-  const textClass = isDark ? 'text-slate-100' : isSepia ? 'text-[#3c2f25]' : 'text-black';
-  const itemHover = isDark ? 'hover:bg-white/5' : 'hover:bg-black/5';
+
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!hasMoreChapters) return;
+    if (!onLoadMoreChapters) return;
+    const el = sentinelRef.current;
+    if (!el) return;
+
+    const obs = new IntersectionObserver((entries) => {
+      const first = entries[0];
+      if (first?.isIntersecting && !isLoadingMoreChapters) {
+        onLoadMoreChapters();
+      }
+    });
+
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [hasMoreChapters, onLoadMoreChapters, isLoadingMoreChapters]);
+
+  const bgClass = isDark ? "bg-neutral-900" : isSepia ? "bg-amber-50" : "bg-white";
+  const textClass = isDark ? "text-neutral-100" : isSepia ? "text-amber-900" : "text-neutral-900";
+  const borderClass = isDark ? "border-neutral-700" : "border-neutral-200";
+  const hoverClass = isDark ? "hover:bg-neutral-800" : isSepia ? "hover:bg-amber-100" : "hover:bg-neutral-100";
+  const activeClass = isDark ? "bg-indigo-900/40" : isSepia ? "bg-indigo-100" : "bg-indigo-50";
+
+  const isActive = (chapter: Chapter) => playbackSnapshot?.chapterId === chapter.id;
+  const progressOf = (chapter: Chapter) => (isActive(chapter) ? (playbackSnapshot?.percent ?? 0) : (chapter.progress ?? 0));
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
-      <div className="p-6 border-b border-black/5 flex items-center justify-between">
-        <div>
-          <h3 className={`text-sm font-black uppercase tracking-widest ${textClass}`}>Chapters</h3>
-          <p className="text-[10px] font-bold opacity-50 truncate max-w-[180px]">{book.title}</p>
+    <div className={`flex flex-col h-full ${bgClass} ${textClass} ${isDrawer ? "" : "border-r"} ${borderClass}`}>
+      <div className={`flex items-center justify-between px-6 py-4 border-b ${borderClass}`}>
+        <div className="min-w-0">
+          <div className="text-xs uppercase tracking-widest opacity-60">Chapters</div>
+          <div className="font-semibold truncate">{book.title}</div>
         </div>
         {isDrawer && (
-          <button onClick={onClose} className="p-2 -mr-2 opacity-60 hover:opacity-100"><X className="w-5 h-5" /></button>
+          <button onClick={onClose} className={`px-3 py-1 rounded-lg border ${borderClass} ${hoverClass}`}>
+            Close
+          </button>
         )}
       </div>
-      <div className="flex-1 overflow-y-auto py-2 scrollbar-hide">
+
+      <div className="flex-1 overflow-y-auto">
         {book.chapters.map((chapter) => {
-          const isCurrent = book.currentChapterId === chapter.id;
-          let pct = chapter.progress !== undefined ? Math.floor(chapter.progress * 100) : 0;
-          if (playbackSnapshot && playbackSnapshot.chapterId === chapter.id) {
-            pct = Math.floor(playbackSnapshot.percent * 100);
-          }
-          
+          const active = isActive(chapter);
+          const progress = progressOf(chapter);
+
           return (
             <button
               key={chapter.id}
               onClick={() => onSelectChapter(chapter.id)}
-              className={`w-full flex items-center gap-3 px-6 py-3 text-left transition-all ${itemHover} ${isCurrent ? 'bg-indigo-600/10' : ''}`}
+              className={`w-full text-left px-6 py-3 border-b ${borderClass} ${hoverClass} ${active ? activeClass : ""}`}
             >
-              <div className={`w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 ${isCurrent ? 'bg-indigo-600 text-white' : 'bg-black/5 text-inherit'}`}>
-                 {chapter.isCompleted ? <CheckCircle2 className="w-3 h-3" /> : <span className="text-[9px] font-black">{pct > 0 ? `${pct}%` : chapter.index}</span>}
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium truncate">{chapter.title}</div>
+                  <div className="text-xs opacity-60">Chapter {chapter.index}</div>
+                </div>
+
+                <div className="text-xs opacity-70 tabular-nums">{Math.round(progress * 100)}%</div>
               </div>
-              <span className={`text-xs font-bold truncate ${isCurrent ? 'text-indigo-600' : textClass} ${chapter.isCompleted ? 'opacity-50' : ''}`}>
-                {chapter.title}
-              </span>
-              {isCurrent && <ChevronRight className="w-3 h-3 ml-auto text-indigo-600" />}
+
+              <div className={`mt-2 h-1 rounded-full ${isDark ? "bg-neutral-700" : "bg-neutral-200"}`}>
+                <div className={`h-1 rounded-full ${isDark ? "bg-indigo-400" : "bg-indigo-600"}`} style={{ width: `${Math.round(progress * 100)}%` }} />
+              </div>
             </button>
           );
         })}
+
+        {hasMoreChapters && (
+          <div ref={sentinelRef} className={`px-6 py-4 text-xs ${textClass} opacity-60 text-center`}>
+            {isLoadingMoreChapters ? 'Loading more…' : 'Scroll to load more'}
+          </div>
+        )}
       </div>
     </div>
   );

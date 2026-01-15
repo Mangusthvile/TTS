@@ -360,7 +360,7 @@ export async function createDriveFolder(name: string, parentId?: string): Promis
   return data.id;
 }
 
-export async function ensureRootStructure(rootId: string) {
+export async function ensureRootStructure(rootFolderId?: string) {
   const subfolders = { booksId: '', trashId: '', savesId: '' };
   const mapping = [
     { name: 'books', key: 'booksId' },

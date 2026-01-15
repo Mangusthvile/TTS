@@ -57,7 +57,7 @@ const Reader: React.FC<ReaderProps> = ({
 
   const speakText = useMemo(() => {
     if (!chapter) return "";
-    return applyRules(chapter.content, rules);
+    return applyRules((chapter.content ?? ""), rules);
   }, [chapter, rules]);
 
   const segments = useMemo(() => {

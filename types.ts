@@ -103,7 +103,7 @@ export interface Chapter {
   title: string;
   sourceUrl?: string;
   filename: string;
-  content: string;
+  content?: string;
   wordCount: number;
   progress: number; // progress as ratio 0..1
   progressChars: number; // actual character offset

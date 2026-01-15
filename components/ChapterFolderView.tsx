@@ -1,4 +1,3 @@
-
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile } from '../types';
 import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon, Sparkles } from 'lucide-react';
@@ -23,10 +22,18 @@ interface ChapterFolderViewProps {
   onBackToLibrary: () => void;
   onResetChapterProgress: (bookId: string, chapterId: string) => void;
   playbackSnapshot?: { chapterId: string, percent: number } | null;
+
+  // Phase One: paging support
+  onLoadMoreChapters?: () => void;
+  hasMoreChapters?: boolean;
+  isLoadingMoreChapters?: boolean;
 }
 
 const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
-  book, theme, onAddChapter, onOpenChapter, onToggleFavorite, onUpdateChapterTitle, onDeleteChapter, onUpdateChapter, onUpdateBookSettings, onBackToLibrary, onResetChapterProgress, playbackSnapshot
+  book, theme, onAddChapter, onOpenChapter, onToggleFavorite, onUpdateChapterTitle, onDeleteChapter, onUpdateChapter, onUpdateBookSettings, onBackToLibrary, onResetChapterProgress, playbackSnapshot,
+  onLoadMoreChapters,
+  hasMoreChapters,
+  isLoadingMoreChapters
 }) => {
   const VIEW_MODE_KEY = `talevox:viewMode:${book.id}`;
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
@@ -62,9 +69,29 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const isSepia = theme === Theme.SEPIA;
   const cardBg = isDark ? 'bg-slate-800 border-slate-700' : isSepia ? 'bg-[#f4ecd8] border-[#d8ccb6]' : 'bg-white border-black/10';
   const textSecondary = isDark ? 'text-slate-400' : isSepia ? 'text-[#3c2f25]/70' : 'text-slate-600';
+  const subtleText = textSecondary;
   const stickyHeaderBg = isDark ? 'bg-slate-900/90' : isSepia ? 'bg-[#f4ecd8]/90' : 'bg-white/90';
 
   const chapters = useMemo(() => [...(book.chapters || [])].sort((a, b) => a.index - b.index), [book.chapters]);
+
+  const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!hasMoreChapters) return;
+    if (!onLoadMoreChapters) return;
+    const el = loadMoreSentinelRef.current;
+    if (!el) return;
+
+    const obs = new IntersectionObserver((entries) => {
+      const first = entries[0];
+      if (first?.isIntersecting && !isLoadingMoreChapters) {
+        onLoadMoreChapters();
+      }
+    }, { rootMargin: '200px' });
+
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [hasMoreChapters, onLoadMoreChapters, isLoadingMoreChapters]);
 
   // ... (Integrity check and Audio generation logic remains same) ...
   const handleCheckDriveIntegrity = useCallback(async () => {
@@ -361,6 +388,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           </div>
         );
       })}
+      {hasMoreChapters && (
+        <div ref={loadMoreSentinelRef} className={`py-4 text-center text-xs ${subtleText}`}>
+          {isLoadingMoreChapters ? 'Loading more…' : 'Scroll to load more'}
+        </div>
+      )}
     </div>
   );
 
@@ -390,6 +422,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           </div>
         );
       })}
+      {hasMoreChapters && (
+        <div ref={loadMoreSentinelRef} className={`py-4 text-center text-xs ${subtleText}`}>
+          {isLoadingMoreChapters ? 'Loading more…' : 'Scroll to load more'}
+        </div>
+      )}
     </div>
   );
 
