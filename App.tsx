@@ -9,6 +9,7 @@ import Extractor from './components/Extractor';
 import ChapterFolderView from './components/ChapterFolderView';
 import ChapterSidebar from './components/ChapterSidebar';
 import { speechController, applyRules, PROGRESS_STORE_V4 } from './services/speechService';
+import { reflowLineBreaks } from './services/textFormat';
 import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, openFolderPicker, listFilesSortedByModified, resolveFolderIdByName, listSaveFileCandidates, createDriveFolder, listFoldersInFolder, findTaleVoxRoots } from './services/driveService';
 import { initDriveAuth, getValidDriveToken, clearStoredToken, isTokenValid } from './services/driveAuth';
 import { authManager, AuthState } from './services/authManager';
@@ -170,6 +171,23 @@ const App: React.FC = () => {
     const savedDiag = localStorage.getItem('talevox_sync_diag');
     const savedUiMode = localStorage.getItem(UI_MODE_KEY) as UiMode | null;
 
+    const defaultReaderSettings: ReaderSettings = {
+      fontFamily: "'Source Serif 4', serif",
+      fontSizePx: 20,
+      lineHeight: 1.55,
+      paragraphSpacing: 1,
+      reflowLineBreaks: true,
+      highlightColor: '#4f46e5',
+      followHighlight: true,
+      uiMode: savedUiMode || 'auto',
+    };
+
+    const mergedReaderSettings: ReaderSettings = {
+      ...defaultReaderSettings,
+      ...(parsed.readerSettings || {}),
+      uiMode: savedUiMode || parsed.readerSettings?.uiMode || defaultReaderSettings.uiMode,
+    };
+
     return {
       books: [],
       activeBookId: parsed.activeBookId,
@@ -178,15 +196,7 @@ const App: React.FC = () => {
       theme: parsed.theme || Theme.LIGHT,
       currentOffsetChars: 0,
       debugMode: parsed.debugMode || false,
-      readerSettings: parsed.readerSettings || {
-        fontFamily: "'Source Serif 4', serif",
-        fontSizePx: 20,
-        lineHeight: 1.8,
-        paragraphSpacing: 1,
-        highlightColor: '#4f46e5',
-        followHighlight: true,
-        uiMode: savedUiMode || 'auto'
-      },
+      readerSettings: mergedReaderSettings,
       driveToken: parsed.driveToken,
       googleClientId: parsed.googleClientId,
       keepAwake: parsed.keepAwake ?? false,
@@ -215,12 +225,20 @@ const App: React.FC = () => {
         const books = await libraryListBooks();
         if (cancelled) return;
 
+        let nextActiveBookId: string | undefined;
+
         setState((p) => {
           const desired = p.activeBookId;
           const valid = desired && books.some((b) => b.id === desired);
-          const nextActiveBookId = valid ? desired : (books[0]?.id ?? undefined);
+          nextActiveBookId = valid ? desired : (books[0]?.id ?? undefined);
           return { ...p, books, activeBookId: nextActiveBookId };
         });
+
+        console.log("[TaleVox][Library] Loaded books:", books.length);
+
+        if (nextActiveBookId) {
+          void loadMoreChapters(nextActiveBookId, true);
+        }
       } catch (e: any) {
         console.error("Library bootstrap failed", e);
       }
@@ -567,60 +585,97 @@ const App: React.FC = () => {
       }
   }, [isDirty, showToast]);
 
-  const ensureChapterContentLoaded = useCallback(async (bookId: string, chapterId: string, session: number): Promise<string | null> => {
+  const ensureChapterContentLoaded = useCallback(
+    async (bookId: string, chapterId: string, session: number): Promise<string | null> => {
       const s = stateRef.current;
       const book = s.books.find(b => b.id === bookId);
       const chapter = book?.chapters.find(c => c.id === chapterId);
       if (!book || !chapter) return null;
 
-      if (chapter.content && chapter.content.length > 10) return chapter.content;
+      // If we already have content in memory, accept it even if short.
+      if (typeof chapter.content === "string") {
+        return chapter.content;
+      }
 
+      // Local cache first. Only null means missing. Short strings are valid.
       try {
-        const cached = await libraryLoadChapterText(chapterId);
-        if (cached && cached.length > 10) {
+        const cached = await libraryLoadChapterText(bookId, chapterId);
+
+        if (cached !== null) {
           if (chapterSessionRef.current !== session) return null;
 
           setState(p => ({
             ...p,
-            books: p.books.map(b => b.id === bookId ? {
-              ...b,
-              chapters: b.chapters.map(c => c.id === chapterId ? { ...c, content: cached, textLength: cached.length } : c)
-            } : b)
+            books: p.books.map(b =>
+              b.id === bookId
+                ? {
+                    ...b,
+                    chapters: b.chapters.map(c =>
+                      c.id === chapterId
+                        ? { ...c, content: cached, textLength: cached.length, updatedAt: Date.now() }
+                        : c
+                    ),
+                  }
+                : b
+            ),
           }));
 
+          trace("text:cache:hit", { chapterId, len: cached.length });
           return cached;
         }
-      } catch (e) {
-        // ignore, fall back to Drive below
+
+        trace("text:cache:miss", { chapterId });
+      } catch (e: any) {
+        traceError("text:cache:error", e);
+        // ignore and fall back to Drive below
       }
 
+      // Drive fallback only if authorized
       if (chapter.cloudTextFileId && isAuthorized) {
-           trace('text:load:start', { chapterId, fileId: chapter.cloudTextFileId, session });
-           try {
-               const text = await fetchDriveFile(chapter.cloudTextFileId);
-               if (text) {
-                   if (chapterSessionRef.current !== session) {
-                       trace('text:load:aborted', { reason: 'stale_session' });
-                       return null;
-                   }
-                   setState(p => ({
-                       ...p,
-                       books: p.books.map(b => b.id === bookId ? {
-                           ...b,
-                           chapters: b.chapters.map(c => c.id === chapterId ? { ...c, content: text, textLength: text.length } : c)
-                       } : b)
-                   }));
-                   trace('text:load:success', { len: text.length });
-                   try { await librarySaveChapterText(bookId, chapterId, text); } catch {}
-                   return text;
-               }
-           } catch (e: any) {
-               traceError('text:load:failed', e);
-               showToast("Failed to load text: " + e.message, 0, 'error');
-           }
+        trace("text:drive:load:start", { chapterId, fileId: chapter.cloudTextFileId, session });
+
+        try {
+          const text = await fetchDriveFile(chapter.cloudTextFileId);
+
+          if (typeof text === "string") {
+            if (chapterSessionRef.current !== session) {
+              trace("text:drive:load:aborted", { reason: "stale_session" });
+              return null;
+            }
+
+            setState(p => ({
+              ...p,
+              books: p.books.map(b =>
+                b.id === bookId
+                  ? {
+                      ...b,
+                      chapters: b.chapters.map(c =>
+                        c.id === chapterId
+                          ? { ...c, content: text, textLength: text.length, updatedAt: Date.now() }
+                          : c
+                      ),
+                    }
+                  : b
+              ),
+            }));
+
+            try {
+              await librarySaveChapterText(bookId, chapterId, text);
+            } catch {}
+
+            trace("text:drive:load:success", { chapterId, len: text.length });
+            return text;
+          }
+        } catch (e: any) {
+          traceError("text:drive:load:failed", e);
+          showToast("Failed to load text: " + (e?.message ?? String(e)), 0, "error");
+        }
       }
+
       return null;
-  }, [isAuthorized, showToast]);
+    },
+    [isAuthorized, showToast]
+  );
 
   const hardRefreshForChapter = useCallback(async (bookId: string, chapterId: string) => {
        const s = stateRef.current;
@@ -717,7 +772,7 @@ const App: React.FC = () => {
     
     if (session !== chapterSessionRef.current) return;
 
-    if (!content && (!chapter.content || chapter.content.length < 10)) {
+    if (content === null && typeof chapter.content !== "string") {
         showToast("Chapter text missing. Check Drive.", 0, 'error');
         updatePhase('READY');
         return;
@@ -728,7 +783,9 @@ const App: React.FC = () => {
     setCurrentIntroDurSec(chapter.audioIntroDurSec || 5);
     const voice = book.settings.defaultVoiceId || 'en-US-Standard-C';
     const allRules = [...s.globalRules, ...book.rules];
-    const textToSpeak = applyRules((content ?? chapter.content ?? ""), allRules);
+    let textToSpeak = applyRules((content ?? chapter.content ?? ""), allRules);
+    if (s.readerSettings?.reflowLineBreaks) textToSpeak = reflowLineBreaks(textToSpeak);
+
     const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
     const introText = applyRules(rawIntro, allRules);
     
@@ -1114,7 +1171,7 @@ const App: React.FC = () => {
     }
   }, [hardRefreshForChapter, showToast]);
 
-  useEffect(() => {
+  const prefsJson = useMemo(() => {
     const prefs = {
       activeBookId: state.activeBookId,
       playbackSpeed: state.playbackSpeed,
@@ -1133,9 +1190,29 @@ const App: React.FC = () => {
       globalRules: state.globalRules,
       showDiagnostics: state.showDiagnostics
     };
+    return JSON.stringify(prefs);
+  }, [
+    state.activeBookId,
+    state.playbackSpeed,
+    state.selectedVoiceName,
+    state.theme,
+    state.debugMode,
+    state.readerSettings,
+    state.driveToken,
+    state.googleClientId,
+    state.keepAwake,
+    state.lastSavedAt,
+    state.driveRootFolderId,
+    state.driveRootFolderName,
+    state.driveSubfolders,
+    state.autoSaveInterval,
+    state.globalRules,
+    state.showDiagnostics
+  ]);
 
-    safeSetLocalStorage(PREFS_KEY, JSON.stringify(prefs));
-  }, [state]);
+  useEffect(() => {
+    safeSetLocalStorage(PREFS_KEY, prefsJson);
+  }, [prefsJson]);
 
   const LinkCloudModal = () => {
     const [candidates, setCandidates] = useState<{id: string, name: string, hasState: boolean}[]>([]);
@@ -1334,8 +1411,24 @@ const App: React.FC = () => {
                 void loadMoreChapters(id, true);
               }} 
               onAddBook={handleAddBook}
-              onDeleteBook={id => { setState(p => ({ ...p, books: p.books.filter(b => b.id !== id) })); markDirty(); }}
-              onUpdateBook={book => { setState(p => ({ ...p, books: p.books.map(b => b.id === book.id ? book : b) })); markDirty(); }}
+              onDeleteBook={async (id) => {
+                try {
+                  await libraryDeleteBook(id);
+                } catch (e: any) {
+                  console.error('[TaleVox][Library] delete failed', e);
+                }
+                setState(p => ({ ...p, books: p.books.filter(b => b.id !== id), activeBookId: p.activeBookId === id ? undefined : p.activeBookId }));
+                markDirty();
+              }}
+              onUpdateBook={async (book) => {
+                try {
+                  await libraryUpsertBook({ ...book, directoryHandle: undefined });
+                } catch (e: any) {
+                  console.error('[TaleVox][Library] update failed', e);
+                }
+                setState(p => ({ ...p, books: p.books.map(b => b.id === book.id ? book : b) }));
+                markDirty();
+              }}
               theme={state.theme}
               isCloudLinked={!!state.driveRootFolderId}
               onLinkCloud={handleSelectRoot}
@@ -1356,6 +1449,8 @@ const App: React.FC = () => {
               onLoadMoreChapters={() => void loadMoreChapters(activeBook.id, false)}
               hasMoreChapters={chapterPagingByBook[activeBook.id]?.hasMore ?? true}
               isLoadingMoreChapters={chapterPagingByBook[activeBook.id]?.loading ?? false}
+              globalRules={state.globalRules}
+              reflowLineBreaksEnabled={state.readerSettings.reflowLineBreaks}
             />
           )}
 
@@ -1423,7 +1518,7 @@ const App: React.FC = () => {
               lastSavedAt={state.lastSavedAt}
               driveRootName={state.driveRootFolderName}
               onSelectRoot={handleSelectRoot}
-              onRunMigration={handleRunMigration}
+              onRunMigration={handleSaveState}
               syncDiagnostics={state.syncDiagnostics}
               autoSaveInterval={state.autoSaveInterval}
               onSetAutoSaveInterval={v => setState(p => ({ ...p, autoSaveInterval: v }))}

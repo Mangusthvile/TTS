@@ -1,161 +1,286 @@
-import React, { useState, useRef } from 'react';
-import { Book, Theme, StorageBackend } from '../types';
-import { BookOpen, Plus, Trash2, Cloud, Monitor, Database, Image as ImageIcon, FolderSync } from 'lucide-react';
-import { openFolderPicker } from '../services/driveService';
-import { getValidDriveToken } from '../services/driveAuth';
+import React, { useMemo, useRef, useState } from "react";
+import { Book, StorageBackend, Theme } from "../types";
+import { BookOpen, Plus, Trash2, Image as ImageIcon, Cloud, Database, Monitor } from "lucide-react";
 
-interface LibraryProps {
+interface Props {
   books: Book[];
   activeBookId?: string;
-  onSelectBook: (id: string) => void;
-  onAddBook: (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string, driveFolderName?: string) => Promise<void>;
-  onDeleteBook: (id: string) => void;
+  onSelectBook: (bookId: string) => void;
+  onAddBook: (
+    title: string,
+    backend: StorageBackend,
+    directoryHandle?: any,
+    driveFolderId?: string,
+    driveFolderName?: string
+  ) => Promise<void>;
+  onDeleteBook: (bookId: string) => void;
   onUpdateBook: (book: Book) => void;
   theme: Theme;
-  onClose?: () => void;
-  isOpen?: boolean;
-  isCloudLinked?: boolean;
-  onLinkCloud?: () => void;
+  isCloudLinked: boolean;
+  onLinkCloud: () => void;
 }
 
-const Library: React.FC<LibraryProps> = ({ 
-  books, activeBookId, onSelectBook, onAddBook, onDeleteBook, onUpdateBook, theme, onClose, isOpen, isCloudLinked, onLinkCloud
+const Library: React.FC<Props> = ({
+  books,
+  activeBookId,
+  onSelectBook,
+  onAddBook,
+  onDeleteBook,
+  onUpdateBook,
+  theme,
+  isCloudLinked,
+  onLinkCloud,
 }) => {
   const [isAdding, setIsAdding] = useState(false);
+  const [newTitle, setNewTitle] = useState("");
   const [isProcessingAdd, setIsProcessingAdd] = useState(false);
-  const [newTitle, setNewTitle] = useState('');
-  const coverInputRef = useRef<HTMLInputElement>(null);
+
+  const coverInputRef = useRef<HTMLInputElement | null>(null);
   const [uploadingCoverFor, setUploadingCoverFor] = useState<string | null>(null);
 
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
-  const textClass = isDark ? 'text-slate-100' : isSepia ? 'text-[#3c2f25]' : 'text-black';
+
+  const textPrimary = isDark ? "text-white" : isSepia ? "text-[#3c2f25]" : "text-black";
+  const textMuted = isDark ? "text-white/60" : isSepia ? "text-[#3c2f25]/70" : "text-black/55";
+
+  const headerIconColor = isDark ? "text-indigo-400" : "text-indigo-600";
+
+  const chromeButton =
+    isDark
+      ? "bg-white/5 hover:bg-white/10 border border-white/10 text-white"
+      : isSepia
+        ? "bg-[#3c2f25]/10 hover:bg-[#3c2f25]/15 border border-[#3c2f25]/15 text-[#3c2f25]"
+        : "bg-indigo-600 hover:bg-indigo-700 border border-indigo-700 text-white";
+
+  const panel =
+    isDark
+      ? "bg-white/5 border border-white/10"
+      : isSepia
+        ? "bg-[#efe6d5] border border-[#3c2f25]/15"
+        : "bg-white border border-slate-200";
+
+  const optionCard =
+    isDark
+      ? "bg-slate-900 border border-white/10 hover:bg-slate-800"
+      : isSepia
+        ? "bg-[#efe6d5] border border-[#3c2f25]/15 hover:bg-[#e6dcc8]"
+        : "bg-white border border-slate-200 hover:bg-slate-50";
+
+  const cardShell =
+    isDark
+      ? "bg-white/5 border border-white/10"
+      : isSepia
+        ? "bg-[#efe6d5] border border-[#3c2f25]/15"
+        : "bg-white border border-slate-200";
+
+  const ringActive = "ring-2 ring-indigo-500 shadow-indigo-500/20";
+
+  const sortedBooks = useMemo(() => {
+    return [...books].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+  }, [books]);
 
   const handleAdd = async (backend: StorageBackend, handle?: any, driveFolderId?: string, driveFolderName?: string) => {
     if (!newTitle.trim()) return;
+
     setIsProcessingAdd(true);
     try {
-      await onAddBook(newTitle, backend, handle, driveFolderId, driveFolderName);
+      await onAddBook(newTitle.trim(), backend, handle, driveFolderId, driveFolderName);
       setIsAdding(false);
-      setNewTitle('');
+      setNewTitle("");
     } catch (e: any) {
-      alert("Error adding book: " + e.message);
+      alert("Error adding book: " + (e?.message ?? String(e)));
     } finally {
       setIsProcessingAdd(false);
     }
   };
 
-  const handleStartDrivePick = async () => {
-    if (!newTitle.trim()) return;
-    if (!isCloudLinked && onLinkCloud) {
+  const handleStartDriveAdd = async () => {
+    if (!isCloudLinked) {
       onLinkCloud();
       return;
     }
-    
-    // If cloud is linked, we create the book folder automatically under TaleVox/books
-    // instead of opening a manual folder picker.
-    handleAdd(StorageBackend.DRIVE);
+    await handleAdd(StorageBackend.DRIVE);
   };
 
-  const handleCoverUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleCoverSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !uploadingCoverFor) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const book = books.find(b => b.id === uploadingCoverFor);
-      if (book) {
-        onUpdateBook({ ...book, coverImage: reader.result as string });
-      }
-      setUploadingCoverFor(null);
-    };
-    reader.readAsDataURL(file);
+
+    try {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const url = String(reader.result ?? "");
+        const book = books.find((b) => b.id === uploadingCoverFor);
+        if (!book) return;
+        onUpdateBook({ ...book, coverImage: url, updatedAt: Date.now() });
+        setUploadingCoverFor(null);
+        if (coverInputRef.current) coverInputRef.current.value = "";
+      };
+      reader.readAsDataURL(file);
+    } catch (err: any) {
+      alert("Cover upload failed: " + (err?.message ?? String(err)));
+    }
   };
 
   return (
-    <div className={`h-full flex flex-col min-w-0 ${isDark ? 'bg-slate-900' : isSepia ? 'bg-[#efe6d5]' : 'bg-white'}`}>
-      <input type="file" ref={coverInputRef} className="hidden" accept="image/*" onChange={handleCoverUpload} />
-      
-      <div className="p-6 flex items-center justify-between flex-shrink-0">
-        <h2 className={`text-2xl font-black tracking-tight flex items-center gap-3 ${textClass}`}>
-          <BookOpen className="w-8 h-8 text-indigo-600" /> Library
-        </h2>
-        <button 
-          onClick={() => setIsAdding(true)} 
-          className="p-3 bg-indigo-600 text-white rounded-2xl shadow-xl hover:scale-105 active:scale-95 transition-transform"
-          aria-label="Add new book"
+    <div className="h-full w-full flex flex-col min-w-0 bg-transparent">
+      <input ref={coverInputRef} type="file" accept="image/*" className="hidden" onChange={handleCoverSelected} />
+
+      {/* Header matches desktop look */}
+      <div className="px-6 sm:px-10 pt-8 sm:pt-10 flex items-center justify-between flex-shrink-0">
+        <div className="flex items-center gap-3">
+          <BookOpen className={`w-7 h-7 sm:w-8 sm:h-8 ${headerIconColor}`} />
+          <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textPrimary}`}>Library</h2>
+        </div>
+
+        <button
+          onClick={() => setIsAdding(true)}
+          className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-xl transition-all active:scale-95 ${chromeButton}`}
+          aria-label="Add Book"
         >
           <Plus className="w-6 h-6" />
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-6 pb-12">
-        {isAdding && (
-          <div className={`p-6 rounded-[2rem] border shadow-2xl space-y-6 mb-8 animate-in zoom-in-95 ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-indigo-50 border-indigo-100'}`}>
-            <div className="space-y-1">
-              <label className="text-[10px] font-black uppercase tracking-widest text-indigo-600 ml-1">New Book Title</label>
-              <input 
-                autoFocus 
+      {/* Add book panel */}
+      {isAdding && (
+        <div className="px-6 sm:px-10 pt-6 flex-shrink-0">
+          <div className={`p-6 rounded-[2rem] shadow-2xl ${panel}`}>
+            <div className="space-y-2">
+              <label className={`text-[10px] font-black uppercase tracking-widest ${textMuted}`}>New Book Title</label>
+              <input
+                autoFocus
                 disabled={isProcessingAdd}
-                type="text" 
-                value={newTitle} 
-                onChange={e => setNewTitle(e.target.value)} 
-                placeholder="e.g. The Hobbit" 
-                className={`w-full px-4 py-4 rounded-xl outline-none text-sm font-bold border ${isDark ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-white border-slate-200 text-black'}`} 
+                type="text"
+                value={newTitle}
+                onChange={(e) => setNewTitle(e.target.value)}
+                placeholder="e.g. The Mech Touch"
+                className={`w-full px-4 py-4 rounded-xl outline-none text-sm font-bold ${
+                  isDark
+                    ? "bg-slate-900 border border-white/10 text-white"
+                    : isSepia
+                      ? "bg-[#efe6d5] border border-[#3c2f25]/15 text-[#3c2f25]"
+                      : "bg-white border border-slate-200 text-black"
+                }`}
               />
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <button onClick={() => handleAdd(StorageBackend.MEMORY)} className={`flex flex-col items-center gap-2 p-4 rounded-2xl text-[10px] font-black uppercase border transition-all ${isDark ? 'bg-slate-900 border-slate-700' : 'bg-white'}`}><Database className="w-5 h-5 text-emerald-500" /> Memory</button>
-              <button onClick={handleStartDrivePick} className={`flex flex-col items-center gap-2 p-4 rounded-2xl text-[10px] font-black uppercase border transition-all ${isDark ? 'bg-slate-900 border-slate-700' : 'bg-white'}`}><Cloud className="w-5 h-5 text-indigo-500" /> {isProcessingAdd ? 'Loading...' : isCloudLinked ? 'Drive' : 'Link Drive'}</button>
-              <button onClick={async () => { const h = await (window as any).showDirectoryPicker({ mode: "readwrite" }); handleAdd(StorageBackend.LOCAL, h); }} className={`flex flex-col items-center gap-2 p-4 rounded-2xl text-[10px] font-black uppercase border transition-all ${isDark ? 'bg-slate-900 border-slate-700' : 'bg-white'}`}><Monitor className="w-5 h-5 text-slate-400" /> Local</button>
-            </div>
-            <button onClick={() => setIsAdding(false)} className={`w-full py-2 text-[10px] font-black uppercase tracking-widest opacity-60`}>Cancel</button>
-          </div>
-        )}
 
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4">
+              <button
+                disabled={isProcessingAdd}
+                onClick={() => handleAdd(StorageBackend.MEMORY)}
+                className={`p-4 rounded-2xl flex flex-col items-center gap-2 text-[10px] font-black uppercase transition-all ${optionCard}`}
+              >
+                <Database className="w-5 h-5 text-emerald-500" />
+                Memory
+              </button>
+
+              <button
+                disabled={isProcessingAdd}
+                onClick={handleStartDriveAdd}
+                className={`p-4 rounded-2xl flex flex-col items-center gap-2 text-[10px] font-black uppercase transition-all ${optionCard}`}
+              >
+                <Cloud className="w-5 h-5 text-indigo-500" />
+                {isCloudLinked ? "Drive" : "Link Drive"}
+              </button>
+
+              <button
+                disabled={isProcessingAdd}
+                onClick={async () => {
+                  try {
+                    const w: any = window as any;
+                    if (typeof w.showDirectoryPicker === "function") {
+                      const h = await w.showDirectoryPicker({ mode: "readwrite" });
+                      await handleAdd(StorageBackend.LOCAL, h);
+                    } else {
+                      await handleAdd(StorageBackend.LOCAL);
+                    }
+                  } catch {
+                    await handleAdd(StorageBackend.LOCAL);
+                  }
+                }}
+                className={`p-4 rounded-2xl flex flex-col items-center gap-2 text-[10px] font-black uppercase transition-all ${optionCard}`}
+              >
+                <Monitor className={`w-5 h-5 ${isDark ? "text-slate-300" : isSepia ? "text-[#3c2f25]" : "text-slate-600"}`} />
+                Local
+              </button>
+            </div>
+
+            <button
+              onClick={() => setIsAdding(false)}
+              className={`w-full mt-3 py-2 text-[10px] font-black uppercase tracking-widest ${textMuted}`}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Books grid: matches desktop spacing and left alignment */}
+      <div className="flex-1 min-w-0 overflow-y-auto px-6 sm:px-10 pt-8 pb-16">
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
-          {books.map(book => {
-            const unreadCount = book.chapters.filter(c => !c.isCompleted).length;
+          {sortedBooks.map((book) => {
+            const chapterCount = book.chapterCount ?? book.chapters.length;
+
             return (
-              <div key={book.id} className="flex flex-col gap-2 group relative">
-                <div 
+              <div key={book.id} className="flex flex-col gap-2 group">
+                <div
                   onClick={() => onSelectBook(book.id)}
-                  className={`aspect-[2/3] rounded-2xl overflow-hidden relative shadow-lg cursor-pointer transition-all hover:scale-[1.03] active:scale-[0.98] border-2 ${activeBookId === book.id ? 'border-indigo-500 shadow-indigo-500/20' : 'border-transparent'}`}
+                  className={[
+                    "aspect-[2/3] rounded-3xl overflow-hidden relative shadow-2xl cursor-pointer transition-all",
+                    cardShell,
+                    activeBookId === book.id ? ringActive : "",
+                  ].join(" ")}
                 >
                   {book.coverImage ? (
                     <img src={book.coverImage} className="w-full h-full object-cover" alt={book.title} />
                   ) : (
-                    <div className={`w-full h-full flex flex-col items-center justify-center p-4 text-center gap-2 ${isDark ? 'bg-slate-800' : 'bg-slate-100'}`}>
-                      <BookOpen className="w-10 h-10 opacity-10" />
-                      <span className="text-[10px] font-black uppercase tracking-widest opacity-40 leading-tight">{book.title}</span>
-                    </div>
-                  )}
-                  
-                  {unreadCount > 0 && (
-                    <div className="absolute top-2 right-2 px-2 py-1 bg-indigo-600 text-white text-[10px] font-black rounded-lg shadow-lg">
-                      {unreadCount}
+                    <div className={`w-full h-full flex flex-col items-center justify-center text-center ${isDark ? "bg-slate-900" : isSepia ? "bg-[#efe6d5]" : "bg-slate-100"}`}>
+                      <BookOpen className={`w-12 h-12 ${isDark ? "text-white/15" : "text-black/10"}`} />
+                      <div className={`mt-2 px-3 text-[10px] font-black uppercase tracking-widest ${isDark ? "text-white/40" : "text-black/40"}`}>
+                        {book.title}
+                      </div>
                     </div>
                   )}
 
-                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100 gap-2">
-                    <button 
-                      onClick={(e) => { e.stopPropagation(); setUploadingCoverFor(book.id); coverInputRef.current?.click(); }}
-                      className="p-3 bg-white/20 backdrop-blur-md text-white rounded-xl hover:bg-white/40 transition-all"
+                  {/* Top-right badge like desktop screenshot */}
+                  {chapterCount > 0 && (
+                    <div className="absolute top-2 right-2 px-2 py-1 bg-indigo-600 text-white text-[10px] font-black rounded-xl shadow-lg">
+                      {Math.min(chapterCount, 9999)}
+                    </div>
+                  )}
+
+                  {/* Actions overlay. Works on desktop hover. Still okay on mobile for now. */}
+                  <div className="absolute inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all gap-2">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setUploadingCoverFor(book.id);
+                        coverInputRef.current?.click();
+                      }}
+                      className="p-3 bg-white/20 backdrop-blur-md text-white rounded-2xl hover:bg-white/35 transition-all"
                       aria-label="Change Cover"
                     >
                       <ImageIcon className="w-5 h-5" />
                     </button>
-                    <button 
-                      onClick={(e) => { e.stopPropagation(); if (confirm(`Delete '${book.title}'?`)) onDeleteBook(book.id); }}
-                      className="p-3 bg-red-500/40 backdrop-blur-md text-white rounded-xl hover:bg-red-500/60 transition-all"
+
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (confirm(`Delete '${book.title}' and all chapters?`)) onDeleteBook(book.id);
+                      }}
+                      className="p-3 bg-red-500/30 backdrop-blur-md text-white rounded-2xl hover:bg-red-500/50 transition-all"
                       aria-label="Delete Book"
                     >
                       <Trash2 className="w-5 h-5" />
                     </button>
                   </div>
                 </div>
+
                 <div onClick={() => onSelectBook(book.id)} className="cursor-pointer">
-                  <h3 className={`font-black text-xs sm:text-sm line-clamp-1 mt-1 ${textClass}`}>{book.title}</h3>
-                  <p className="text-[9px] font-bold uppercase tracking-tighter opacity-50">{book.chapters.length} chapters</p>
+                  <div className={`font-black text-xs sm:text-sm line-clamp-1 ${textPrimary}`}>{book.title}</div>
+                  <div className={`text-[9px] font-bold uppercase tracking-tighter ${textMuted}`}>{chapterCount} chapters</div>
                 </div>
               </div>
             );

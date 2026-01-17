@@ -1,20 +1,25 @@
-// services/libraryIdb.ts
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 /**
- * IndexedDB-backed library storage for web/desktop builds.
+ * IndexedDB backed library storage for web and desktop builds.
  *
- * Tables:
- * - books (key: id)
- * - chapters (key: id, index: ["bookId","index"])
- * - chapter_text (key: chapterId, index: bookId)
+ * Stores:
+ * books (key: id)
+ * chapters (key: id, index: byBookIndex, bookId_index, byBookId)
+ * chapter_text (key: chapterId, index: byBookId)
+ *
+ * Notes:
+ * 1) This file exports both plain names and idb prefixed aliases.
+ *    This prevents import naming drift from breaking builds.
+ * 2) Chapter objects returned from paging include required defaults:
+ *    wordCount, progress, progressChars.
  */
 
 import { HighlightMode } from "../types";
 import type { Book, Chapter, StorageBackend, AudioStatus, BookSettings, Rule } from "../types";
 
 const DB_NAME = "TalevoxLibrary";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 const STORE_BOOKS = "books";
 const STORE_CHAPTERS = "chapters";
@@ -33,25 +38,30 @@ type BookRow = {
   currentChapterId?: string;
   settings?: BookSettings;
   rules?: Rule[];
+  chapterCount?: number;
   updatedAt: number;
 };
 
 type ChapterRow = {
   id: string;
   bookId: string;
-  index: number;
+  idx: number;
   title: string;
   filename: string;
   sourceUrl?: string;
+
   cloudTextFileId?: string;
   cloudAudioFileId?: string;
+
   audioDriveId?: string;
   audioStatus?: AudioStatus;
   audioSignature?: string;
+
   durationSec?: number;
   textLength?: number;
   wordCount?: number;
   isFavorite?: boolean;
+
   updatedAt: number;
 };
 
@@ -64,8 +74,16 @@ type ChapterTextRow = {
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
+function ensureIndexedDbAvailable(): void {
+  if (typeof indexedDB === "undefined") {
+    throw new Error("IndexedDB is not available in this environment.");
+  }
+}
+
 function openDb(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
+
+  ensureIndexedDbAvailable();
 
   dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -78,14 +96,23 @@ function openDb(): Promise<IDBDatabase> {
       }
 
       if (!db.objectStoreNames.contains(STORE_CHAPTERS)) {
-        const store = db.createObjectStore(STORE_CHAPTERS, { keyPath: "id" });
-        store.createIndex("bookId_index", ["bookId", "index"], { unique: false });
-        store.createIndex("bookId", "bookId", { unique: false });
+        const s = db.createObjectStore(STORE_CHAPTERS, { keyPath: "id" });
+        s.createIndex("byBookId", "bookId", { unique: false });
+        s.createIndex("byBookIndex", ["bookId", "idx"], { unique: false });
+        s.createIndex("bookId_index", ["bookId", "idx"], { unique: false });
+      } else {
+        const s = req.transaction!.objectStore(STORE_CHAPTERS);
+        if (!s.indexNames.contains("byBookId")) s.createIndex("byBookId", "bookId", { unique: false });
+        if (!s.indexNames.contains("byBookIndex")) s.createIndex("byBookIndex", ["bookId", "idx"], { unique: false });
+        if (!s.indexNames.contains("bookId_index")) s.createIndex("bookId_index", ["bookId", "idx"], { unique: false });
       }
 
       if (!db.objectStoreNames.contains(STORE_CHAPTER_TEXT)) {
-        const store = db.createObjectStore(STORE_CHAPTER_TEXT, { keyPath: "chapterId" });
-        store.createIndex("bookId", "bookId", { unique: false });
+        const s = db.createObjectStore(STORE_CHAPTER_TEXT, { keyPath: "chapterId" });
+        s.createIndex("byBookId", "bookId", { unique: false });
+      } else {
+        const s = req.transaction!.objectStore(STORE_CHAPTER_TEXT);
+        if (!s.indexNames.contains("byBookId")) s.createIndex("byBookId", "bookId", { unique: false });
       }
     };
 
@@ -96,6 +123,13 @@ function openDb(): Promise<IDBDatabase> {
   return dbPromise;
 }
 
+function reqToPromise<T>(req: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
 function txDone(tx: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
@@ -104,40 +138,65 @@ function txDone(tx: IDBTransaction): Promise<void> {
   });
 }
 
-function reqToPromise<T>(req: IDBRequest<T>): Promise<T> {
-  return new Promise((resolve, reject) => {
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
+function toBook(row: BookRow): Book {
+  return {
+    id: row.id,
+    title: row.title,
+    author: row.author,
+    coverImage: row.coverImage,
+    backend: row.backend,
+    driveFolderId: row.driveFolderId,
+    driveFolderName: row.driveFolderName,
+    currentChapterId: row.currentChapterId,
+    settings: row.settings ?? { useBookSettings: false, highlightMode: HighlightMode.WORD },
+    rules: row.rules ?? [],
+    chapters: [],
+    chapterCount: row.chapterCount ?? 0,
+    updatedAt: row.updatedAt ?? Date.now(),
+  };
 }
 
-export async function idbListBooks(): Promise<Book[]> {
+function toChapter(row: ChapterRow): Chapter {
+  return {
+    id: row.id,
+    index: row.idx,
+    title: row.title,
+    filename: row.filename,
+    sourceUrl: row.sourceUrl,
+    content: undefined,
+
+    wordCount: row.wordCount ?? 0,
+    progress: 0,
+    progressChars: 0,
+
+    progressSec: undefined,
+    durationSec: row.durationSec,
+    textLength: row.textLength,
+    isFavorite: row.isFavorite,
+
+    cloudTextFileId: row.cloudTextFileId,
+    cloudAudioFileId: row.cloudAudioFileId,
+    audioDriveId: row.audioDriveId,
+    audioStatus: row.audioStatus,
+    audioSignature: row.audioSignature,
+
+    updatedAt: row.updatedAt,
+  } as any;
+}
+
+export async function listBooks(): Promise<Book[]> {
   const db = await openDb();
   const tx = db.transaction([STORE_BOOKS], "readonly");
   const store = tx.objectStore(STORE_BOOKS);
+
   const rows = (await reqToPromise(store.getAll())) as BookRow[];
   await txDone(tx);
 
-  return rows
-    .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
-    .map((r) => ({
-      id: r.id,
-      title: r.title,
-      author: r.author,
-      coverImage: r.coverImage,
-      chapters: [],
-      currentChapterId: r.currentChapterId,
-      rules: r.rules ?? [],
-      directoryHandle: undefined,
-      driveFolderId: r.driveFolderId,
-      driveFolderName: r.driveFolderName,
-      backend: r.backend,
-      settings: r.settings ?? { useBookSettings: false, highlightMode: HighlightMode.WORD },
-      updatedAt: r.updatedAt,
-    }));
+  rows.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+  return rows.map(toBook);
 }
 
-export async function idbUpsertBook(book: Book): Promise<void> {
+export async function upsertBook(book: Book): Promise<void> {
   const db = await openDb();
   const tx = db.transaction([STORE_BOOKS], "readwrite");
   const store = tx.objectStore(STORE_BOOKS);
@@ -151,8 +210,9 @@ export async function idbUpsertBook(book: Book): Promise<void> {
     driveFolderId: book.driveFolderId,
     driveFolderName: book.driveFolderName,
     currentChapterId: book.currentChapterId,
-    settings: book.settings,
+    settings: book.settings ?? { useBookSettings: false, highlightMode: HighlightMode.WORD },
     rules: book.rules ?? [],
+    chapterCount: book.chapterCount ?? book.chapters?.length ?? 0,
     updatedAt: book.updatedAt ?? Date.now(),
   };
 
@@ -160,127 +220,86 @@ export async function idbUpsertBook(book: Book): Promise<void> {
   await txDone(tx);
 }
 
-export async function idbDeleteBook(bookId: string): Promise<void> {
+export async function deleteBook(bookId: string): Promise<void> {
   const db = await openDb();
+  const tx = db.transaction([STORE_BOOKS, STORE_CHAPTERS, STORE_CHAPTER_TEXT], "readwrite");
 
-  {
-    const tx = db.transaction([STORE_BOOKS], "readwrite");
-    tx.objectStore(STORE_BOOKS).delete(bookId);
-    await txDone(tx);
-  }
+  const sBooks = tx.objectStore(STORE_BOOKS);
+  const sCh = tx.objectStore(STORE_CHAPTERS);
+  const sTxt = tx.objectStore(STORE_CHAPTER_TEXT);
 
-  const chapters = await idbListAllChaptersForBook(bookId);
-  const chapterIds = chapters.map((c) => c.id);
+  sBooks.delete(bookId);
 
-  if (chapterIds.length) {
-    const tx = db.transaction([STORE_CHAPTERS, STORE_CHAPTER_TEXT], "readwrite");
-    const sCh = tx.objectStore(STORE_CHAPTERS);
-    const sTxt = tx.objectStore(STORE_CHAPTER_TEXT);
-    for (const id of chapterIds) sCh.delete(id);
-    for (const id of chapterIds) sTxt.delete(id);
-    await txDone(tx);
-  }
-}
+  const chIdx = sCh.index("byBookId");
+  const chKeys = (await reqToPromise(chIdx.getAllKeys(IDBKeyRange.only(bookId)))) as any[];
+  for (const k of chKeys) sCh.delete(k);
 
-async function idbListAllChaptersForBook(bookId: string): Promise<ChapterRow[]> {
-  const db = await openDb();
-  const tx = db.transaction([STORE_CHAPTERS], "readonly");
-  const store = tx.objectStore(STORE_CHAPTERS);
-  const idx = store.index("bookId");
-  const rows = (await reqToPromise(idx.getAll(IDBKeyRange.only(bookId)))) as ChapterRow[];
-  await txDone(tx);
-  return rows;
-}
-
-export async function idbListChaptersPage(bookId: string, afterIndex: number, limit: number): Promise<ChapterPage> {
-  const db = await openDb();
-  const tx = db.transaction([STORE_CHAPTERS], "readonly");
-  const store = tx.objectStore(STORE_CHAPTERS);
-  const idx = store.index("bookId_index");
-
-  const lower = IDBKeyRange.lowerBound([bookId, afterIndex + 1]);
-  const chapters: Chapter[] = [];
-
-  await new Promise<void>((resolve, reject) => {
-    const req = idx.openCursor(lower, "next");
-    req.onerror = () => reject(req.error);
-    req.onsuccess = () => {
-      const cursor = req.result;
-      if (!cursor) return resolve();
-
-      const row = cursor.value as ChapterRow;
-      if (row.bookId !== bookId) return resolve();
-
-      chapters.push({
-        id: row.id,
-        index: row.index,
-        title: row.title,
-        filename: row.filename,
-        sourceUrl: row.sourceUrl,
-        content: undefined,
-        wordCount: row.wordCount ?? 0,
-        progress: 0,
-        progressChars: 0,
-        progressSec: undefined,
-        durationSec: row.durationSec,
-        textLength: row.textLength,
-        isFavorite: row.isFavorite,
-        cloudTextFileId: row.cloudTextFileId,
-        cloudAudioFileId: row.cloudAudioFileId,
-        audioDriveId: row.audioDriveId,
-        audioStatus: row.audioStatus,
-        audioSignature: row.audioSignature,
-        updatedAt: row.updatedAt,
-      });
-
-      if (chapters.length >= limit) return resolve();
-      cursor.continue();
-    };
-  });
+  const txtIdx = sTxt.index("byBookId");
+  const txtKeys = (await reqToPromise(txtIdx.getAllKeys(IDBKeyRange.only(bookId)))) as any[];
+  for (const k of txtKeys) sTxt.delete(k);
 
   await txDone(tx);
-
-  const nextAfterIndex = chapters.length ? chapters[chapters.length - 1].index : null;
-  return { chapters, nextAfterIndex };
 }
 
-export async function idbUpsertChapterMeta(bookId: string, chapter: Chapter): Promise<void> {
+export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promise<void> {
   const db = await openDb();
-  const tx = db.transaction([STORE_CHAPTERS], "readwrite");
-  const store = tx.objectStore(STORE_CHAPTERS);
+  const tx = db.transaction([STORE_BOOKS, STORE_CHAPTERS], "readwrite");
+
+  const sBooks = tx.objectStore(STORE_BOOKS);
+  const sCh = tx.objectStore(STORE_CHAPTERS);
 
   const row: ChapterRow = {
     id: chapter.id,
     bookId,
-    index: chapter.index,
+    idx: chapter.index,
     title: chapter.title,
     filename: chapter.filename,
     sourceUrl: chapter.sourceUrl,
-    cloudTextFileId: chapter.cloudTextFileId,
-    cloudAudioFileId: chapter.cloudAudioFileId,
-    audioDriveId: chapter.audioDriveId,
-    audioStatus: chapter.audioStatus,
-    audioSignature: chapter.audioSignature,
-    durationSec: chapter.durationSec,
-    textLength: chapter.textLength,
-    wordCount: chapter.wordCount,
-    isFavorite: chapter.isFavorite,
-    updatedAt: chapter.updatedAt ?? Date.now(),
+
+    cloudTextFileId: (chapter as any).cloudTextFileId,
+    cloudAudioFileId: (chapter as any).cloudAudioFileId,
+
+    audioDriveId: (chapter as any).audioDriveId,
+    audioStatus: (chapter as any).audioStatus,
+    audioSignature: (chapter as any).audioSignature,
+
+    durationSec: (chapter as any).durationSec,
+    textLength: (chapter as any).textLength,
+    wordCount: (chapter as any).wordCount ?? chapter.wordCount ?? 0,
+    isFavorite: (chapter as any).isFavorite,
+
+    updatedAt: (chapter as any).updatedAt ?? Date.now(),
   };
 
-  store.put(row);
+  sCh.put(row);
+
+  try {
+    const bookRow = (await reqToPromise(sBooks.get(bookId))) as BookRow | undefined;
+    if (bookRow) {
+      const prev = Number(bookRow.chapterCount ?? 0);
+      const candidate = Math.max(prev, chapter.index + 1);
+      bookRow.chapterCount = candidate;
+      bookRow.updatedAt = Date.now();
+      sBooks.put(bookRow);
+    }
+  } catch {
+    // ignore
+  }
+
   await txDone(tx);
 }
 
-export async function idbDeleteChapter(chapterId: string): Promise<void> {
+export async function deleteChapter(bookId: string, chapterId: string): Promise<void> {
   const db = await openDb();
   const tx = db.transaction([STORE_CHAPTERS, STORE_CHAPTER_TEXT], "readwrite");
+
   tx.objectStore(STORE_CHAPTERS).delete(chapterId);
   tx.objectStore(STORE_CHAPTER_TEXT).delete(chapterId);
+
   await txDone(tx);
 }
 
-export async function idbSaveChapterText(bookId: string, chapterId: string, content: string): Promise<void> {
+export async function saveChapterText(bookId: string, chapterId: string, content: string): Promise<void> {
   const db = await openDb();
   const tx = db.transaction([STORE_CHAPTER_TEXT], "readwrite");
   const store = tx.objectStore(STORE_CHAPTER_TEXT);
@@ -291,55 +310,158 @@ export async function idbSaveChapterText(bookId: string, chapterId: string, cont
     content,
     updatedAt: Date.now(),
   };
+
   store.put(row);
   await txDone(tx);
 }
 
-export async function idbLoadChapterText(chapterId: string): Promise<string | null> {
+// services/libraryIdb.ts
+export async function loadChapterText(bookId: string, chapterId: string): Promise<string | null> {
   const db = await openDb();
-  const tx = db.transaction([STORE_CHAPTER_TEXT], "readonly");
+  const tx = db.transaction([STORE_CHAPTER_TEXT], "readwrite");
   const store = tx.objectStore(STORE_CHAPTER_TEXT);
+
   const row = (await reqToPromise(store.get(chapterId))) as ChapterTextRow | undefined;
-  await txDone(tx);
-  return row?.content ?? null;
-}
 
-export async function idbBulkUpsertChapters(
-  bookId: string,
-  items: Array<{ chapter: Chapter; content?: string | null }>
-): Promise<void> {
-  const db = await openDb();
-  const tx = db.transaction([STORE_CHAPTERS, STORE_CHAPTER_TEXT], "readwrite");
-  const sCh = tx.objectStore(STORE_CHAPTERS);
-  const sTxt = tx.objectStore(STORE_CHAPTER_TEXT);
+  if (!row) {
+    await txDone(tx);
+    return null;
+  }
 
-  for (const it of items) {
-    const c = it.chapter;
-    const row: ChapterRow = {
-      id: c.id,
-      bookId,
-      index: c.index,
-      title: c.title,
-      filename: c.filename,
-      sourceUrl: c.sourceUrl,
-      cloudTextFileId: c.cloudTextFileId,
-      cloudAudioFileId: c.cloudAudioFileId,
-      audioDriveId: c.audioDriveId,
-      audioStatus: c.audioStatus,
-      audioSignature: c.audioSignature,
-      durationSec: c.durationSec,
-      textLength: c.textLength,
-      wordCount: c.wordCount,
-      isFavorite: c.isFavorite,
-      updatedAt: c.updatedAt ?? Date.now(),
-    };
-    sCh.put(row);
-
-    if (typeof it.content === "string" && it.content.length) {
-      const txtRow: ChapterTextRow = { chapterId: c.id, bookId, content: it.content, updatedAt: Date.now() };
-      sTxt.put(txtRow);
+  // If the bookId mismatches, repair it. ChapterId is globally unique.
+  if (row.bookId !== bookId) {
+    try {
+      store.put({ ...row, bookId, updatedAt: Date.now() });
+    } catch {
+      // ignore
     }
   }
 
   await txDone(tx);
+  return row.content ?? "";
 }
+
+export async function listChaptersPage(
+  bookId: string,
+  afterIndex: number | null,
+  limit: number
+): Promise<ChapterPage> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_CHAPTERS], "readonly");
+  const store = tx.objectStore(STORE_CHAPTERS);
+
+  const idx =
+    store.indexNames.contains("byBookIndex")
+      ? store.index("byBookIndex")
+      : store.index("bookId_index");
+
+  const start = (afterIndex ?? -1) + 1;
+  const range = IDBKeyRange.bound([bookId, start], [bookId, Number.MAX_SAFE_INTEGER]);
+
+  const chapters: Chapter[] = [];
+
+  await new Promise<void>((resolve, reject) => {
+    const req = idx.openCursor(range, "next");
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor) return resolve();
+
+      if (chapters.length >= limit) return resolve();
+
+      const row = cursor.value as ChapterRow;
+      chapters.push(toChapter(row));
+
+      cursor.continue();
+    };
+  });
+
+  await txDone(tx);
+
+  const nextAfterIndex = chapters.length ? chapters[chapters.length - 1].index : null;
+  return { chapters, nextAfterIndex: chapters.length < limit ? null : nextAfterIndex };
+}
+
+export async function bulkUpsertChapters(
+  bookId: string,
+  items: Array<{ chapter: Chapter; content?: string | null }>
+): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_BOOKS, STORE_CHAPTERS, STORE_CHAPTER_TEXT], "readwrite");
+
+  const sBooks = tx.objectStore(STORE_BOOKS);
+  const sCh = tx.objectStore(STORE_CHAPTERS);
+  const sTxt = tx.objectStore(STORE_CHAPTER_TEXT);
+
+  let maxIdx = -1;
+
+  for (const it of items) {
+    const c = it.chapter;
+
+    const row: ChapterRow = {
+      id: c.id,
+      bookId,
+      idx: c.index,
+      title: c.title,
+      filename: c.filename,
+      sourceUrl: c.sourceUrl,
+
+      cloudTextFileId: (c as any).cloudTextFileId,
+      cloudAudioFileId: (c as any).cloudAudioFileId,
+
+      audioDriveId: (c as any).audioDriveId,
+      audioStatus: (c as any).audioStatus,
+      audioSignature: (c as any).audioSignature,
+
+      durationSec: (c as any).durationSec,
+      textLength: (c as any).textLength,
+      wordCount: (c as any).wordCount ?? c.wordCount ?? 0,
+      isFavorite: (c as any).isFavorite,
+
+      updatedAt: (c as any).updatedAt ?? Date.now(),
+    };
+
+    if (typeof row.idx === "number" && row.idx > maxIdx) maxIdx = row.idx;
+
+    sCh.put(row);
+
+    if (typeof it.content === "string" && it.content.length) {
+      const txtRow: ChapterTextRow = {
+        chapterId: c.id,
+        bookId,
+        content: it.content,
+        updatedAt: Date.now(),
+      };
+      sTxt.put(txtRow);
+    }
+  }
+
+  try {
+    const bookRow = (await reqToPromise(sBooks.get(bookId))) as BookRow | undefined;
+    if (bookRow) {
+      const prev = Number(bookRow.chapterCount ?? 0);
+      const candidate = maxIdx >= 0 ? Math.max(prev, maxIdx + 1) : prev;
+      bookRow.chapterCount = candidate;
+      bookRow.updatedAt = Date.now();
+      sBooks.put(bookRow);
+    }
+  } catch {
+    // ignore
+  }
+
+  await txDone(tx);
+}
+
+/**
+ * Export aliases to prevent naming drift.
+ * These match the earlier Phase One naming.
+ */
+export const idbListBooks = listBooks;
+export const idbUpsertBook = upsertBook;
+export const idbDeleteBook = deleteBook;
+export const idbUpsertChapterMeta = upsertChapterMeta;
+export const idbDeleteChapter = deleteChapter;
+export const idbSaveChapterText = saveChapterText;
+export const idbLoadChapterText = loadChapterText;
+export const idbListChaptersPage = listChaptersPage;
+export const idbBulkUpsertChapters = bulkUpsertChapters;

@@ -1,17 +1,21 @@
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
-import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile } from '../types';
+import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile, Rule } from '../types';
 import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon, Sparkles } from 'lucide-react';
 import { applyRules } from '../services/speechService';
 import { synthesizeChunk } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache } from '../services/audioCache';
 import { uploadToDrive, listFilesInFolder, buildMp3Name, buildTextName, createDriveFolder, findFileSync, moveFile } from '../services/driveService';
 import { isTokenValid } from '../services/driveAuth';
+import { reflowLineBreaks } from '../services/textFormat';
+import { loadChapterText as libraryLoadChapterText } from '../services/libraryStore';
 
 type ViewMode = 'details' | 'list' | 'grid';
 
 interface ChapterFolderViewProps {
   book: Book;
   theme: Theme;
+  globalRules: Rule[];
+  reflowLineBreaksEnabled: boolean;
   onAddChapter: () => void;
   onOpenChapter: (chapterId: string) => void;
   onToggleFavorite: (chapterId: string) => void;
@@ -30,7 +34,20 @@ interface ChapterFolderViewProps {
 }
 
 const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
-  book, theme, onAddChapter, onOpenChapter, onToggleFavorite, onUpdateChapterTitle, onDeleteChapter, onUpdateChapter, onUpdateBookSettings, onBackToLibrary, onResetChapterProgress, playbackSnapshot,
+  book,
+  theme,
+  globalRules,
+  reflowLineBreaksEnabled,
+  onAddChapter,
+  onOpenChapter,
+  onToggleFavorite,
+  onUpdateChapterTitle,
+  onDeleteChapter,
+  onUpdateChapter,
+  onUpdateBookSettings,
+  onBackToLibrary,
+  onResetChapterProgress,
+  playbackSnapshot,
   onLoadMoreChapters,
   hasMoreChapters,
   isLoadingMoreChapters
@@ -156,15 +173,45 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
   }, [book.driveFolderId, chapters, onUpdateChapter]);
 
+  const AUDIO_STATUS_ERROR: AudioStatus =
+    ((AudioStatus as any).ERROR ??
+      (AudioStatus as any).FAILED ??
+      (AudioStatus as any).MISSING ??
+      (AudioStatus as any).NONE ??
+      AudioStatus.READY) as AudioStatus;
+
   const generateAudio = async (chapter: Chapter, voiceToUse?: string) => {
     const voice = voiceToUse || book.settings.defaultVoiceId || 'en-US-Standard-C';
-    const introText = applyRules(`Chapter ${chapter.index}. ${chapter.title}. `, book.rules);
-    const contentText = applyRules(chapter.content, book.rules);
-    const fullText = introText + contentText;
+
     setSynthesizingId(chapter.id);
     try {
+      let rawContent = chapter.content;
+
+      if (!rawContent || rawContent.trim().length === 0) {
+        rawContent = (await libraryLoadChapterText(book.id, chapter.id)) || "";
+      }
+
+      if (!rawContent || rawContent.trim().length === 0) {
+        alert("Chapter text is empty. Open the chapter once or re-import text, then try generating audio again.");
+        return;
+      }
+
+      const allRules = [...(globalRules || []), ...(book.rules || [])];
+
+      const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
+      let introText = applyRules(rawIntro, allRules);
+      let contentText = applyRules(rawContent, allRules);
+
+      if (reflowLineBreaksEnabled) {
+        introText = reflowLineBreaks(introText);
+        contentText = reflowLineBreaks(contentText);
+      }
+
+      const fullText = introText + contentText;
+
       const cacheKey = generateAudioKey(fullText, voice, 1.0);
       let audioBlob = await getAudioFromCache(cacheKey);
+
       if (!audioBlob) {
         const res = await synthesizeChunk(fullText, voice, 1.0);
         const fetchRes = await fetch(res.audioUrl);
@@ -172,15 +219,38 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         audioBlob = await fetchRes.blob();
         if (audioBlob) await saveAudioToCache(cacheKey, audioBlob);
       }
-      if (!audioBlob) throw new Error("No audio blob available");
-      let cloudId = chapter.cloudAudioFileId || chapter.audioDriveId;
+
+      let updated: Chapter = {
+        ...chapter,
+        audioStatus: AudioStatus.READY,
+        hasCachedAudio: true,
+        updatedAt: Date.now(),
+      };
+
       if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
-        const filename = buildMp3Name(chapter.index, chapter.title);
-        cloudId = await uploadToDrive(book.driveFolderId, filename, audioBlob, cloudId, 'audio/mpeg');
+        if (!isTokenValid()) {
+          alert("Google Drive session expired. Please sign in again in Settings.");
+          return;
+        }
+        const mp3Name = buildMp3Name(chapter.index, chapter.title);
+        const cloudFile = await uploadToDrive(
+          book.driveFolderId,
+          mp3Name,
+          audioBlob,
+          "audio/mpeg",
+          chapter.cloudAudioFileId
+        );
+        updated = {
+          ...updated,
+          cloudAudioFileId: (typeof cloudFile === "string" ? cloudFile : (cloudFile as any)?.id),
+        };
       }
-      onUpdateChapter({ ...chapter, cloudAudioFileId: cloudId, audioStatus: AudioStatus.READY, hasCachedAudio: true });
-    } catch (e) {
-      onUpdateChapter({ ...chapter, audioStatus: AudioStatus.FAILED });
+
+      onUpdateChapter(updated);
+    } catch (e: any) {
+      console.error(e);
+      alert(`Failed to generate audio: ${e?.message || e}`);
+      onUpdateChapter({ ...chapter, audioStatus: AUDIO_STATUS_ERROR, updatedAt: Date.now() });
     } finally {
       setSynthesizingId(null);
     }
@@ -282,6 +352,31 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               <button onClick={() => setMobileMenuId(null)} className="p-2 opacity-40"><X className="w-5 h-5" /></button>
            </div>
            <div className="space-y-2">
+              <button
+                disabled={synthesizingId === ch.id}
+                onClick={() => { setMobileMenuId(null); void generateAudio(ch); }}
+                className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${
+                  isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'
+                } ${synthesizingId === ch.id ? 'opacity-60' : ''}`}
+              >
+                <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg">
+                  {synthesizingId === ch.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Headphones className="w-4 h-4" />}
+                </div>
+                {ch.cloudAudioFileId || ch.hasCachedAudio ? 'Regenerate Audio' : 'Generate Audio'}
+              </button>
+
+              <button
+                onClick={() => { setMobileMenuId(null); setRememberAsDefault(false); setShowVoiceModal({ chapterId: ch.id }); }}
+                className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${
+                  isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'
+                }`}
+              >
+                <div className="p-2 bg-violet-600/10 text-violet-600 rounded-lg">
+                  <Sparkles className="w-4 h-4" />
+                </div>
+                Choose Voice
+              </button>
+
               <button onClick={() => { setMobileMenuId(null); onResetChapterProgress(book.id, ch.id); }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}>
                  <div className="p-2 bg-emerald-600/10 text-emerald-600 rounded-lg"><RefreshCw className="w-4 h-4" /></div>
                  Reset Progress

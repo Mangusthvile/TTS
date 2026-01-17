@@ -142,6 +142,7 @@ export interface ReaderSettings {
   fontSizePx: number;
   lineHeight: number;
   paragraphSpacing: number;
+  reflowLineBreaks: boolean;
   highlightColor: string;
   followHighlight: boolean;
   uiMode: UiMode;
@@ -153,6 +154,7 @@ export interface Book {
   author?: string;
   coverImage?: string; // Data URL
   chapters: Chapter[];
+  chapterCount?: number;
   currentChapterId?: string;
   rules: Rule[];
   directoryHandle?: any;

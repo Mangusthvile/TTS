@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useMemo, useState } from 'react';
 import { Chapter, Rule, Theme, HighlightMode, ReaderSettings } from '../types';
 import { applyRules } from '../services/speechService';
+import { reflowLineBreaks } from '../services/textFormat';
 import { Bug, FolderOpen, Plus, ChevronLeft, ArrowDownCircle } from 'lucide-react';
 
 interface ReaderProps {
@@ -57,8 +58,9 @@ const Reader: React.FC<ReaderProps> = ({
 
   const speakText = useMemo(() => {
     if (!chapter) return "";
-    return applyRules((chapter.content ?? ""), rules);
-  }, [chapter, rules]);
+    const ruled = applyRules((chapter.content ?? ""), rules);
+    return readerSettings.reflowLineBreaks ? reflowLineBreaks(ruled) : ruled;
+  }, [chapter, rules, readerSettings.reflowLineBreaks]);
 
   const segments = useMemo(() => {
     if (!speakText) return { words: [], sentences: [], nodes: [] };
@@ -163,6 +165,12 @@ const Reader: React.FC<ReaderProps> = ({
     lineHeight: readerSettings.lineHeight,
   };
 
+  const paragraphClass =
+    readerSettings.paragraphSpacing === 0 ? 'space-y-0' :
+    readerSettings.paragraphSpacing === 1 ? 'space-y-2' :
+    readerSettings.paragraphSpacing === 2 ? 'space-y-6' :
+    'space-y-10';
+
   const fadeColor = theme === Theme.DARK ? 'from-slate-900' : theme === Theme.SEPIA ? 'from-[#efe6d5]' : 'from-white';
 
   return (
@@ -209,7 +217,7 @@ const Reader: React.FC<ReaderProps> = ({
                 <button onClick={onToggleDebug} title="Debug Mode" className={`p-3 rounded-xl transition-all ${theme === Theme.DARK ? 'bg-white/10 hover:bg-white/20' : 'bg-black/5 hover:bg-black/10'}`}><Bug className="w-5 h-5" /></button>
              </div>
           </div>
-          <div className={readerSettings.paragraphSpacing === 2 ? 'space-y-10' : 'space-y-2'}>
+          <div className={paragraphClass}>
             {segments.nodes}
           </div>
         </div>

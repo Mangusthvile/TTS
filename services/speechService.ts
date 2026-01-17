@@ -6,6 +6,36 @@ import { isMobileMode } from '../utils/platform';
 // Phase 2 local-first progress (SQLite-backed on Android via StorageDriver)
 import { commitProgressLocal, loadProgressLocal } from "../services/progressStore";
 
+function getSpeechSynthesisSafe(): SpeechSynthesis | null {
+  try {
+    const ss = (window as any)?.speechSynthesis as SpeechSynthesis | undefined;
+    if (!ss) return null;
+    return ss;
+  } catch {
+    return null;
+  }
+}
+
+function safeSpeechCancel(): void {
+  const ss = getSpeechSynthesisSafe();
+  if (ss && typeof ss.cancel === "function") ss.cancel();
+}
+
+function safeSpeechPause(): void {
+  const ss = getSpeechSynthesisSafe();
+  if (ss && typeof ss.pause === "function") ss.pause();
+}
+
+function safeSpeechResume(): void {
+  const ss = getSpeechSynthesisSafe();
+  if (ss && typeof ss.resume === "function") ss.resume();
+}
+
+function isSpeechSpeaking(): boolean {
+  const ss = getSpeechSynthesisSafe();
+  return !!(ss && (ss as any).speaking);
+}
+
 export const PROGRESS_STORE_V4 = 'talevox_progress_v4';
 
 export function applyRules(text: string, rules: Rule[]): string {
@@ -717,15 +747,27 @@ class SpeechController {
   speak(text: string, voiceName: string | undefined, rate: number, offset: number, onEnd: () => void, isIntro: boolean = false) {
     this.audio.pause();
     this.stopSyncLoop();
-    window.speechSynthesis.cancel();
+    safeSpeechCancel();
+
+    const ss = getSpeechSynthesisSafe();
+    const UtteranceCtor = (window as any)?.SpeechSynthesisUtterance;
+    if (!ss || !UtteranceCtor) {
+      trace("tts:unavailable");
+      onEnd();
+      return;
+    }
 
     const executeUtterance = (txt: string, delay: number, callback: () => void) => {
-      const utterance = new SpeechSynthesisUtterance(txt);
-      const voice = window.speechSynthesis.getVoices().find(v => v.name === voiceName);
+      const utterance = new UtteranceCtor(txt);
+      const voices = typeof ss.getVoices === "function" ? ss.getVoices() : [];
+      const voice = voices.find((v: any) => v.name === voiceName);
       if (voice) utterance.voice = voice;
       utterance.rate = rate;
-      utterance.onend = () => { if (delay > 0) setTimeout(callback, delay * 1000); else callback(); };
-      window.speechSynthesis.speak(utterance);
+      utterance.onend = () => {
+        if (delay > 0) setTimeout(callback, delay * 1000);
+        else callback();
+      };
+      ss.speak(utterance);
     };
 
     executeUtterance(text, 0, onEnd);
@@ -736,7 +778,7 @@ class SpeechController {
     this.lastKnownTime = this.audio.currentTime || this.lastKnownTime;
     this.emitSyncTick();
     this.commitLocalProgress(false, "pause(method)");
-    window.speechSynthesis.pause();
+    safeSpeechPause();
   }
 
   resume() {
@@ -748,7 +790,7 @@ class SpeechController {
       this.audio.play().catch(e => traceError('resume:error', e));
       this.commitLocalProgress(false, "resume(method)");
     }
-    window.speechSynthesis.resume();
+    safeSpeechResume();
   }
 
   stop() {
@@ -768,7 +810,7 @@ class SpeechController {
     this.lastKnownTime = 0;
     this.renderedOffset = 0;
     if (this.onFetchStateChange) this.onFetchStateChange(false);
-    window.speechSynthesis.cancel();
+    safeSpeechCancel();
   }
 
   safeStop() {
@@ -788,11 +830,11 @@ class SpeechController {
     this.lastKnownTime = 0;
     this.renderedOffset = 0;
     if (this.onFetchStateChange) this.onFetchStateChange(false);
-    window.speechSynthesis.cancel();
+    safeSpeechCancel();
   }
 
   setPlaybackRate(rate: number) { this.requestedSpeed = rate; if (this.audio.src) this.applyRequestedSpeed(); }
-  get isPaused() { return this.audio.paused && !window.speechSynthesis.speaking; }
+  get isPaused() { return this.audio.paused && !isSpeechSpeaking(); }
   get currentTime() { return this.audio.currentTime; }
   get duration() { return this.audio.duration; }
 }

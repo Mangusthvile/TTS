@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { ReaderSettings, Theme, SyncDiagnostics, UiMode } from '../types';
 import { RefreshCw, Cloud, CloudOff, Loader2, LogOut, Save, LogIn, Check, Sun, Coffee, Moon, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer, ClipboardCopy, FileWarning, Bug, Smartphone, Type, Palette, Monitor, LayoutTemplate, Library } from 'lucide-react';
@@ -193,6 +192,52 @@ const Settings: React.FC<SettingsProps> = ({
                    className="w-full h-2 rounded-lg appearance-none bg-black/5 accent-indigo-600"
                  />
                </div>
+
+               <div className="space-y-2">
+                 <span className="text-[10px] font-black uppercase opacity-50">
+                   Line Spacing ({settings.lineHeight.toFixed(2)})
+                 </span>
+                 <input
+                   type="range"
+                   min="1.2"
+                   max="2.2"
+                   step="0.05"
+                   value={settings.lineHeight}
+                   onChange={(e) => onUpdate({ lineHeight: parseFloat(e.target.value) })}
+                   className="w-full h-2 rounded-lg appearance-none bg-black/5 accent-indigo-600"
+                 />
+               </div>
+
+               <div className="space-y-2">
+                 <span className="text-[10px] font-black uppercase opacity-50">Paragraph Spacing</span>
+                 <select
+                   value={settings.paragraphSpacing}
+                   onChange={(e) => onUpdate({ paragraphSpacing: parseInt(e.target.value) })}
+                   className={`w-full px-3 py-2 rounded-xl font-black text-sm ${
+                     theme === Theme.DARK ? 'bg-white/5 border border-white/10' : 'bg-black/5 border border-black/10'
+                   }`}
+                 >
+                   <option value={0}>Tight</option>
+                   <option value={1}>Normal</option>
+                   <option value={2}>Wide</option>
+                   <option value={3}>Extra Wide</option>
+                 </select>
+               </div>
+
+               <label className={`flex items-center justify-between gap-4 p-4 rounded-2xl ${
+                 theme === Theme.DARK ? 'bg-white/5 border border-white/10' : 'bg-black/5 border border-black/10'
+               }`}>
+                 <div>
+                   <div className="text-xs font-black">Reflow Line Breaks</div>
+                   <div className="text-[10px] opacity-60">Fix line wrapped chapters and make paragraphs look normal</div>
+                 </div>
+                 <input
+                   type="checkbox"
+                   checked={settings.reflowLineBreaks}
+                   onChange={(e) => onUpdate({ reflowLineBreaks: e.target.checked })}
+                   className="w-5 h-5 accent-indigo-600"
+                 />
+               </label>
              </div>
 
              <div className="space-y-3">

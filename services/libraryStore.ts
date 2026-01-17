@@ -1,47 +1,28 @@
 // services/libraryStore.ts
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-/**
- * Phase One. LibraryStore
- *
- * Goals:
- * - Store books and chapters without loading everything into React memory.
- * - Support paging for chapter lists (10,000+ chapters per book).
- * - Store chapter text separately so metadata lists stay light.
- *
- * Storage backends:
- * - Native (Capacitor Android): SQLite tables in talevox.db
- * - Web/Desktop: IndexedDB (services/libraryIdb.ts)
- */
-
 import { Capacitor } from "@capacitor/core";
+import { HighlightMode } from "../types";
+import type { Book, Chapter, StorageBackend, AudioStatus, BookSettings, Rule } from "../types";
 import { initStorage, getStorage } from "./storageSingleton";
-import type { SQLiteDBConnection } from "@capacitor-community/sqlite";
-
-import { HighlightMode, AudioStatus } from "../types";
-import type { Book, Chapter, StorageBackend } from "../types";
 import {
-  idbListBooks,
-  idbUpsertBook,
-  idbDeleteBook,
-  idbListChaptersPage,
-  idbUpsertChapterMeta,
-  idbDeleteChapter,
-  idbSaveChapterText,
-  idbLoadChapterText,
-  idbBulkUpsertChapters,
-  type ChapterPage,
+  listBooks as idbListBooks,
+  upsertBook as idbUpsertBook,
+  deleteBook as idbDeleteBook,
+  upsertChapterMeta as idbUpsertChapterMeta,
+  deleteChapter as idbDeleteChapter,
+  saveChapterText as idbSaveChapterText,
+  loadChapterText as idbLoadChapterText,
+  listChaptersPage as idbListChaptersPage,
+  bulkUpsertChapters as idbBulkUpsertChapters
 } from "./libraryIdb";
-
-export type { ChapterPage };
-
-const DEFAULT_PAGE_SIZE = 200;
+import type { SQLiteDBConnection } from "@capacitor-community/sqlite";
 
 let initPromise: Promise<void> | null = null;
 
 function isNative(): boolean {
   try {
-    return Capacitor.isNativePlatform();
+    return typeof window !== "undefined" && !!(window as any).Capacitor && Capacitor.isNativePlatform();
   } catch {
     return false;
   }
@@ -49,55 +30,47 @@ function isNative(): boolean {
 
 async function ensureInit(): Promise<void> {
   if (initPromise) return initPromise;
-
   initPromise = (async () => {
     await initStorage();
   })();
-
   return initPromise;
 }
 
-function mustSqliteDb(): SQLiteDBConnection {
-  const driver = getStorage();
-  if (driver.name !== "sqlite") {
-    throw new Error(`LibraryStore expected sqlite driver, got ${driver.name}`);
-  }
-  const anyDriver = driver as any;
-  if (typeof anyDriver.getDb !== "function") {
-    throw new Error("SqliteStorageDriver is missing getDb(). Apply Phase One changes to services/sqliteStorageDriver.ts");
-  }
-  return anyDriver.getDb() as SQLiteDBConnection;
-}
-
-function safeParseJson<T>(raw: string | null | undefined, fallback: T): T {
-  if (!raw) return fallback;
+function safeParseJson<T>(jsonStr: any, fallback: T): T {
   try {
-    return JSON.parse(raw) as T;
+    if (jsonStr == null) return fallback;
+    const parsed = JSON.parse(String(jsonStr));
+    return (parsed ?? fallback) as T;
   } catch {
     return fallback;
   }
 }
 
-function ensureBookDefaults(b: Partial<Book>): Book {
+function ensureBookDefaults(b: Partial<Book> & { id: string; title: string; backend: StorageBackend }): Book {
   return {
-    id: b.id!,
-    title: b.title ?? "Untitled",
+    id: b.id,
+    title: b.title,
     author: b.author,
     coverImage: b.coverImage,
-    chapters: b.chapters ?? [],
-    currentChapterId: b.currentChapterId,
-    rules: b.rules ?? [],
-    directoryHandle: undefined,
+    backend: b.backend,
     driveFolderId: b.driveFolderId,
     driveFolderName: b.driveFolderName,
-    backend: (b.backend ?? ("local" as StorageBackend)) as StorageBackend,
-    settings:
-      b.settings ?? {
-        useBookSettings: false,
-        highlightMode: HighlightMode.WORD,
-      },
+    currentChapterId: b.currentChapterId,
+    settings: b.settings ?? { useBookSettings: false, highlightMode: HighlightMode.WORD },
+    rules: b.rules ?? [],
+    chapters: b.chapters ?? [],
+    chapterCount: (b as any).chapterCount ?? 0,
+    directoryHandle: b.directoryHandle,
     updatedAt: b.updatedAt ?? Date.now(),
   };
+}
+
+function mustSqliteDb(): SQLiteDBConnection {
+  const driver = getStorage();
+  if ((driver as any).name !== "sqlite" || typeof (driver as any).getDb !== "function") {
+    throw new Error("SQLite driver not available on this platform.");
+  }
+  return (driver as any).getDb() as SQLiteDBConnection;
 }
 
 export async function listBooks(): Promise<Book[]> {
@@ -109,14 +82,21 @@ export async function listBooks(): Promise<Book[]> {
 
   const db = mustSqliteDb();
   const res = await db.query(
-    `SELECT id, title, author, coverImage, backend, driveFolderId, driveFolderName, currentChapterId,
-            settingsJson, rulesJson, updatedAt
-     FROM books
-     ORDER BY updatedAt DESC`,
+    `SELECT b.id, b.title, b.author, b.coverImage, b.backend, b.driveFolderId, b.driveFolderName, b.currentChapterId,
+            b.settingsJson, b.rulesJson, b.updatedAt,
+            IFNULL(cnt.chapterCount, 0) AS chapterCount
+     FROM books b
+     LEFT JOIN (
+       SELECT bookId, COUNT(*) AS chapterCount
+       FROM chapters
+       GROUP BY bookId
+     ) cnt ON cnt.bookId = b.id
+     ORDER BY b.updatedAt DESC`,
     []
   );
 
   const rows = (res.values ?? []) as any[];
+
   return rows.map((r) =>
     ensureBookDefaults({
       id: String(r.id),
@@ -130,6 +110,7 @@ export async function listBooks(): Promise<Book[]> {
       settings: safeParseJson(r.settingsJson, { useBookSettings: false, highlightMode: HighlightMode.WORD }),
       rules: safeParseJson(r.rulesJson, []),
       chapters: [],
+      chapterCount: Number(r.chapterCount ?? 0),
       updatedAt: Number(r.updatedAt ?? Date.now()),
     })
   );
@@ -144,25 +125,24 @@ export async function upsertBook(book: Book): Promise<void> {
   }
 
   const db = mustSqliteDb();
-  const now = Date.now();
-
   const settingsJson = JSON.stringify(book.settings ?? { useBookSettings: false, highlightMode: HighlightMode.WORD });
   const rulesJson = JSON.stringify(book.rules ?? []);
+  const updatedAt = book.updatedAt ?? Date.now();
 
   await db.run(
     `INSERT INTO books (id, title, author, coverImage, backend, driveFolderId, driveFolderName, currentChapterId, settingsJson, rulesJson, updatedAt)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
-       title = excluded.title,
-       author = excluded.author,
-       coverImage = excluded.coverImage,
-       backend = excluded.backend,
-       driveFolderId = excluded.driveFolderId,
-       driveFolderName = excluded.driveFolderName,
-       currentChapterId = excluded.currentChapterId,
-       settingsJson = excluded.settingsJson,
-       rulesJson = excluded.rulesJson,
-       updatedAt = excluded.updatedAt`,
+       title=excluded.title,
+       author=excluded.author,
+       coverImage=excluded.coverImage,
+       backend=excluded.backend,
+       driveFolderId=excluded.driveFolderId,
+       driveFolderName=excluded.driveFolderName,
+       currentChapterId=excluded.currentChapterId,
+       settingsJson=excluded.settingsJson,
+       rulesJson=excluded.rulesJson,
+       updatedAt=excluded.updatedAt`,
     [
       book.id,
       book.title,
@@ -174,7 +154,7 @@ export async function upsertBook(book: Book): Promise<void> {
       book.currentChapterId ?? null,
       settingsJson,
       rulesJson,
-      book.updatedAt ?? now,
+      updatedAt,
     ]
   );
 }
@@ -188,70 +168,9 @@ export async function deleteBook(bookId: string): Promise<void> {
   }
 
   const db = mustSqliteDb();
-
-  await db.run(`DELETE FROM chapters WHERE bookId = ?`, [bookId]);
   await db.run(`DELETE FROM chapter_text WHERE bookId = ?`, [bookId]);
+  await db.run(`DELETE FROM chapters WHERE bookId = ?`, [bookId]);
   await db.run(`DELETE FROM books WHERE id = ?`, [bookId]);
-}
-
-export async function listChaptersPage(
-  bookId: string,
-  afterIndex: number = -1,
-  limit: number = DEFAULT_PAGE_SIZE
-): Promise<ChapterPage> {
-  await ensureInit();
-
-  if (!isNative()) {
-    return idbListChaptersPage(bookId, afterIndex, limit);
-  }
-
-  const db = mustSqliteDb();
-
-  const res = await db.query(
-    `SELECT c.id, c.idx, c.title, c.filename, c.sourceUrl,
-            c.cloudTextFileId, c.cloudAudioFileId, c.audioDriveId, c.audioStatus, c.audioSignature,
-            c.durationSec, c.textLength, c.wordCount, c.isFavorite, c.updatedAt,
-            p.timeSec AS progressSec, p.durationSec AS progressDurationSec, p.percent AS progressPercent, p.isComplete AS progressIsComplete
-     FROM chapters c
-     LEFT JOIN progress p ON p.chapterId = c.id
-     WHERE c.bookId = ? AND c.idx > ?
-     ORDER BY c.idx ASC
-     LIMIT ?`,
-    [bookId, afterIndex, limit]
-  );
-
-  const rows = (res.values ?? []) as any[];
-  const chapters: Chapter[] = rows.map((r) => {
-    const progressPercent = r.progressPercent != null ? Number(r.progressPercent) : 0;
-    const isComplete = r.progressIsComplete === 1;
-
-    return {
-      id: String(r.id),
-      index: Number(r.idx),
-      title: String(r.title),
-      sourceUrl: r.sourceUrl ?? undefined,
-      filename: String(r.filename),
-      content: undefined,
-      wordCount: Number(r.wordCount ?? 0),
-      progress: isComplete ? 1 : progressPercent,
-      progressChars: 0,
-      progressTotalLength: undefined,
-      progressSec: r.progressSec != null ? Number(r.progressSec) : undefined,
-      durationSec: r.durationSec != null ? Number(r.durationSec) : undefined,
-      textLength: r.textLength != null ? Number(r.textLength) : undefined,
-      isFavorite: r.isFavorite === 1,
-      isCompleted: isComplete,
-      cloudTextFileId: r.cloudTextFileId ?? undefined,
-      cloudAudioFileId: r.cloudAudioFileId ?? undefined,
-      audioDriveId: r.audioDriveId ?? undefined,
-      audioStatus: (r.audioStatus as any) ?? AudioStatus.NONE,
-      audioSignature: r.audioSignature ?? undefined,
-      updatedAt: Number(r.updatedAt ?? Date.now()),
-    };
-  });
-
-  const nextAfterIndex = chapters.length ? chapters[chapters.length - 1].index : null;
-  return { chapters, nextAfterIndex };
 }
 
 export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promise<void> {
@@ -263,29 +182,31 @@ export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promi
   }
 
   const db = mustSqliteDb();
-  const now = Date.now();
+  const updatedAt = chapter.updatedAt ?? Date.now();
 
   await db.run(
-    `INSERT INTO chapters (id, bookId, idx, title, filename, sourceUrl,
-                           cloudTextFileId, cloudAudioFileId, audioDriveId, audioStatus, audioSignature,
-                           durationSec, textLength, wordCount, isFavorite, updatedAt)
+    `INSERT INTO chapters (
+       id, bookId, idx, title, filename, sourceUrl,
+       cloudTextFileId, cloudAudioFileId, audioDriveId,
+       audioStatus, audioSignature, durationSec, textLength, wordCount, isFavorite, updatedAt
+     )
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
-       bookId = excluded.bookId,
-       idx = excluded.idx,
-       title = excluded.title,
-       filename = excluded.filename,
-       sourceUrl = excluded.sourceUrl,
-       cloudTextFileId = excluded.cloudTextFileId,
-       cloudAudioFileId = excluded.cloudAudioFileId,
-       audioDriveId = excluded.audioDriveId,
-       audioStatus = excluded.audioStatus,
-       audioSignature = excluded.audioSignature,
-       durationSec = excluded.durationSec,
-       textLength = excluded.textLength,
-       wordCount = excluded.wordCount,
-       isFavorite = excluded.isFavorite,
-       updatedAt = excluded.updatedAt`,
+       bookId=excluded.bookId,
+       idx=excluded.idx,
+       title=excluded.title,
+       filename=excluded.filename,
+       sourceUrl=excluded.sourceUrl,
+       cloudTextFileId=excluded.cloudTextFileId,
+       cloudAudioFileId=excluded.cloudAudioFileId,
+       audioDriveId=excluded.audioDriveId,
+       audioStatus=excluded.audioStatus,
+       audioSignature=excluded.audioSignature,
+       durationSec=excluded.durationSec,
+       textLength=excluded.textLength,
+       wordCount=excluded.wordCount,
+       isFavorite=excluded.isFavorite,
+       updatedAt=excluded.updatedAt`,
     [
       chapter.id,
       bookId,
@@ -295,29 +216,29 @@ export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promi
       chapter.sourceUrl ?? null,
       chapter.cloudTextFileId ?? null,
       chapter.cloudAudioFileId ?? null,
-      chapter.audioDriveId ?? null,
-      chapter.audioStatus ?? AudioStatus.NONE,
-      chapter.audioSignature ?? null,
-      chapter.durationSec ?? null,
+      (chapter as any).audioDriveId ?? null,
+      (chapter.audioStatus ?? ("none" as any)) as AudioStatus,
+      (chapter as any).audioSignature ?? null,
+      (chapter as any).durationSec ?? null,
       chapter.textLength ?? null,
-      chapter.wordCount ?? null,
+      (chapter as any).wordCount ?? null,
       chapter.isFavorite ? 1 : 0,
-      chapter.updatedAt ?? now,
+      updatedAt,
     ]
   );
 }
 
-export async function deleteChapter(chapterId: string): Promise<void> {
+export async function deleteChapter(bookId: string, chapterId: string): Promise<void> {
   await ensureInit();
 
   if (!isNative()) {
-    await idbDeleteChapter(chapterId);
+    await idbDeleteChapter(bookId, chapterId);
     return;
   }
 
   const db = mustSqliteDb();
-  await db.run(`DELETE FROM chapters WHERE id = ?`, [chapterId]);
   await db.run(`DELETE FROM chapter_text WHERE chapterId = ?`, [chapterId]);
+  await db.run(`DELETE FROM chapters WHERE id = ? AND bookId = ?`, [chapterId, bookId]);
 }
 
 export async function saveChapterText(bookId: string, chapterId: string, content: string): Promise<void> {
@@ -329,31 +250,119 @@ export async function saveChapterText(bookId: string, chapterId: string, content
   }
 
   const db = mustSqliteDb();
-  const now = Date.now();
-
   await db.run(
     `INSERT INTO chapter_text (chapterId, bookId, content, updatedAt)
      VALUES (?, ?, ?, ?)
      ON CONFLICT(chapterId) DO UPDATE SET
-       bookId = excluded.bookId,
-       content = excluded.content,
-       updatedAt = excluded.updatedAt`,
-    [chapterId, bookId, content, now]
+       content=excluded.content,
+       updatedAt=excluded.updatedAt`,
+    [chapterId, bookId, content, Date.now()]
   );
 }
 
-export async function loadChapterText(chapterId: string): Promise<string | null> {
+export async function loadChapterText(bookId: string, chapterId: string): Promise<string | null> {
   await ensureInit();
 
   if (!isNative()) {
-    return idbLoadChapterText(chapterId);
+    return idbLoadChapterText(bookId, chapterId);
   }
 
   const db = mustSqliteDb();
-  const res = await db.query(`SELECT content FROM chapter_text WHERE chapterId = ?`, [chapterId]);
+
+  // First try the correct lookup
+  const res = await db.query(
+    `SELECT content FROM chapter_text WHERE chapterId = ? AND bookId = ?`,
+    [chapterId, bookId]
+  );
   const row = (res.values?.[0] ?? null) as any;
-  if (!row || row.content == null) return null;
-  return String(row.content);
+  if (row) return String(row.content ?? "");
+
+  // Fallback lookup by chapterId only.
+  // This repairs older rows that were saved under the wrong bookId.
+  const res2 = await db.query(
+    `SELECT bookId, content FROM chapter_text WHERE chapterId = ? LIMIT 1`,
+    [chapterId]
+  );
+  const row2 = (res2.values?.[0] ?? null) as any;
+  if (!row2) return null;
+
+  const content = String(row2.content ?? "");
+
+  try {
+    await db.run(`UPDATE chapter_text SET bookId = ? WHERE chapterId = ?`, [bookId, chapterId]);
+  } catch {
+    // ignore repair failure
+  }
+
+  return content;
+}
+
+export async function listChaptersPage(
+  bookId: string,
+  afterIndex: number | null,
+  limit: number
+): Promise<{ chapters: Chapter[]; nextAfterIndex: number | null }> {
+  await ensureInit();
+
+  if (!isNative()) {
+    return idbListChaptersPage(bookId, afterIndex, limit);
+  }
+
+  const db = mustSqliteDb();
+  const params: any[] = [bookId];
+
+  let where = `WHERE bookId = ?`;
+  if (afterIndex != null) {
+    where += ` AND idx > ?`;
+    params.push(afterIndex);
+  }
+
+  params.push(limit);
+
+  const res = await db.query(
+    `SELECT id, idx as "index", title, filename, sourceUrl,
+            cloudTextFileId, cloudAudioFileId, audioDriveId,
+            audioStatus, audioSignature, durationSec, textLength, wordCount, isFavorite, updatedAt
+     FROM chapters
+     ${where}
+     ORDER BY idx ASC
+     LIMIT ?`,
+    params
+  );
+
+  const rows = (res.values ?? []) as any[];
+
+  const chapters: Chapter[] = rows.map((r) => ({
+    id: String(r.id),
+    index: Number(r.index ?? r.idx),
+    title: String(r.title),
+    filename: String(r.filename),
+    sourceUrl: r.sourceUrl ?? undefined,
+    content: undefined,
+
+    wordCount: Number(r.wordCount ?? 0),
+    progress: 0,
+    progressChars: 0,
+    progressSec: r.progressSec != null ? Number(r.progressSec) : undefined,
+    durationSec: r.durationSec != null ? Number(r.durationSec) : undefined,
+    textLength: r.textLength != null ? Number(r.textLength) : undefined,
+
+    isFavorite: r.isFavorite === 1 || r.isFavorite === true,
+    updatedAt: Number(r.updatedAt ?? Date.now()),
+
+    cloudTextFileId: r.cloudTextFileId ?? undefined,
+    cloudAudioFileId: r.cloudAudioFileId ?? undefined,
+    audioDriveId: r.audioDriveId ?? undefined,
+    audioStatus: r.audioStatus ?? undefined,
+    audioSignature: r.audioSignature ?? undefined,
+  }));
+
+  const nextAfterIndex = chapters.length ? chapters[chapters.length - 1].index : null;
+
+  return {
+    chapters,
+    nextAfterIndex: chapters.length < limit ? null : nextAfterIndex,
+  };
 }
 
 export async function bulkUpsertChapters(
@@ -367,19 +376,10 @@ export async function bulkUpsertChapters(
     return;
   }
 
-  const db = mustSqliteDb();
-
-  await db.execute("BEGIN TRANSACTION;");
-  try {
-    for (const it of items) {
-      await upsertChapterMeta(bookId, it.chapter);
-      if (typeof it.content === "string" && it.content.length) {
-        await saveChapterText(bookId, it.chapter.id, it.content);
-      }
+  for (const it of items) {
+    await upsertChapterMeta(bookId, it.chapter);
+    if (typeof it.content === "string" && it.content.length) {
+      await saveChapterText(bookId, it.chapter.id, it.content);
     }
-    await db.execute("COMMIT;");
-  } catch (e) {
-    await db.execute("ROLLBACK;");
-    throw e;
   }
 }

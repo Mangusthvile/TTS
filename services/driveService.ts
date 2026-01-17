@@ -361,6 +361,11 @@ export async function createDriveFolder(name: string, parentId?: string): Promis
 }
 
 export async function ensureRootStructure(rootFolderId?: string) {
+  if (!rootFolderId) {
+    const root = await ensureNativeRootFolder();
+    rootFolderId = root.id;
+  }
+
   const subfolders = { booksId: '', trashId: '', savesId: '' };
   const mapping = [
     { name: 'books', key: 'booksId' },
@@ -369,7 +374,7 @@ export async function ensureRootStructure(rootFolderId?: string) {
   ];
 
   for (const item of mapping) {
-    const res = await resolveFolderIdByName(rootId, item.name);
+    const res = await resolveFolderIdByName(rootFolderId, item.name);
     (subfolders as any)[item.key] = res.id;
   }
   return subfolders;
