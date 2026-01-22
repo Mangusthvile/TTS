@@ -1442,7 +1442,12 @@ const App: React.FC = () => {
               onToggleFavorite={() => {}} onUpdateChapterTitle={(id, t) => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(c => c.id === id ? { ...c, title: t } : c) } : b) })); markDirty(); }}
               onDeleteChapter={id => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.filter(c => c.id !== id) } : b) })); markDirty(); }}
               onUpdateChapter={c => { setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(ch => ch.id === c.id ? c : ch) } : b) })); markDirty(); }}
-              onUpdateBookSettings={s => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, ...s } } : b) })); markDirty(); }}
+              onUpdateBookSettings={s => {
+                const updatedBook = { ...activeBook, settings: { ...activeBook.settings, ...s } };
+                setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? updatedBook : b) }));
+                void libraryUpsertBook(updatedBook);
+                markDirty();
+              }}
               onBackToLibrary={() => setActiveTab('library')}
               onResetChapterProgress={handleResetChapterProgress}
               playbackSnapshot={playbackSnapshot}

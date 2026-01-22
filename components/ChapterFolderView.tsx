@@ -52,6 +52,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   hasMoreChapters,
   isLoadingMoreChapters
 }) => {
+  const { driveFolderId } = book;
   const VIEW_MODE_KEY = `talevox:viewMode:${book.id}`;
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     const saved = localStorage.getItem(VIEW_MODE_KEY);
@@ -63,6 +64,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [editingChapterId, setEditingChapterId] = useState<string | null>(null);
   const [tempTitle, setTempTitle] = useState('');
   const [synthesizingId, setSynthesizingId] = useState<string | null>(null);
+  const [synthesisProgress, setSynthesisProgress] = useState<{ current: number, total: number, message: string } | null>(null);
   const [isCheckingDrive, setIsCheckingDrive] = useState(false);
   const [lastScan, setLastScan] = useState<ScanResult | null>(null);
   const [showFixModal, setShowFixModal] = useState(false);
@@ -110,16 +112,20 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     return () => obs.disconnect();
   }, [hasMoreChapters, onLoadMoreChapters, isLoadingMoreChapters]);
 
-  // ... (Integrity check and Audio generation logic remains same) ...
+  const handleCheckIntegrity = useCallback(async () => {
+    // Placeholder for Step 2 logic
+    await handleCheckDriveIntegrity();
+  }, [book.backend]);
+
   const handleCheckDriveIntegrity = useCallback(async () => {
-    if (!book.driveFolderId) return;
+    if (!driveFolderId) return;
     if (!isTokenValid()) {
       alert("Google Drive session expired. Please sign in again in Settings.");
       return;
     }
     setIsCheckingDrive(true);
     try {
-      const driveFiles = await listFilesInFolder(book.driveFolderId);
+      const driveFiles = await listFilesInFolder(driveFolderId);
       driveFiles.sort((a, b) => new Date(b.modifiedTime).getTime() - new Date(a.modifiedTime).getTime());
 
       const fileMap = new Map<string, typeof driveFiles[0]>();
@@ -171,93 +177,107 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     } finally {
       setIsCheckingDrive(false);
     }
-  }, [book.driveFolderId, chapters, onUpdateChapter]);
+  }, [driveFolderId, chapters, onUpdateChapter]);
 
-  const AUDIO_STATUS_ERROR: AudioStatus =
-    ((AudioStatus as any).ERROR ??
-      (AudioStatus as any).FAILED ??
-      (AudioStatus as any).MISSING ??
-      (AudioStatus as any).NONE ??
-      AudioStatus.READY) as AudioStatus;
-
-  const generateAudio = async (chapter: Chapter, voiceToUse?: string) => {
-    const voice = voiceToUse || book.settings.defaultVoiceId || 'en-US-Standard-C';
+  const generateAudio = async (chapter: Chapter, voiceIdOverride?: string) => {
+    if (synthesizingId) return;
 
     setSynthesizingId(chapter.id);
+    setSynthesisProgress({ current: 0, total: 1, message: "Preparing text..." });
+
     try {
-      let rawContent = chapter.content;
+      const selectedVoiceId =
+        voiceIdOverride ||
+        book.settings.defaultVoiceId ||
+        book.settings.selectedVoiceName ||
+        "en-US-Standard-C";
 
-      if (!rawContent || rawContent.trim().length === 0) {
-        rawContent = (await libraryLoadChapterText(book.id, chapter.id)) || "";
+      const rawContent =
+        chapter.content ||
+        (await libraryLoadChapterText(book.id, chapter.id)) ||
+        "";
+
+      if (!rawContent.trim()) {
+        throw new Error("No chapter text found. Create or import text first.");
       }
 
-      if (!rawContent || rawContent.trim().length === 0) {
-        alert("Chapter text is empty. Open the chapter once or re-import text, then try generating audio again.");
-        return;
-      }
-
+      // IMPORTANT. Must match App.tsx ordering and formatting.
       const allRules = [...(globalRules || []), ...(book.rules || [])];
 
+      let textToSpeak = applyRules(rawContent, allRules);
+      if (reflowLineBreaksEnabled) textToSpeak = reflowLineBreaks(textToSpeak);
+
       const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
-      let introText = applyRules(rawIntro, allRules);
-      let contentText = applyRules(rawContent, allRules);
+      const introText = applyRules(rawIntro, allRules);
 
-      if (reflowLineBreaksEnabled) {
-        introText = reflowLineBreaks(introText);
-        contentText = reflowLineBreaks(contentText);
-      }
+      const fullText = introText + textToSpeak;
 
-      const fullText = introText + contentText;
+      // IMPORTANT. Must match App.tsx cache key construction.
+      const cacheKey = generateAudioKey(fullText, selectedVoiceId, 1.0);
 
-      const cacheKey = generateAudioKey(fullText, voice, 1.0);
       let audioBlob = await getAudioFromCache(cacheKey);
 
       if (!audioBlob) {
-        const res = await synthesizeChunk(fullText, voice, 1.0);
-        const fetchRes = await fetch(res.audioUrl);
-        if (!fetchRes.ok) throw new Error("Synthesis output fetch failed");
-        audioBlob = await fetchRes.blob();
-        if (audioBlob) await saveAudioToCache(cacheKey, audioBlob);
+        setSynthesisProgress({ current: 0, total: 1, message: "Synthesizing audio..." });
+
+        const res = await synthesizeChunk(fullText, selectedVoiceId, 1.0);
+
+        const audioResponse = await fetch(res.audioUrl);
+        audioBlob = await audioResponse.blob();
+
+        await saveAudioToCache(cacheKey, audioBlob);
       }
 
-      let updated: Chapter = {
+      onUpdateChapter({
         ...chapter,
         audioStatus: AudioStatus.READY,
+        audioSignature: cacheKey,
+        audioPrefixLen: introText.length,
         hasCachedAudio: true,
         updatedAt: Date.now(),
-      };
+      });
 
-      if (book.backend === StorageBackend.DRIVE && book.driveFolderId) {
-        if (!isTokenValid()) {
-          alert("Google Drive session expired. Please sign in again in Settings.");
-          return;
-        }
-        const mp3Name = buildMp3Name(chapter.index, chapter.title);
-        const cloudFile = await uploadToDrive(
-          book.driveFolderId,
-          mp3Name,
+      if (book.backend === StorageBackend.DRIVE && driveFolderId) {
+        setSynthesisProgress({ current: 0, total: 1, message: "Uploading to Drive..." });
+
+        const filename = buildMp3Name(chapter.index, chapter.title);
+
+        const cloudAudioFileId = await uploadToDrive(
+          driveFolderId,
+          filename,
           audioBlob,
-          "audio/mpeg",
-          chapter.cloudAudioFileId
+          chapter.cloudAudioFileId,
+          "audio/mpeg"
         );
-        updated = {
-          ...updated,
-          cloudAudioFileId: (typeof cloudFile === "string" ? cloudFile : (cloudFile as any)?.id),
-        };
-      }
 
-      onUpdateChapter(updated);
-    } catch (e: any) {
-      console.error(e);
-      alert(`Failed to generate audio: ${e?.message || e}`);
-      onUpdateChapter({ ...chapter, audioStatus: AUDIO_STATUS_ERROR, updatedAt: Date.now() });
+        onUpdateChapter({
+          ...chapter,
+          cloudAudioFileId,
+          audioStatus: AudioStatus.READY,
+          audioSignature: cacheKey,
+          audioPrefixLen: introText.length,
+          hasCachedAudio: true,
+          updatedAt: Date.now(),
+        });
+      }
+    } catch (err: any) {
+      console.error("[TaleVox] generateAudio failed", err);
+
+      onUpdateChapter({
+        ...chapter,
+        audioStatus: AudioStatus.FAILED,
+        updatedAt: Date.now(),
+      });
+
+      alert(err?.message || "Audio generation failed");
     } finally {
       setSynthesizingId(null);
+      setSynthesisProgress(null);
     }
   };
 
   const handleRunFix = async () => {
-    if (!lastScan || !book.driveFolderId) return;
+    if (!lastScan || !driveFolderId) return;
     setIsFixing(true);
     const totalActions = (fixOptions.restoreText ? lastScan.missingTextIds.length : 0) + (fixOptions.genAudio ? lastScan.missingAudioIds.length : 0) + (fixOptions.cleanupStrays ? lastScan.strayFiles.length : 0);
     setFixProgress({ current: 0, total: totalActions });
@@ -267,7 +287,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           const ch = chapters.find(c => c.id === cid);
           if (ch && ch.content) {
             const filename = buildTextName(ch.index, ch.title);
-            const id = await uploadToDrive(book.driveFolderId, filename, ch.content);
+            const id = await uploadToDrive(driveFolderId, filename, ch.content);
             onUpdateChapter({ ...ch, cloudTextFileId: id, hasTextOnDrive: true });
           }
           setFixProgress(p => ({ ...p, current: p.current + 1 }));
@@ -281,10 +301,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         }
       }
       if (fixOptions.cleanupStrays && lastScan.strayFiles.length > 0) {
-        let trashFolderId = await findFileSync('_trash', book.driveFolderId);
-        if (!trashFolderId) trashFolderId = await createDriveFolder('_trash', book.driveFolderId);
+        let trashFolderId = await findFileSync('_trash', driveFolderId);
+        if (!trashFolderId) trashFolderId = await createDriveFolder('_trash', driveFolderId);
         for (const file of lastScan.strayFiles) {
-          await moveFile(file.id, book.driveFolderId!, trashFolderId);
+          await moveFile(file.id, driveFolderId!, trashFolderId);
           setFixProgress(p => ({ ...p, current: p.current + 1 }));
         }
       }
@@ -308,7 +328,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   };
 
   const renderAudioStatusIcon = (c: Chapter) => {
-    if (c.cloudAudioFileId || c.audioDriveId || c.audioStatus === AudioStatus.READY) {
+    if (c.cloudAudioFileId || (c as any).audioDriveId || c.audioStatus === AudioStatus.READY) {
       return (
         <span title="Audio ready on Google Drive" className="inline-flex items-center">
           <Cloud className="w-4 h-4 text-emerald-500" />
@@ -354,7 +374,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
            <div className="space-y-2">
               <button
                 disabled={synthesizingId === ch.id}
-                onClick={() => { setMobileMenuId(null); void generateAudio(ch); }}
+                onClick={() => {
+                  setMobileMenuId(null);
+                  setRememberAsDefault(true);
+                  setShowVoiceModal({ chapterId: ch.id });
+                }}
                 className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${
                   isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'
                 } ${synthesizingId === ch.id ? 'opacity-60' : ''}`}
@@ -363,18 +387,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                   {synthesizingId === ch.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Headphones className="w-4 h-4" />}
                 </div>
                 {ch.cloudAudioFileId || ch.hasCachedAudio ? 'Regenerate Audio' : 'Generate Audio'}
-              </button>
-
-              <button
-                onClick={() => { setMobileMenuId(null); setRememberAsDefault(false); setShowVoiceModal({ chapterId: ch.id }); }}
-                className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${
-                  isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'
-                }`}
-              >
-                <div className="p-2 bg-violet-600/10 text-violet-600 rounded-lg">
-                  <Sparkles className="w-4 h-4" />
-                </div>
-                Choose Voice
               </button>
 
               <button onClick={() => { setMobileMenuId(null); onResetChapterProgress(book.id, ch.id); }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}>
@@ -423,7 +435,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                   ) : (
                     <div className="font-black text-sm truncate flex items-center">{c.title}{renderTextStatusIcon(c)}</div>
                   )}
-                  <span className="md:inline hidden">{renderAudioStatusIcon(c)}</span>
+                  <span className="inline">{renderAudioStatusIcon(c)}</span>
                 </div>
                 <div className={`h-1 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-700' : 'bg-black/5'}`}>
                    <div className={`h-full transition-all duration-300 ${isCompleted ? 'bg-emerald-500' : 'bg-indigo-500'}`} style={{ width: `${percent}%` }} />
@@ -529,7 +541,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   return (
     <div className={`h-full min-h-0 flex flex-col ${isDark ? 'bg-slate-900 text-slate-100' : isSepia ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
-      {/* ... rest of the existing layout code remains unchanged ... */}
       {showVoiceModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
           <div className={`w-full max-w-md rounded-3xl shadow-2xl p-8 space-y-6 ${isDark ? 'bg-slate-900 border border-slate-800' : 'bg-white border border-black/5'}`}>
@@ -576,7 +587,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
           <div className={`flex flex-wrap gap-2 transition-all duration-300 ${isHeaderExpanded || window.innerWidth >= 768 ? 'opacity-100 max-h-40 pointer-events-auto' : 'opacity-0 max-h-0 pointer-events-none overflow-hidden sm:opacity-100 sm:max-h-40 sm:pointer-events-auto'}`}>
             <button onClick={onAddChapter} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-indigo-600 text-white rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center gap-2"><Plus className="w-3.5 h-3.5" /> Add Chapter</button>
-            <button onClick={handleCheckDriveIntegrity} disabled={isCheckingDrive} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center justify-center gap-2">{isCheckingDrive ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}{isCheckingDrive ? '...' : 'Check'}</button>
+            <button onClick={handleCheckIntegrity} disabled={isCheckingDrive} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center justify-center gap-2">{isCheckingDrive ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}{isCheckingDrive ? '...' : 'Check'}</button>
             <button onClick={() => setShowFixModal(true)} disabled={!hasIssues} className={`flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2 ${hasIssues ? 'bg-amber-600 text-white shadow-amber-600/20 hover:scale-105' : 'bg-black/5 text-black/20 cursor-not-allowed'}`}><Wrench className="w-3.5 h-3.5" /> Fix</button>
           </div>
         </div>
