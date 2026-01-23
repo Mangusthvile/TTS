@@ -144,6 +144,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     setIsCheckingDrive(true);
     try {
       const driveFiles = await listFilesInFolder(driveFolderId);
+
+      const driveNameSet = new Set(
+        driveFiles
+          .map((f: any) => f?.name)
+          .filter((n: any): n is string => typeof n === "string" && n.length > 0)
+      );
+
       driveFiles.sort((a, b) => new Date(b.modifiedTime).getTime() - new Date(a.modifiedTime).getTime());
 
       const fileMap = new Map<string, typeof driveFiles[0]>();
@@ -189,6 +196,15 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             scan.strayFiles.push(f);
         }
       }
+
+      scan.missingTextIds = chapters
+        .filter((ch) => !driveNameSet.has(buildTextName(ch.index, ch.title)))
+        .map((ch) => ch.id);
+
+      scan.missingAudioIds = chapters
+        .filter((ch) => !driveNameSet.has(buildMp3Name(ch.index, ch.title)))
+        .map((ch) => ch.id);
+
       setLastScan(scan);
       setMissingTextIds(scan.missingTextIds);
       setMissingAudioIds(scan.missingAudioIds);
@@ -451,6 +467,16 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       // Targets are: missing + outdated-from-strays
       const textTargetIds = new Set<string>([...missingTextIds, ...strayTextTargets]);
       const audioTargetIds = new Set<string>([...missingAudioIds, ...strayAudioTargets]);
+
+      if (fixOptions.cleanupStrays && !fixOptions.restoreText && !fixOptions.genAudio) {
+        pushNotice(
+          "Cleanup would delete old files without creating new ones. Enable Restore Missing Text and or Generate Missing Audio first.",
+          "error",
+          6500
+        );
+        setIsFixing(false);
+        return;
+      }
 
       // Optional: build a fast name->id map so we overwrite instead of duplicating
       let nameToId = new Map<string, string>();
