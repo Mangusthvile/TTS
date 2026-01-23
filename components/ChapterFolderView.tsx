@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
-import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile, Rule } from '../types';
+import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile, Rule, HighlightMode } from '../types';
 import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon, Sparkles } from 'lucide-react';
 import { applyRules } from '../services/speechService';
 import { synthesizeChunk } from '../services/cloudTtsService';
@@ -67,6 +67,26 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [synthesisProgress, setSynthesisProgress] = useState<{ current: number, total: number, message: string } | null>(null);
   const [isCheckingDrive, setIsCheckingDrive] = useState(false);
   const [lastScan, setLastScan] = useState<ScanResult | null>(null);
+
+  const [notice, setNotice] = useState<{ message: string; kind: 'info' | 'success' | 'error' } | null>(null);
+  const noticeTimerRef = useRef<number | null>(null);
+
+  const pushNotice = useCallback((message: string, kind: 'info' | 'success' | 'error' = 'info', durationMs: number = 3000) => {
+    setNotice({ message, kind });
+
+    if (noticeTimerRef.current) {
+      window.clearTimeout(noticeTimerRef.current);
+      noticeTimerRef.current = null;
+    }
+
+    if (durationMs > 0) {
+      noticeTimerRef.current = window.setTimeout(() => {
+        setNotice(null);
+        noticeTimerRef.current = null;
+      }, durationMs);
+    }
+  }, []);
+
   const [showFixModal, setShowFixModal] = useState(false);
   const [isFixing, setIsFixing] = useState(false);
   const [fixProgress, setFixProgress] = useState({ current: 0, total: 0 });
@@ -113,15 +133,39 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   }, [hasMoreChapters, onLoadMoreChapters, isLoadingMoreChapters]);
 
   const handleCheckIntegrity = useCallback(async () => {
-    // Placeholder for Step 2 logic
-    await handleCheckDriveIntegrity();
-  }, [book.backend]);
+    if (book.backend !== StorageBackend.DRIVE) {
+      pushNotice("Check currently works for Drive books only.", "info", 3500);
+      return;
+    }
 
-  const handleCheckDriveIntegrity = useCallback(async () => {
-    if (!driveFolderId) return;
+    if (!driveFolderId) {
+      pushNotice("This book is not linked to a Drive folder yet. Sign in and reopen the book.", "error", 4500);
+      return;
+    }
+
+    const scan = await handleCheckDriveIntegrity();
+    if (!scan) return;
+
+    const missingText = scan.missingTextIds.length;
+    const missingAudio = scan.missingAudioIds.length;
+    const strays = scan.strayFiles.length;
+
+    if (missingText || missingAudio || strays) {
+      pushNotice(
+        `Scan complete. Missing text ${missingText}. Missing audio ${missingAudio}. Stray files ${strays}. Fix is ready.`,
+        "error",
+        6000
+      );
+    } else {
+      pushNotice("Scan complete. Everything looks good.", "success", 2500);
+    }
+  }, [book.backend, driveFolderId, handleCheckDriveIntegrity, pushNotice]);
+
+  const handleCheckDriveIntegrity = useCallback(async (): Promise<ScanResult | null> => {
+    if (!driveFolderId) return null;
     if (!isTokenValid()) {
       alert("Google Drive session expired. Please sign in again in Settings.");
-      return;
+      return null;
     }
     setIsCheckingDrive(true);
     try {
@@ -172,12 +216,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         }
       }
       setLastScan(scan);
+      return scan;
     } catch (e: any) {
-      alert("Integrity check failed: " + e.message);
+      pushNotice("Integrity check failed: " + (e?.message || String(e)), 'error', 6000);
+      return null;
     } finally {
       setIsCheckingDrive(false);
     }
-  }, [driveFolderId, chapters, onUpdateChapter]);
+  }, [driveFolderId, chapters, onUpdateChapter, pushNotice]);
 
   const generateAudio = async (chapter: Chapter, voiceIdOverride?: string) => {
     if (synthesizingId) return;
@@ -285,11 +331,22 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       if (fixOptions.restoreText) {
         for (const cid of lastScan.missingTextIds) {
           const ch = chapters.find(c => c.id === cid);
-          if (ch && ch.content) {
-            const filename = buildTextName(ch.index, ch.title);
-            const id = await uploadToDrive(driveFolderId, filename, ch.content);
-            onUpdateChapter({ ...ch, cloudTextFileId: id, hasTextOnDrive: true });
+
+          if (ch) {
+            const text =
+              (ch.content && ch.content.trim() ? ch.content : null) ??
+              (await libraryLoadChapterText(book.id, ch.id)) ??
+              "";
+
+            if (text.trim()) {
+              const filename = buildTextName(ch.index, ch.title);
+              const id = await uploadToDrive(driveFolderId, filename, text, ch.cloudTextFileId, 'text/plain');
+              onUpdateChapter({ ...ch, cloudTextFileId: id, hasTextOnDrive: true });
+            } else {
+              pushNotice(`Missing local text for "${ch.title}".`, 'error', 5000);
+            }
           }
+
           setFixProgress(p => ({ ...p, current: p.current + 1 }));
         }
       }
@@ -537,7 +594,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     </div>
   );
 
-  const hasIssues = lastScan && (lastScan.missingTextIds.length > 0 || lastScan.missingAudioIds.length > 0 || lastScan.strayFiles.length > 0);
+  const fixEnabled =
+    !isCheckingDrive &&
+    !!lastScan &&
+    (lastScan.missingTextIds.length > 0 ||
+      lastScan.missingAudioIds.length > 0 ||
+      lastScan.strayFiles.length > 0);
 
   return (
     <div className={`h-full min-h-0 flex flex-col ${isDark ? 'bg-slate-900 text-slate-100' : isSepia ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
@@ -588,10 +650,44 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           <div className={`flex flex-wrap gap-2 transition-all duration-300 ${isHeaderExpanded || window.innerWidth >= 768 ? 'opacity-100 max-h-40 pointer-events-auto' : 'opacity-0 max-h-0 pointer-events-none overflow-hidden sm:opacity-100 sm:max-h-40 sm:pointer-events-auto'}`}>
             <button onClick={onAddChapter} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-indigo-600 text-white rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center gap-2"><Plus className="w-3.5 h-3.5" /> Add Chapter</button>
             <button onClick={handleCheckIntegrity} disabled={isCheckingDrive} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center justify-center gap-2">{isCheckingDrive ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}{isCheckingDrive ? '...' : 'Check'}</button>
-            <button onClick={() => setShowFixModal(true)} disabled={!hasIssues} className={`flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2 ${hasIssues ? 'bg-amber-600 text-white shadow-amber-600/20 hover:scale-105' : 'bg-black/5 text-black/20 cursor-not-allowed'}`}><Wrench className="w-3.5 h-3.5" /> Fix</button>
+            <button
+              onClick={() => {
+                if (!fixEnabled) {
+                  pushNotice("Run Check first. Fix becomes available only when issues are found.", "info", 3500);
+                  return;
+                }
+                setShowFixModal(true);
+              }}
+              disabled={!fixEnabled}
+              className={[
+                "inline-flex items-center gap-2 rounded-full px-6 py-3 text-xs font-black tracking-wide transition",
+                fixEnabled
+                  ? "bg-orange-500 text-white shadow-lg shadow-orange-500/30 hover:bg-orange-400"
+                  : "bg-white/5 text-white/40 border border-white/10 cursor-not-allowed"
+              ].join(" ")}
+            >
+              <span className="text-base">🔧</span>
+              <span>FIX</span>
+            </button>
           </div>
         </div>
       </div>
+
+      {notice && (
+        <div className="px-4 sm:px-6">
+          <div
+            className={`mt-3 px-4 py-3 rounded-2xl text-xs font-black tracking-tight ${
+              notice.kind === 'error'
+                ? 'bg-red-600/10 text-red-700 border border-red-600/20'
+                : notice.kind === 'success'
+                ? 'bg-emerald-600/10 text-emerald-700 border border-emerald-600/20'
+                : 'bg-indigo-600/10 text-indigo-700 border border-indigo-600/20'
+            }`}
+          >
+            {notice.message}
+          </div>
+        </div>
+      )}
 
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 sm:px-6 py-6 sm:py-8">{chapters.length === 0 ? (<div className="p-12 text-center text-xs font-black opacity-30 uppercase">No chapters found</div>) : (<>{viewMode === 'details' && renderDetailsView()}{viewMode === 'list' && renderListView()}{viewMode === 'grid' && renderGridView()}</>)}</div>
     </div>
