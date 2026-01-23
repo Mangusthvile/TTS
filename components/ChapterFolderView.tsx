@@ -132,35 +132,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     return () => obs.disconnect();
   }, [hasMoreChapters, onLoadMoreChapters, isLoadingMoreChapters]);
 
-  const handleCheckIntegrity = useCallback(async () => {
-    if (book.backend !== StorageBackend.DRIVE) {
-      pushNotice("Check currently works for Drive books only.", "info", 3500);
-      return;
-    }
-
-    if (!driveFolderId) {
-      pushNotice("This book is not linked to a Drive folder yet. Sign in and reopen the book.", "error", 4500);
-      return;
-    }
-
-    const scan = await handleCheckDriveIntegrity();
-    if (!scan) return;
-
-    const missingText = scan.missingTextIds.length;
-    const missingAudio = scan.missingAudioIds.length;
-    const strays = scan.strayFiles.length;
-
-    if (missingText || missingAudio || strays) {
-      pushNotice(
-        `Scan complete. Missing text ${missingText}. Missing audio ${missingAudio}. Stray files ${strays}. Fix is ready.`,
-        "error",
-        6000
-      );
-    } else {
-      pushNotice("Scan complete. Everything looks good.", "success", 2500);
-    }
-  }, [book.backend, driveFolderId, handleCheckDriveIntegrity, pushNotice]);
-
   const handleCheckDriveIntegrity = useCallback(async (): Promise<ScanResult | null> => {
     if (!driveFolderId) return null;
     if (!isTokenValid()) {
@@ -224,6 +195,35 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       setIsCheckingDrive(false);
     }
   }, [driveFolderId, chapters, onUpdateChapter, pushNotice]);
+
+  const handleCheckIntegrity = useCallback(async () => {
+    if (book.backend !== StorageBackend.DRIVE) {
+      pushNotice("Check currently works for Drive books only.", "info", 3500);
+      return;
+    }
+
+    if (!driveFolderId) {
+      pushNotice("This book is not linked to a Drive folder yet. Sign in and reopen the book.", "error", 4500);
+      return;
+    }
+
+    const scan = await handleCheckDriveIntegrity();
+    if (!scan) return;
+
+    const missingText = scan.missingTextIds.length;
+    const missingAudio = scan.missingAudioIds.length;
+    const strays = scan.strayFiles.length;
+
+    if (missingText || missingAudio || strays) {
+      pushNotice(
+        `Scan complete. Missing text ${missingText}. Missing audio ${missingAudio}. Stray files ${strays}. Fix is ready.`,
+        "error",
+        6000
+      );
+    } else {
+      pushNotice("Scan complete. Everything looks good.", "success", 2500);
+    }
+  }, [book.backend, driveFolderId, handleCheckDriveIntegrity, pushNotice]);
 
   const generateAudio = async (chapter: Chapter, voiceIdOverride?: string) => {
     if (synthesizingId) return;
