@@ -309,7 +309,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         setSynthesisProgress({ current: 0, total: 1, message: "Synthesizing audio..." });
 
         const res = await synthesizeChunk(fullText, selectedVoiceId, 1.0);
-        audioBlob = new Blob([res.mp3Bytes], { type: "audio/mpeg" });
+        
+        // Replace the Blob construction with an ArrayBuffer-backed copy for TS compatibility.
+        const mp3Bytes = res.mp3Bytes instanceof Uint8Array ? res.mp3Bytes : new Uint8Array(res.mp3Bytes as any);
+
+        // Copy into a fresh Uint8Array so its buffer is a real ArrayBuffer (not ArrayBufferLike / SharedArrayBuffer)
+        const mp3Copy = new Uint8Array(mp3Bytes);
+
+        audioBlob = new Blob([mp3Copy], { type: "audio/mpeg" });
 
         await saveAudioToCache(cacheKey, audioBlob);
       }
