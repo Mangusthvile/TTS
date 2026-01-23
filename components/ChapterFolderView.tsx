@@ -4,7 +4,7 @@ import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headpho
 import { applyRules } from '../services/speechService';
 import { synthesizeChunk } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache } from '../services/audioCache';
-import { uploadToDrive, listFilesInFolder, buildMp3Name, buildTextName, createDriveFolder, findFileSync, moveFile } from '../services/driveService';
+import { uploadToDrive, listFilesInFolder, buildMp3Name, buildTextName, createDriveFolder, findFileSync, moveFile, moveFileToTrash } from '../services/driveService';
 import { isTokenValid } from '../services/driveAuth';
 import { reflowLineBreaks } from '../services/textFormat';
 import { loadChapterText as libraryLoadChapterText } from '../services/libraryStore';
@@ -67,6 +67,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [synthesisProgress, setSynthesisProgress] = useState<{ current: number, total: number, message: string } | null>(null);
   const [isCheckingDrive, setIsCheckingDrive] = useState(false);
   const [lastScan, setLastScan] = useState<ScanResult | null>(null);
+  const [missingTextIds, setMissingTextIds] = useState<string[]>([]);
+  const [missingAudioIds, setMissingAudioIds] = useState<string[]>([]);
+  const [fixLog, setFixLog] = useState<string[]>([]);
 
   const [notice, setNotice] = useState<{ message: string; kind: 'info' | 'success' | 'error' } | null>(null);
   const noticeTimerRef = useRef<number | null>(null);
@@ -187,6 +190,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         }
       }
       setLastScan(scan);
+      setMissingTextIds(scan.missingTextIds);
+      setMissingAudioIds(scan.missingAudioIds);
       return scan;
     } catch (e: any) {
       pushNotice("Integrity check failed: " + (e?.message || String(e)), 'error', 6000);
@@ -323,52 +328,138 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   };
 
   const handleRunFix = async () => {
-    if (!lastScan || !driveFolderId) return;
+    if (!driveFolderId) return;
+
     setIsFixing(true);
-    const totalActions = (fixOptions.restoreText ? lastScan.missingTextIds.length : 0) + (fixOptions.genAudio ? lastScan.missingAudioIds.length : 0) + (fixOptions.cleanupStrays ? lastScan.strayFiles.length : 0);
-    setFixProgress({ current: 0, total: totalActions });
+    setFixLog([]);
+
+    // Helper: pull a chapter index out of old filenames
+    const parseChapterIndexFromFileName = (name: string): number | null => {
+      const base = name.trim();
+
+      // 0001_title.txt or 1-title.mp3 or 1 title.txt
+      let m = base.match(/^(\d{1,6})[\s_-]/);
+      if (m) return Number(m[1]);
+
+      // chapter_12_title.txt, CHAPTER 12 - foo.mp3
+      m = base.match(/^chapter[\s_-]*(\d{1,6})/i);
+      if (m) return Number(m[1]);
+
+      return null;
+    };
+
+    const loadTextForFix = async (ch: Chapter): Promise<string> => {
+      if (typeof (ch as any).content === "string" && (ch as any).content.trim()) {
+        return String((ch as any).content);
+      }
+      const cached = await libraryLoadChapterText(book.id, ch.id);
+      return cached ?? "";
+    };
+
     try {
-      if (fixOptions.restoreText) {
-        for (const cid of lastScan.missingTextIds) {
-          const ch = chapters.find(c => c.id === cid);
+      const chaptersById = new Map(chapters.map((c) => [c.id, c]));
+      const chaptersByIndex = new Map(chapters.map((c) => [c.index, c]));
 
-          if (ch) {
-            const text =
-              (ch.content && ch.content.trim() ? ch.content : null) ??
-              (await libraryLoadChapterText(book.id, ch.id)) ??
-              "";
+      // Derive “outdated” chapters from stray files
+      const strayTextTargets = new Set<string>();
+      const strayAudioTargets = new Set<string>();
 
-            if (text.trim()) {
-              const filename = buildTextName(ch.index, ch.title);
-              const id = await uploadToDrive(driveFolderId, filename, text, ch.cloudTextFileId, 'text/plain');
-              onUpdateChapter({ ...ch, cloudTextFileId: id, hasTextOnDrive: true });
-            } else {
-              pushNotice(`Missing local text for "${ch.title}".`, 'error', 5000);
-            }
+      for (const f of lastScan?.strayFiles ?? []) {
+        const idx = parseChapterIndexFromFileName(f.name || "");
+        if (!idx) continue;
+
+        const ch = chaptersByIndex.get(idx);
+        if (!ch) continue;
+
+        const lower = (f.name || "").toLowerCase();
+        if (lower.endsWith(".txt")) strayTextTargets.add(ch.id);
+        if (lower.endsWith(".mp3")) strayAudioTargets.add(ch.id);
+      }
+
+      // Targets are: missing + outdated-from-strays
+      const textTargetIds = new Set<string>([...missingTextIds, ...strayTextTargets]);
+      const audioTargetIds = new Set<string>([...missingAudioIds, ...strayAudioTargets]);
+
+      // Optional: build a fast name->id map so we overwrite instead of duplicating
+      let nameToId = new Map<string, string>();
+      if ((fixOptions.restoreText && textTargetIds.size) || (fixOptions.genAudio && audioTargetIds.size)) {
+        const driveFiles = await listFilesInFolder(driveFolderId);
+        for (const df of driveFiles) {
+          if (df.name && df.id) nameToId.set(df.name, df.id);
+        }
+      }
+
+      // Restore or rebuild text
+      if (fixOptions.restoreText && textTargetIds.size) {
+        for (const chapterId of textTargetIds) {
+          const ch = chaptersById.get(chapterId);
+          if (!ch) continue;
+
+          const text = await loadTextForFix(ch);
+          if (!text.trim()) {
+            setFixLog((prev) => [...prev, `Skip text (empty): ${ch.title}`]);
+            continue;
           }
 
-          setFixProgress(p => ({ ...p, current: p.current + 1 }));
+          const filename = buildTextName(ch.index, ch.title);
+          const existingId = ch.cloudTextFileId || nameToId.get(filename);
+
+          setFixLog((prev) => [...prev, `Upload text: ${filename}`]);
+
+          const cloudTextFileId = await uploadToDrive(
+            driveFolderId,
+            filename,
+            text,
+            existingId,
+            "text/plain"
+          );
+
+          onUpdateChapter({ ...ch, cloudTextFileId, updatedAt: Date.now() });
         }
       }
-      if (fixOptions.genAudio) {
-        for (const cid of lastScan.missingAudioIds) {
-          const ch = chapters.find(c => c.id === cid);
-          if (ch) await generateAudio(ch);
-          setFixProgress(p => ({ ...p, current: p.current + 1 }));
+
+      // Regenerate or rebuild audio
+      if (fixOptions.genAudio && audioTargetIds.size) {
+        for (const chapterId of audioTargetIds) {
+          const ch = chaptersById.get(chapterId);
+          if (!ch) continue;
+
+          const filename = buildMp3Name(ch.index, ch.title);
+          const existingId = ch.cloudAudioFileId || nameToId.get(filename);
+
+          setFixLog((prev) => [...prev, `Synthesize audio: ${ch.title}`]);
+
+          // Generate using the chapter, but pass in a resolved file id so we overwrite canonical MP3s
+          await generateAudio({ ...ch, cloudAudioFileId: existingId || ch.cloudAudioFileId });
         }
       }
-      if (fixOptions.cleanupStrays && lastScan.strayFiles.length > 0) {
-        let trashFolderId = await findFileSync('_trash', driveFolderId);
-        if (!trashFolderId) trashFolderId = await createDriveFolder('_trash', driveFolderId);
-        for (const file of lastScan.strayFiles) {
-          await moveFile(file.id, driveFolderId!, trashFolderId);
-          setFixProgress(p => ({ ...p, current: p.current + 1 }));
+
+      // Cleanup strays and duplicates
+      if (fixOptions.cleanupStrays) {
+        if (lastScan?.duplicates?.length) {
+          for (const dup of lastScan.duplicates) {
+            for (const removeId of dup.removeIds) {
+              setFixLog((prev) => [...prev, `Remove duplicate: ${removeId}`]);
+              await moveFileToTrash(removeId);
+            }
+          }
+        }
+
+        if (lastScan?.strayFiles?.length) {
+          for (const stray of lastScan.strayFiles) {
+            setFixLog((prev) => [...prev, `Trash stray: ${stray.name}`]);
+            await moveFileToTrash(stray.id);
+          }
         }
       }
-      setShowFixModal(false);
-      handleCheckDriveIntegrity();
+
+      pushNotice("Fix complete. Run CHECK again to verify.", "success");
+
+      setLastScan(null);
+      setMissingTextIds([]);
+      setMissingAudioIds([]);
     } catch (e: any) {
-      alert("Fix encountered error: " + e.message);
+      pushNotice(`Fix failed: ${e?.message || e}`, "error");
     } finally {
       setIsFixing(false);
     }

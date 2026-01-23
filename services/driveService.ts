@@ -44,6 +44,22 @@ export async function moveFile(fileId: string, currentParentId: string, newParen
   if (!response.ok) throw new Error("MOVE_FAILED");
 }
 
+export async function moveFileToTrash(fileId: string): Promise<void> {
+  if (!fileId) return;
+
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`;
+
+  const response = await driveFetch(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ trashed: true })
+  });
+
+  if (!response.ok && response.status !== 404) {
+    throw new Error(`TRASH_FAILED: ${response.status}`);
+  }
+}
+
 /**
  * Native-safe Drive "picker":
  * - On Android/iOS (Capacitor), Google Picker is not reliable.
