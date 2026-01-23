@@ -784,7 +784,7 @@ const App: React.FC = () => {
     if (session !== chapterSessionRef.current) return;
 
     if (content === null && typeof chapter.content !== "string") {
-        pushNotice({ message: "Chapter text missing. Check Drive.", type: 'error', ms: 0 });
+        pushNotice({ message: "Chapter text missing. Check Drive.", type: 'error', ms: 5000 });
         updatePhase('READY');
         return;
     }
@@ -887,7 +887,7 @@ const App: React.FC = () => {
         }
 
     } else {
-        pushNotice({ message: "Audio not found. Try generating it.", type: 'info', ms: 0 });
+        pushNotice({ message: "Audio not found. Try generating it.", type: 'info', ms: 3000 });
         updatePhase('READY');
         setIsPlaying(false);
     }
@@ -949,7 +949,7 @@ const App: React.FC = () => {
       pushNotice({ message: `Next: Chapter ${next.index}`, type: 'info' });
       loadChapterSession(next.id, autoTrigger ? 'auto' : 'user');
     } else {
-      setIsPlaying(false); updatePhase('IDLE'); pushNotice({ message: "End of book", type: 'success', ms: 0 });
+      setIsPlaying(false); updatePhase('IDLE'); pushNotice({ message: "End of book", type: 'success', ms: 3000 });
     }
   }, [loadChapterSession, updatePhase, pushNotice]);
 

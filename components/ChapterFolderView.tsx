@@ -93,6 +93,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [showFixModal, setShowFixModal] = useState(false);
   const [isFixing, setIsFixing] = useState(false);
   const [fixProgress, setFixProgress] = useState({ current: 0, total: 0 });
+  const abortFixRef = useRef(false);
 
   const [showVoiceModal, setShowVoiceModal] = useState<{ chapterId?: string } | null>(null);
   const [rememberAsDefault, setRememberAsDefault] = useState(true);
@@ -168,6 +169,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       }
 
       // Anything in Drive folder not expected is stray
+      // STRICT CHECK: Legacy files (e.g. "Chapter 1.txt") are NOT in expectedNames, so they are stray.
       const strayFiles = driveFiles.filter(f => {
         if (!f?.name) return false;
         if (expectedNames.has(f.name)) return false;
@@ -268,8 +270,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
   }, [book.backend, handleCheckDriveIntegrity, handleCheckLocalIntegrity, pushNotice]);
 
-  const generateAudio = async (chapter: Chapter, voiceIdOverride?: string) => {
-    if (synthesizingId) return;
+  const generateAudio = async (chapter: Chapter, voiceIdOverride?: string): Promise<boolean> => {
+    if (synthesizingId) return false;
 
     setSynthesizingId(chapter.id);
     setSynthesisProgress({ current: 0, total: 1, message: "Preparing text..." });
@@ -344,6 +346,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           updatedAt: Date.now(),
         });
       }
+      return true;
     } catch (err: any) {
       console.error("[TaleVox] generateAudio failed", err);
 
@@ -354,6 +357,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       });
 
       alert(err?.message || "Audio generation failed");
+      return false;
     } finally {
       setSynthesizingId(null);
       setSynthesisProgress(null);
@@ -362,7 +366,16 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const handleRunFix = async () => {
     setIsFixing(true);
+    abortFixRef.current = false;
     setFixLog([]);
+    let errorCount = 0;
+
+    const totalSteps = 
+      (fixOptions.restoreText ? missingTextIds.length : 0) + 
+      (fixOptions.genAudio ? missingAudioIds.length : 0) + 
+      (fixOptions.cleanupStrays && lastScan?.strayFiles ? lastScan.strayFiles.length : 0);
+    
+    setFixProgress({ current: 0, total: totalSteps });
 
     try {
       if (book.backend !== StorageBackend.DRIVE) {
@@ -370,10 +383,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
         if (fixOptions.genAudio && targets.size) {
           for (const chapterId of targets) {
+            if (abortFixRef.current) break;
             const ch = chapters.find(c => c.id === chapterId);
             if (!ch) continue;
             setFixLog(prev => [...prev, `Generate audio: ${ch.title}`]);
             await generateAudio(ch);
+            setFixProgress(p => ({ ...p, current: p.current + 1 }));
           }
         }
         pushNotice("Fix complete.", "success", 3500);
@@ -391,46 +406,78 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       // 1. Restore Missing Text
       if (fixOptions.restoreText && missingTextIds.length) {
         for (const chapterId of missingTextIds) {
+          if (abortFixRef.current) break;
           const ch = chaptersById.get(chapterId);
           if (!ch) continue;
 
           const text = (ch.content && ch.content.trim() ? ch.content : null) ?? (await libraryLoadChapterText(book.id, ch.id)) ?? "";
-          if (!text.trim()) continue;
+          if (!text.trim()) {
+              setFixLog(p => [...p, `Skipping text restore for ${ch.title} (no local content)`]);
+              errorCount++;
+              continue;
+          }
 
           const filename = buildTextName(book.id, ch.id);
           setFixLog((prev) => [...prev, `Uploading missing text: ${filename}`]);
 
-          const cloudTextFileId = await uploadToDrive(driveFolderId, filename, text, undefined, "text/plain");
-          onUpdateChapter({ ...ch, cloudTextFileId, hasTextOnDrive: true, updatedAt: Date.now() });
+          try {
+            const cloudTextFileId = await uploadToDrive(driveFolderId, filename, text, undefined, "text/plain");
+            onUpdateChapter({ ...ch, cloudTextFileId, hasTextOnDrive: true, updatedAt: Date.now() });
+          } catch (e) {
+            errorCount++;
+            setFixLog(p => [...p, `Failed to upload text: ${filename}`]);
+          }
+          setFixProgress(p => ({ ...p, current: p.current + 1 }));
         }
       }
 
       // 2. Generate Missing Audio
       if (fixOptions.genAudio && missingAudioIds.length) {
         for (const chapterId of missingAudioIds) {
+          if (abortFixRef.current) break;
           const ch = chaptersById.get(chapterId);
           if (!ch) continue;
           setFixLog((prev) => [...prev, `Generating missing audio: ${ch.title}`]);
-          await generateAudio(ch);
+          const success = await generateAudio(ch);
+          if (!success) errorCount++;
+          setFixProgress(p => ({ ...p, current: p.current + 1 }));
         }
       }
 
       // 3. Cleanup stray files (only after replacements exist)
       if (fixOptions.cleanupStrays && lastScan?.strayFiles?.length) {
-        for (const stray of lastScan.strayFiles) {
-          setFixLog((prev) => [...prev, `Trashing stray file: ${stray.name}`]);
-          await moveFileToTrash(stray.id);
+        if (abortFixRef.current) {
+            setFixLog(p => [...p, "Cleanup aborted by user."]);
+        } else if (errorCount > 0) {
+            setFixLog(p => [...p, "SKIPPING CLEANUP: Errors occurred during restoration."]);
+            pushNotice("Cleanup skipped for safety due to errors.", "error");
+        } else {
+            for (const stray of lastScan.strayFiles) {
+              if (abortFixRef.current) break;
+              setFixLog((prev) => [...prev, `Trashing stray file: ${stray.name}`]);
+              try {
+                  await moveFileToTrash(stray.id);
+              } catch (e) {
+                  setFixLog(p => [...p, `Failed to trash ${stray.name}`]);
+              }
+              setFixProgress(p => ({ ...p, current: p.current + 1 }));
+            }
         }
       }
 
-      pushNotice("Fix complete. Run CHECK again to verify.", "success");
-      setLastScan(null);
-      setMissingTextIds([]);
-      setMissingAudioIds([]);
+      if (abortFixRef.current) {
+          pushNotice("Fix operation stopped.", "info");
+      } else if (errorCount === 0) {
+          pushNotice("Fix complete. Run CHECK again to verify.", "success");
+          setLastScan(null);
+          setMissingTextIds([]);
+          setMissingAudioIds([]);
+      }
     } catch (e: any) {
       pushNotice(`Fix failed: ${e?.message || e}`, "error", 6000);
     } finally {
       setIsFixing(false);
+      abortFixRef.current = false;
     }
   };
 
@@ -566,7 +613,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                   <button onClick={(e) => { e.stopPropagation(); onResetChapterProgress(book.id, c.id); }} className="p-2 opacity-40 hover:opacity-100 hover:text-indigo-500" title="Reset Progress">
                       <RotateCcw className="w-4 h-4" />
                   </button>
-                  <button onClick={(e) => { e.stopPropagation(); setRememberAsDefault(false); setShowVoiceModal({ chapterId: c.id }); }} className="p-2 opacity-40 hover:opacity-100" title="Regenerate Audio"><Headphones className="w-4 h-4" /></button>
+                  <button onClick={(e) => { e.stopPropagation(); setRememberAsDefault(true); setShowVoiceModal({ chapterId: c.id }); }} className="p-2 opacity-40 hover:opacity-100" title="Regenerate Audio"><Headphones className="w-4 h-4" /></button>
                   <button onClick={(e) => { e.stopPropagation(); setEditingChapterId(c.id); setTempTitle(c.title); }} className="p-2 opacity-40 hover:opacity-100" title="Edit Title"><Edit2 className="w-4 h-4" /></button>
                   <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete?')) onDeleteChapter(c.id); }} className="p-2 opacity-40 hover:opacity-100 hover:text-red-500" title="Delete"><Trash2 className="w-4 h-4" /></button>
                 </div>
@@ -685,7 +732,15 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4"><div className="p-4 rounded-2xl bg-indigo-600/5 border border-indigo-600/10 flex flex-col gap-1"><span className="text-[10px] font-black uppercase text-indigo-600">Missing Text</span><span className="text-2xl font-black">{lastScan.missingTextIds.length}</span></div><div className="p-4 rounded-2xl bg-amber-600/5 border border-amber-600/10 flex flex-col gap-1"><span className="text-[10px] font-black uppercase text-amber-600">Missing Audio</span><span className="text-2xl font-black">{lastScan.missingAudioIds.length}</span></div><div className="p-4 rounded-2xl bg-red-600/5 border border-red-600/10 flex flex-col gap-1"><span className="text-[10px] font-black uppercase text-red-600">Stray Files</span><span className="text-2xl font-black">{lastScan.strayFiles.length}</span></div></div>
              <div className="space-y-4"><label className="text-[10px] font-black uppercase tracking-widest opacity-60">Actions to Perform</label><div className="space-y-3"><label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.restoreText} onChange={e => setFixOptions(o => ({...o, restoreText: e.target.checked}))} /><div><div className="text-sm font-black">Restore Missing Text</div><p className="text-[10px] opacity-60 uppercase font-bold">Re-upload local content to Drive</p></div></label><label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.genAudio} onChange={e => setFixOptions(o => ({...o, genAudio: e.target.checked}))} /><div><div className="text-sm font-black">Generate Missing Audio</div><p className="text-[10px] opacity-60 uppercase font-bold">Synthesize and upload MP3s</p></div></label><label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.cleanupStrays} onChange={e => setFixOptions(o => ({...o, cleanupStrays: e.target.checked}))} /><div><div className="text-sm font-black">Cleanup Book Folder</div><p className="text-[10px] opacity-60 uppercase font-bold">Move unrecognized files to trash</p></div></label></div></div>
              <div className="max-h-[25vh] overflow-y-auto border rounded-2xl p-4 bg-black/5 space-y-2"><span className="text-[10px] font-black uppercase opacity-40 sticky top-0 bg-inherit py-1">Detailed Breakdown</span>{fixOptions.restoreText && lastScan.missingTextIds.map(cid => (<div key={`txt-${cid}`} className="text-xs font-bold flex items-center gap-2 text-indigo-600"><Plus className="w-3 h-3" /> Re-upload: {chapters.find(c=>c.id===cid)?.title}</div>))}{fixOptions.genAudio && lastScan.missingAudioIds.map(cid => (<div key={`aud-${cid}`} className="text-xs font-bold flex items-center gap-2 text-amber-600"><Headphones className="w-3 h-3" /> Synthesize: {chapters.find(c=>c.id===cid)?.title}</div>))}{fixOptions.cleanupStrays && lastScan.strayFiles.map(f => (<div key={`stray-${f.id}`} className="text-xs font-bold flex items-center gap-2 text-red-600"><History className="w-3 h-3" /> Move to trash: {f.name}</div>))}</div>
-             {isFixing ? (<div className="space-y-4 pt-4"><div className="flex justify-between items-center"><span className="text-sm font-black">Restoring Integrity...</span><span className="text-xs font-mono font-black">{fixProgress.current} / {fixProgress.total}</span></div><div className="h-3 w-full bg-black/5 rounded-full overflow-hidden"><div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${(fixProgress.current / fixProgress.total) * 100}%` }} /></div></div>) : (<div className="grid grid-cols-2 gap-4"><button onClick={() => setShowFixModal(false)} className="py-4 rounded-2xl font-black uppercase text-[10px] tracking-widest border-2 hover:bg-black/5">Cancel</button><button onClick={handleRunFix} className="py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-xl hover:scale-[1.02] active:scale-95 transition-all">Start Fixing</button></div>)}
+             {isFixing ? (
+               <div className="space-y-4 pt-4">
+                 <div className="flex justify-between items-center"><span className="text-sm font-black">Restoring Integrity...</span><span className="text-xs font-mono font-black">{fixProgress.current} / {fixProgress.total}</span></div>
+                 <div className="h-3 w-full bg-black/5 rounded-full overflow-hidden"><div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${(fixProgress.current / fixProgress.total) * 100}%` }} /></div>
+                 <button onClick={() => { abortFixRef.current = true; }} className="w-full py-3 mt-2 bg-red-500/10 text-red-600 rounded-xl font-black uppercase text-[10px] tracking-widest hover:bg-red-500/20">Stop Generation</button>
+               </div>
+             ) : (
+               <div className="grid grid-cols-2 gap-4"><button onClick={() => setShowFixModal(false)} className="py-4 rounded-2xl font-black uppercase text-[10px] tracking-widest border-2 hover:bg-black/5">Cancel</button><button onClick={handleRunFix} className="py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-xl hover:scale-[1.02] active:scale-95 transition-all">Start Fixing</button></div>
+             )}
           </div>
         </div>
       )}
