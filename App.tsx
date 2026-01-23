@@ -100,7 +100,7 @@ const App: React.FC = () => {
       const timer = setTimeout(() => {
         trace('watchdog:seek_timeout');
         setPlaybackPhase('READY'); 
-        showToast("Seek timed out", 0, 'error');
+        pushNotice({ message: "Seek timed out", type: 'error' });
       }, 6000);
       return () => clearTimeout(timer);
     }
@@ -355,7 +355,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (authState.status === 'error') {
-      showToast(`Auth Error: ${authState.lastError}`, 0, 'error');
+      pushNotice({ message: `Auth Error: ${authState.lastError}`, type: 'error' });
     }
   }, [authState.status, authState.lastError]);
 
@@ -366,10 +366,21 @@ const App: React.FC = () => {
   const activeChapterMetadata = useMemo(() => activeBook?.chapters.find(c => c.id === activeBook.currentChapterId), [activeBook]);
 
   const [toast, setToast] = useState<{ message: string; type: 'info' | 'success' | 'error' | 'reconnect' } | null>(null);
+  const noticeTimerRef = useRef<number | null>(null);
 
-  const showToast = useCallback((message: string, duration = 3000, type: 'info' | 'success' | 'error' | 'reconnect' = 'info') => {
-    setToast({ message, type });
-    if (duration > 0) setTimeout(() => setToast(null), duration);
+  const pushNotice = useCallback((n: { type: "info"|"success"|"error"|"reconnect"; message: string; ms?: number }) => {
+    setToast({ message: n.message, type: n.type });
+
+    if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
+
+    const ms = n.ms ?? (n.type === "error" ? 4500 : 2500);
+    noticeTimerRef.current = window.setTimeout(() => setToast(null), ms);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
+    };
   }, []);
 
   const updatePhase = useCallback((p: PlaybackPhase) => {
@@ -535,7 +546,7 @@ const App: React.FC = () => {
       if (!stateRef.current.driveRootFolderId) return;
       if (!force && !isDirty) return;
       
-      if (!silent) showToast("Saving to Cloud...", 0, 'info');
+      if (!silent) pushNotice({ message: "Saving to Cloud...", type: 'info', ms: 0 });
       
       try {
           const s = stateRef.current;
@@ -578,12 +589,12 @@ const App: React.FC = () => {
           
           setState(p => ({ ...p, lastSavedAt: Date.now() }));
           setIsDirty(false);
-          if (!silent) showToast("Cloud Save Complete", 2000, 'success');
+          if (!silent) pushNotice({ message: "Cloud Save Complete", type: 'success' });
       } catch (e: any) {
-          if (!silent) showToast("Save Failed: " + e.message, 0, 'error');
+          if (!silent) pushNotice({ message: "Save Failed: " + e.message, type: 'error' });
           console.error(e);
       }
-  }, [isDirty, showToast]);
+  }, [isDirty, pushNotice]);
 
   const ensureChapterContentLoaded = useCallback(
     async (bookId: string, chapterId: string, session: number): Promise<string | null> => {
@@ -668,13 +679,13 @@ const App: React.FC = () => {
           }
         } catch (e: any) {
           traceError("text:drive:load:failed", e);
-          showToast("Failed to load text: " + (e?.message ?? String(e)), 0, "error");
+          pushNotice({ message: "Failed to load text: " + (e?.message ?? String(e)), type: "error" });
         }
       }
 
       return null;
     },
-    [isAuthorized, showToast]
+    [isAuthorized, pushNotice]
   );
 
   const hardRefreshForChapter = useCallback(async (bookId: string, chapterId: string) => {
@@ -685,8 +696,8 @@ const App: React.FC = () => {
        if (!chapter) return;
 
        try {
-           const textName = buildTextName(chapter.index, chapter.title);
-           const audioName = buildMp3Name(chapter.index, chapter.title);
+           const textName = buildTextName(book.id, chapter.id);
+           const audioName = buildMp3Name(book.id, chapter.id);
            
            const [textId, audioId] = await Promise.all([
                findFileSync(textName, book.driveFolderId),
@@ -732,15 +743,15 @@ const App: React.FC = () => {
       if (changedCount > 0) {
           setState(p => ({ ...p, books: newBooks }));
           markDirty();
-          showToast(`Reconciled ${changedCount} chapters`, 2000, 'success');
+          pushNotice({ message: `Reconciled ${changedCount} chapters`, type: 'success' });
       } else {
-          showToast("Progress already consistent", 2000, 'info');
+          pushNotice({ message: "Progress already consistent", type: 'info' });
       }
-  }, [markDirty, showToast]);
+  }, [markDirty, pushNotice]);
 
   const handleResetChapterProgress = (bid: string, cid: string) => {
       commitProgressUpdate(bid, cid, { currentTime: 0, duration: 0, charOffset: 0, completed: false }, true, true);
-      showToast("Reset", 1000, 'info');
+      pushNotice({ message: "Reset", type: 'info', ms: 1000 });
   };
 
   const handleNextChapterRef = useRef<(autoTrigger?: boolean) => void>(() => {});
@@ -773,7 +784,7 @@ const App: React.FC = () => {
     if (session !== chapterSessionRef.current) return;
 
     if (content === null && typeof chapter.content !== "string") {
-        showToast("Chapter text missing. Check Drive.", 0, 'error');
+        pushNotice({ message: "Chapter text missing. Check Drive.", type: 'error', ms: 0 });
         updatePhase('READY');
         return;
     }
@@ -876,12 +887,12 @@ const App: React.FC = () => {
         }
 
     } else {
-        showToast("Audio not found. Try generating it.", 0, 'info');
+        pushNotice({ message: "Audio not found. Try generating it.", type: 'info', ms: 0 });
         updatePhase('READY');
         setIsPlaying(false);
     }
 
-  }, [isAuthorized, ensureChapterContentLoaded, showToast, updatePhase, effectiveMobileMode, state.playbackSpeed]);
+  }, [isAuthorized, ensureChapterContentLoaded, pushNotice, updatePhase, effectiveMobileMode, state.playbackSpeed]);
 
   const handleSmartOpenChapter = (id: string) => {
     const s = stateRef.current;
@@ -899,11 +910,11 @@ const App: React.FC = () => {
         const nextIncomplete = sorted.slice(clickedIdx + 1).find(c => !c.isCompleted);
         
         if (nextIncomplete) {
-            showToast(`Skipping completed ch.${clickedChapter.index} → ch.${nextIncomplete.index}`, 2000, 'info');
+            pushNotice({ message: `Skipping completed ch.${clickedChapter.index} → ch.${nextIncomplete.index}`, type: 'info' });
             loadChapterSession(nextIncomplete.id, 'user');
             return;
         }
-        showToast("Re-opening completed chapter", 1000, 'info');
+        pushNotice({ message: "Re-opening completed chapter", type: 'info', ms: 1000 });
     }
     
     loadChapterSession(id, 'user');
@@ -935,12 +946,12 @@ const App: React.FC = () => {
     
     if (idx >= 0 && idx < sorted.length - 1) {
       const next = sorted[idx + 1];
-      showToast(`Next: Chapter ${next.index}`, 2000, 'info');
+      pushNotice({ message: `Next: Chapter ${next.index}`, type: 'info' });
       loadChapterSession(next.id, autoTrigger ? 'auto' : 'user');
     } else {
-      setIsPlaying(false); updatePhase('IDLE'); showToast("End of book", 0, 'success');
+      setIsPlaying(false); updatePhase('IDLE'); pushNotice({ message: "End of book", type: 'success', ms: 0 });
     }
-  }, [loadChapterSession, updatePhase, showToast]);
+  }, [loadChapterSession, updatePhase, pushNotice]);
 
   useEffect(() => { handleNextChapterRef.current = handleNextChapter; }, [handleNextChapter]);
 
@@ -1021,7 +1032,7 @@ const App: React.FC = () => {
               newBook.id = newFolderId;
               newBook.driveFolderId = newFolderId;
               newBook.driveFolderName = title;
-          } catch(e: any) { showToast("Failed to create Drive folder", 0, 'error'); return; }
+          } catch(e: any) { pushNotice({ message: "Failed to create Drive folder", type: 'error', ms: 0 }); return; }
       }
       await libraryUpsertBook({ ...newBook, directoryHandle: undefined });
       setState(p => ({ ...p, books: [...p.books, newBook], activeBookId: newBook.id }));
@@ -1033,8 +1044,9 @@ const App: React.FC = () => {
       const s = stateRef.current;
       const book = s.books.find(b => b.id === s.activeBookId);
       if (!book) return;
+      const chapterId = crypto.randomUUID();
       const newChapter: Chapter = {
-          id: crypto.randomUUID(), index: data.index, title: data.title, content: data.content, wordCount: 0, textLength: data.content.length, filename: buildTextName(data.index, data.title), progress: 0, progressChars: 0, audioStatus: AudioStatus.PENDING, updatedAt: Date.now()
+          id: chapterId, index: data.index, title: data.title, content: data.content, wordCount: 0, textLength: data.content.length, filename: buildTextName(book.id, chapterId), progress: 0, progressChars: 0, audioStatus: AudioStatus.PENDING, updatedAt: Date.now()
       };
       if (book.driveFolderId && isAuthorized) {
           try { newChapter.cloudTextFileId = await uploadToDrive(book.driveFolderId, newChapter.filename, data.content); newChapter.hasTextOnDrive = true; } catch {}
@@ -1043,7 +1055,7 @@ const App: React.FC = () => {
       await librarySaveChapterText(book.id, newChapter.id, data.content);
       setState(p => ({ ...p, books: p.books.map(b => b.id === book.id ? { ...b, chapters: [...b.chapters, newChapter].sort((a,b)=>a.index-b.index) } : b) }));
       markDirty();
-      if (!data.keepOpen) setIsAddChapterOpen(false); else showToast("Added", 1000, 'success');
+      if (!data.keepOpen) setIsAddChapterOpen(false); else pushNotice({ message: "Added", type: 'success', ms: 1000 });
   };
 
   const handleSelectRoot = async () => {
@@ -1053,7 +1065,7 @@ const App: React.FC = () => {
   const performFullDriveSync = async (manual = false) => {
       if(!isAuthorized || !stateRef.current.driveRootFolderId) return;
       setIsSyncing(true);
-      if(manual) showToast("Scanning Drive...", 0, 'info');
+      if(manual) pushNotice({ message: "Scanning Drive...", type: 'info', ms: 0 });
       
       try {
          const s = stateRef.current;
@@ -1064,19 +1076,19 @@ const App: React.FC = () => {
          
          for (const db of driveBooks) {
              const files = await listFilesInFolder(db.id);
-             const chaptersMap = new Map<number, Partial<Chapter>>();
+             const chaptersMap = new Map<string, Partial<Chapter>>();
              
              for (const f of files) {
-                 const match = f.name.match(/^(\d+)[-_\s]+(.*?)\.(txt|mp3)$/i);
+                 // Support new c_<id> format
+                 const match = f.name.match(/^c_(.*?)\.(txt|mp3)$/i);
                  if (match) {
-                     const index = parseInt(match[1]);
-                     const title = match[2].trim();
-                     const ext = match[3].toLowerCase();
+                     const id = match[1];
+                     const ext = match[2].toLowerCase();
                      
-                     if (!chaptersMap.has(index)) {
-                         chaptersMap.set(index, { index, title, id: '', filename: '', content: '', wordCount: 0, progress: 0, progressChars: 0, updatedAt: Date.now() });
+                     if (!chaptersMap.has(id)) {
+                         chaptersMap.set(id, { id, index: 0, title: 'Imported Chapter', filename: '', content: '', wordCount: 0, progress: 0, progressChars: 0, updatedAt: Date.now() });
                      }
-                     const ch = chaptersMap.get(index)!;
+                     const ch = chaptersMap.get(id)!;
                      if (ext === 'txt') {
                          ch.cloudTextFileId = f.id;
                          ch.filename = f.name;
@@ -1092,7 +1104,7 @@ const App: React.FC = () => {
                  .filter(c => c.cloudTextFileId || c.cloudAudioFileId)
                  .map(c => ({
                      ...c,
-                     id: c.cloudTextFileId || c.cloudAudioFileId || crypto.randomUUID(),
+                     id: c.id || crypto.randomUUID(),
                  } as Chapter));
 
              const existingBookIdx = updatedBooks.findIndex(b => b.driveFolderId === db.id);
@@ -1102,15 +1114,13 @@ const App: React.FC = () => {
                  
                  for (const dc of driveChapters) {
                      const existingChIdx = mergedChapters.findIndex(ec => 
-                         ec.cloudTextFileId === dc.cloudTextFileId || 
-                         (ec.index === dc.index && ec.title.toLowerCase() === dc.title.toLowerCase())
+                         ec.id === dc.id || ec.cloudTextFileId === dc.cloudTextFileId
                      );
                      
                      if (existingChIdx !== -1) {
                          mergedChapters[existingChIdx] = {
                              ...mergedChapters[existingChIdx],
                              ...dc,
-                             // Preserve local progress
                              progress: mergedChapters[existingChIdx].progress,
                              progressSec: mergedChapters[existingChIdx].progressSec,
                              isCompleted: mergedChapters[existingChIdx].isCompleted
@@ -1138,10 +1148,10 @@ const App: React.FC = () => {
          setState(p => ({ ...p, books: updatedBooks, driveSubfolders: { booksId, savesId, trashId } }));
          markDirty();
          setIsSyncing(false);
-         if(manual) showToast("Sync Complete", 2000, 'success');
+         if(manual) pushNotice({ message: "Sync Complete", type: 'success' });
       } catch (e: any) {
          setIsSyncing(false);
-         showToast("Sync Failed: " + e.message, 0, 'error');
+         pushNotice({ message: "Sync Failed: " + e.message, type: 'error', ms: 0 });
       }
   };
 
@@ -1149,7 +1159,7 @@ const App: React.FC = () => {
       await performFullDriveSync(manual);
   };
 
-  const handleRunMigration = () => showToast("Not implemented", 0, 'info');
+  const handleRunMigration = () => pushNotice({ message: "Not implemented", type: 'info', ms: 0 });
   
   const handleScanAndRebuild = useCallback(async () => {
     setIsScanningRules(true);
@@ -1159,9 +1169,9 @@ const App: React.FC = () => {
       const book = s.books.find(b => b.id === s.activeBookId);
       if (book && book.currentChapterId) {
          await hardRefreshForChapter(book.id, book.currentChapterId);
-         showToast("Chapter Refreshed", 1000, 'success');
+         pushNotice({ message: "Chapter Refreshed", type: 'success', ms: 1000 });
       } else {
-         showToast("Refreshed", 1000, 'info');
+         pushNotice({ message: "Refreshed", type: 'info', ms: 1000 });
       }
     } catch (e) {
       console.warn(e);
@@ -1169,7 +1179,7 @@ const App: React.FC = () => {
       setIsScanningRules(false);
       setScanProgress('');
     }
-  }, [hardRefreshForChapter, showToast]);
+  }, [hardRefreshForChapter, pushNotice]);
 
   const prefsJson = useMemo(() => {
     const prefs = {
@@ -1238,7 +1248,7 @@ const App: React.FC = () => {
         const id = await createDriveFolder("TaleVox");
         handleSelect(id, "TaleVox");
       } catch (e: any) {
-        showToast("Failed to create folder", 0, 'error');
+        pushNotice({ message: "Failed to create folder", type: 'error', ms: 0 });
         setLoading(false);
       }
     };
@@ -1444,7 +1454,13 @@ const App: React.FC = () => {
               onUpdateChapter={c => { setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(ch => ch.id === c.id ? c : ch) } : b) })); markDirty(); }}
               onUpdateBookSettings={s => {
                 const updatedBook = { ...activeBook, settings: { ...activeBook.settings, ...s } };
-                setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? updatedBook : b) }));
+                setState(p => {
+                  const next = { ...p, books: p.books.map(b => b.id === activeBook.id ? updatedBook : b) };
+                  if (s.defaultVoiceId) {
+                    next.selectedVoiceName = s.defaultVoiceId;
+                  }
+                  return next;
+                });
                 void libraryUpsertBook(updatedBook);
                 markDirty();
               }}

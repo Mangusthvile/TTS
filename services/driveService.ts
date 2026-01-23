@@ -1,22 +1,14 @@
 import { Capacitor } from '@capacitor/core';
 import { driveFetch, getValidDriveToken } from './driveAuth';
 
-export function buildMp3Name(chapterIndex: number, title: string) {
-  const safe = (title || "untitled")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 60);
-  return `${chapterIndex.toString().padStart(3, '0')}_${safe}.mp3`;
+export function buildMp3Name(bookId: string, chapterIdOrIndex: string | number): string {
+  // New format: stable IDs (works even if chapter title changes)
+  return `c_${String(chapterIdOrIndex)}.mp3`;
 }
 
-export function buildTextName(chapterIndex: number, title: string) {
-  const safe = (title || "untitled")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 60);
-  return `${chapterIndex.toString().padStart(3, '0')}_${safe}.txt`;
+export function buildTextName(bookId: string, chapterIdOrIndex: string | number): string {
+  // New format: stable IDs (works even if chapter title changes)
+  return `c_${String(chapterIdOrIndex)}.txt`;
 }
 
 export function u8ToArrayBuffer(u8: Uint8Array): ArrayBuffer {
@@ -44,10 +36,11 @@ export async function moveFile(fileId: string, currentParentId: string, newParen
   if (!response.ok) throw new Error("MOVE_FAILED");
 }
 
+// Send a Drive file to the user's trash (true trash), NOT your app "_trash" folder.
 export async function moveFileToTrash(fileId: string): Promise<void> {
   if (!fileId) return;
 
-  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`;
+  const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?supportsAllDrives=true`;
 
   const response = await driveFetch(url, {
     method: "PATCH",

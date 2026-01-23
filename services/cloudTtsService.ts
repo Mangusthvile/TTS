@@ -1,3 +1,7 @@
+export type SynthesizeResult = {
+  mp3Bytes: Uint8Array;
+  mime: string;
+};
 
 export interface CloudTtsResult {
   audioUrl: string;
@@ -30,6 +34,13 @@ function toU8(u8: Uint8Array): U8 {
   const out = makeU8(u8.byteLength);
   out.set(u8);
   return out;
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
 }
 
 /**
@@ -191,9 +202,20 @@ async function postTts(
     }
     throw new Error(`Cloud TTS Failed: ${response.status}`);
   }
+
+  const ct = response.headers.get("content-type") || "";
+
+  // If your Cloud Run returns raw audio bytes:
+  if (ct.includes("audio/") || ct.includes("application/octet-stream")) {
+    const buf = await response.arrayBuffer();
+    return new Uint8Array(buf);
+  }
+
+  // If your Cloud Run returns JSON with base64:
   const data = await response.json();
-  if (!data.audioBase64) throw new Error("No audio data.");
-  return b64ToU8(data.audioBase64);
+  const b64 = data.mp3Base64 || data.audioBase64 || data.audioContent;
+  if (!b64) throw new Error("TTS response missing base64 audio");
+  return b64ToU8(b64);
 }
 
 async function synthesizeWithAdaptiveSplit(
@@ -233,8 +255,9 @@ async function synthesizeWithAdaptiveSplit(
 export async function synthesizeChunk(
   text: string,
   voiceName: string,
-  speakingRate: number
-): Promise<CloudTtsResult> {
+  speakingRate: number,
+  languageCode = "en-US"
+): Promise<SynthesizeResult> {
   const endpoint = (import.meta as any).env?.VITE_TTS_ENDPOINT || DEFAULT_ENDPOINT;
   const cloudVoice = sanitizeVoiceForCloud(voiceName);
   const chunks = chunkTextByUtf8Bytes(text, MAX_TTS_BYTES);
@@ -253,9 +276,7 @@ export async function synthesizeChunk(
       }
     }
     const mergedBytes = concatU8(audioParts);
-    const mp3Buffer = u8ToArrayBuffer(mergedBytes);
-    const blob = new Blob([mp3Buffer], { type: "audio/mpeg" });
-    return { audioUrl: URL.createObjectURL(blob), byteSize: mergedBytes.length };
+    return { mp3Bytes: mergedBytes, mime: "audio/mpeg" };
   } catch (err) {
     throw err;
   }
