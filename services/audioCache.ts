@@ -43,6 +43,28 @@ export async function getAudioFromCache(key: string): Promise<Blob | null> {
   });
 }
 
+export async function hasAudioInCache(key: string): Promise<boolean> {
+  const db = await initAudioDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STORE_NAME, 'readonly');
+    const store = transaction.objectStore(STORE_NAME);
+
+    const anyStore = store as any;
+    const request: IDBRequest = typeof anyStore.getKey === 'function'
+      ? anyStore.getKey(key)
+      : store.get(key);
+
+    request.onsuccess = () => {
+      if (typeof anyStore.getKey === 'function') {
+        resolve(!!request.result);
+      } else {
+        resolve(!!request.result);
+      }
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
 export async function deleteAudioFromCache(key: string): Promise<void> {
   const db = await initAudioDB();
   return new Promise((resolve, reject) => {
@@ -58,12 +80,11 @@ export async function deleteAudioFromCache(key: string): Promise<void> {
  * Generates a unique cache key based on text, voice, and speed.
  */
 export function generateAudioKey(text: string, voice: string, speed: number): string {
-  // Simple hash for text content
   let hash = 0;
   for (let i = 0; i < text.length; i++) {
     const char = text.charCodeAt(i);
     hash = ((hash << 5) - hash) + char;
-    hash |= 0; 
+    hash |= 0;
   }
   return `audio_${voice}_${speed}_${hash}`;
 }

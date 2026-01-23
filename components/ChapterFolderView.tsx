@@ -3,7 +3,7 @@ import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanRe
 import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon, Sparkles } from 'lucide-react';
 import { applyRules } from '../services/speechService';
 import { synthesizeChunk } from '../services/cloudTtsService';
-import { saveAudioToCache, generateAudioKey, getAudioFromCache } from '../services/audioCache';
+import { saveAudioToCache, generateAudioKey, getAudioFromCache, hasAudioInCache } from '../services/audioCache';
 import { uploadToDrive, listFilesInFolder, buildMp3Name, buildTextName, createDriveFolder, findFileSync, moveFile, moveFileToTrash } from '../services/driveService';
 import { isTokenValid } from '../services/driveAuth';
 import { reflowLineBreaks } from '../services/textFormat';
@@ -201,18 +201,59 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
   }, [driveFolderId, chapters, onUpdateChapter, pushNotice]);
 
+  const handleCheckLocalIntegrity = useCallback(async (): Promise<ScanResult | null> => {
+    setIsCheckingDrive(true);
+    try {
+      const scan: ScanResult = {
+        missingTextIds: [],
+        missingAudioIds: [],
+        strayFiles: [],
+        duplicates: [],
+        totalChecked: chapters.length
+      };
+
+      for (const chapter of chapters) {
+        const text =
+          (chapter.content && chapter.content.trim() ? chapter.content : null) ??
+          (await libraryLoadChapterText(book.id, chapter.id)) ??
+          "";
+
+        if (!text.trim()) {
+          scan.missingTextIds.push(chapter.id);
+        }
+
+        const signature = (chapter as any).audioSignature as string | undefined;
+        const audioOk = signature ? await hasAudioInCache(signature) : false;
+
+        if (!audioOk) {
+          scan.missingAudioIds.push(chapter.id);
+        }
+
+        onUpdateChapter({
+          ...chapter,
+          audioStatus: audioOk ? AudioStatus.READY : AudioStatus.PENDING
+        });
+      }
+
+      setLastScan(scan);
+      setMissingTextIds(scan.missingTextIds);
+      setMissingAudioIds(scan.missingAudioIds);
+
+      return scan;
+    } catch (e: any) {
+      pushNotice("Integrity check failed: " + (e?.message || String(e)), "error", 6000);
+      return null;
+    } finally {
+      setIsCheckingDrive(false);
+    }
+  }, [chapters, book.id, onUpdateChapter, pushNotice]);
+
   const handleCheckIntegrity = useCallback(async () => {
-    if (book.backend !== StorageBackend.DRIVE) {
-      pushNotice("Check currently works for Drive books only.", "info", 3500);
-      return;
-    }
+    const scan =
+      book.backend === StorageBackend.DRIVE
+        ? await handleCheckDriveIntegrity()
+        : await handleCheckLocalIntegrity();
 
-    if (!driveFolderId) {
-      pushNotice("This book is not linked to a Drive folder yet. Sign in and reopen the book.", "error", 4500);
-      return;
-    }
-
-    const scan = await handleCheckDriveIntegrity();
     if (!scan) return;
 
     const missingText = scan.missingTextIds.length;
@@ -228,7 +269,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     } else {
       pushNotice("Scan complete. Everything looks good.", "success", 2500);
     }
-  }, [book.backend, driveFolderId, handleCheckDriveIntegrity, pushNotice]);
+  }, [book.backend, handleCheckDriveIntegrity, handleCheckLocalIntegrity, pushNotice]);
 
   const generateAudio = async (chapter: Chapter, voiceIdOverride?: string) => {
     if (synthesizingId) return;
@@ -328,35 +369,66 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   };
 
   const handleRunFix = async () => {
-    if (!driveFolderId) return;
-
     setIsFixing(true);
     setFixLog([]);
 
-    // Helper: pull a chapter index out of old filenames
-    const parseChapterIndexFromFileName = (name: string): number | null => {
-      const base = name.trim();
-
-      // 0001_title.txt or 1-title.mp3 or 1 title.txt
-      let m = base.match(/^(\d{1,6})[\s_-]/);
-      if (m) return Number(m[1]);
-
-      // chapter_12_title.txt, CHAPTER 12 - foo.mp3
-      m = base.match(/^chapter[\s_-]*(\d{1,6})/i);
-      if (m) return Number(m[1]);
-
-      return null;
-    };
-
-    const loadTextForFix = async (ch: Chapter): Promise<string> => {
-      if (typeof (ch as any).content === "string" && (ch as any).content.trim()) {
-        return String((ch as any).content);
-      }
-      const cached = await libraryLoadChapterText(book.id, ch.id);
-      return cached ?? "";
-    };
-
     try {
+      if (book.backend !== StorageBackend.DRIVE) {
+        const targets = new Set<string>([...missingAudioIds]);
+
+        if (fixOptions.genAudio && targets.size) {
+          for (const chapterId of targets) {
+            const ch = chapters.find(c => c.id === chapterId);
+            if (!ch) continue;
+            setFixLog(prev => [...prev, `Generate audio: ${ch.title}`]);
+            await generateAudio(ch);
+          }
+        }
+
+        if (fixOptions.restoreText && missingTextIds.length) {
+          setFixLog(prev => [...prev, "Restore text is not available for non Drive books. Add text first."]);
+        }
+
+        pushNotice("Fix complete. Run CHECK again to verify.", "success", 3500);
+        setLastScan(null);
+        setMissingTextIds([]);
+        setMissingAudioIds([]);
+        return;
+      }
+
+      if (!driveFolderId) {
+        pushNotice("This Drive book is not linked to a folder yet. Sign in and reopen the book.", "error", 4500);
+        return;
+      }
+
+      const folderId: string = driveFolderId;
+
+      // From here on, use folderId for ALL drive calls
+      const driveFiles = await listFilesInFolder(folderId);
+
+      // Helper: pull a chapter index out of old filenames
+      const parseChapterIndexFromFileName = (name: string): number | null => {
+        const base = name.trim();
+
+        // 0001_title.txt or 1-title.mp3 or 1 title.txt
+        let m = base.match(/^(\d{1,6})[\s_-]/);
+        if (m) return Number(m[1]);
+
+        // chapter_12_title.txt, CHAPTER 12 - foo.mp3
+        m = base.match(/^chapter[\s_-]*(\d{1,6})/i);
+        if (m) return Number(m[1]);
+
+        return null;
+      };
+
+      const loadTextForFix = async (ch: Chapter): Promise<string> => {
+        if (typeof (ch as any).content === "string" && (ch as any).content.trim()) {
+          return String((ch as any).content);
+        }
+        const cached = await libraryLoadChapterText(book.id, ch.id);
+        return cached ?? "";
+      };
+
       const chaptersById = new Map(chapters.map((c) => [c.id, c]));
       const chaptersByIndex = new Map(chapters.map((c) => [c.index, c]));
 
@@ -383,7 +455,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       // Optional: build a fast name->id map so we overwrite instead of duplicating
       let nameToId = new Map<string, string>();
       if ((fixOptions.restoreText && textTargetIds.size) || (fixOptions.genAudio && audioTargetIds.size)) {
-        const driveFiles = await listFilesInFolder(driveFolderId);
         for (const df of driveFiles) {
           if (df.name && df.id) nameToId.set(df.name, df.id);
         }
@@ -407,7 +478,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           setFixLog((prev) => [...prev, `Upload text: ${filename}`]);
 
           const cloudTextFileId = await uploadToDrive(
-            driveFolderId,
+            folderId,
             filename,
             text,
             existingId,
@@ -459,7 +530,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       setMissingTextIds([]);
       setMissingAudioIds([]);
     } catch (e: any) {
-      pushNotice(`Fix failed: ${e?.message || e}`, "error");
+      pushNotice(`Fix failed: ${e?.message || e}`, "error", 6000);
     } finally {
       setIsFixing(false);
     }
