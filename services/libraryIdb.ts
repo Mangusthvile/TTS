@@ -248,6 +248,9 @@ export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promi
   const sBooks = tx.objectStore(STORE_BOOKS);
   const sCh = tx.objectStore(STORE_CHAPTERS);
 
+  const existingChapter = (await reqToPromise(sCh.get(chapter.id) as any)) as ChapterRow | undefined;
+  const isNewChapter = !existingChapter;
+
   const row: ChapterRow = {
     id: chapter.id,
     bookId,
@@ -277,8 +280,7 @@ export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promi
     const bookRow = (await reqToPromise(sBooks.get(bookId))) as BookRow | undefined;
     if (bookRow) {
       const prev = Number(bookRow.chapterCount ?? 0);
-      const candidate = Math.max(prev, chapter.index + 1);
-      bookRow.chapterCount = candidate;
+      bookRow.chapterCount = isNewChapter ? prev + 1 : prev;
       bookRow.updatedAt = Date.now();
       sBooks.put(bookRow);
     }
@@ -393,10 +395,13 @@ export async function bulkUpsertChapters(
   const sCh = tx.objectStore(STORE_CHAPTERS);
   const sTxt = tx.objectStore(STORE_CHAPTER_TEXT);
 
-  let maxIdx = -1;
+  let newCount = 0;
 
   for (const it of items) {
     const c = it.chapter;
+
+    const existing = (await reqToPromise(sCh.get(c.id))) as ChapterRow | undefined;
+    if (!existing) newCount += 1;
 
     const row: ChapterRow = {
       id: c.id,
@@ -421,8 +426,6 @@ export async function bulkUpsertChapters(
       updatedAt: (c as any).updatedAt ?? Date.now(),
     };
 
-    if (typeof row.idx === "number" && row.idx > maxIdx) maxIdx = row.idx;
-
     sCh.put(row);
 
     if (typeof it.content === "string" && it.content.length) {
@@ -440,8 +443,7 @@ export async function bulkUpsertChapters(
     const bookRow = (await reqToPromise(sBooks.get(bookId))) as BookRow | undefined;
     if (bookRow) {
       const prev = Number(bookRow.chapterCount ?? 0);
-      const candidate = maxIdx >= 0 ? Math.max(prev, maxIdx + 1) : prev;
-      bookRow.chapterCount = candidate;
+      bookRow.chapterCount = prev + newCount;
       bookRow.updatedAt = Date.now();
       sBooks.put(bookRow);
     }

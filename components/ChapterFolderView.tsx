@@ -4,12 +4,33 @@ import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headpho
 import { applyRules } from '../services/speechService';
 import { synthesizeChunk } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache, hasAudioInCache } from '../services/audioCache';
-import { uploadToDrive, listFilesInFolder, buildMp3Name, buildTextName, createDriveFolder, findFileSync, moveFile, moveFileToTrash } from '../services/driveService';
+import {
+  uploadToDrive,
+  listFilesInFolder,
+  buildMp3Name,
+  buildTextName,
+  createDriveFolder,
+  findFileSync,
+  moveFile,
+  moveFileToTrash,
+  fetchDriveFile,
+  copyDriveFile
+} from "../services/driveService";
 import { isTokenValid } from '../services/driveAuth';
 import { reflowLineBreaks } from '../services/textFormat';
-import { loadChapterText as libraryLoadChapterText } from '../services/libraryStore';
+import {
+  loadChapterText as libraryLoadChapterText,
+  bulkUpsertChapters as libraryBulkUpsertChapters
+} from "../services/libraryStore";
 
 type ViewMode = 'details' | 'list' | 'grid';
+
+type LegacyGroup = {
+  legacyIndex: number;
+  slug: string;
+  text?: StrayFile;
+  audio?: StrayFile;
+};
 
 interface ChapterFolderViewProps {
   book: Book;
@@ -31,6 +52,9 @@ interface ChapterFolderViewProps {
   onLoadMoreChapters?: () => void;
   hasMoreChapters?: boolean;
   isLoadingMoreChapters?: boolean;
+  
+  // Optional UI refresh callback
+  onAppendChapters?: (chapters: Chapter[]) => void;
 }
 
 const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
@@ -50,7 +74,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   playbackSnapshot,
   onLoadMoreChapters,
   hasMoreChapters,
-  isLoadingMoreChapters
+  isLoadingMoreChapters,
+  onAppendChapters
 }) => {
   const { driveFolderId } = book;
   const VIEW_MODE_KEY = `talevox:viewMode:${book.id}`;
@@ -70,6 +95,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [missingTextIds, setMissingTextIds] = useState<string[]>([]);
   const [missingAudioIds, setMissingAudioIds] = useState<string[]>([]);
   const [fixLog, setFixLog] = useState<string[]>([]);
+
+  const [legacyGroups, setLegacyGroups] = useState<LegacyGroup[]>([]);
+  const [unlinkedNewFormatFiles, setUnlinkedNewFormatFiles] = useState<StrayFile[]>([]);
 
   const [notice, setNotice] = useState<{ message: string; kind: 'info' | 'success' | 'error' } | null>(null);
   const noticeTimerRef = useRef<number | null>(null);
@@ -105,7 +133,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [fixOptions, setFixOptions] = useState({
     genAudio: true,
     restoreText: true,
-    cleanupStrays: true
+    cleanupStrays: true,
+    convertLegacy: true,
+    cleanupLegacyOriginals: false
   });
 
   const isDark = theme === Theme.DARK;
@@ -168,25 +198,65 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         if (!byName.has(mp3Name)) missingAudio.push(ch);
       }
 
-      // Anything in Drive folder not expected is stray
-      // STRICT CHECK: Legacy files (e.g. "Chapter 1.txt") are NOT in expectedNames, so they are stray.
-      const strayFiles = driveFiles.filter(f => {
-        if (!f?.name) return false;
-        if (expectedNames.has(f.name)) return false;
+      // Classification logic
+      const legacyMatches: LegacyGroup[] = [];
+      const unlinkedMatches: StrayFile[] = [];
+      const trueStrays: StrayFile[] = [];
+
+      const legacyRegex = /^(\d+)_(.+)\.(txt|mp3)$/;
+      const newFormatRegex = /^c_.+\.(txt|mp3)$/;
+
+      // Group legacy by prefix
+      const legacyMap = new Map<string, LegacyGroup>();
+
+      for (const f of driveFiles) {
+        if (!f?.name) continue;
+        if (expectedNames.has(f.name)) continue;
 
         // ignore common stuff
-        if (f.name === ".keep" || f.name === "cover.jpg" || f.name === "manifest.json" || f.name.startsWith('_')) return false;
+        if (f.name === ".keep" || f.name === "cover.jpg" || f.name === "manifest.json" || f.name.startsWith('_')) continue;
 
-        return true;
-      });
+        const leg = f.name.match(legacyRegex);
+        if (leg) {
+          const idx = parseInt(leg[1], 10);
+          const slug = leg[2]; // includes title part
+          const ext = leg[3];
+          const key = `${idx}_${slug}`;
+          
+          let group = legacyMap.get(key);
+          if (!group) {
+            group = { legacyIndex: idx, slug, text: undefined, audio: undefined };
+            legacyMap.set(key, group);
+          }
+          if (ext === 'txt') group.text = f;
+          if (ext === 'mp3') group.audio = f;
+          continue;
+        }
+
+        if (newFormatRegex.test(f.name)) {
+          unlinkedMatches.push(f);
+          continue;
+        }
+
+        trueStrays.push(f);
+      }
+      
+      const legacyGroupsList = Array.from(legacyMap.values()).sort((a,b) => a.legacyIndex - b.legacyIndex);
+
+      setLegacyGroups(legacyGroupsList);
+      setUnlinkedNewFormatFiles(unlinkedMatches);
 
       const scan: ScanResult = {
         missingTextIds: missingText.map(c => c.id),
         missingAudioIds: missingAudio.map(c => c.id),
-        strayFiles: strayFiles,
+        strayFiles: trueStrays,
         duplicates: [],
         totalChecked: chapters.length
       };
+
+      // Attach extra counts for UI
+      (scan as any).legacyCount = legacyGroupsList.length;
+      (scan as any).unlinkedNewFormatCount = unlinkedMatches.length;
 
       setLastScan(scan);
       setMissingTextIds(scan.missingTextIds);
@@ -258,10 +328,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     const missingText = scan.missingTextIds.length;
     const missingAudio = scan.missingAudioIds.length;
     const strays = scan.strayFiles.length;
+    const legacyCount = Number((scan as any).legacyCount || 0);
+    const unlinkedCount = Number((scan as any).unlinkedNewFormatCount || 0);
 
-    if (missingText || missingAudio || strays) {
+    if (missingText || missingAudio || strays || legacyCount || unlinkedCount) {
       pushNotice(
-        `Found issues: ${missingText} missing text, ${missingAudio} missing audio, ${strays} stray.`,
+        `Found issues: ${missingText} missing text, ${missingAudio} missing audio, ${strays} stray, ${legacyCount} legacy, ${unlinkedCount} unlinked.`,
         "info",
         6000
       );
@@ -378,6 +450,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     let errorCount = 0;
 
     const totalSteps = 
+      (fixOptions.convertLegacy ? legacyGroups.length : 0) +
       (fixOptions.restoreText ? missingTextIds.length : 0) + 
       (fixOptions.genAudio ? missingAudioIds.length : 0) + 
       (fixOptions.cleanupStrays && lastScan?.strayFiles ? lastScan.strayFiles.length : 0);
@@ -409,6 +482,86 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       }
 
       const chaptersById = new Map(chapters.map((c) => [c.id, c]));
+
+      // Step 0: Legacy Conversion
+      if (fixOptions.convertLegacy && legacyGroups.length > 0) {
+        const newChapters: Chapter[] = [];
+        const upsertItems: { chapter: Chapter; content: string }[] = [];
+
+        for (const group of legacyGroups) {
+           if (abortFixRef.current) break;
+           if (!group.text) continue; // Need text to make a chapter
+
+           setFixLog(p => [...p, `Converting legacy: ${group.slug}`]);
+           
+           try {
+             // 1. Read text
+             const textContent = await fetchDriveFile(group.text.id);
+             
+             // 2. Create ID
+             const newId = crypto.randomUUID ? crypto.randomUUID() : `legacy-${Date.now()}-${Math.random()}`;
+             
+             // 3. Upload text
+             const newTextName = buildTextName(book.id, newId);
+             const cloudTextFileId = await uploadToDrive(driveFolderId, newTextName, textContent, undefined, "text/plain");
+             
+             // 4. Copy audio if exists
+             let cloudAudioFileId: string | undefined;
+             if (group.audio) {
+               const newMp3Name = buildMp3Name(book.id, newId);
+               cloudAudioFileId = await copyDriveFile(group.audio.id, driveFolderId, newMp3Name);
+             }
+             
+             // 5. Create Chapter object
+             const newChapter: Chapter = {
+               id: newId,
+               index: group.legacyIndex,
+               title: group.slug.replace(/_/g, ' '),
+               filename: newTextName,
+               content: textContent,
+               wordCount: textContent.split(/\s+/).length,
+               textLength: textContent.length,
+               cloudTextFileId,
+               cloudAudioFileId,
+               audioStatus: cloudAudioFileId ? AudioStatus.READY : AudioStatus.PENDING,
+               hasTextOnDrive: true,
+               updatedAt: Date.now()
+             } as any;
+
+             newChapters.push(newChapter);
+             upsertItems.push({ chapter: newChapter, content: textContent });
+             
+             setFixProgress(p => ({ ...p, current: p.current + 1 }));
+
+           } catch (e) {
+             errorCount++;
+             setFixLog(p => [...p, `Failed to convert ${group.slug}: ${e}`]);
+           }
+        }
+
+        if (upsertItems.length > 0) {
+          await libraryBulkUpsertChapters(book.id, upsertItems);
+          if (onAppendChapters) onAppendChapters(newChapters);
+        }
+        
+        // Cleanup originals
+        if (fixOptions.cleanupLegacyOriginals && errorCount === 0) {
+           if (unlinkedNewFormatFiles.length > 0) {
+             setFixLog(p => [...p, "SKIPPING LEGACY CLEANUP: Unlinked new-format files detected."]);
+             pushNotice("Legacy cleanup skipped for safety.", "error");
+           } else {
+             for (const group of legacyGroups) {
+               if (abortFixRef.current) break;
+               try {
+                 if (group.text) await moveFileToTrash(group.text.id);
+                 if (group.audio) await moveFileToTrash(group.audio.id);
+               } catch (e) {
+                 setFixLog(p => [...p, `Failed to trash legacy files for ${group.slug}`]);
+               }
+             }
+           }
+        }
+      }
 
       // 1. Restore Missing Text
       if (fixOptions.restoreText && missingTextIds.length) {
@@ -479,6 +632,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           setLastScan(null);
           setMissingTextIds([]);
           setMissingAudioIds([]);
+          setLegacyGroups([]);
+          setUnlinkedNewFormatFiles([]);
       }
     } catch (e: any) {
       pushNotice(`Fix failed: ${e?.message || e}`, "error", 6000);
@@ -712,7 +867,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     !!lastScan &&
     (lastScan.missingTextIds.length > 0 ||
       lastScan.missingAudioIds.length > 0 ||
-      lastScan.strayFiles.length > 0);
+      lastScan.strayFiles.length > 0 ||
+      (lastScan as any).legacyCount > 0 ||
+      (lastScan as any).unlinkedNewFormatCount > 0);
 
   return (
     <div className={`h-full min-h-0 flex flex-col ${isDark ? 'bg-slate-900 text-slate-100' : isSepia ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
@@ -736,9 +893,27 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm overflow-y-auto">
           <div className={`w-full max-w-2xl rounded-[2.5rem] shadow-2xl p-8 lg:p-12 space-y-8 animate-in zoom-in-95 ${isDark ? 'bg-slate-900 border border-white/10' : 'bg-white'}`}>
              <div className="flex justify-between items-start"><div><h3 className="text-2xl font-black tracking-tight flex items-center gap-3"><Wrench className="w-7 h-7 text-indigo-600" /> Fix & Cleanup Cloud Folder</h3><p className="text-xs font-bold opacity-50 uppercase tracking-widest mt-2">Book: {book.title}</p></div>{!isFixing && <button onClick={() => setShowFixModal(false)} className="p-3 bg-black/5 rounded-full hover:bg-black/10"><X className="w-6 h-6" /></button>}</div>
-             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4"><div className="p-4 rounded-2xl bg-indigo-600/5 border border-indigo-600/10 flex flex-col gap-1"><span className="text-[10px] font-black uppercase text-indigo-600">Missing Text</span><span className="text-2xl font-black">{lastScan.missingTextIds.length}</span></div><div className="p-4 rounded-2xl bg-amber-600/5 border border-amber-600/10 flex flex-col gap-1"><span className="text-[10px] font-black uppercase text-amber-600">Missing Audio</span><span className="text-2xl font-black">{lastScan.missingAudioIds.length}</span></div><div className="p-4 rounded-2xl bg-red-600/5 border border-red-600/10 flex flex-col gap-1"><span className="text-[10px] font-black uppercase text-red-600">Stray Files</span><span className="text-2xl font-black">{lastScan.strayFiles.length}</span></div></div>
-             <div className="space-y-4"><label className="text-[10px] font-black uppercase tracking-widest opacity-60">Actions to Perform</label><div className="space-y-3"><label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.restoreText} onChange={e => setFixOptions(o => ({...o, restoreText: e.target.checked}))} /><div><div className="text-sm font-black">Restore Missing Text</div><p className="text-[10px] opacity-60 uppercase font-bold">Re-upload local content to Drive</p></div></label><label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.genAudio} onChange={e => setFixOptions(o => ({...o, genAudio: e.target.checked}))} /><div><div className="text-sm font-black">Generate Missing Audio</div><p className="text-[10px] opacity-60 uppercase font-bold">Synthesize and upload MP3s</p></div></label><label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.cleanupStrays} onChange={e => setFixOptions(o => ({...o, cleanupStrays: e.target.checked}))} /><div><div className="text-sm font-black">Cleanup Book Folder</div><p className="text-[10px] opacity-60 uppercase font-bold">Move unrecognized files to trash</p></div></label></div></div>
-             <div className="max-h-[25vh] overflow-y-auto border rounded-2xl p-4 bg-black/5 space-y-2"><span className="text-[10px] font-black uppercase opacity-40 sticky top-0 bg-inherit py-1">Detailed Breakdown</span>{fixOptions.restoreText && lastScan.missingTextIds.map(cid => (<div key={`txt-${cid}`} className="text-xs font-bold flex items-center gap-2 text-indigo-600"><Plus className="w-3 h-3" /> Re-upload: {chapters.find(c=>c.id===cid)?.title}</div>))}{fixOptions.genAudio && lastScan.missingAudioIds.map(cid => (<div key={`aud-${cid}`} className="text-xs font-bold flex items-center gap-2 text-amber-600"><Headphones className="w-3 h-3" /> Synthesize: {chapters.find(c=>c.id===cid)?.title}</div>))}{fixOptions.cleanupStrays && lastScan.strayFiles.map(f => (<div key={`stray-${f.id}`} className="text-xs font-bold flex items-center gap-2 text-red-600"><History className="w-3 h-3" /> Move to trash: {f.name}</div>))}</div>
+             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+               <div className="p-4 rounded-2xl bg-indigo-600/5 border border-indigo-600/10 flex flex-col gap-1"><span className="text-[10px] font-black uppercase text-indigo-600">Missing Text</span><span className="text-2xl font-black">{lastScan.missingTextIds.length}</span></div>
+               <div className="p-4 rounded-2xl bg-amber-600/5 border border-amber-600/10 flex flex-col gap-1"><span className="text-[10px] font-black uppercase text-amber-600">Missing Audio</span><span className="text-2xl font-black">{lastScan.missingAudioIds.length}</span></div>
+               <div className="p-4 rounded-2xl bg-red-600/5 border border-red-600/10 flex flex-col gap-1"><span className="text-[10px] font-black uppercase text-red-600">Stray Files</span><span className="text-2xl font-black">{lastScan.strayFiles.length}</span></div>
+               <div className="p-4 rounded-2xl bg-purple-600/5 border border-purple-600/10 flex flex-col gap-1"><span className="text-[10px] font-black uppercase text-purple-600">Legacy</span><span className="text-2xl font-black">{(lastScan as any).legacyCount || 0}</span></div>
+             </div>
+             <div className="space-y-4"><label className="text-[10px] font-black uppercase tracking-widest opacity-60">Actions to Perform</label>
+               <div className="space-y-3">
+                 <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.convertLegacy} onChange={e => setFixOptions(o => ({...o, convertLegacy: e.target.checked}))} /><div><div className="text-sm font-black">Convert Legacy Files</div><p className="text-[10px] opacity-60 uppercase font-bold">Migrate old format to new UUID format</p></div></label>
+                 <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.cleanupLegacyOriginals} onChange={e => setFixOptions(o => ({...o, cleanupLegacyOriginals: e.target.checked}))} /><div><div className="text-sm font-black">Cleanup Legacy Originals</div><p className="text-[10px] opacity-60 uppercase font-bold">Trash old files after successful conversion</p></div></label>
+                 <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.restoreText} onChange={e => setFixOptions(o => ({...o, restoreText: e.target.checked}))} /><div><div className="text-sm font-black">Restore Missing Text</div><p className="text-[10px] opacity-60 uppercase font-bold">Re-upload local content to Drive</p></div></label>
+                 <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.genAudio} onChange={e => setFixOptions(o => ({...o, genAudio: e.target.checked}))} /><div><div className="text-sm font-black">Generate Missing Audio</div><p className="text-[10px] opacity-60 uppercase font-bold">Synthesize and upload MP3s</p></div></label>
+                 <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.cleanupStrays} onChange={e => setFixOptions(o => ({...o, cleanupStrays: e.target.checked}))} /><div><div className="text-sm font-black">Cleanup Book Folder</div><p className="text-[10px] opacity-60 uppercase font-bold">Move unrecognized files to trash</p></div></label>
+               </div>
+             </div>
+             <div className="max-h-[25vh] overflow-y-auto border rounded-2xl p-4 bg-black/5 space-y-2"><span className="text-[10px] font-black uppercase opacity-40 sticky top-0 bg-inherit py-1">Detailed Breakdown</span>
+               {fixOptions.convertLegacy && legacyGroups.map(g => (<div key={`leg-${g.slug}`} className="text-xs font-bold flex items-center gap-2 text-purple-600"><Sparkles className="w-3 h-3" /> Convert: {g.slug}</div>))}
+               {fixOptions.restoreText && lastScan.missingTextIds.map(cid => (<div key={`txt-${cid}`} className="text-xs font-bold flex items-center gap-2 text-indigo-600"><Plus className="w-3 h-3" /> Re-upload: {chapters.find(c=>c.id===cid)?.title}</div>))}
+               {fixOptions.genAudio && lastScan.missingAudioIds.map(cid => (<div key={`aud-${cid}`} className="text-xs font-bold flex items-center gap-2 text-amber-600"><Headphones className="w-3 h-3" /> Synthesize: {chapters.find(c=>c.id===cid)?.title}</div>))}
+               {fixOptions.cleanupStrays && lastScan.strayFiles.map(f => (<div key={`stray-${f.id}`} className="text-xs font-bold flex items-center gap-2 text-red-600"><History className="w-3 h-3" /> Move to trash: {f.name}</div>))}
+             </div>
              {isFixing ? (
                <div className="space-y-4 pt-4">
                  <div className="flex justify-between items-center"><span className="text-sm font-black">Restoring Integrity...</span><span className="text-xs font-mono font-black">{fixProgress.current} / {fixProgress.total}</span></div>

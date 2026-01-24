@@ -53,6 +53,28 @@ export async function moveFileToTrash(fileId: string): Promise<void> {
   }
 }
 
+export async function copyDriveFile(
+  sourceFileId: string,
+  destFolderId: string,
+  newName: string
+): Promise<string> {
+  const res = await driveFetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(sourceFileId)}/copy?supportsAllDrives=true`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: newName,
+        parents: [destFolderId],
+      }),
+    }
+  );
+
+  const json = await res.json().catch(() => ({} as any));
+  if (!json?.id) throw new Error("Drive copy failed");
+  return json.id as string;
+}
+
 /**
  * Native-safe Drive "picker":
  * - On Android/iOS (Capacitor), Google Picker is not reliable.
