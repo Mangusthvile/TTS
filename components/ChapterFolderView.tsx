@@ -22,6 +22,8 @@ import {
   loadChapterText as libraryLoadChapterText,
   bulkUpsertChapters as libraryBulkUpsertChapters
 } from "../services/libraryStore";
+import { initBookFolderManifests } from "../services/bookFolderInit";
+import { createDriveFolderAdapter } from "../services/driveFolderAdapter";
 
 type ViewMode = 'details' | 'list' | 'grid';
 
@@ -91,6 +93,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [synthesizingId, setSynthesizingId] = useState<string | null>(null);
   const [synthesisProgress, setSynthesisProgress] = useState<{ current: number, total: number, message: string } | null>(null);
   const [isCheckingDrive, setIsCheckingDrive] = useState(false);
+  const [isInitManifests, setIsInitManifests] = useState(false);
   const [lastScan, setLastScan] = useState<ScanResult | null>(null);
   const [missingTextIds, setMissingTextIds] = useState<string[]>([]);
   const [missingAudioIds, setMissingAudioIds] = useState<string[]>([]);
@@ -165,6 +168,36 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     obs.observe(el);
     return () => obs.disconnect();
   }, [hasMoreChapters, onLoadMoreChapters, isLoadingMoreChapters]);
+
+  const handleInitManifests = useCallback(async () => {
+    if (!driveFolderId) {
+      pushNotice("Drive folder not set for this book yet.", "error");
+      return;
+    }
+    if (book.backend !== "drive") {
+      pushNotice("This tool is currently only wired for Drive books.", "error");
+      return;
+    }
+
+    setIsInitManifests(true);
+    try {
+      const adapter = createDriveFolderAdapter();
+
+      const res = await initBookFolderManifests({
+        book,
+        rootFolderId: driveFolderId,
+        rootFolderName: (book as any).driveFolderName ?? book.title,
+        adapter
+      });
+
+      const total = res.inventory.expectedTotal ?? res.inventory.chapters.length;
+      pushNotice(`Manifests ready. Inventory has ${total} chapters.`, "success");
+    } catch (e: any) {
+      pushNotice(`Manifest init failed: ${String(e?.message ?? e)}`, "error");
+    } finally {
+      setIsInitManifests(false);
+    }
+  }, [book, driveFolderId, pushNotice]);
 
   const handleCheckDriveIntegrity = useCallback(async (): Promise<ScanResult | null> => {
     if (!driveFolderId) {
@@ -946,6 +979,15 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           <div className={`flex flex-wrap gap-2 transition-all duration-300 ${isHeaderExpanded || window.innerWidth >= 768 ? 'opacity-100 max-h-40 pointer-events-auto' : 'opacity-0 max-h-0 pointer-events-none overflow-hidden sm:opacity-100 sm:max-h-40 sm:pointer-events-auto'}`}>
             <button onClick={onAddChapter} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-indigo-600 text-white rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center gap-2"><Plus className="w-3.5 h-3.5" /> Add Chapter</button>
             <button onClick={handleCheckIntegrity} disabled={isCheckingDrive} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center justify-center gap-2">{isCheckingDrive ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}{isCheckingDrive ? '...' : 'Check'}</button>
+            <button
+              onClick={handleInitManifests}
+              disabled={isInitManifests || isCheckingDrive}
+              className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center justify-center gap-2"
+              title="Create meta/book.json and meta/inventory.json in this book folder"
+            >
+              {isInitManifests ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+              {isInitManifests ? "Initializing..." : "Init Manifests"}
+            </button>
             <button
               disabled={!hasIssues}
               className={hasIssues ? "flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-orange-500 text-white rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center gap-2" : "flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-orange-500/40 text-white/60 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest cursor-not-allowed flex items-center justify-center gap-2"}
