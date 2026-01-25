@@ -174,7 +174,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       pushNotice("Drive folder not set for this book yet.", "error");
       return;
     }
-    if (book.backend !== "drive") {
+    if (book.backend !== StorageBackend.DRIVE) {
       pushNotice("This tool is currently only wired for Drive books.", "error");
       return;
     }
@@ -213,7 +213,15 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       const driveFiles = await listFilesInFolder(driveFolderId);
 
       // Build fast lookup by name
-      const byName = new Map(driveFiles.map(f => [f.name, f]));
+      const filesByName = new Map<string, StrayFile[]>();
+      for (const f of driveFiles) {
+        if (!f?.name) continue;
+        const arr = filesByName.get(f.name) || [];
+        arr.push(f);
+        filesByName.set(f.name, arr);
+      }
+
+      const hasName = (name: string) => (filesByName.get(name)?.length || 0) > 0;
 
       // Expected file names from current chapters
       const expectedNames = new Set<string>();
@@ -227,8 +235,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         expectedNames.add(txtName);
         expectedNames.add(mp3Name);
 
-        if (!byName.has(txtName)) missingText.push(ch);
-        if (!byName.has(mp3Name)) missingAudio.push(ch);
+        if (!hasName(txtName)) missingText.push(ch);
+        if (!hasName(mp3Name)) missingAudio.push(ch);
       }
 
       // Classification logic
@@ -243,6 +251,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       const legacyMap = new Map<string, LegacyGroup>();
 
       for (const f of driveFiles) {
+        // Ignore folders, especially meta/text/audio/trash
+        if (f.mimeType === "application/vnd.google-apps.folder") continue;
+
         if (!f?.name) continue;
         if (expectedNames.has(f.name)) continue;
 
@@ -279,11 +290,56 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       setLegacyGroups(legacyGroupsList);
       setUnlinkedNewFormatFiles(unlinkedMatches);
 
+      const pickKeepId = (arr: StrayFile[]) => {
+        let best = arr[0];
+        let bestTime = Date.parse(best.modifiedTime || "");
+        if (Number.isNaN(bestTime)) bestTime = 0;
+
+        for (const f of arr.slice(1)) {
+          let t = Date.parse(f.modifiedTime || "");
+          if (Number.isNaN(t)) t = 0;
+          if (t >= bestTime) {
+            bestTime = t;
+            best = f;
+          }
+        }
+        return best.id;
+      };
+
+      const duplicates: ScanResult["duplicates"] = [];
+
+      for (const ch of chapters) {
+        const txtName = buildTextName(book.id, ch.id);
+        const mp3Name = buildMp3Name(book.id, ch.id);
+
+        const txtArr = filesByName.get(txtName) || [];
+        if (txtArr.length > 1) {
+          const keepId = pickKeepId(txtArr);
+          duplicates.push({
+            chapterId: ch.id,
+            type: "text",
+            keepId,
+            removeIds: txtArr.filter(x => x.id !== keepId).map(x => x.id)
+          });
+        }
+
+        const mp3Arr = filesByName.get(mp3Name) || [];
+        if (mp3Arr.length > 1) {
+          const keepId = pickKeepId(mp3Arr);
+          duplicates.push({
+            chapterId: ch.id,
+            type: "audio",
+            keepId,
+            removeIds: mp3Arr.filter(x => x.id !== keepId).map(x => x.id)
+          });
+        }
+      }
+
       const scan: ScanResult = {
         missingTextIds: missingText.map(c => c.id),
         missingAudioIds: missingAudio.map(c => c.id),
         strayFiles: trueStrays,
-        duplicates: [],
+        duplicates,
         totalChecked: chapters.length
       };
 
@@ -482,15 +538,53 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     setFixLog([]);
     let errorCount = 0;
 
-    const totalSteps = 
+    const totalSteps =
       (fixOptions.convertLegacy ? legacyGroups.length : 0) +
-      (fixOptions.restoreText ? missingTextIds.length : 0) + 
-      (fixOptions.genAudio ? missingAudioIds.length : 0) + 
+      (fixOptions.restoreText ? missingTextIds.length : 0) +
+      (fixOptions.genAudio ? missingAudioIds.length : 0) +
       (fixOptions.cleanupStrays && lastScan?.strayFiles ? lastScan.strayFiles.length : 0);
-    
+
     setFixProgress({ current: 0, total: totalSteps });
 
+    const bump = () => setFixProgress(p => ({ ...p, current: p.current + 1 }));
+
+    const normalizeTitle = (s: string) =>
+      (s || "").trim().toLowerCase().replace(/\s+/g, " ");
+
+    const slugToTitle = (slug: string) =>
+      (slug || "").replace(/_/g, " ").trim();
+
+    // Stable ID so Convert Legacy is repeat safe.
+    // Same legacy index + slug will always map to the same chapter id.
+    const stableLegacyId = (legacyIndex: number, slug: string) => {
+      const raw = `${book.id}|${legacyIndex}|${slug}`;
+      let h = 2166136261; // FNV-1a
+      for (let i = 0; i < raw.length; i++) {
+        h ^= raw.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+      }
+      const hex = (h >>> 0).toString(16).padStart(8, "0");
+      return `leg_${legacyIndex}_${hex}`;
+    };
+
+    const pickKeepIdFromArray = (arr: StrayFile[]) => {
+      let best = arr[0];
+      let bestTime = Date.parse(best.modifiedTime || "");
+      if (Number.isNaN(bestTime)) bestTime = 0;
+
+      for (const f of arr.slice(1)) {
+        let t = Date.parse(f.modifiedTime || "");
+        if (Number.isNaN(t)) t = 0;
+        if (t >= bestTime) {
+          bestTime = t;
+          best = f;
+        }
+      }
+      return best.id;
+    };
+
     try {
+      // Local backend: only generate missing audio
       if (book.backend !== StorageBackend.DRIVE) {
         const targets = new Set<string>([...missingAudioIds]);
 
@@ -499,16 +593,19 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             if (abortFixRef.current) break;
             const ch = chapters.find(c => c.id === chapterId);
             if (!ch) continue;
+
             setFixLog(prev => [...prev, `Generate audio: ${ch.title}`]);
             await generateAudio(ch);
-            setFixProgress(p => ({ ...p, current: p.current + 1 }));
+            bump();
           }
         }
+
         pushNotice("Fix complete.", "success", 3500);
         setLastScan(null);
         return;
       }
 
+      // Drive backend
       if (!driveFolderId) {
         pushNotice("Drive folder not set.", "error");
         return;
@@ -516,157 +613,262 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       const chaptersById = new Map(chapters.map((c) => [c.id, c]));
 
-      // Step 0: Legacy Conversion
+      // Snapshot Drive files once so we can upsert without creating duplicates.
+      const driveFiles = await listFilesInFolder(driveFolderId);
+
+      const filesByName = new Map<string, StrayFile[]>();
+      for (const f of driveFiles) {
+        if (!f?.name) continue;
+        const arr = filesByName.get(f.name) || [];
+        arr.push(f);
+        filesByName.set(f.name, arr);
+      }
+
+      // If we discover duplicates for the same new-format filename,
+      // we will trash the extras at the end (only if cleanup is enabled and no errors).
+      const extraNewFormatDuplicatesToTrash: { id: string; name: string }[] = [];
+
+      const getExistingKeepId = (name: string) => {
+        const arr = filesByName.get(name) || [];
+        if (arr.length === 0) return undefined;
+
+        const keepId = pickKeepIdFromArray(arr);
+
+        // Queue any extra duplicates for cleanup later.
+        if (arr.length > 1) {
+          for (const f of arr) {
+            if (f.id !== keepId) {
+              extraNewFormatDuplicatesToTrash.push({ id: f.id, name: f.name });
+            }
+          }
+        }
+
+        return keepId;
+      };
+
+      // Step 0: Legacy Conversion (repeat safe)
       if (fixOptions.convertLegacy && legacyGroups.length > 0) {
-        const newChapters: Chapter[] = [];
+        const actuallyNewChapters: Chapter[] = [];
         const upsertItems: { chapter: Chapter; content: string }[] = [];
 
         for (const group of legacyGroups) {
-           if (abortFixRef.current) break;
-           if (!group.text) continue; // Need text to make a chapter
+          if (abortFixRef.current) break;
 
-           setFixLog(p => [...p, `Converting legacy: ${group.slug}`]);
-           
-           try {
-             // 1. Read text
-             const textContent = await fetchDriveFile(group.text.id);
-             
-             // 2. Create ID
-             const newId = crypto.randomUUID ? crypto.randomUUID() : `legacy-${Date.now()}-${Math.random()}`;
-             
-             // 3. Upload text
-             const newTextName = buildTextName(book.id, newId);
-             const cloudTextFileId = await uploadToDrive(driveFolderId, newTextName, textContent, undefined, "text/plain");
-             
-             // 4. Copy audio if exists
-             let cloudAudioFileId: string | undefined;
-             if (group.audio) {
-               const newMp3Name = buildMp3Name(book.id, newId);
-               cloudAudioFileId = await copyDriveFile(group.audio.id, driveFolderId, newMp3Name);
-             }
-             
-             // 5. Create Chapter object
-             const newChapter: Chapter = {
-               id: newId,
-               index: group.legacyIndex,
-               title: group.slug.replace(/_/g, ' '),
-               filename: newTextName,
-               content: textContent,
-               wordCount: textContent.split(/\s+/).length,
-               textLength: textContent.length,
-               cloudTextFileId,
-               cloudAudioFileId,
-               audioStatus: cloudAudioFileId ? AudioStatus.READY : AudioStatus.PENDING,
-               hasTextOnDrive: true,
-               updatedAt: Date.now()
-             } as any;
+          if (!group.text) {
+            // No text means we cannot safely create a chapter record.
+            setFixLog(p => [...p, `Skipping legacy (no text): ${group.slug}`]);
+            bump();
+            continue;
+          }
 
-             newChapters.push(newChapter);
-             upsertItems.push({ chapter: newChapter, content: textContent });
-             
-             setFixProgress(p => ({ ...p, current: p.current + 1 }));
+          const legacyTitle = slugToTitle(group.slug);
 
-           } catch (e) {
-             errorCount++;
-             setFixLog(p => [...p, `Failed to convert ${group.slug}: ${e}`]);
-           }
+          // If a chapter already exists at this index with the same title,
+          // we adopt it instead of creating another one.
+          const existing = chapters.find(c =>
+            c.index === group.legacyIndex &&
+            normalizeTitle(c.title) === normalizeTitle(legacyTitle)
+          );
+
+          const chapterId = existing?.id ?? stableLegacyId(group.legacyIndex, group.slug);
+
+          setFixLog(p => [...p, `Converting legacy: ${group.slug} -> ${legacyTitle}`]);
+
+          try {
+            // 1) Read legacy text
+            const textContent = await fetchDriveFile(group.text.id);
+
+            // 2) Upsert new-format text file (prevents duplicate filenames)
+            const newTextName = buildTextName(book.id, chapterId);
+            const existingTextFileId = getExistingKeepId(newTextName);
+
+            const cloudTextFileId = await uploadToDrive(
+              driveFolderId,
+              newTextName,
+              textContent,
+              existingTextFileId,
+              "text/plain"
+            );
+
+            // 3) Ensure new-format audio exists (copy once, do not duplicate)
+            let cloudAudioFileId: string | undefined;
+            if (group.audio) {
+              const newMp3Name = buildMp3Name(book.id, chapterId);
+              const existingMp3FileId = getExistingKeepId(newMp3Name);
+
+              if (existingMp3FileId) {
+                cloudAudioFileId = existingMp3FileId;
+              } else {
+                cloudAudioFileId = await copyDriveFile(group.audio.id, driveFolderId, newMp3Name);
+              }
+            }
+
+            const wordCount = textContent.trim() ? textContent.trim().split(/\s+/).length : 0;
+
+            const chapterRecord: Chapter = {
+              id: chapterId,
+              index: group.legacyIndex,
+              title: legacyTitle,
+
+              // IMPORTANT: do not keep the full chapter text in memory for Drive books
+              content: "",
+
+              wordCount,
+              textLength: textContent.length,
+              cloudTextFileId,
+              cloudAudioFileId,
+              audioStatus: cloudAudioFileId ? AudioStatus.READY : AudioStatus.PENDING,
+              hasTextOnDrive: true,
+              updatedAt: Date.now()
+            } as any;
+
+            upsertItems.push({ chapter: chapterRecord, content: textContent });
+
+            // If this chapter did not exist in the UI yet, add it.
+            if (!existing) {
+              actuallyNewChapters.push(chapterRecord);
+            } else {
+              // If it already exists, update the UI copy so it stops showing missing status.
+              onUpdateChapter({
+                ...existing,
+                cloudTextFileId,
+                cloudAudioFileId,
+                hasTextOnDrive: true,
+                audioStatus: cloudAudioFileId ? AudioStatus.READY : existing.audioStatus,
+                updatedAt: Date.now()
+              } as any);
+            }
+          } catch (e: any) {
+            errorCount++;
+            setFixLog(p => [...p, `Failed to convert ${group.slug}: ${String(e?.message ?? e)}`]);
+          } finally {
+            bump();
+          }
         }
 
         if (upsertItems.length > 0) {
           await libraryBulkUpsertChapters(book.id, upsertItems);
-          if (onAppendChapters) onAppendChapters(newChapters);
+
+          // This is what makes chapters appear immediately, if App.tsx passes it.
+          if (onAppendChapters && actuallyNewChapters.length > 0) {
+            onAppendChapters(actuallyNewChapters);
+          }
         }
-        
-        // Cleanup originals
-        if (fixOptions.cleanupLegacyOriginals && errorCount === 0) {
-           if (unlinkedNewFormatFiles.length > 0) {
-             setFixLog(p => [...p, "SKIPPING LEGACY CLEANUP: Unlinked new-format files detected."]);
-             pushNotice("Legacy cleanup skipped for safety.", "error");
-           } else {
-             for (const group of legacyGroups) {
-               if (abortFixRef.current) break;
-               try {
-                 if (group.text) await moveFileToTrash(group.text.id);
-                 if (group.audio) await moveFileToTrash(group.audio.id);
-               } catch (e) {
-                 setFixLog(p => [...p, `Failed to trash legacy files for ${group.slug}`]);
-               }
-             }
-           }
+
+        // Cleanup original legacy files only if user chose it AND it is safe.
+        if (fixOptions.cleanupLegacyOriginals) {
+          if (unlinkedNewFormatFiles.length > 0) {
+            setFixLog(p => [...p, "SKIPPING LEGACY CLEANUP: Unlinked new-format files detected."]);
+            pushNotice("Legacy cleanup skipped for safety.", "error");
+          } else if (errorCount > 0) {
+            setFixLog(p => [...p, "SKIPPING LEGACY CLEANUP: Errors occurred during conversion."]);
+            pushNotice("Legacy cleanup skipped for safety due to errors.", "error");
+          } else {
+            for (const group of legacyGroups) {
+              if (abortFixRef.current) break;
+              try {
+                if (group.text) await moveFileToTrash(group.text.id);
+                if (group.audio) await moveFileToTrash(group.audio.id);
+              } catch {
+                setFixLog(p => [...p, `Failed to trash legacy files for ${group.slug}`]);
+              }
+            }
+          }
         }
       }
 
-      // 1. Restore Missing Text
+      // 1) Restore Missing Text
       if (fixOptions.restoreText && missingTextIds.length) {
         for (const chapterId of missingTextIds) {
           if (abortFixRef.current) break;
           const ch = chaptersById.get(chapterId);
-          if (!ch) continue;
+          if (!ch) { bump(); continue; }
 
-          const text = (ch.content && ch.content.trim() ? ch.content : null) ?? (await libraryLoadChapterText(book.id, ch.id)) ?? "";
+          const text =
+            (ch.content && ch.content.trim() ? ch.content : null) ??
+            (await libraryLoadChapterText(book.id, ch.id)) ??
+            "";
+
           if (!text.trim()) {
-              setFixLog(p => [...p, `Skipping text restore for ${ch.title} (no local content)`]);
-              errorCount++;
-              continue;
+            setFixLog(p => [...p, `Skipping text restore for ${ch.title} (no local content)`]);
+            errorCount++;
+            bump();
+            continue;
           }
 
           const filename = buildTextName(book.id, ch.id);
-          setFixLog((prev) => [...prev, `Uploading missing text: ${filename}`]);
+          setFixLog(prev => [...prev, `Uploading missing text: ${filename}`]);
 
           try {
             const cloudTextFileId = await uploadToDrive(driveFolderId, filename, text, undefined, "text/plain");
-            onUpdateChapter({ ...ch, cloudTextFileId, hasTextOnDrive: true, updatedAt: Date.now() });
-          } catch (e) {
+            onUpdateChapter({ ...ch, cloudTextFileId, hasTextOnDrive: true, updatedAt: Date.now() } as any);
+          } catch {
             errorCount++;
             setFixLog(p => [...p, `Failed to upload text: ${filename}`]);
           }
-          setFixProgress(p => ({ ...p, current: p.current + 1 }));
+
+          bump();
         }
       }
 
-      // 2. Generate Missing Audio
+      // 2) Generate Missing Audio
       if (fixOptions.genAudio && missingAudioIds.length) {
         for (const chapterId of missingAudioIds) {
           if (abortFixRef.current) break;
           const ch = chaptersById.get(chapterId);
-          if (!ch) continue;
-          setFixLog((prev) => [...prev, `Generating missing audio: ${ch.title}`]);
+          if (!ch) { bump(); continue; }
+
+          setFixLog(prev => [...prev, `Generating missing audio: ${ch.title}`]);
           const success = await generateAudio(ch);
           if (!success) errorCount++;
-          setFixProgress(p => ({ ...p, current: p.current + 1 }));
+
+          bump();
         }
       }
 
-      // 3. Cleanup stray files (only after replacements exist)
-      if (fixOptions.cleanupStrays && lastScan?.strayFiles?.length) {
+      // 3) Cleanup stray files (and also cleanup extra duplicate new-format files if found)
+      if (fixOptions.cleanupStrays) {
         if (abortFixRef.current) {
-            setFixLog(p => [...p, "Cleanup aborted by user."]);
+          setFixLog(p => [...p, "Cleanup aborted by user."]);
         } else if (errorCount > 0) {
-            setFixLog(p => [...p, "SKIPPING CLEANUP: Errors occurred during restoration."]);
-            pushNotice("Cleanup skipped for safety due to errors.", "error");
+          setFixLog(p => [...p, "SKIPPING CLEANUP: Errors occurred during restoration."]);
+          pushNotice("Cleanup skipped for safety due to errors.", "error");
         } else {
-            for (const stray of lastScan.strayFiles) {
-              if (abortFixRef.current) break;
-              setFixLog((prev) => [...prev, `Trashing stray file: ${stray.name}`]);
-              try {
-                  await moveFileToTrash(stray.id);
-              } catch (e) {
-                  setFixLog(p => [...p, `Failed to trash ${stray.name}`]);
-              }
-              setFixProgress(p => ({ ...p, current: p.current + 1 }));
+          // Trash true strays from last scan
+          const strayList = lastScan?.strayFiles || [];
+          for (const stray of strayList) {
+            if (abortFixRef.current) break;
+            setFixLog(prev => [...prev, `Trashing stray file: ${stray.name}`]);
+            try {
+              await moveFileToTrash(stray.id);
+            } catch {
+              setFixLog(p => [...p, `Failed to trash ${stray.name}`]);
             }
+            bump();
+          }
+
+          // Also trash extra duplicates of new-format filenames (if any)
+          for (const dup of extraNewFormatDuplicatesToTrash) {
+            if (abortFixRef.current) break;
+            setFixLog(prev => [...prev, `Trashing duplicate file: ${dup.name}`]);
+            try {
+              await moveFileToTrash(dup.id);
+            } catch {
+              setFixLog(p => [...p, `Failed to trash duplicate ${dup.name}`]);
+            }
+          }
         }
       }
 
       if (abortFixRef.current) {
-          pushNotice("Fix operation stopped.", "info");
+        pushNotice("Fix operation stopped.", "info");
       } else if (errorCount === 0) {
-          pushNotice("Fix complete. Run CHECK again to verify.", "success");
-          setLastScan(null);
-          setMissingTextIds([]);
-          setMissingAudioIds([]);
-          setLegacyGroups([]);
-          setUnlinkedNewFormatFiles([]);
+        pushNotice("Fix complete. Run CHECK again to verify.", "success");
+        setLastScan(null);
+        setMissingTextIds([]);
+        setMissingAudioIds([]);
+        setLegacyGroups([]);
+        setUnlinkedNewFormatFiles([]);
       }
     } catch (e: any) {
       pushNotice(`Fix failed: ${e?.message || e}`, "error", 6000);
@@ -950,7 +1152,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
              {isFixing ? (
                <div className="space-y-4 pt-4">
                  <div className="flex justify-between items-center"><span className="text-sm font-black">Restoring Integrity...</span><span className="text-xs font-mono font-black">{fixProgress.current} / {fixProgress.total}</span></div>
-                 <div className="h-3 w-full bg-black/5 rounded-full overflow-hidden"><div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${(fixProgress.current / fixProgress.total) * 100}%` }} /></div>
+                 <div className="h-3 w-full bg-black/5 rounded-full overflow-hidden"><div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${fixProgress.total ? (fixProgress.current / fixProgress.total) * 100 : 0}%` }} /></div>
                  <button onClick={() => { abortFixRef.current = true; }} className="w-full py-3 mt-2 bg-red-500/10 text-red-600 rounded-xl font-black uppercase text-[10px] tracking-widest hover:bg-red-500/20">Stop Generation</button>
                </div>
              ) : (
