@@ -20,7 +20,8 @@ import { isTokenValid } from '../services/driveAuth';
 import { reflowLineBreaks } from '../services/textFormat';
 import {
   loadChapterText as libraryLoadChapterText,
-  bulkUpsertChapters as libraryBulkUpsertChapters
+  bulkUpsertChapters as libraryBulkUpsertChapters,
+  listChaptersPage
 } from "../services/libraryStore";
 import { initBookFolderManifests } from "../services/bookFolderInit";
 import { createDriveFolderAdapter } from "../services/driveFolderAdapter";
@@ -98,6 +99,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [missingTextIds, setMissingTextIds] = useState<string[]>([]);
   const [missingAudioIds, setMissingAudioIds] = useState<string[]>([]);
   const [fixLog, setFixLog] = useState<string[]>([]);
+  const [scanTitles, setScanTitles] = useState<Record<string, string>>({});
 
   const [legacyGroups, setLegacyGroups] = useState<LegacyGroup[]>([]);
   const [unlinkedNewFormatFiles, setUnlinkedNewFormatFiles] = useState<StrayFile[]>([]);
@@ -169,6 +171,15 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     return () => obs.disconnect();
   }, [hasMoreChapters, onLoadMoreChapters, isLoadingMoreChapters]);
 
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
+    if (scrollHeight - scrollTop - clientHeight < 200) {
+      if (hasMoreChapters && !isLoadingMoreChapters && onLoadMoreChapters) {
+        onLoadMoreChapters();
+      }
+    }
+  }, [hasMoreChapters, isLoadingMoreChapters, onLoadMoreChapters]);
+
   const handleInitManifests = useCallback(async () => {
     if (!driveFolderId) {
       pushNotice("Drive folder not set for this book yet.", "error");
@@ -199,6 +210,24 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
   }, [book, driveFolderId, pushNotice]);
 
+  const fetchAllChapters = useCallback(async () => {
+    const all: Chapter[] = [];
+    let afterIndex = 0;
+    const LIMIT = 200;
+    while (true) {
+      const page = await listChaptersPage(book.id, afterIndex, LIMIT);
+
+      if (!page || page.chapters.length === 0) break;
+
+      all.push(...page.chapters);
+
+      if (page.nextAfterIndex == null) break;
+
+      afterIndex = page.nextAfterIndex;
+    }
+    return all.sort((a, b) => a.index - b.index);
+  }, [book.id]);
+
   const handleCheckDriveIntegrity = useCallback(async (): Promise<ScanResult | null> => {
     if (!driveFolderId) {
       pushNotice("Drive folder not set for this book yet.", "error");
@@ -223,12 +252,20 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       const hasName = (name: string) => (filesByName.get(name)?.length || 0) > 0;
 
+      // Load full chapter list from DB for accurate check
+      const allChapters = await fetchAllChapters();
+      
+      // Update title cache for UI
+      const titleMap: Record<string, string> = {};
+      allChapters.forEach(c => titleMap[c.id] = c.title);
+      setScanTitles(titleMap);
+
       // Expected file names from current chapters
       const expectedNames = new Set<string>();
       const missingText: Chapter[] = [];
       const missingAudio: Chapter[] = [];
 
-      for (const ch of chapters) {
+      for (const ch of allChapters) {
         const txtName = buildTextName(book.id, ch.id);
         const mp3Name = buildMp3Name(book.id, ch.id);
 
@@ -308,7 +345,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       const duplicates: ScanResult["duplicates"] = [];
 
-      for (const ch of chapters) {
+      for (const ch of allChapters) {
         const txtName = buildTextName(book.id, ch.id);
         const mp3Name = buildMp3Name(book.id, ch.id);
 
@@ -340,7 +377,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         missingAudioIds: missingAudio.map(c => c.id),
         strayFiles: trueStrays,
         duplicates,
-        totalChecked: chapters.length
+        totalChecked: allChapters.length
       };
 
       // Attach extra counts for UI
@@ -357,20 +394,27 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     } finally {
       setIsCheckingDrive(false);
     }
-  }, [driveFolderId, book.id, chapters, pushNotice]);
+  }, [driveFolderId, book.id, fetchAllChapters, pushNotice]);
 
   const handleCheckLocalIntegrity = useCallback(async (): Promise<ScanResult | null> => {
     setIsCheckingDrive(true);
     try {
+      const allChapters = await fetchAllChapters();
+      
+      // Update title cache
+      const titleMap: Record<string, string> = {};
+      allChapters.forEach(c => titleMap[c.id] = c.title);
+      setScanTitles(titleMap);
+
       const scan: ScanResult = {
         missingTextIds: [],
         missingAudioIds: [],
         strayFiles: [],
         duplicates: [],
-        totalChecked: chapters.length
+        totalChecked: allChapters.length
       };
 
-      for (const chapter of chapters) {
+      for (const chapter of allChapters) {
         const text =
           (chapter.content && chapter.content.trim() ? chapter.content : null) ??
           (await libraryLoadChapterText(book.id, chapter.id)) ??
@@ -404,7 +448,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     } finally {
       setIsCheckingDrive(false);
     }
-  }, [chapters, book.id, onUpdateChapter, pushNotice]);
+  }, [book.id, onUpdateChapter, pushNotice, fetchAllChapters]);
 
   const handleCheckIntegrity = useCallback(async () => {
     const scan =
@@ -584,6 +628,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     };
 
     try {
+      // Fetch all chapters to ensure we can fix items not currently in UI
+      const allChapters = await fetchAllChapters();
+
       // Local backend: only generate missing audio
       if (book.backend !== StorageBackend.DRIVE) {
         const targets = new Set<string>([...missingAudioIds]);
@@ -591,7 +638,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         if (fixOptions.genAudio && targets.size) {
           for (const chapterId of targets) {
             if (abortFixRef.current) break;
-            const ch = chapters.find(c => c.id === chapterId);
+            const ch = allChapters.find(c => c.id === chapterId);
             if (!ch) continue;
 
             setFixLog(prev => [...prev, `Generate audio: ${ch.title}`]);
@@ -611,7 +658,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         return;
       }
 
-      const chaptersById = new Map(chapters.map((c) => [c.id, c]));
+      const chaptersById = new Map(allChapters.map((c) => [c.id, c]));
 
       // Snapshot Drive files once so we can upsert without creating duplicates.
       const driveFiles = await listFilesInFolder(driveFolderId);
@@ -665,7 +712,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
           // If a chapter already exists at this index with the same title,
           // we adopt it instead of creating another one.
-          const existing = chapters.find(c =>
+          const existing = allChapters.find(c =>
             c.index === group.legacyIndex &&
             normalizeTitle(c.title) === normalizeTitle(legacyTitle)
           );
@@ -1145,8 +1192,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
              </div>
              <div className="max-h-[25vh] overflow-y-auto border rounded-2xl p-4 bg-black/5 space-y-2"><span className="text-[10px] font-black uppercase opacity-40 sticky top-0 bg-inherit py-1">Detailed Breakdown</span>
                {fixOptions.convertLegacy && legacyGroups.map(g => (<div key={`leg-${g.slug}`} className="text-xs font-bold flex items-center gap-2 text-purple-600"><Sparkles className="w-3 h-3" /> Convert: {g.slug}</div>))}
-               {fixOptions.restoreText && lastScan.missingTextIds.map(cid => (<div key={`txt-${cid}`} className="text-xs font-bold flex items-center gap-2 text-indigo-600"><Plus className="w-3 h-3" /> Re-upload: {chapters.find(c=>c.id===cid)?.title}</div>))}
-               {fixOptions.genAudio && lastScan.missingAudioIds.map(cid => (<div key={`aud-${cid}`} className="text-xs font-bold flex items-center gap-2 text-amber-600"><Headphones className="w-3 h-3" /> Synthesize: {chapters.find(c=>c.id===cid)?.title}</div>))}
+               {fixOptions.restoreText && lastScan.missingTextIds.map(cid => (<div key={`txt-${cid}`} className="text-xs font-bold flex items-center gap-2 text-indigo-600"><Plus className="w-3 h-3" /> Re-upload: {scanTitles[cid] || chapters.find(c=>c.id===cid)?.title || cid}</div>))}
+               {fixOptions.genAudio && lastScan.missingAudioIds.map(cid => (<div key={`aud-${cid}`} className="text-xs font-bold flex items-center gap-2 text-amber-600"><Headphones className="w-3 h-3" /> Synthesize: {scanTitles[cid] || chapters.find(c=>c.id===cid)?.title || cid}</div>))}
                {fixOptions.cleanupStrays && lastScan.strayFiles.map(f => (<div key={`stray-${f.id}`} className="text-xs font-bold flex items-center gap-2 text-red-600"><History className="w-3 h-3" /> Move to trash: {f.name}</div>))}
              </div>
              {isFixing ? (
@@ -1175,7 +1222,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           
           <div className={`flex items-center gap-3 sm:gap-8 cursor-pointer md:cursor-default`} onClick={() => window.innerWidth < 768 && setIsHeaderExpanded(!isHeaderExpanded)}>
             <div className={`rounded-xl sm:rounded-2xl overflow-hidden shadow-xl flex-shrink-0 bg-indigo-600/10 flex items-center justify-center transition-all duration-300 ${isHeaderExpanded ? 'w-24 sm:w-32 aspect-[2/3]' : 'w-12 sm:w-32 aspect-[1/1] sm:aspect-[2/3]'}`}>{book.coverImage ? <img src={book.coverImage} className="w-full h-full object-cover" alt={book.title} /> : <ImageIcon className="w-5 h-5 sm:w-10 sm:h-10 opacity-20" />}</div>
-            <div className="flex-1 min-w-0"><div className="flex items-center gap-2"><h1 className={`font-black tracking-tight truncate transition-all duration-300 ${isHeaderExpanded ? 'text-xl sm:text-3xl' : 'text-sm sm:text-3xl'}`}>{book.title}</h1><div className="md:hidden">{isHeaderExpanded ? <ChevronUp className="w-4 h-4 opacity-40" /> : <ChevronDown className="w-4 h-4 opacity-40" />}</div></div><p className={`font-bold opacity-60 uppercase tracking-widest transition-all duration-300 ${isHeaderExpanded ? 'text-[10px] sm:text-xs mt-1' : 'text-[8px] sm:text-xs'}`}>{book.chapters.length} Chapters {isHeaderExpanded && `• ${book.backend} backend`}</p></div>
+            <div className="flex-1 min-w-0"><div className="flex items-center gap-2"><h1 className={`font-black tracking-tight truncate transition-all duration-300 ${isHeaderExpanded ? 'text-xl sm:text-3xl' : 'text-sm sm:text-3xl'}`}>{book.title}</h1><div className="md:hidden">{isHeaderExpanded ? <ChevronUp className="w-4 h-4 opacity-40" /> : <ChevronDown className="w-4 h-4 opacity-40" />}</div></div><p className={`font-bold opacity-60 uppercase tracking-widest transition-all duration-300 ${isHeaderExpanded ? 'text-[10px] sm:text-xs mt-1' : 'text-[8px] sm:text-xs'}`}>{book.chapterCount ?? book.chapters.length} Chapters {isHeaderExpanded && `• ${book.backend} backend`}</p></div>
           </div>
 
           <div className={`flex flex-wrap gap-2 transition-all duration-300 ${isHeaderExpanded || window.innerWidth >= 768 ? 'opacity-100 max-h-40 pointer-events-auto' : 'opacity-0 max-h-0 pointer-events-none overflow-hidden sm:opacity-100 sm:max-h-40 sm:pointer-events-auto'}`}>
@@ -1217,7 +1264,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         </div>
       )}
 
-      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 sm:px-6 py-6 sm:py-8">{chapters.length === 0 ? (<div className="p-12 text-center text-xs font-black opacity-30 uppercase">No chapters found</div>) : (<>{viewMode === 'details' && renderDetailsView()}{viewMode === 'list' && renderListView()}{viewMode === 'grid' && renderGridView()}</>)}</div>
+      <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-4 sm:px-6 py-6 sm:py-8">{chapters.length === 0 ? (<div className="p-12 text-center text-xs font-black opacity-30 uppercase">No chapters found</div>) : (<>{viewMode === 'details' && renderDetailsView()}{viewMode === 'list' && renderListView()}{viewMode === 'grid' && renderGridView()}</>)}</div>
     </div>
   );
 };
