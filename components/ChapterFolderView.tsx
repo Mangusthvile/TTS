@@ -21,7 +21,7 @@ import { reflowLineBreaks } from '../services/textFormat';
 import {
   loadChapterText as libraryLoadChapterText,
   bulkUpsertChapters as libraryBulkUpsertChapters,
-  listChaptersPage
+  listChaptersPage as libraryListChaptersPage
 } from "../services/libraryStore";
 import { initBookFolderManifests } from "../services/bookFolderInit";
 import { createDriveFolderAdapter } from "../services/driveFolderAdapter";
@@ -215,7 +215,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     let afterIndex = 0;
     const LIMIT = 200;
     while (true) {
-      const page = await listChaptersPage(book.id, afterIndex, LIMIT);
+      const page = await libraryListChaptersPage(book.id, afterIndex, LIMIT);
 
       if (!page || page.chapters.length === 0) break;
 
@@ -239,15 +239,35 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
     setIsCheckingDrive(true);
     try {
-      const driveFiles = await listFilesInFolder(driveFolderId);
+      const driveFilesRaw = await listFilesInFolder(driveFolderId);
 
-      // Build fast lookup by name
+      // Deduplicate by name, keeping newest. Collect extras as strays.
       const filesByName = new Map<string, StrayFile[]>();
-      for (const f of driveFiles) {
+      for (const f of driveFilesRaw) {
         if (!f?.name) continue;
         const arr = filesByName.get(f.name) || [];
         arr.push(f);
         filesByName.set(f.name, arr);
+      }
+
+      const driveFiles: StrayFile[] = []; // Unique files (newest)
+      const duplicateStrays: StrayFile[] = [];
+
+      for (const [name, files] of filesByName) {
+          if (files.length === 1) {
+              driveFiles.push(files[0]);
+          } else {
+              // Sort newest first
+              files.sort((a, b) => {
+                  const tA = Date.parse(a.modifiedTime || '') || 0;
+                  const tB = Date.parse(b.modifiedTime || '') || 0;
+                  return tB - tA;
+              });
+              driveFiles.push(files[0]); // Keep newest
+              for (let i = 1; i < files.length; i++) {
+                  duplicateStrays.push(files[i]);
+              }
+          }
       }
 
       const hasName = (name: string) => (filesByName.get(name)?.length || 0) > 0;
@@ -279,7 +299,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       // Classification logic
       const legacyMatches: LegacyGroup[] = [];
       const unlinkedMatches: StrayFile[] = [];
-      const trueStrays: StrayFile[] = [];
+      const trueStrays: StrayFile[] = [...duplicateStrays];
 
       const legacyRegex = /^(\d+)_(.+)\.(txt|mp3)$/;
       const newFormatRegex = /^c_.+\.(txt|mp3)$/;
@@ -327,50 +347,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       setLegacyGroups(legacyGroupsList);
       setUnlinkedNewFormatFiles(unlinkedMatches);
 
-      const pickKeepId = (arr: StrayFile[]) => {
-        let best = arr[0];
-        let bestTime = Date.parse(best.modifiedTime || "");
-        if (Number.isNaN(bestTime)) bestTime = 0;
-
-        for (const f of arr.slice(1)) {
-          let t = Date.parse(f.modifiedTime || "");
-          if (Number.isNaN(t)) t = 0;
-          if (t >= bestTime) {
-            bestTime = t;
-            best = f;
-          }
-        }
-        return best.id;
-      };
-
       const duplicates: ScanResult["duplicates"] = [];
-
-      for (const ch of allChapters) {
-        const txtName = buildTextName(book.id, ch.id);
-        const mp3Name = buildMp3Name(book.id, ch.id);
-
-        const txtArr = filesByName.get(txtName) || [];
-        if (txtArr.length > 1) {
-          const keepId = pickKeepId(txtArr);
-          duplicates.push({
-            chapterId: ch.id,
-            type: "text",
-            keepId,
-            removeIds: txtArr.filter(x => x.id !== keepId).map(x => x.id)
-          });
-        }
-
-        const mp3Arr = filesByName.get(mp3Name) || [];
-        if (mp3Arr.length > 1) {
-          const keepId = pickKeepId(mp3Arr);
-          duplicates.push({
-            chapterId: ch.id,
-            type: "audio",
-            keepId,
-            removeIds: mp3Arr.filter(x => x.id !== keepId).map(x => x.id)
-          });
-        }
-      }
 
       const scan: ScanResult = {
         missingTextIds: missingText.map(c => c.id),

@@ -1436,7 +1436,23 @@ const App: React.FC = () => {
                 } catch (e: any) {
                   console.error('[TaleVox][Library] update failed', e);
                 }
-                setState(p => ({ ...p, books: p.books.map(b => b.id === book.id ? book : b) }));
+                setState(p => ({
+                  ...p,
+                  books: p.books.map(b => {
+                    if (b.id !== book.id) return b;
+
+                    return {
+                      ...b,
+                      ...book,
+
+                      // Always preserve these fields from the existing state
+                      chapterCount: b.chapterCount,
+                      chapters: b.chapters,
+                      nextChapterAfterIndex: b.nextChapterAfterIndex,
+                      hasMoreChapters: b.hasMoreChapters,
+                    };
+                  })
+                }));
                 markDirty();
               }}
               theme={state.theme}
