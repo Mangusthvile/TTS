@@ -30,7 +30,6 @@ const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
 const UI_MODE_KEY = "talevox_ui_mode";
 const PREFS_KEY = 'talevox_prefs_v3';
-const BUILD_STAMP = 'BUILD 2026-01-26 A';
 
 // --- Safe Storage Helper ---
 const safeSetLocalStorage = (key: string, value: string) => {
@@ -1346,7 +1345,6 @@ const App: React.FC = () => {
             <button onClick={() => handleSync(true)} disabled={isSyncing} className={`flex items-center gap-2 px-3 py-2 bg-indigo-600/10 text-indigo-600 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-600/20 transition-all ${isSyncing ? 'animate-pulse' : ''}`}><RefreshCw className="w-3.5 h-3.5" /> <span className="hidden xs:inline">Sync</span></button>
           )}
           <button onClick={() => handleSaveState(true, false)} className={`p-2.5 rounded-xl bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20 transition-all ${isDirty ? 'ring-2 ring-indigo-600 animate-pulse' : ''}`} title="Manual Cloud Save"><Save className="w-4 h-4" /></button>
-          <span className="text-[10px] font-mono opacity-40 select-none">{BUILD_STAMP}</span>
         </div>
       </header>
 
