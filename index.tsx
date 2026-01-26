@@ -27,7 +27,7 @@ declare global {
 
 // Prefer Vite-injected version; fallback only if somehow missing.
 window.__APP_VERSION__ =
-  (typeof __APP_VERSION__ !== "undefined" && __APP_VERSION__) || "2.9.11";
+  (typeof __APP_VERSION__ !== "undefined" && __APP_VERSION__) || "2.9.12";
 
 // Install global trace listeners immediately
 installGlobalTraceHandlers();
