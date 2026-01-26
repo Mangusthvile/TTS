@@ -1445,11 +1445,9 @@ const App: React.FC = () => {
                       ...b,
                       ...book,
 
-                      // Always preserve these fields from the existing state
+                      // Preserve the currently loaded chapter page and the known total count.
                       chapterCount: b.chapterCount,
                       chapters: b.chapters,
-                      nextChapterAfterIndex: b.nextChapterAfterIndex,
-                      hasMoreChapters: b.hasMoreChapters,
                     };
                   })
                 }));
@@ -1488,6 +1486,38 @@ const App: React.FC = () => {
               isLoadingMoreChapters={chapterPagingByBook[activeBook.id]?.loading ?? false}
               globalRules={state.globalRules}
               reflowLineBreaksEnabled={state.readerSettings.reflowLineBreaks}
+              onAppendChapters={(newChapters) => {
+                setState((prev) => ({
+                  ...prev,
+                  books: prev.books.map((b) => {
+                    if (b.id !== activeBook.id) return b;
+
+                    const combined = [...(b.chapters || []), ...newChapters];
+
+                    // Deduplicate by chapter id
+                    const seen = new Set<string>();
+                    const deduped = combined.filter((c) => {
+                      if (seen.has(c.id)) return false;
+                      seen.add(c.id);
+                      return true;
+                    });
+
+                    // Keep list ordered by chapter index
+                    deduped.sort((a, c) => a.index - c.index);
+
+                    return {
+                      ...b,
+                      chapters: deduped,
+
+                      // Total chapter count should be the known total, not just the loaded page.
+                      // These are newly created chapters, so adding is correct here.
+                      chapterCount: (b.chapterCount ?? 0) + newChapters.length,
+                    };
+                  }),
+                }));
+
+                markDirty();
+              }}
             />
           )}
 
