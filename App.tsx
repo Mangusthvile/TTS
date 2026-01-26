@@ -24,7 +24,7 @@ import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library 
 import { trace, traceError } from './utils/trace';
 import { computeMobileMode } from './utils/platform';
 
-const STATE_FILENAME = 'talevox_state_v2912.json';
+const STATE_FILENAME = 'talevox_state_v2913.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -307,7 +307,11 @@ const App: React.FC = () => {
           });
 
           deduped.sort((a, b2) => a.index - b2.index);
-          return { ...b, chapters: deduped };
+          return {
+            ...b,
+            chapters: deduped,
+            chapterCount: page.totalCount ?? b.chapterCount,
+          };
         });
 
         return { ...p, books };
