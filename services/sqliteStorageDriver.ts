@@ -12,6 +12,7 @@ import type {
   AppState,
   SettingsState,
   RulesState,
+  AuthSession,
   ChapterProgress,
   StorageDriver,
   StorageInitResult,
@@ -42,6 +43,7 @@ const KEY_APP_STATE = "app_state";
 const KEY_SETTINGS = "settings";
 const KEY_RULES = "rules";
 const KEY_SMALL_BACKUP = "small_backup";
+const KEY_AUTH_SESSION = "auth_session";
 
 const LIBRARY_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS books (
@@ -174,6 +176,20 @@ export class SqliteStorageDriver implements StorageDriver {
 
   async saveRules(rules: RulesState): Promise<SaveResult> {
     return this.saveKvJson(KEY_RULES, rules);
+  }
+
+  async loadAuthSession(): Promise<LoadResult<AuthSession | null>> {
+    const res = await this.loadKvJson<AuthSession>(KEY_AUTH_SESSION);
+    if (!res.ok) return { ok: true, where: "sqlite", value: null };
+    return { ok: true, where: "sqlite", value: res.value ?? null };
+  }
+
+  async saveAuthSession(session: AuthSession): Promise<SaveResult> {
+    return this.saveKvJson(KEY_AUTH_SESSION, session);
+  }
+
+  async clearAuthSession(): Promise<SaveResult> {
+    return this.saveKvJson(KEY_AUTH_SESSION, null);
   }
 
   // -----------------------

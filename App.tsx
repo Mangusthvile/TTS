@@ -11,7 +11,7 @@ import ChapterSidebar from './components/ChapterSidebar';
 import { speechController, applyRules, PROGRESS_STORE_V4 } from './services/speechService';
 import { reflowLineBreaks } from './services/textFormat';
 import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, openFolderPicker, listFilesSortedByModified, resolveFolderIdByName, listSaveFileCandidates, createDriveFolder, listFoldersInFolder, findTaleVoxRoots } from './services/driveService';
-import { initDriveAuth, getValidDriveToken, clearStoredToken, isTokenValid } from './services/driveAuth';
+import { initDriveAuth, getValidDriveToken, clearStoredToken, isTokenValid, ensureValidToken } from './services/driveAuth';
 import { authManager, AuthState } from './services/authManager';
 import { saveChapterToFile } from './services/fileService';
 import { synthesizeChunk } from './services/cloudTtsService';
@@ -24,7 +24,7 @@ import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library 
 import { trace, traceError } from './utils/trace';
 import { computeMobileMode } from './utils/platform';
 
-const STATE_FILENAME = 'talevox_state_v2911.json';
+const STATE_FILENAME = 'talevox_state_v2917.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -307,7 +307,11 @@ const App: React.FC = () => {
           });
 
           deduped.sort((a, b2) => a.index - b2.index);
-          return { ...b, chapters: deduped };
+          return {
+            ...b,
+            chapters: deduped,
+            chapterCount: page.totalCount ?? b.chapterCount,
+          };
         });
 
         return { ...p, books };
@@ -340,7 +344,7 @@ const App: React.FC = () => {
   const [audioCurrentTime, setAudioCurrentTime] = useState(0);
   
   const [authState, setAuthState] = useState<AuthState>(authManager.getState());
-  const isAuthorized = authState.status === 'signed_in';
+  const isAuthorized = authState.status === 'signed_in' && !!authManager.getToken();
 
   useEffect(() => {
     const unsubscribe = authManager.subscribe(setAuthState);
@@ -357,7 +361,22 @@ const App: React.FC = () => {
     if (authState.status === 'error') {
       pushNotice({ message: `Auth Error: ${authState.lastError}`, type: 'error' });
     }
+    if (authState.status === 'expired') {
+      pushNotice({ message: 'Drive session expired. Reconnect required.', type: 'reconnect', ms: 6000 });
+    }
   }, [authState.status, authState.lastError]);
+
+  const handleReconnectDrive = useCallback(async () => {
+    try {
+      await ensureValidToken(true);
+      if (stateRef.current.driveRootFolderId) {
+        await handleSync(true);
+      }
+      pushNotice({ message: 'Drive reconnected.', type: 'success' });
+    } catch (e: any) {
+      pushNotice({ message: e?.message || 'Reconnect failed', type: 'error' });
+    }
+  }, [handleSync, pushNotice]);
 
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
@@ -1339,8 +1358,8 @@ const App: React.FC = () => {
         <div className="flex items-center gap-2 sm:gap-4">
           {authState.status === 'signing_in' ? (
              <span className="flex items-center gap-2 px-3 py-2 bg-black/5 rounded-xl text-[10px] font-black uppercase tracking-widest"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Signing In...</span>
-          ) : !isAuthorized ? (
-            <button onClick={() => authManager.signIn()} className="flex items-center gap-2 px-3 py-2 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-md"><LogIn className="w-3.5 h-3.5" /> <span className="hidden xs:inline">Sign In</span></button>
+          ) : authState.status === 'expired' || !isAuthorized ? (
+            <button onClick={handleReconnectDrive} className="flex items-center gap-2 px-3 py-2 bg-amber-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-amber-700 transition-all shadow-md"><LogIn className="w-3.5 h-3.5" /> <span className="hidden xs:inline">Reconnect Drive</span></button>
           ) : (
             <button onClick={() => handleSync(true)} disabled={isSyncing} className={`flex items-center gap-2 px-3 py-2 bg-indigo-600/10 text-indigo-600 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-600/20 transition-all ${isSyncing ? 'animate-pulse' : ''}`}><RefreshCw className="w-3.5 h-3.5" /> <span className="hidden xs:inline">Sync</span></button>
           )}

@@ -301,7 +301,7 @@ export async function listChaptersPage(
   bookId: string,
   afterIndex: number | null,
   limit: number
-): Promise<{ chapters: Chapter[]; nextAfterIndex: number | null }> {
+): Promise<{ chapters: Chapter[]; nextAfterIndex: number | null; totalCount?: number }> {
   await ensureInit();
 
   if (!isNative()) {
@@ -358,10 +358,19 @@ export async function listChaptersPage(
   }));
 
   const nextAfterIndex = chapters.length ? chapters[chapters.length - 1].index : null;
+  let totalCount: number | undefined;
+  try {
+    const countRes = await db.query(`SELECT COUNT(*) as total FROM chapters WHERE bookId = ?`, [bookId]);
+    const countRow = (countRes.values?.[0] ?? null) as any;
+    totalCount = countRow ? Number(countRow.total ?? 0) : 0;
+  } catch {
+    totalCount = undefined;
+  }
 
   return {
     chapters,
     nextAfterIndex: chapters.length < limit ? null : nextAfterIndex,
+    totalCount,
   };
 }
 
