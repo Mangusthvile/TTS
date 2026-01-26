@@ -178,6 +178,19 @@ export interface ScanResult {
   strayFiles: StrayFile[];
   duplicates: { chapterId: string, type: 'audio' | 'text', keepId: string, removeIds: string[] }[];
   totalChecked: number;
+  expectedChapters?: number;
+  missingTextCount?: number;
+  missingAudioCount?: number;
+  accountedChaptersCount?: number;
+  legacyRecoveryCandidates?: Record<
+    string,
+    {
+      legacyTextCandidate: { id: string; name: string } | null;
+      legacyAudioCandidate: { id: string; name: string } | null;
+      reasonChosen: "index match" | "title match" | "newest" | null;
+    }
+  >;
+  safeToCleanup?: boolean;
 }
 
 export interface SyncDiagnostics {

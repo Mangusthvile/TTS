@@ -8,7 +8,6 @@ import {
   uploadToDrive,
   listFilesInFolder,
   buildMp3Name,
-  buildTextName,
   createDriveFolder,
   findFileSync,
   moveFile,
@@ -25,6 +24,7 @@ import {
 } from "../services/libraryStore";
 import { initBookFolderManifests } from "../services/bookFolderInit";
 import { createDriveFolderAdapter } from "../services/driveFolderAdapter";
+import type { InventoryManifest } from "../services/bookManifests";
 
 type ViewMode = 'details' | 'list' | 'grid';
 
@@ -98,6 +98,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [lastScan, setLastScan] = useState<ScanResult | null>(null);
   const [missingTextIds, setMissingTextIds] = useState<string[]>([]);
   const [missingAudioIds, setMissingAudioIds] = useState<string[]>([]);
+  const [lastInventory, setLastInventory] = useState<InventoryManifest | null>(null);
+  const [lastDriveFiles, setLastDriveFiles] = useState<StrayFile[]>([]);
   const [fixLog, setFixLog] = useState<string[]>([]);
   const [scanTitles, setScanTitles] = useState<Record<string, string>>({});
 
@@ -138,10 +140,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const [fixOptions, setFixOptions] = useState({
     genAudio: true,
-    restoreText: true,
     cleanupStrays: true,
-    convertLegacy: true,
-    cleanupLegacyOriginals: false
+    convertLegacy: true
   });
 
   const isDark = theme === Theme.DARK;
@@ -243,23 +243,53 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       // 1. List root files
       const rootFiles = await listFilesInFolder(driveFolderId);
 
-      // 2. Identify subfolders (text, audio, trash)
+      // 2. Identify subfolders (meta, text, audio, trash)
       const subfolders = rootFiles.filter(f => f.mimeType === "application/vnd.google-apps.folder");
-      const targetSubfolders = ["text", "audio", "trash"];
-      
+      const targetSubfolders = ["meta", "text", "audio", "trash"];
+
       let allFiles = [...rootFiles];
-      
+      let metaFiles: StrayFile[] = [];
+
       // 3. Scan subfolders and combine files
       for (const folder of subfolders) {
-          if (targetSubfolders.includes(folder.name)) {
-              try {
-                  const subFiles = await listFilesInFolder(folder.id);
-                  allFiles = [...allFiles, ...subFiles];
-              } catch (e) {
-                  console.warn(`Failed to list subfolder ${folder.name}`, e);
-              }
+        if (targetSubfolders.includes(folder.name)) {
+          try {
+            const subFiles = await listFilesInFolder(folder.id);
+            if (folder.name === "meta") metaFiles = subFiles;
+            allFiles = [...allFiles, ...subFiles];
+          } catch (e) {
+            console.warn(`Failed to list subfolder ${folder.name}`, e);
           }
+        }
       }
+
+      const metaFolder = subfolders.find(f => f.name === "meta");
+      if (!metaFolder) {
+        throw new Error("meta folder not found in this Drive book.");
+      }
+
+      if (metaFiles.length === 0) {
+        metaFiles = await listFilesInFolder(metaFolder.id);
+      }
+
+      const inventoryFile = metaFiles.find(f => f.name === "inventory.json");
+      if (!inventoryFile) {
+        throw new Error("inventory.json not found in meta folder.");
+      }
+
+      let inventory: InventoryManifest;
+      try {
+        const rawInventory = await fetchDriveFile(inventoryFile.id);
+        inventory = JSON.parse(rawInventory) as InventoryManifest;
+      } catch (e) {
+        throw new Error(`Failed to parse inventory.json: ${String((e as Error)?.message ?? e)}`);
+      }
+
+      if (!Array.isArray(inventory?.chapters)) {
+        throw new Error("inventory.json is missing chapters.");
+      }
+
+      setLastInventory(inventory);
 
       // 4. Deduplicate by name, keeping newest. Collect extras as strays.
       // Invariant: duplicates (same name, different id) are ALWAYS stray — they never go through
@@ -294,31 +324,52 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       const hasName = (name: string) => (filesByName.get(name)?.length || 0) > 0;
 
-      // Load full chapter list from DB for accurate check
-      const allChapters = await fetchAllChapters();
-      
-      // Update title cache for UI
+      // Update title cache for UI from inventory
       const titleMap: Record<string, string> = {};
-      allChapters.forEach(c => titleMap[c.id] = c.title);
+      inventory.chapters.forEach((c) => {
+        if (c?.chapterId) titleMap[c.chapterId] = c.title ?? c.chapterId;
+      });
       setScanTitles(titleMap);
 
-      // Expected file names from current chapters
+      // Expected file names from inventory
       const expectedNames = new Set<string>();
-      const missingText: Chapter[] = [];
-      const missingAudio: Chapter[] = [];
+      const missingTextIds: string[] = [];
+      const missingAudioIds: string[] = [];
+      let accountedChaptersCount = 0;
 
-      for (const ch of allChapters) {
-        const txtName = buildTextName(book.id, ch.id);
-        const mp3Name = buildMp3Name(book.id, ch.id);
+      for (const ch of inventory.chapters) {
+        const chapterId = ch.chapterId;
+        if (!chapterId) continue;
+        const txtName = `c_${chapterId}.txt`;
+        const mp3Name = `c_${chapterId}.mp3`;
 
         expectedNames.add(txtName);
         expectedNames.add(mp3Name);
 
-        if (!hasName(txtName)) missingText.push(ch);
-        if (!hasName(mp3Name)) missingAudio.push(ch);
+        const hasTextExpected = hasName(txtName);
+        const hasAudioExpected = hasName(mp3Name);
+
+        if (!hasTextExpected) missingTextIds.push(chapterId);
+        if (!hasAudioExpected) missingAudioIds.push(chapterId);
+        if (hasTextExpected && hasAudioExpected) accountedChaptersCount += 1;
       }
 
-      // Classification logic. Only driveFiles are classified; duplicateStrays are always stray.
+      const toSlug = (value: string) =>
+        value
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "_")
+          .replace(/^_+|_+$/g, "");
+
+      const newestFile = (files: StrayFile[]) => {
+        if (!files.length) return null;
+        return files.reduce((latest, current) => {
+          const latestTime = Date.parse(latest.modifiedTime || "") || 0;
+          const currentTime = Date.parse(current.modifiedTime || "") || 0;
+          return currentTime > latestTime ? current : latest;
+        });
+      };
+
+      // Classification logic
       const legacyMatches: LegacyGroup[] = [];
       const unlinkedMatches: StrayFile[] = [];
       const trueStrays: StrayFile[] = [...duplicateStrays];
@@ -328,6 +379,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       // Group legacy by prefix
       const legacyMap = new Map<string, LegacyGroup>();
+      const legacyFiles: Array<{ file: StrayFile; idx: number; slug: string; type: "text" | "audio" }> = [];
 
       for (const f of driveFiles) {
         // Ignore folders, especially meta/text/audio/trash
@@ -345,6 +397,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           const slug = leg[2]; // includes title part
           const ext = leg[3];
           const key = `${idx}_${slug}`;
+          const type = ext === "txt" ? "text" : "audio";
+          legacyFiles.push({ file: f, idx, slug, type });
           
           let group = legacyMap.get(key);
           if (!group) {
@@ -371,12 +425,109 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       const duplicates: ScanResult["duplicates"] = [];
 
+      const inventoryById = new Map(inventory.chapters.map((c) => [c.chapterId, c]));
+      const legacyByIdx = new Map<number, { text: StrayFile[]; audio: StrayFile[] }>();
+      const legacyBySlug = new Map<string, { text: StrayFile[]; audio: StrayFile[] }>();
+
+      for (const entry of legacyFiles) {
+        const byIdx = legacyByIdx.get(entry.idx) ?? { text: [], audio: [] };
+        byIdx[entry.type].push(entry.file);
+        legacyByIdx.set(entry.idx, byIdx);
+
+        const slugKey = toSlug(entry.slug);
+        const bySlug = legacyBySlug.get(slugKey) ?? { text: [], audio: [] };
+        bySlug[entry.type].push(entry.file);
+        legacyBySlug.set(slugKey, bySlug);
+      }
+
+      const missingChapterIds = new Set<string>([...missingTextIds, ...missingAudioIds]);
+      const legacyRecoveryCandidates: ScanResult["legacyRecoveryCandidates"] = {};
+
+      for (const chapterId of missingChapterIds) {
+        const inv = inventoryById.get(chapterId);
+        const idx = inv?.idx;
+        const titleSlug = inv?.title ? toSlug(inv.title) : "";
+
+        let legacyTextCandidate: { id: string; name: string } | null = null;
+        let legacyAudioCandidate: { id: string; name: string } | null = null;
+        let reasonChosen: "index match" | "title match" | "newest" | null = null;
+
+        if (typeof idx === "number" && legacyByIdx.has(idx)) {
+          const byIdx = legacyByIdx.get(idx)!;
+          const textNewest = newestFile(byIdx.text);
+          const audioNewest = newestFile(byIdx.audio);
+          if (textNewest) legacyTextCandidate = { id: textNewest.id, name: textNewest.name };
+          if (audioNewest) legacyAudioCandidate = { id: audioNewest.id, name: audioNewest.name };
+          if (textNewest || audioNewest) {
+            const multiText = byIdx.text.length > 1;
+            const multiAudio = byIdx.audio.length > 1;
+            reasonChosen = multiText || multiAudio ? "newest" : "index match";
+          }
+        }
+
+        if ((!legacyTextCandidate || !legacyAudioCandidate) && titleSlug && legacyBySlug.has(titleSlug)) {
+          const bySlug = legacyBySlug.get(titleSlug)!;
+          if (!legacyTextCandidate) {
+            const textNewest = newestFile(bySlug.text);
+            if (textNewest) legacyTextCandidate = { id: textNewest.id, name: textNewest.name };
+          }
+          if (!legacyAudioCandidate) {
+            const audioNewest = newestFile(bySlug.audio);
+            if (audioNewest) legacyAudioCandidate = { id: audioNewest.id, name: audioNewest.name };
+          }
+          if ((legacyTextCandidate || legacyAudioCandidate) && !reasonChosen) {
+            const multiText = bySlug.text.length > 1;
+            const multiAudio = bySlug.audio.length > 1;
+            reasonChosen = multiText || multiAudio ? "newest" : "title match";
+          }
+        }
+
+        legacyRecoveryCandidates[chapterId] = {
+          legacyTextCandidate,
+          legacyAudioCandidate,
+          reasonChosen,
+        };
+      }
+
+      const expectedInventoryCount = 848;
+      const hasExpectedCount = inventory.chapters.length === expectedInventoryCount;
+      let safeToCleanup = hasExpectedCount;
+
+      if (safeToCleanup) {
+        for (const ch of inventory.chapters) {
+          const chapterId = ch.chapterId;
+          if (!chapterId) {
+            safeToCleanup = false;
+            break;
+          }
+
+          const txtName = `c_${chapterId}.txt`;
+          const mp3Name = `c_${chapterId}.mp3`;
+          const hasTextExpected = hasName(txtName);
+          const hasAudioExpected = hasName(mp3Name);
+          const legacyCandidate = legacyRecoveryCandidates[chapterId];
+          const hasLegacyText = !!legacyCandidate?.legacyTextCandidate;
+          const hasLegacyAudio = !!legacyCandidate?.legacyAudioCandidate;
+
+          if ((!hasTextExpected && !hasLegacyText) || (!hasAudioExpected && !hasLegacyAudio)) {
+            safeToCleanup = false;
+            break;
+          }
+        }
+      }
+
       const scan: ScanResult = {
-        missingTextIds: missingText.map(c => c.id),
-        missingAudioIds: missingAudio.map(c => c.id),
+        missingTextIds,
+        missingAudioIds,
         strayFiles: trueStrays,
         duplicates,
-        totalChecked: allChapters.length
+        totalChecked: inventory.chapters.length,
+        expectedChapters: inventory.chapters.length,
+        missingTextCount: missingTextIds.length,
+        missingAudioCount: missingAudioIds.length,
+        accountedChaptersCount,
+        legacyRecoveryCandidates,
+        safeToCleanup,
       };
 
       // Attach extra counts for UI
@@ -386,6 +537,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       setLastScan(scan);
       setMissingTextIds(scan.missingTextIds);
       setMissingAudioIds(scan.missingAudioIds);
+      setLastDriveFiles(allFiles);
+      if (!safeToCleanup) {
+        pushNotice("Not safe to cleanup. Some inventory chapters cannot be recovered yet.", "error", 6000);
+      }
       return scan;
     } catch (e: any) {
       pushNotice("Integrity check failed: " + (e?.message || String(e)), 'error', 6000);
@@ -393,7 +548,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     } finally {
       setIsCheckingDrive(false);
     }
-  }, [driveFolderId, book.id, fetchAllChapters, pushNotice]);
+  }, [driveFolderId, pushNotice]);
 
   const handleCheckLocalIntegrity = useCallback(async (): Promise<ScanResult | null> => {
     setIsCheckingDrive(true);
@@ -575,56 +730,110 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
   };
 
+  const buildFixPlan = useCallback((options?: { includeConversions?: boolean; includeGeneration?: boolean; includeCleanup?: boolean }) => {
+    const scan = lastScan;
+    const inventory = lastInventory;
+    if (!scan || !inventory) {
+      return {
+        conversions: [] as Array<{ chapterId: string; type: "text" | "audio"; source: StrayFile; targetName: string }>,
+        generationIds: [] as string[],
+        cleanup: [] as StrayFile[],
+        safeToCleanup: false
+      };
+    }
+
+    const includeConversions = options?.includeConversions ?? true;
+    const includeGeneration = options?.includeGeneration ?? true;
+    const includeCleanup = options?.includeCleanup ?? true;
+
+    const nameSet = new Set(lastDriveFiles.map((f) => f.name).filter(Boolean));
+    const hasName = (name: string) => nameSet.has(name);
+    const legacyCandidates = scan.legacyRecoveryCandidates ?? {};
+
+    const expectedNames = new Set<string>();
+    for (const ch of inventory.chapters) {
+      if (!ch.chapterId) continue;
+      expectedNames.add(`c_${ch.chapterId}.txt`);
+      expectedNames.add(`c_${ch.chapterId}.mp3`);
+    }
+
+    const conversions: Array<{ chapterId: string; type: "text" | "audio"; source: StrayFile; targetName: string }> = [];
+
+    if (includeConversions) {
+      for (const chapterId of scan.missingTextIds) {
+        const legacyText = legacyCandidates[chapterId]?.legacyTextCandidate;
+        if (legacyText) {
+          conversions.push({
+            chapterId,
+            type: "text",
+            source: { ...legacyText, mimeType: "text/plain", modifiedTime: "" } as StrayFile,
+            targetName: `c_${chapterId}.txt`
+          });
+        }
+      }
+
+      for (const chapterId of scan.missingAudioIds) {
+        const legacyAudio = legacyCandidates[chapterId]?.legacyAudioCandidate;
+        if (legacyAudio) {
+          conversions.push({
+            chapterId,
+            type: "audio",
+            source: { ...legacyAudio, mimeType: "audio/mpeg", modifiedTime: "" } as StrayFile,
+            targetName: `c_${chapterId}.mp3`
+          });
+        }
+      }
+    }
+
+    const generationIds: string[] = [];
+    if (includeGeneration) {
+      for (const chapterId of scan.missingAudioIds) {
+        const legacyAudio = legacyCandidates[chapterId]?.legacyAudioCandidate;
+        if (legacyAudio) continue;
+        const textName = `c_${chapterId}.txt`;
+        const hasTextExpected = hasName(textName);
+        const hasLegacyText = !!legacyCandidates[chapterId]?.legacyTextCandidate;
+        if (hasTextExpected || hasLegacyText) {
+          generationIds.push(chapterId);
+        }
+      }
+    }
+
+    const cleanup: StrayFile[] = [];
+    const safeToCleanup = !!scan.safeToCleanup;
+
+    if (includeCleanup && safeToCleanup) {
+      const allowedNames = new Set<string>(["book.json", "inventory.json", ...expectedNames]);
+      for (const f of lastDriveFiles) {
+        if (f.mimeType === "application/vnd.google-apps.folder") continue;
+        if (!f.name) continue;
+        if (!allowedNames.has(f.name)) cleanup.push(f);
+      }
+    }
+
+    return { conversions, generationIds, cleanup, safeToCleanup };
+  }, [lastDriveFiles, lastInventory, lastScan]);
+
   const handleRunFix = async () => {
     setIsFixing(true);
     abortFixRef.current = false;
     setFixLog([]);
     let errorCount = 0;
 
+    const plan = buildFixPlan({
+      includeConversions: fixOptions.convertLegacy,
+      includeGeneration: fixOptions.genAudio,
+      includeCleanup: fixOptions.cleanupStrays
+    });
+
     const totalSteps =
-      (fixOptions.convertLegacy ? legacyGroups.length : 0) +
-      (fixOptions.restoreText ? missingTextIds.length : 0) +
-      (fixOptions.genAudio ? missingAudioIds.length : 0) +
-      (fixOptions.cleanupStrays && lastScan?.strayFiles ? lastScan.strayFiles.length : 0);
+      plan.conversions.length +
+      plan.generationIds.length +
+      (plan.safeToCleanup ? plan.cleanup.length : 0);
 
     setFixProgress({ current: 0, total: totalSteps });
 
     const bump = () => setFixProgress(p => ({ ...p, current: p.current + 1 }));
-
-    const normalizeTitle = (s: string) =>
-      (s || "").trim().toLowerCase().replace(/\s+/g, " ");
-
-    const slugToTitle = (slug: string) =>
-      (slug || "").replace(/_/g, " ").trim();
-
-    // Stable ID so Convert Legacy is repeat safe.
-    // Same legacy index + slug will always map to the same chapter id.
-    const stableLegacyId = (legacyIndex: number, slug: string) => {
-      const raw = `${book.id}|${legacyIndex}|${slug}`;
-      let h = 2166136261; // FNV-1a
-      for (let i = 0; i < raw.length; i++) {
-        h ^= raw.charCodeAt(i);
-        h = Math.imul(h, 16777619);
-      }
-      const hex = (h >>> 0).toString(16).padStart(8, "0");
-      return `leg_${legacyIndex}_${hex}`;
-    };
-
-    const pickKeepIdFromArray = (arr: StrayFile[]) => {
-      let best = arr[0];
-      let bestTime = Date.parse(best.modifiedTime || "");
-      if (Number.isNaN(bestTime)) bestTime = 0;
-
-      for (const f of arr.slice(1)) {
-        let t = Date.parse(f.modifiedTime || "");
-        if (Number.isNaN(t)) t = 0;
-        if (t >= bestTime) {
-          bestTime = t;
-          best = f;
-        }
-      }
-      return best.id;
-    };
 
     try {
       // Fetch all chapters to ensure we can fix items not currently in UI
@@ -659,230 +868,47 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       const chaptersById = new Map(allChapters.map((c) => [c.id, c]));
 
-      // Snapshot Drive files once so we can upsert without creating duplicates.
-      const driveFiles = await listFilesInFolder(driveFolderId);
-
-      const filesByName = new Map<string, StrayFile[]>();
-      for (const f of driveFiles) {
-        if (!f?.name) continue;
-        const arr = filesByName.get(f.name) || [];
-        arr.push(f);
-        filesByName.set(f.name, arr);
-      }
-
-      // If we discover duplicates for the same new-format filename,
-      // we will trash the extras at the end (only if cleanup is enabled and no errors).
-      const extraNewFormatDuplicatesToTrash: { id: string; name: string }[] = [];
-
-      const getExistingKeepId = (name: string) => {
-        const arr = filesByName.get(name) || [];
-        if (arr.length === 0) return undefined;
-
-        const keepId = pickKeepIdFromArray(arr);
-
-        // Queue any extra duplicates for cleanup later.
-        if (arr.length > 1) {
-          for (const f of arr) {
-            if (f.id !== keepId) {
-              extraNewFormatDuplicatesToTrash.push({ id: f.id, name: f.name });
-            }
-          }
-        }
-
-        return keepId;
-      };
-
-      // Step 0: Legacy Conversion (repeat safe)
-      if (fixOptions.convertLegacy && legacyGroups.length > 0) {
-        const actuallyNewChapters: Chapter[] = [];
-        const upsertItems: { chapter: Chapter; content: string }[] = [];
-
-        for (const group of legacyGroups) {
-          if (abortFixRef.current) break;
-
-          if (!group.text) {
-            // No text means we cannot safely create a chapter record.
-            setFixLog(p => [...p, `Skipping legacy (no text): ${group.slug}`]);
-            bump();
-            continue;
-          }
-
-          const legacyTitle = slugToTitle(group.slug);
-
-          // If a chapter already exists at this index with the same title,
-          // we adopt it instead of creating another one.
-          const existing = allChapters.find(c =>
-            c.index === group.legacyIndex &&
-            normalizeTitle(c.title) === normalizeTitle(legacyTitle)
-          );
-
-          const chapterId = existing?.id ?? stableLegacyId(group.legacyIndex, group.slug);
-
-          setFixLog(p => [...p, `Converting legacy: ${group.slug} -> ${legacyTitle}`]);
-
-          try {
-            // 1) Read legacy text
-            const textContent = await fetchDriveFile(group.text.id);
-
-            // 2) Upsert new-format text file (prevents duplicate filenames)
-            const newTextName = buildTextName(book.id, chapterId);
-            const existingTextFileId = getExistingKeepId(newTextName);
-
-            const cloudTextFileId = await uploadToDrive(
-              driveFolderId,
-              newTextName,
-              textContent,
-              existingTextFileId,
-              "text/plain"
-            );
-
-            // 3) Ensure new-format audio exists (copy once, do not duplicate)
-            let cloudAudioFileId: string | undefined;
-            if (group.audio) {
-              const newMp3Name = buildMp3Name(book.id, chapterId);
-              const existingMp3FileId = getExistingKeepId(newMp3Name);
-
-              if (existingMp3FileId) {
-                cloudAudioFileId = existingMp3FileId;
-              } else {
-                cloudAudioFileId = await copyDriveFile(group.audio.id, driveFolderId, newMp3Name);
-              }
-            }
-
-            const wordCount = textContent.trim() ? textContent.trim().split(/\s+/).length : 0;
-
-            const chapterRecord: Chapter = {
-              id: chapterId,
-              index: group.legacyIndex,
-              title: legacyTitle,
-
-              // IMPORTANT: do not keep the full chapter text in memory for Drive books
-              content: "",
-
-              wordCount,
-              textLength: textContent.length,
-              cloudTextFileId,
-              cloudAudioFileId,
-              audioStatus: cloudAudioFileId ? AudioStatus.READY : AudioStatus.PENDING,
-              hasTextOnDrive: true,
-              updatedAt: Date.now()
-            } as any;
-
-            upsertItems.push({ chapter: chapterRecord, content: textContent });
-
-            // If this chapter did not exist in the UI yet, add it.
-            if (!existing) {
-              actuallyNewChapters.push(chapterRecord);
+      // 1) Convert legacy candidates into expected files
+      for (const conversion of plan.conversions) {
+        if (abortFixRef.current) break;
+        setFixLog(prev => [...prev, `Copy legacy ${conversion.type}: ${conversion.targetName}`]);
+        try {
+          const newId = await copyDriveFile(conversion.source.id, driveFolderId, conversion.targetName);
+          const ch = chaptersById.get(conversion.chapterId);
+          if (ch) {
+            if (conversion.type === "text") {
+              onUpdateChapter({ ...ch, cloudTextFileId: newId, hasTextOnDrive: true, updatedAt: Date.now() } as any);
             } else {
-              // If it already exists, update the UI copy so it stops showing missing status.
-              onUpdateChapter({
-                ...existing,
-                cloudTextFileId,
-                cloudAudioFileId,
-                hasTextOnDrive: true,
-                audioStatus: cloudAudioFileId ? AudioStatus.READY : existing.audioStatus,
-                updatedAt: Date.now()
-              } as any);
-            }
-          } catch (e: any) {
-            errorCount++;
-            setFixLog(p => [...p, `Failed to convert ${group.slug}: ${String(e?.message ?? e)}`]);
-          } finally {
-            bump();
-          }
-        }
-
-        if (upsertItems.length > 0) {
-          await libraryBulkUpsertChapters(book.id, upsertItems);
-
-          // This is what makes chapters appear immediately, if App.tsx passes it.
-          if (onAppendChapters && actuallyNewChapters.length > 0) {
-            onAppendChapters(actuallyNewChapters);
-          }
-        }
-
-        // Cleanup original legacy files only if user chose it AND it is safe.
-        if (fixOptions.cleanupLegacyOriginals) {
-          if (unlinkedNewFormatFiles.length > 0) {
-            setFixLog(p => [...p, "SKIPPING LEGACY CLEANUP: Unlinked new-format files detected."]);
-            pushNotice("Legacy cleanup skipped for safety.", "error");
-          } else if (errorCount > 0) {
-            setFixLog(p => [...p, "SKIPPING LEGACY CLEANUP: Errors occurred during conversion."]);
-            pushNotice("Legacy cleanup skipped for safety due to errors.", "error");
-          } else {
-            for (const group of legacyGroups) {
-              if (abortFixRef.current) break;
-              try {
-                if (group.text) await moveFileToTrash(group.text.id);
-                if (group.audio) await moveFileToTrash(group.audio.id);
-              } catch {
-                setFixLog(p => [...p, `Failed to trash legacy files for ${group.slug}`]);
-              }
+              onUpdateChapter({ ...ch, cloudAudioFileId: newId, audioStatus: AudioStatus.READY, updatedAt: Date.now() } as any);
             }
           }
+        } catch {
+          errorCount++;
+          setFixLog(p => [...p, `Failed to copy legacy ${conversion.targetName}`]);
         }
+        bump();
       }
 
-      // 1) Restore Missing Text
-      if (fixOptions.restoreText && missingTextIds.length) {
-        for (const chapterId of missingTextIds) {
-          if (abortFixRef.current) break;
-          const ch = chaptersById.get(chapterId);
-          if (!ch) { bump(); continue; }
-
-          const text =
-            (ch.content && ch.content.trim() ? ch.content : null) ??
-            (await libraryLoadChapterText(book.id, ch.id)) ??
-            "";
-
-          if (!text.trim()) {
-            setFixLog(p => [...p, `Skipping text restore for ${ch.title} (no local content)`]);
-            errorCount++;
-            bump();
-            continue;
-          }
-
-          const filename = buildTextName(book.id, ch.id);
-          setFixLog(prev => [...prev, `Uploading missing text: ${filename}`]);
-
-          try {
-            const cloudTextFileId = await uploadToDrive(driveFolderId, filename, text, undefined, "text/plain");
-            onUpdateChapter({ ...ch, cloudTextFileId, hasTextOnDrive: true, updatedAt: Date.now() } as any);
-          } catch {
-            errorCount++;
-            setFixLog(p => [...p, `Failed to upload text: ${filename}`]);
-          }
-
-          bump();
-        }
+      // 2) Generate missing audio (when no legacy audio candidate)
+      for (const chapterId of plan.generationIds) {
+        if (abortFixRef.current) break;
+        const ch = chaptersById.get(chapterId);
+        if (!ch) { bump(); continue; }
+        setFixLog(prev => [...prev, `Generating missing audio: ${ch.title}`]);
+        const success = await generateAudio(ch);
+        if (!success) errorCount++;
+        bump();
       }
 
-      // 2) Generate Missing Audio
-      if (fixOptions.genAudio && missingAudioIds.length) {
-        for (const chapterId of missingAudioIds) {
-          if (abortFixRef.current) break;
-          const ch = chaptersById.get(chapterId);
-          if (!ch) { bump(); continue; }
-
-          setFixLog(prev => [...prev, `Generating missing audio: ${ch.title}`]);
-          const success = await generateAudio(ch);
-          if (!success) errorCount++;
-
-          bump();
-        }
-      }
-
-      // 3) Cleanup stray files (and also cleanup extra duplicate new-format files if found)
-      if (fixOptions.cleanupStrays) {
+      // 3) Cleanup (only when safeToCleanup)
+      if (fixOptions.cleanupStrays && plan.safeToCleanup) {
         if (abortFixRef.current) {
           setFixLog(p => [...p, "Cleanup aborted by user."]);
         } else if (errorCount > 0) {
           setFixLog(p => [...p, "SKIPPING CLEANUP: Errors occurred during restoration."]);
           pushNotice("Cleanup skipped for safety due to errors.", "error");
         } else {
-          // Trash true strays from last scan
-          const strayList = lastScan?.strayFiles || [];
-          for (const stray of strayList) {
+          for (const stray of plan.cleanup) {
             if (abortFixRef.current) break;
             setFixLog(prev => [...prev, `Trashing stray file: ${stray.name}`]);
             try {
@@ -891,17 +917,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               setFixLog(p => [...p, `Failed to trash ${stray.name}`]);
             }
             bump();
-          }
-
-          // Also trash extra duplicates of new-format filenames (if any)
-          for (const dup of extraNewFormatDuplicatesToTrash) {
-            if (abortFixRef.current) break;
-            setFixLog(prev => [...prev, `Trashing duplicate file: ${dup.name}`]);
-            try {
-              await moveFileToTrash(dup.id);
-            } catch {
-              setFixLog(p => [...p, `Failed to trash duplicate ${dup.name}`]);
-            }
           }
         }
       }
@@ -1152,6 +1167,16 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       (lastScan as any).legacyCount > 0 ||
       (lastScan as any).unlinkedNewFormatCount > 0);
 
+  const planPreview = buildFixPlan({
+    includeConversions: fixOptions.convertLegacy,
+    includeGeneration: fixOptions.genAudio,
+    includeCleanup: fixOptions.cleanupStrays
+  });
+  const legacyTextCount = planPreview.conversions.filter(c => c.type === "text").length;
+  const legacyAudioCount = planPreview.conversions.filter(c => c.type === "audio").length;
+  const generateCount = planPreview.generationIds.length;
+  const cleanupCount = planPreview.safeToCleanup ? planPreview.cleanup.length : 0;
+
   return (
     <div className={`h-full min-h-0 flex flex-col ${isDark ? 'bg-slate-900 text-slate-100' : isSepia ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
       {showVoiceModal && (
@@ -1182,25 +1207,19 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
              </div>
              <div className="space-y-4"><label className="text-[10px] font-black uppercase tracking-widest opacity-60">Actions to Perform</label>
                <div className="space-y-3">
-                 <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.convertLegacy} onChange={e => setFixOptions(o => ({...o, convertLegacy: e.target.checked}))} /><div><div className="text-sm font-black">Convert Legacy Files</div><p className="text-[10px] opacity-60 uppercase font-bold">Migrate old format to new UUID format</p></div></label>
-                 <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.cleanupLegacyOriginals} onChange={e => setFixOptions(o => ({...o, cleanupLegacyOriginals: e.target.checked}))} /><div><div className="text-sm font-black">Cleanup Legacy Originals</div><p className="text-[10px] opacity-60 uppercase font-bold">Trash old files after successful conversion</p></div></label>
-                 <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.restoreText} onChange={e => setFixOptions(o => ({...o, restoreText: e.target.checked}))} /><div><div className="text-sm font-black">Restore Missing Text</div><p className="text-[10px] opacity-60 uppercase font-bold">Re-upload local content to Drive</p></div></label>
+                 <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.convertLegacy} onChange={e => setFixOptions(o => ({...o, convertLegacy: e.target.checked}))} /><div><div className="text-sm font-black">Convert Legacy Files</div><p className="text-[10px] opacity-60 uppercase font-bold">Create expected files from legacy matches</p></div></label>
                  <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.genAudio} onChange={e => setFixOptions(o => ({...o, genAudio: e.target.checked}))} /><div><div className="text-sm font-black">Generate Missing Audio</div><p className="text-[10px] opacity-60 uppercase font-bold">Synthesize and upload MP3s</p></div></label>
                  <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.cleanupStrays} onChange={e => setFixOptions(o => ({...o, cleanupStrays: e.target.checked}))} /><div><div className="text-sm font-black">Cleanup Book Folder</div><p className="text-[10px] opacity-60 uppercase font-bold">Move unrecognized files to trash</p></div></label>
                </div>
              </div>
-             <div className="max-h-[25vh] overflow-y-auto border rounded-2xl p-4 bg-black/5 space-y-2"><span className="text-[10px] font-black uppercase opacity-40 sticky top-0 bg-inherit py-1">Detailed Breakdown</span>
-               {fixOptions.convertLegacy && legacyGroups.map(g => (<div key={`leg-${g.slug}`} className="text-xs font-bold flex items-center gap-2 text-purple-600"><Sparkles className="w-3 h-3" /> Convert: {g.slug}</div>))}
-               {fixOptions.restoreText && lastScan.missingTextIds.map(cid => (<div key={`txt-${cid}`} className="text-xs font-bold flex items-center gap-2 text-indigo-600"><Plus className="w-3 h-3" /> Re-upload: {scanTitles[cid] || chapters.find(c=>c.id===cid)?.title || cid}</div>))}
-               {fixOptions.genAudio && lastScan.missingAudioIds.map(cid => (<div key={`aud-${cid}`} className="text-xs font-bold flex items-center gap-2 text-amber-600"><Headphones className="w-3 h-3" /> Synthesize: {scanTitles[cid] || chapters.find(c=>c.id===cid)?.title || cid}</div>))}
-               {fixOptions.cleanupStrays && lastScan.strayFiles.map(f => (<div key={`stray-${f.id}`} className="text-xs font-bold flex items-center gap-2 text-red-600"><History className="w-3 h-3" /> Move to trash: {f.name}</div>))}
-               {unlinkedNewFormatFiles.length > 0 && (
-                 <div className="text-xs font-bold flex flex-col gap-1 text-slate-500 mt-2">
-                   <span className="uppercase opacity-60">Unlinked Files (Kept)</span>
-                   {unlinkedNewFormatFiles.map(f => (
-                      <div key={f.id} className="flex items-center gap-2"><Check className="w-3 h-3" /> {f.name}</div>
-                   ))}
-                 </div>
+             <div className="border rounded-2xl p-4 bg-black/5 space-y-2">
+               <span className="text-[10px] font-black uppercase opacity-40">Preview</span>
+               <div className="text-xs font-bold flex items-center gap-2 text-purple-600"><Sparkles className="w-3 h-3" /> Will create {legacyTextCount} text files from legacy</div>
+               <div className="text-xs font-bold flex items-center gap-2 text-purple-600"><Sparkles className="w-3 h-3" /> Will create {legacyAudioCount} audio files from legacy</div>
+               <div className="text-xs font-bold flex items-center gap-2 text-amber-600"><Headphones className="w-3 h-3" /> Will generate {generateCount} audios</div>
+               <div className="text-xs font-bold flex items-center gap-2 text-red-600"><History className="w-3 h-3" /> Will move {cleanupCount} files to trash</div>
+               {fixOptions.cleanupStrays && !planPreview.safeToCleanup && (
+                 <div className="text-[10px] font-bold uppercase text-red-600">Cleanup disabled (not safe yet)</div>
                )}
              </div>
              {isFixing ? (
