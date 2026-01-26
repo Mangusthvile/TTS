@@ -127,6 +127,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [isFixing, setIsFixing] = useState(false);
   const [fixProgress, setFixProgress] = useState({ current: 0, total: 0 });
   const abortFixRef = useRef(false);
+  const [previewOnly, setPreviewOnly] = useState(true);
 
   const [showVoiceModal, setShowVoiceModal] = useState<{ chapterId?: string } | null>(null);
   const [rememberAsDefault, setRememberAsDefault] = useState(true);
@@ -239,11 +240,30 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
     setIsCheckingDrive(true);
     try {
-      const driveFilesRaw = await listFilesInFolder(driveFolderId);
+      // 1. List root files
+      const rootFiles = await listFilesInFolder(driveFolderId);
 
-      // Deduplicate by name, keeping newest. Collect extras as strays.
+      // 2. Identify subfolders (text, audio, trash)
+      const subfolders = rootFiles.filter(f => f.mimeType === "application/vnd.google-apps.folder");
+      const targetSubfolders = ["text", "audio", "trash"];
+      
+      let allFiles = [...rootFiles];
+      
+      // 3. Scan subfolders and combine files
+      for (const folder of subfolders) {
+          if (targetSubfolders.includes(folder.name)) {
+              try {
+                  const subFiles = await listFilesInFolder(folder.id);
+                  allFiles = [...allFiles, ...subFiles];
+              } catch (e) {
+                  console.warn(`Failed to list subfolder ${folder.name}`, e);
+              }
+          }
+      }
+
+      // 4. Deduplicate by name, keeping newest. Collect extras as strays.
       const filesByName = new Map<string, StrayFile[]>();
-      for (const f of driveFilesRaw) {
+      for (const f of allFiles) {
         if (!f?.name) continue;
         const arr = filesByName.get(f.name) || [];
         arr.push(f);
@@ -1172,6 +1192,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                {fixOptions.restoreText && lastScan.missingTextIds.map(cid => (<div key={`txt-${cid}`} className="text-xs font-bold flex items-center gap-2 text-indigo-600"><Plus className="w-3 h-3" /> Re-upload: {scanTitles[cid] || chapters.find(c=>c.id===cid)?.title || cid}</div>))}
                {fixOptions.genAudio && lastScan.missingAudioIds.map(cid => (<div key={`aud-${cid}`} className="text-xs font-bold flex items-center gap-2 text-amber-600"><Headphones className="w-3 h-3" /> Synthesize: {scanTitles[cid] || chapters.find(c=>c.id===cid)?.title || cid}</div>))}
                {fixOptions.cleanupStrays && lastScan.strayFiles.map(f => (<div key={`stray-${f.id}`} className="text-xs font-bold flex items-center gap-2 text-red-600"><History className="w-3 h-3" /> Move to trash: {f.name}</div>))}
+               {unlinkedNewFormatFiles.length > 0 && (
+                 <div className="text-xs font-bold flex flex-col gap-1 text-slate-500 mt-2">
+                   <span className="uppercase opacity-60">Unlinked Files (Kept)</span>
+                   {unlinkedNewFormatFiles.map(f => (
+                      <div key={f.id} className="flex items-center gap-2"><Check className="w-3 h-3" /> {f.name}</div>
+                   ))}
+                 </div>
+               )}
              </div>
              {isFixing ? (
                <div className="space-y-4 pt-4">
@@ -1180,7 +1208,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                  <button onClick={() => { abortFixRef.current = true; }} className="w-full py-3 mt-2 bg-red-500/10 text-red-600 rounded-xl font-black uppercase text-[10px] tracking-widest hover:bg-red-500/20">Stop Generation</button>
                </div>
              ) : (
-               <div className="grid grid-cols-2 gap-4"><button onClick={() => setShowFixModal(false)} className="py-4 rounded-2xl font-black uppercase text-[10px] tracking-widest border-2 hover:bg-black/5">Cancel</button><button onClick={handleRunFix} className="py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-xl hover:scale-[1.02] active:scale-95 transition-all">Start Fixing</button></div>
+               <div className="grid grid-cols-2 gap-4">
+                 <button onClick={() => setShowFixModal(false)} className="py-4 rounded-2xl font-black uppercase text-[10px] tracking-widest border-2 hover:bg-black/5">Cancel</button>
+                 <div className="flex flex-col gap-2">
+                   <button disabled={previewOnly} onClick={handleRunFix} className={`py-4 text-white rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-xl transition-all ${previewOnly ? 'bg-slate-400 cursor-not-allowed' : 'bg-indigo-600 hover:scale-[1.02] active:scale-95'}`}>Start Fixing</button>
+                   <label className="flex items-center justify-center gap-2 cursor-pointer opacity-60 hover:opacity-100 transition-opacity"><input type="checkbox" checked={previewOnly} onChange={e => setPreviewOnly(e.target.checked)} className="accent-indigo-600" /><span className="text-[10px] font-black uppercase">Preview Only (Safe Mode)</span></label>
+                 </div>
+               </div>
              )}
           </div>
         </div>

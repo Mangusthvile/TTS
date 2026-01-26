@@ -1431,8 +1431,18 @@ const App: React.FC = () => {
                 markDirty();
               }}
               onUpdateBook={async (book) => {
+                // Fix: Merge fields into existing book to preserve chapterCount
+                const s = stateRef.current;
+                const existing = s.books.find(b => b.id === book.id);
+                const merged = {
+                   ...existing,
+                   ...book,
+                   chapterCount: existing?.chapterCount ?? book.chapterCount,
+                   chapters: existing?.chapters ?? book.chapters ?? []
+                };
+
                 try {
-                  await libraryUpsertBook({ ...book, directoryHandle: undefined });
+                  await libraryUpsertBook({ ...merged, directoryHandle: undefined });
                 } catch (e: any) {
                   console.error('[TaleVox][Library] update failed', e);
                 }
