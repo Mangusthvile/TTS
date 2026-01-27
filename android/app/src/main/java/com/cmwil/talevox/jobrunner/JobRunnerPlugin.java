@@ -120,6 +120,45 @@ public class JobRunnerPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void enqueueFixIntegrity(PluginCall call) {
+        JSObject payload = call.getObject("payload");
+        String jobId = UUID.randomUUID().toString();
+        long now = System.currentTimeMillis();
+
+        ContentValues values = new ContentValues();
+        values.put("jobId", jobId);
+        values.put("type", "fixIntegrity");
+        values.put("status", "queued");
+        values.put("payloadJson", payload != null ? payload.toString() : null);
+        values.put("progressJson", new JSONObject().toString());
+        values.put("error", (String) null);
+        values.put("createdAt", now);
+        values.put("updatedAt", now);
+
+        SQLiteDatabase db = getDb();
+        db.insertWithOnConflict("jobs", null, values, SQLiteDatabase.CONFLICT_REPLACE);
+
+        OneTimeWorkRequest request =
+            new OneTimeWorkRequest.Builder(FixIntegrityWorker.class)
+                .setInputData(new Data.Builder().putString("jobId", jobId).build())
+                .build();
+        WorkManager.getInstance(getContext()).enqueue(request);
+
+        try {
+            JSONObject progressJson = new JSONObject();
+            progressJson.put("workRequestId", request.getId().toString());
+            ContentValues update = new ContentValues();
+            update.put("progressJson", progressJson.toString());
+            update.put("updatedAt", System.currentTimeMillis());
+            db.update("jobs", update, "jobId = ?", new String[]{jobId});
+        } catch (JSONException ignored) {}
+
+        JSObject ret = new JSObject();
+        ret.put("jobId", jobId);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
     public void cancelJob(PluginCall call) {
         String jobId = call.getString("jobId");
         if (jobId == null) {
@@ -156,8 +195,19 @@ public class JobRunnerPlugin extends Plugin {
             return;
         }
 
+        String type = row.type != null ? row.type : "generateAudio";
+        Class workerClass;
+        if ("fixIntegrity".equals(type)) {
+            workerClass = FixIntegrityWorker.class;
+        } else if ("generateAudio".equals(type)) {
+            workerClass = GenerateAudioWorker.class;
+        } else {
+            call.reject("unsupported job type");
+            return;
+        }
+
         OneTimeWorkRequest request =
-            new OneTimeWorkRequest.Builder(GenerateAudioWorker.class)
+            new OneTimeWorkRequest.Builder(workerClass)
                 .setInputData(new Data.Builder().putString("jobId", jobId).build())
                 .build();
         WorkManager.getInstance(getContext()).enqueue(request);
@@ -243,7 +293,7 @@ public class JobRunnerPlugin extends Plugin {
         SQLiteDatabase db = getDb();
         Cursor cursor = db.query(
             "jobs",
-            new String[]{"jobId", "status", "payloadJson", "progressJson"},
+            new String[]{"jobId", "status", "type", "payloadJson", "progressJson"},
             "jobId = ?",
             new String[]{jobId},
             null,
@@ -255,6 +305,7 @@ public class JobRunnerPlugin extends Plugin {
             return null;
         }
         String status = cursor.getString(cursor.getColumnIndexOrThrow("status"));
+        String type = cursor.getString(cursor.getColumnIndexOrThrow("type"));
         String payloadStr = cursor.getString(cursor.getColumnIndexOrThrow("payloadJson"));
         String progressStr = cursor.getString(cursor.getColumnIndexOrThrow("progressJson"));
         cursor.close();
@@ -262,9 +313,9 @@ public class JobRunnerPlugin extends Plugin {
         try {
             JSONObject payload = payloadStr != null ? new JSONObject(payloadStr) : null;
             JSONObject progress = progressStr != null ? new JSONObject(progressStr) : null;
-            return new JobRow(jobId, status, payload, progress);
+            return new JobRow(jobId, status, type, payload, progress);
         } catch (JSONException e) {
-            return new JobRow(jobId, status, null, null);
+            return new JobRow(jobId, status, type, null, null);
         }
     }
 
@@ -299,12 +350,14 @@ public class JobRunnerPlugin extends Plugin {
     private static class JobRow {
         String jobId;
         String status;
+        String type;
         JSONObject payloadJson;
         JSONObject progressJson;
 
-        JobRow(String jobId, String status, JSONObject payloadJson, JSONObject progressJson) {
+        JobRow(String jobId, String status, String type, JSONObject payloadJson, JSONObject progressJson) {
             this.jobId = jobId;
             this.status = status;
+            this.type = type;
             this.payloadJson = payloadJson;
             this.progressJson = progressJson;
         }

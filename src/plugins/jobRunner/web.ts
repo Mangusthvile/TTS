@@ -30,6 +30,24 @@ export class JobRunnerWeb extends WebPlugin implements JobRunnerPlugin {
     return { jobId };
   }
 
+  async enqueueFixIntegrity(options: { payload: { bookId: string; driveFolderId?: string; options?: { genAudio?: boolean; cleanupStrays?: boolean; convertLegacy?: boolean } } }): Promise<{ jobId: string }> {
+    const jobId = createJobId();
+    const now = Date.now();
+
+    const job: JobRecord = {
+      jobId,
+      type: "fixIntegrity",
+      status: "queued",
+      payloadJson: options.payload,
+      progressJson: { total: 0, completed: 0 },
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await createJob(job);
+    return { jobId };
+  }
+
   async cancelJob(options: { jobId: string }): Promise<void> {
     await updateJob(options.jobId, { status: "canceled", updatedAt: Date.now() });
   }

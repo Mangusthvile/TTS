@@ -18,7 +18,7 @@ import {
 import { isTokenValid } from '../services/driveAuth';
 import { reflowLineBreaks } from '../services/textFormat';
 import { computeMobileMode } from '../utils/platform';
-import { enqueueGenerateAudio } from '../services/jobRunnerService';
+import { enqueueGenerateAudio, enqueueFixIntegrity } from '../services/jobRunnerService';
 import {
   loadChapterText as libraryLoadChapterText,
   bulkUpsertChapters as libraryBulkUpsertChapters,
@@ -940,6 +940,31 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         return;
       }
 
+      if (isMobileInterface) {
+        setFixLog(prev => [...prev, `Queued background fix job`]);
+        try {
+          await enqueueFixIntegrity(
+            {
+              bookId: book.id,
+              driveFolderId: book.driveFolderId,
+              options: {
+                genAudio: fixOptions.genAudio,
+                cleanupStrays: fixOptions.cleanupStrays,
+                convertLegacy: fixOptions.convertLegacy
+              }
+            },
+            uiMode
+          );
+          pushNotice("Background fix queued. Track it in Jobs or notifications.", "success", 4000);
+          setShowFixModal(false);
+        } catch (e: any) {
+          errorCount++;
+          setFixLog(prev => [...prev, `Failed to queue background fix job: ${String(e?.message ?? e)}`]);
+          pushNotice("Failed to queue background fix job.", "error", 5000);
+        }
+        return;
+      }
+
       const chaptersById = new Map(allChapters.map((c) => [c.id, c]));
 
       // 1) Convert legacy candidates into expected files
@@ -964,39 +989,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       }
 
       // 2) Generate missing audio (when no legacy audio candidate)
-      if (plan.generationIds.length && isMobileInterface) {
-        setFixLog(prev => [...prev, `Queued background audio job (${plan.generationIds.length} chapters)`]);
-        try {
-          const voiceId =
-            book.settings.defaultVoiceId ||
-            book.settings.selectedVoiceName ||
-            "en-US-Standard-C";
-          await enqueueGenerateAudio(
-            {
-              bookId: book.id,
-              chapterIds: plan.generationIds,
-              voice: { id: voiceId },
-              settings: {
-                playbackSpeed: book.settings.useBookSettings ? (book.settings.playbackSpeed ?? 1.0) : 1.0
-              }
-            },
-            uiMode
-          );
-        } catch (e: any) {
-          errorCount++;
-          setFixLog(prev => [...prev, `Failed to queue background audio job: ${String(e?.message ?? e)}`]);
-        }
-        for (let i = 0; i < plan.generationIds.length; i++) bump();
-      } else {
-        for (const chapterId of plan.generationIds) {
-          if (abortFixRef.current) break;
-          const ch = chaptersById.get(chapterId);
-          if (!ch) { bump(); continue; }
-          setFixLog(prev => [...prev, `Generating missing audio: ${ch.title}`]);
-          const success = await generateAudio(ch);
-          if (!success) errorCount++;
-          bump();
-        }
+      for (const chapterId of plan.generationIds) {
+        if (abortFixRef.current) break;
+        const ch = chaptersById.get(chapterId);
+        if (!ch) { bump(); continue; }
+        setFixLog(prev => [...prev, `Generating missing audio: ${ch.title}`]);
+        const success = await generateAudio(ch);
+        if (!success) errorCount++;
+        bump();
       }
 
       // 3) Cleanup (only when safeToCleanup)
@@ -1358,6 +1358,17 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                 >
                   Init Manifests
                 </button>
+                {isMobileInterface && (
+                  <button
+                    onClick={() => {
+                      setShowBookSettings(false);
+                      setShowFixModal(true);
+                    }}
+                    className="px-4 py-2 rounded-xl bg-orange-500 text-white text-[10px] font-black uppercase tracking-widest"
+                  >
+                    Fix Integrity (BG)
+                  </button>
+                )}
               </div>
             </div>
 
@@ -1520,7 +1531,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                   <div key={job.jobId} className={`p-3 rounded-xl border ${isDark ? 'border-slate-800 bg-slate-950/40' : 'border-black/5 bg-white'}`}>
                     <div className="flex items-center justify-between gap-2">
                       <div className="min-w-0">
-                        <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Generate Audio</div>
+                      <div className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                        {job.type === "fixIntegrity" ? "Fix Integrity" : "Generate Audio"}
+                      </div>
                         <div className="text-xs font-black truncate">Status: {job.status}</div>
                       </div>
                       <div className="flex items-center gap-2">

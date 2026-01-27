@@ -42,7 +42,7 @@ export enum AudioStatus {
   FAILED = 'failed'
 }
 
-export type JobType = "generateAudio";
+export type JobType = "generateAudio" | "fixIntegrity";
 
 export type JobStatus =
   | "queued"

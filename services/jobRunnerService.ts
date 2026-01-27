@@ -67,6 +67,35 @@ export async function enqueueGenerateAudio(
   return { jobId };
 }
 
+export async function enqueueFixIntegrity(
+  payload: { bookId: string; driveFolderId?: string; options?: { genAudio?: boolean; cleanupStrays?: boolean; convertLegacy?: boolean } },
+  uiMode: UiMode
+): Promise<{ jobId: string }> {
+  const interfaceMode = getInterfaceMode(uiMode);
+  if (interfaceMode === "mobile") {
+    try {
+      return await JobRunner.enqueueFixIntegrity({ payload });
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (!msg.includes("not implemented")) throw e;
+    }
+  }
+
+  const jobId = createJobId();
+  const now = Date.now();
+  const job: JobRecord = {
+    jobId,
+    type: "fixIntegrity",
+    status: "queued",
+    payloadJson: payload,
+    progressJson: { total: 0, completed: 0 },
+    createdAt: now,
+    updatedAt: now,
+  };
+  await createJob(job);
+  return { jobId };
+}
+
 export async function cancelJob(jobId: string, uiMode: UiMode): Promise<void> {
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {

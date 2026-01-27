@@ -20,6 +20,7 @@ export type JobRunnerPayload = {
 
 export interface JobRunnerPlugin {
   enqueueGenerateAudio: (options: { payload: JobRunnerPayload }) => Promise<{ jobId: string }>;
+  enqueueFixIntegrity: (options: { payload: { bookId: string; driveFolderId?: string; options?: { genAudio?: boolean; cleanupStrays?: boolean; convertLegacy?: boolean } } }) => Promise<{ jobId: string }>;
   cancelJob: (options: { jobId: string }) => Promise<void>;
   retryJob: (options: { jobId: string }) => Promise<{ jobId: string }>;
   getJob: (options: { jobId: string }) => Promise<{ job: JobRecord | null }>;

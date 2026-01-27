@@ -12,6 +12,7 @@ import android.os.Build;
 
 import androidx.annotation.NonNull;
 import androidx.core.app.NotificationCompat;
+import androidx.work.ForegroundInfo;
 import androidx.work.Worker;
 import androidx.work.WorkerParameters;
 
@@ -58,21 +59,18 @@ public class GenerateAudioWorker extends Worker {
         try {
             JobRow job = loadJob(jobId);
             if (job == null) {
-                updateStatus(jobId, "failed", "Job not found");
-                return Result.failure();
+                return failJob(jobId, "Job not found", null);
             }
 
             JSONObject payload = job.payloadJson;
             if (payload == null) {
-                updateStatus(jobId, "failed", "Missing payload");
-                return Result.failure();
+                return failJob(jobId, "Missing payload", null);
             }
 
             String bookId = payload.optString("bookId", null);
             JSONArray chapterIds = payload.optJSONArray("chapterIds");
             if (bookId == null || chapterIds == null) {
-                updateStatus(jobId, "failed", "Invalid payload");
-                return Result.failure();
+                return failJob(jobId, "Invalid payload", null);
             }
 
             String voiceId = "en-US-Standard-C";
@@ -119,9 +117,7 @@ public class GenerateAudioWorker extends Worker {
 
                 String content = loadChapterText(bookId, chapterId);
                 if (content == null || content.isEmpty()) {
-                    updateJobProgress(jobId, "failed", progressJson, "Missing chapter text");
-                    emitFinished(jobId, "failed", progressJson, "Missing chapter text");
-                    return Result.failure();
+                    return failJob(jobId, "Missing chapter text", progressJson);
                 }
 
                 String processed = applyRules(content, rules);
@@ -170,12 +166,7 @@ public class GenerateAudioWorker extends Worker {
             showFinishedNotification(jobId, "Audio generation complete");
             return Result.success();
         } catch (Exception e) {
-            updateStatus(jobId, "failed", e.getMessage());
-            JSONObject progress = new JSONObject();
-            try { progress.put("error", e.getMessage()); } catch (JSONException ignored) {}
-            emitFinished(jobId, "failed", progress, e.getMessage());
-            showFinishedNotification(jobId, "Audio generation failed");
-            return Result.failure();
+            return failJob(jobId, e.getMessage(), null);
         }
     }
 
@@ -723,10 +714,7 @@ public class GenerateAudioWorker extends Worker {
     }
 
     private void showProgressNotification(String jobId, String title, JSONObject progressJson) {
-        int total = progressJson != null ? progressJson.optInt("total", 0) : 0;
-        int completed = progressJson != null ? progressJson.optInt("completed", 0) : 0;
-        int percent = total > 0 ? Math.min(100, Math.round((completed * 100f) / total)) : 0;
-
+        Notification notification = buildProgressNotification(jobId, title, progressJson);
         NotificationManager nm = (NotificationManager) getApplicationContext().getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm == null) return;
 
@@ -739,15 +727,8 @@ public class GenerateAudioWorker extends Worker {
             nm.createNotificationChannel(channel);
         }
 
-        Notification notification = new NotificationCompat.Builder(getApplicationContext(), CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(percent + "% (" + completed + "/" + total + ")")
-            .setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setProgress(total > 0 ? total : 100, total > 0 ? completed : percent, total == 0)
-            .setOngoing(true)
-            .build();
-
         nm.notify(notificationId(jobId), notification);
+        setForegroundAsync(new ForegroundInfo(notificationId(jobId), notification));
     }
 
     private void showFinishedNotification(String jobId, String title) {
@@ -774,6 +755,29 @@ public class GenerateAudioWorker extends Worker {
 
     private int notificationId(String jobId) {
         return Math.abs(jobId.hashCode());
+    }
+
+    private Notification buildProgressNotification(String jobId, String title, JSONObject progressJson) {
+        int total = progressJson != null ? progressJson.optInt("total", 0) : 0;
+        int completed = progressJson != null ? progressJson.optInt("completed", 0) : 0;
+        int percent = total > 0 ? Math.min(100, Math.round((completed * 100f) / total)) : 0;
+
+        return new NotificationCompat.Builder(getApplicationContext(), CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(percent + "% (" + completed + "/" + total + ")")
+            .setSmallIcon(android.R.drawable.stat_sys_upload)
+            .setProgress(total > 0 ? total : 100, total > 0 ? completed : percent, total == 0)
+            .setOngoing(true)
+            .build();
+    }
+
+    private Result failJob(String jobId, String message, JSONObject progressJson) {
+        updateStatus(jobId, "failed", message);
+        JSONObject progress = progressJson != null ? progressJson : new JSONObject();
+        try { progress.put("error", message); } catch (JSONException ignored) {}
+        emitFinished(jobId, "failed", progress, message);
+        showFinishedNotification(jobId, "Audio generation failed");
+        return Result.failure();
     }
 
     private static class JobRow {
