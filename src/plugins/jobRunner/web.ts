@@ -1,5 +1,5 @@
 import { WebPlugin } from "@capacitor/core";
-import type { JobRecord } from "../../types";
+import type { JobRecord } from "../../../types";
 import type { JobRunnerPayload, JobRunnerPlugin } from "./index";
 import { createJob, updateJob, getJob, listJobs } from "../../../services/jobStore";
 

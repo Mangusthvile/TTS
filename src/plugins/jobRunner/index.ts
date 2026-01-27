@@ -1,5 +1,5 @@
 import { registerPlugin, type PluginListenerHandle } from "@capacitor/core";
-import type { JobRecord } from "../../types";
+import type { JobRecord } from "../../../types";
 
 export type JobRunnerVoice = {
   id: string;
