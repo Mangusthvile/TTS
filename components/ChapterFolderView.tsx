@@ -298,6 +298,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     return all.sort((a, b) => a.index - b.index);
   }, [book.id]);
 
+  const scanHasIssues = (scan: ScanResult | null | undefined) =>
+    !!scan &&
+    (scan.missingTextIds.length > 0 ||
+      scan.missingAudioIds.length > 0 ||
+      scan.strayFiles.length > 0 ||
+      (scan as any).legacyCount > 0 ||
+      (scan as any).unlinkedNewFormatCount > 0);
+
   const handleCheckDriveIntegrity = useCallback(async (): Promise<ScanResult | null> => {
     if (!driveFolderId) {
       pushNotice("Drive folder not set for this book yet.", "error");
@@ -312,34 +320,16 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       // 1. List root files
       const rootFiles = await listFilesInFolder(driveFolderId);
 
-      // 2. Identify subfolders (meta, text, audio, trash)
+      // 2. Identify meta folder (manifest lives there)
       const subfolders = rootFiles.filter(f => f.mimeType === "application/vnd.google-apps.folder");
-      const targetSubfolders = ["meta", "text", "audio", "trash"];
-
-      let allFiles = [...rootFiles];
       let metaFiles: StrayFile[] = [];
-
-      // 3. Scan subfolders and combine files
-      for (const folder of subfolders) {
-        if (targetSubfolders.includes(folder.name)) {
-          try {
-            const subFiles = await listFilesInFolder(folder.id);
-            if (folder.name === "meta") metaFiles = subFiles;
-            allFiles = [...allFiles, ...subFiles];
-          } catch (e) {
-            console.warn(`Failed to list subfolder ${folder.name}`, e);
-          }
-        }
-      }
 
       const metaFolder = subfolders.find(f => f.name === "meta");
       if (!metaFolder) {
         throw new Error("meta folder not found in this Drive book.");
       }
 
-      if (metaFiles.length === 0) {
-        metaFiles = await listFilesInFolder(metaFolder.id);
-      }
+      metaFiles = await listFilesInFolder(metaFolder.id);
 
       const inventoryFile = metaFiles.find(f => f.name === "inventory.json");
       if (!inventoryFile) {
@@ -364,7 +354,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       // Invariant: duplicates (same name, different id) are ALWAYS stray — they never go through
       // classification and are excluded from driveFiles, so they cannot be legacy or unlinked.
       const filesByName = new Map<string, StrayFile[]>();
-      for (const f of allFiles) {
+      for (const f of rootFiles) {
         if (!f?.name) continue;
         const arr = filesByName.get(f.name) || [];
         arr.push(f);
@@ -451,14 +441,21 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       const legacyFiles: Array<{ file: StrayFile; idx: number; slug: string; type: "text" | "audio" }> = [];
 
       for (const f of driveFiles) {
-        // Ignore folders, especially meta/text/audio/trash
+        // Ignore folders
         if (f.mimeType === "application/vnd.google-apps.folder") continue;
 
         if (!f?.name) continue;
         if (expectedNames.has(f.name)) continue;
 
         // ignore common stuff
-        if (f.name === ".keep" || f.name === "cover.jpg" || f.name === "manifest.json" || f.name.startsWith('_')) continue;
+        if (
+          f.name === ".keep" ||
+          f.name === "cover.jpg" ||
+          f.name === "manifest.json" ||
+          f.name === "book.json" ||
+          f.name === "inventory.json" ||
+          f.name.startsWith('_')
+        ) continue;
 
         const leg = f.name.match(legacyRegex);
         if (leg) {
@@ -558,30 +555,25 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         };
       }
 
-      const expectedInventoryCount = 848;
-      const hasExpectedCount = inventory.chapters.length === expectedInventoryCount;
-      let safeToCleanup = hasExpectedCount;
+      let safeToCleanup = true;
+      for (const ch of inventory.chapters) {
+        const chapterId = ch.chapterId;
+        if (!chapterId) {
+          safeToCleanup = false;
+          break;
+        }
 
-      if (safeToCleanup) {
-        for (const ch of inventory.chapters) {
-          const chapterId = ch.chapterId;
-          if (!chapterId) {
-            safeToCleanup = false;
-            break;
-          }
+        const txtName = `c_${chapterId}.txt`;
+        const mp3Name = `c_${chapterId}.mp3`;
+        const hasTextExpected = hasName(txtName);
+        const hasAudioExpected = hasName(mp3Name);
+        const legacyCandidate = legacyRecoveryCandidates[chapterId];
+        const hasLegacyText = !!legacyCandidate?.legacyTextCandidate;
+        const hasLegacyAudio = !!legacyCandidate?.legacyAudioCandidate;
 
-          const txtName = `c_${chapterId}.txt`;
-          const mp3Name = `c_${chapterId}.mp3`;
-          const hasTextExpected = hasName(txtName);
-          const hasAudioExpected = hasName(mp3Name);
-          const legacyCandidate = legacyRecoveryCandidates[chapterId];
-          const hasLegacyText = !!legacyCandidate?.legacyTextCandidate;
-          const hasLegacyAudio = !!legacyCandidate?.legacyAudioCandidate;
-
-          if ((!hasTextExpected && !hasLegacyText) || (!hasAudioExpected && !hasLegacyAudio)) {
-            safeToCleanup = false;
-            break;
-          }
+        if ((!hasTextExpected && !hasLegacyText) || (!hasAudioExpected && !hasLegacyAudio)) {
+          safeToCleanup = false;
+          break;
         }
       }
 
@@ -606,7 +598,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       setLastScan(scan);
       setMissingTextIds(scan.missingTextIds);
       setMissingAudioIds(scan.missingAudioIds);
-      setLastDriveFiles(allFiles);
+      setLastDriveFiles(rootFiles);
       if (!safeToCleanup) {
         pushNotice("Not safe to cleanup. Some inventory chapters cannot be recovered yet.", "error", 6000);
       }
@@ -674,6 +666,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   }, [book.id, onUpdateChapter, pushNotice, fetchAllChapters]);
 
   const handleCheckIntegrity = useCallback(async () => {
+    if (lastScan && !scanHasIssues(lastScan)) {
+      pushNotice("Already clean - skipping re-check.", "info", 2500);
+      return;
+    }
     const scan =
       book.backend === StorageBackend.DRIVE
         ? await handleCheckDriveIntegrity()
@@ -694,9 +690,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         6000
       );
     } else {
-      pushNotice("All good — nothing to fix.", "success", 2500);
+      pushNotice("All good - nothing to fix.", "success", 2500);
     }
-  }, [book.backend, handleCheckDriveIntegrity, handleCheckLocalIntegrity, pushNotice]);
+  }, [book.backend, handleCheckDriveIntegrity, handleCheckLocalIntegrity, pushNotice, lastScan]);
 
   const generateAudio = async (chapter: Chapter, voiceIdOverride?: string): Promise<boolean> => {
     if (synthesizingId) return false;
@@ -1315,13 +1311,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     </div>
   );
 
-  const hasIssues =
-    !!lastScan &&
-    (lastScan.missingTextIds.length > 0 ||
-      lastScan.missingAudioIds.length > 0 ||
-      lastScan.strayFiles.length > 0 ||
-      (lastScan as any).legacyCount > 0 ||
-      (lastScan as any).unlinkedNewFormatCount > 0);
+  const hasIssues = scanHasIssues(lastScan);
 
   const planPreview = buildFixPlan({
     includeConversions: fixOptions.convertLegacy,

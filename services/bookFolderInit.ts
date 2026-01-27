@@ -37,9 +37,6 @@ export async function initBookFolderManifests(args: {
   };
 
   const metaFolder = await adapter.ensureFolder(root, "meta");
-  await adapter.ensureFolder(root, "text");
-  await adapter.ensureFolder(root, "audio");
-  await adapter.ensureFolder(root, "trash");
 
   const bookJsonFile = await adapter.findByName(metaFolder, "book.json");
   const invJsonFile = await adapter.findByName(metaFolder, "inventory.json");
