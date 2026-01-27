@@ -5,8 +5,13 @@ import android.content.Context;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.Cursor;
 import android.util.Base64;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.Notification;
+import android.os.Build;
 
 import androidx.annotation.NonNull;
+import androidx.core.app.NotificationCompat;
 import androidx.work.Worker;
 import androidx.work.WorkerParameters;
 
@@ -36,6 +41,7 @@ public class GenerateAudioWorker extends Worker {
     private static final String DEFAULT_ENDPOINT = "https://talevox-tts-762195576430.us-south1.run.app";
     private static final int MAX_TTS_BYTES = 4500;
     private static final int MAX_UPLOAD_RETRIES = 5;
+    private static final String CHANNEL_ID = "talevox_jobs";
 
     public GenerateAudioWorker(@NonNull Context context, @NonNull WorkerParameters params) {
         super(context, params);
@@ -93,6 +99,7 @@ public class GenerateAudioWorker extends Worker {
             }
 
             updateJobProgress(jobId, "running", progressJson, null);
+            showProgressNotification(jobId, "Generating audio", progressJson);
 
             List<Rule> rules = loadRulesForBook(bookId);
 
@@ -108,6 +115,7 @@ public class GenerateAudioWorker extends Worker {
                 progressJson.put("currentChapterId", chapterId);
                 updateJobProgress(jobId, "running", progressJson, null);
                 emitProgress(jobId, "running", progressJson);
+                showProgressNotification(jobId, "Generating audio", progressJson);
 
                 String content = loadChapterText(bookId, chapterId);
                 if (content == null || content.isEmpty()) {
@@ -152,18 +160,21 @@ public class GenerateAudioWorker extends Worker {
                 }
                 updateJobProgress(jobId, "running", progressJson, null);
                 emitProgress(jobId, "running", progressJson);
+                showProgressNotification(jobId, "Generating audio", progressJson);
             }
 
             progressJson.put("currentChapterId", JSONObject.NULL);
             progressJson.put("finishedAt", System.currentTimeMillis());
             updateJobProgress(jobId, "completed", progressJson, null);
             emitFinished(jobId, "completed", progressJson, null);
+            showFinishedNotification(jobId, "Audio generation complete");
             return Result.success();
         } catch (Exception e) {
             updateStatus(jobId, "failed", e.getMessage());
             JSONObject progress = new JSONObject();
             try { progress.put("error", e.getMessage()); } catch (JSONException ignored) {}
             emitFinished(jobId, "failed", progress, e.getMessage());
+            showFinishedNotification(jobId, "Audio generation failed");
             return Result.failure();
         }
     }
@@ -709,6 +720,60 @@ public class GenerateAudioWorker extends Worker {
         payload.put("progress", progressJson);
         if (error != null) payload.put("error", error);
         JobRunnerPlugin.emitJobFinished(payload);
+    }
+
+    private void showProgressNotification(String jobId, String title, JSONObject progressJson) {
+        int total = progressJson != null ? progressJson.optInt("total", 0) : 0;
+        int completed = progressJson != null ? progressJson.optInt("completed", 0) : 0;
+        int percent = total > 0 ? Math.min(100, Math.round((completed * 100f) / total)) : 0;
+
+        NotificationManager nm = (NotificationManager) getApplicationContext().getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm == null) return;
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                CHANNEL_ID,
+                "TaleVox Jobs",
+                NotificationManager.IMPORTANCE_LOW
+            );
+            nm.createNotificationChannel(channel);
+        }
+
+        Notification notification = new NotificationCompat.Builder(getApplicationContext(), CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(percent + "% (" + completed + "/" + total + ")")
+            .setSmallIcon(android.R.drawable.stat_sys_upload)
+            .setProgress(total > 0 ? total : 100, total > 0 ? completed : percent, total == 0)
+            .setOngoing(true)
+            .build();
+
+        nm.notify(notificationId(jobId), notification);
+    }
+
+    private void showFinishedNotification(String jobId, String title) {
+        NotificationManager nm = (NotificationManager) getApplicationContext().getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm == null) return;
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                CHANNEL_ID,
+                "TaleVox Jobs",
+                NotificationManager.IMPORTANCE_LOW
+            );
+            nm.createNotificationChannel(channel);
+        }
+
+        Notification notification = new NotificationCompat.Builder(getApplicationContext(), CHANNEL_ID)
+            .setContentTitle(title)
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setOngoing(false)
+            .build();
+
+        nm.notify(notificationId(jobId), notification);
+    }
+
+    private int notificationId(String jobId) {
+        return Math.abs(jobId.hashCode());
     }
 
     private static class JobRow {
