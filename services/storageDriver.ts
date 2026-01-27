@@ -88,6 +88,29 @@ export type StorageDriver = {
   listJobs(type?: JobType): Promise<LoadResult<JobRecord[]>>;
   deleteJob(jobId: string): Promise<SaveResult>;
   clearJobs(statuses: string[]): Promise<SaveResult>;
+  setChapterAudioPath(chapterId: string, localPath: string, sizeBytes: number): Promise<SaveResult>;
+  getChapterAudioPath(chapterId: string): Promise<LoadResult<{ localPath: string; sizeBytes: number; updatedAt: number } | null>>;
+  deleteChapterAudioPath(chapterId: string): Promise<SaveResult>;
+  enqueueUpload(item: DriveUploadQueuedItem): Promise<SaveResult>;
+  getNextReadyUpload(now: number): Promise<LoadResult<DriveUploadQueuedItem | null>>;
+  markUploadUploading(id: string, nextAttemptAt: number): Promise<SaveResult>;
+  markUploadDone(id: string): Promise<SaveResult>;
+  markUploadFailed(id: string, error: string, nextAttemptAt: number): Promise<SaveResult>;
+  countQueuedUploads(): Promise<LoadResult<number>>;
+  listQueuedUploads(limit?: number): Promise<LoadResult<DriveUploadQueuedItem[]>>;
+};
+
+export type DriveUploadQueuedItem = {
+  id: string;
+  chapterId: string;
+  bookId: string;
+  localPath: string;
+  status: 'queued' | 'uploading' | 'failed' | 'done';
+  attempts: number;
+  nextAttemptAt: number;
+  lastError?: string;
+  createdAt: number;
+  updatedAt: number;
 };
 
 function isNativeCapacitor(): boolean {
@@ -135,6 +158,8 @@ class MemoryStorageDriver implements StorageDriver {
   private progress = new Map<string, ChapterProgress>();
   private smallBackup: Record<string, any> | null = null;
   private jobs = new Map<string, JobRecord>();
+  private chapterAudio = new Map<string, { localPath: string; sizeBytes: number; updatedAt: number }>();
+  private uploadQueue = new Map<string, DriveUploadQueuedItem>();
 
   async init(): Promise<StorageInitResult> {
     return { driverName: this.name, mode: "memory" };
@@ -245,6 +270,82 @@ class MemoryStorageDriver implements StorageDriver {
     }
     return { ok: true, where: "memory" };
   }
+
+  async setChapterAudioPath(chapterId: string, localPath: string, sizeBytes: number): Promise<SaveResult> {
+    this.chapterAudio.set(chapterId, { localPath, sizeBytes, updatedAt: Date.now() });
+    return { ok: true, where: "memory" };
+  }
+
+  async getChapterAudioPath(chapterId: string): Promise<LoadResult<{ localPath: string; sizeBytes: number; updatedAt: number } | null>> {
+    return { ok: true, where: "memory", value: this.chapterAudio.get(chapterId) ?? null };
+  }
+
+  async deleteChapterAudioPath(chapterId: string): Promise<SaveResult> {
+    this.chapterAudio.delete(chapterId);
+    return { ok: true, where: "memory" };
+  }
+
+  private nowMs() {
+    return Date.now();
+  }
+
+  async enqueueUpload(item: DriveUploadQueuedItem): Promise<SaveResult> {
+    this.uploadQueue.set(item.id, { ...item });
+    return { ok: true, where: "memory" };
+  }
+
+  async getNextReadyUpload(now: number): Promise<LoadResult<DriveUploadQueuedItem | null>> {
+    let candidate: DriveUploadQueuedItem | null = null;
+    for (const item of this.uploadQueue.values()) {
+      if ((item.status === "queued" || item.status === "failed") && item.nextAttemptAt <= now) {
+        if (!candidate || item.nextAttemptAt < candidate.nextAttemptAt) {
+          candidate = item;
+        }
+      }
+    }
+    return { ok: true, where: "memory", value: candidate };
+  }
+
+  async markUploadUploading(id: string, nextAttemptAt: number): Promise<SaveResult> {
+    const item = this.uploadQueue.get(id);
+    if (!item) return { ok: false, where: "memory", error: "missing" };
+    item.status = "uploading";
+    item.attempts += 1;
+    item.nextAttemptAt = nextAttemptAt;
+    item.updatedAt = this.nowMs();
+    this.uploadQueue.set(id, item);
+    return { ok: true, where: "memory" };
+  }
+
+  async markUploadDone(id: string): Promise<SaveResult> {
+    this.uploadQueue.delete(id);
+    return { ok: true, where: "memory" };
+  }
+
+  async markUploadFailed(id: string, error: string, nextAttemptAt: number): Promise<SaveResult> {
+    const item = this.uploadQueue.get(id);
+    if (!item) return { ok: false, where: "memory", error: "missing" };
+    item.status = "failed";
+    item.lastError = error;
+    item.nextAttemptAt = nextAttemptAt;
+    item.attempts += 1;
+    item.updatedAt = this.nowMs();
+    this.uploadQueue.set(id, item);
+    return { ok: true, where: "memory" };
+  }
+
+  async countQueuedUploads(): Promise<LoadResult<number>> {
+    let count = 0;
+    for (const item of this.uploadQueue.values()) {
+      if (item.status === "queued" || item.status === "failed") count++;
+    }
+    return { ok: true, where: "memory", value: count };
+  }
+
+  async listQueuedUploads(limit?: number): Promise<LoadResult<DriveUploadQueuedItem[]>> {
+    const list = Array.from(this.uploadQueue.values()).sort((a, b) => b.createdAt - a.createdAt);
+    return { ok: true, where: "memory", value: typeof limit === "number" ? list.slice(0, limit) : list };
+  }
 }
 
 // ----------------------------------------
@@ -262,6 +363,8 @@ class SafeLocalStorageDriver implements StorageDriver {
   private KEY_AUTH_SESSION = "talevox_drive_session_v3";
   private KEY_JOBS_INDEX = "talevox_jobs_index";
   private KEY_JOB_PREFIX = "talevox_job:";
+  private KEY_CHAPTER_AUDIO = "talevox_chapter_audio_map";
+  private KEY_UPLOAD_QUEUE = "talevox_drive_upload_queue";
 
   private MAX_ITEM_BYTES = 180_000; // ~180KB per key
 
@@ -412,6 +515,127 @@ class SafeLocalStorageDriver implements StorageDriver {
     } catch (e: any) {
       return { ok: false, where: "localStorage", error: e?.message ?? String(e) };
     }
+  }
+
+  private async loadChapterAudioMap(): Promise<Record<string, { localPath: string; sizeBytes: number; updatedAt: number }>> {
+    try {
+      const raw = window.localStorage.getItem(this.KEY_CHAPTER_AUDIO);
+      if (!raw) return {};
+      return JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  }
+
+  private async saveChapterAudioMap(map: Record<string, { localPath: string; sizeBytes: number; updatedAt: number }>): Promise<SaveResult> {
+    return this.safeSetJson(this.KEY_CHAPTER_AUDIO, map, "localStorage");
+  }
+
+  async setChapterAudioPath(chapterId: string, localPath: string, sizeBytes: number): Promise<SaveResult> {
+    const map = await this.loadChapterAudioMap();
+    map[chapterId] = { localPath, sizeBytes, updatedAt: Date.now() };
+    return this.saveChapterAudioMap(map);
+  }
+
+  async getChapterAudioPath(chapterId: string): Promise<LoadResult<{ localPath: string; sizeBytes: number; updatedAt: number } | null>> {
+    const map = await this.loadChapterAudioMap();
+    return { ok: true, where: "localStorage", value: map[chapterId] ?? null };
+  }
+
+  async deleteChapterAudioPath(chapterId: string): Promise<SaveResult> {
+    const map = await this.loadChapterAudioMap();
+    if (map[chapterId]) {
+      delete map[chapterId];
+      return this.saveChapterAudioMap(map);
+    }
+    return { ok: true, where: "localStorage" };
+  }
+
+  private async loadUploadQueue(): Promise<Record<string, DriveUploadQueuedItem>> {
+    try {
+      const raw = window.localStorage.getItem(this.KEY_UPLOAD_QUEUE);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      return parsed;
+    } catch {
+      return {};
+    }
+  }
+
+  private async saveUploadQueue(map: Record<string, DriveUploadQueuedItem>): Promise<SaveResult> {
+    return this.safeSetJson(this.KEY_UPLOAD_QUEUE, map, "localStorage");
+  }
+
+  private nowMs() {
+    return Date.now();
+  }
+
+  async enqueueUpload(item: DriveUploadQueuedItem): Promise<SaveResult> {
+    const queue = await this.loadUploadQueue();
+    queue[item.id] = { ...item };
+    return this.saveUploadQueue(queue);
+  }
+
+  async getNextReadyUpload(now: number): Promise<LoadResult<DriveUploadQueuedItem | null>> {
+    const queue = await this.loadUploadQueue();
+    let candidate: DriveUploadQueuedItem | null = null;
+    for (const item of Object.values(queue)) {
+      if ((item.status === "queued" || item.status === "failed") && item.nextAttemptAt <= now) {
+        if (!candidate || item.nextAttemptAt < candidate.nextAttemptAt) {
+          candidate = item;
+        }
+      }
+    }
+    return { ok: true, where: "localStorage", value: candidate };
+  }
+
+  async markUploadUploading(id: string, nextAttemptAt: number): Promise<SaveResult> {
+    const queue = await this.loadUploadQueue();
+    const item = queue[id];
+    if (!item) return { ok: false, where: "localStorage", error: "missing" };
+    item.status = "uploading";
+    item.attempts += 1;
+    item.nextAttemptAt = nextAttemptAt;
+    item.updatedAt = this.nowMs();
+    queue[id] = item;
+    return this.saveUploadQueue(queue);
+  }
+
+  async markUploadDone(id: string): Promise<SaveResult> {
+    const queue = await this.loadUploadQueue();
+    if (queue[id]) {
+      delete queue[id];
+      return this.saveUploadQueue(queue);
+    }
+    return { ok: true, where: "localStorage" };
+  }
+
+  async markUploadFailed(id: string, error: string, nextAttemptAt: number): Promise<SaveResult> {
+    const queue = await this.loadUploadQueue();
+    const item = queue[id];
+    if (!item) return { ok: false, where: "localStorage", error: "missing" };
+    item.status = "failed";
+    item.lastError = error;
+    item.nextAttemptAt = nextAttemptAt;
+    item.attempts += 1;
+    item.updatedAt = this.nowMs();
+    queue[id] = item;
+    return this.saveUploadQueue(queue);
+  }
+
+  async countQueuedUploads(): Promise<LoadResult<number>> {
+    const queue = await this.loadUploadQueue();
+    let count = 0;
+    for (const item of Object.values(queue)) {
+      if (item.status === "queued" || item.status === "failed") count++;
+    }
+    return { ok: true, where: "localStorage", value: count };
+  }
+
+  async listQueuedUploads(limit?: number): Promise<LoadResult<DriveUploadQueuedItem[]>> {
+    const queue = await this.loadUploadQueue();
+    const list = Object.values(queue).sort((a, b) => b.createdAt - a.createdAt);
+    return { ok: true, where: "localStorage", value: typeof limit === "number" ? list.slice(0, limit) : list };
   }
 
   private async safeGetJson<T>(key: string, where: SaveResult["where"]): Promise<LoadResult<T>> {

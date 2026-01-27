@@ -4,6 +4,7 @@ import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headpho
 import { applyRules } from '../services/speechService';
 import { synthesizeChunk } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache, hasAudioInCache } from '../services/audioCache';
+import { persistChapterAudio } from '../services/audioStorage';
 import {
   uploadToDrive,
   listFilesInFolder,
@@ -52,6 +53,8 @@ interface ChapterFolderViewProps {
   onAddChapter: () => void;
   onOpenChapter: (chapterId: string) => void;
   onToggleFavorite: (chapterId: string) => void;
+  uploadQueueCount: number;
+  onToggleUploadQueue: () => void;
   onUpdateChapterTitle: (chapterId: string, newTitle: string) => void;
   onDeleteChapter: (chapterId: string) => void;
   onUpdateChapter: (chapter: Chapter) => void;
@@ -94,7 +97,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   onLoadMoreChapters,
   hasMoreChapters,
   isLoadingMoreChapters,
-  onAppendChapters
+  onAppendChapters,
+  uploadQueueCount,
+  onToggleUploadQueue
 }) => {
   const { driveFolderId } = book;
   const VIEW_MODE_KEY = `talevox:viewMode:${book.id}`;
@@ -743,6 +748,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         audioBlob = new Blob([mp3Copy], { type: "audio/mpeg" });
 
         await saveAudioToCache(cacheKey, audioBlob);
+      }
+
+      if (audioBlob) {
+        await persistChapterAudio(chapter.id, audioBlob, uiMode);
       }
 
       onUpdateChapter({
@@ -1504,21 +1513,27 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             </div>
           </div>
           
-          <div className="flex items-center justify-between gap-3">
-            <div className={`flex items-center gap-3 sm:gap-8 cursor-pointer md:cursor-default flex-1 min-w-0`} onClick={() => window.innerWidth < 768 && setIsHeaderExpanded(!isHeaderExpanded)}>
-              <div className={`rounded-xl sm:rounded-2xl overflow-hidden shadow-xl flex-shrink-0 bg-indigo-600/10 flex items-center justify-center transition-all duration-300 ${isHeaderExpanded ? 'w-24 sm:w-32 aspect-[2/3]' : 'w-12 sm:w-32 aspect-[1/1] sm:aspect-[2/3]'}`}>{book.coverImage ? <img src={book.coverImage} className="w-full h-full object-cover" alt={book.title} /> : <ImageIcon className="w-5 h-5 sm:w-10 sm:h-10 opacity-20" />}</div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <h1 className={`font-black tracking-tight truncate transition-all duration-300 ${isHeaderExpanded ? 'text-xl sm:text-3xl' : 'text-sm sm:text-3xl'}`}>{book.title}</h1>
-                  <div className="md:hidden">{isHeaderExpanded ? <ChevronUp className="w-4 h-4 opacity-40" /> : <ChevronDown className="w-4 h-4 opacity-40" />}</div>
+            <div className="flex items-center justify-between gap-3">
+              <div className={`flex items-center gap-3 sm:gap-8 cursor-pointer md:cursor-default flex-1 min-w-0`} onClick={() => window.innerWidth < 768 && setIsHeaderExpanded(!isHeaderExpanded)}>
+                <div className={`rounded-xl sm:rounded-2xl overflow-hidden shadow-xl flex-shrink-0 bg-indigo-600/10 flex items-center justify-center transition-all duration-300 ${isHeaderExpanded ? 'w-24 sm:w-32 aspect-[2/3]' : 'w-12 sm:w-32 aspect-[1/1] sm:aspect-[2/3]'}`}>{book.coverImage ? <img src={book.coverImage} className="w-full h-full object-cover" alt={book.title} /> : <ImageIcon className="w-5 h-5 sm:w-10 sm:h-10 opacity-20" />}</div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <h1 className={`font-black tracking-tight truncate transition-all duration-300 ${isHeaderExpanded ? 'text-xl sm:text-3xl' : 'text-sm sm:text-3xl'}`}>{book.title}</h1>
+                    <div className="md:hidden">{isHeaderExpanded ? <ChevronUp className="w-4 h-4 opacity-40" /> : <ChevronDown className="w-4 h-4 opacity-40" />}</div>
+                  </div>
+                  <p className={`font-bold opacity-60 uppercase tracking-widest transition-all duration-300 ${isHeaderExpanded ? 'text-[10px] sm:text-xs mt-1' : 'text-[8px] sm:text-xs'}`}>{book.chapterCount ?? book.chapters.length} Chapters {isHeaderExpanded && `• ${book.backend} backend`}</p>
                 </div>
-                <p className={`font-bold opacity-60 uppercase tracking-widest transition-all duration-300 ${isHeaderExpanded ? 'text-[10px] sm:text-xs mt-1' : 'text-[8px] sm:text-xs'}`}>{book.chapterCount ?? book.chapters.length} Chapters {isHeaderExpanded && `• ${book.backend} backend`}</p>
               </div>
+              {isMobileInterface && (
+                <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest">
+                  <span className="text-indigo-400">Uploads queued: {uploadQueueCount}</span>
+                  <button onClick={onToggleUploadQueue} className="text-[10px] text-indigo-500 hover:text-indigo-300">View queue</button>
+                </div>
+              )}
+              <button onClick={() => setShowBookSettings(true)} className="p-2 rounded-lg bg-black/5 hover:bg-black/10">
+                <GearIcon className="w-5 h-5" />
+              </button>
             </div>
-            <button onClick={() => setShowBookSettings(true)} className="p-2 rounded-lg bg-black/5 hover:bg-black/10">
-              <GearIcon className="w-5 h-5" />
-            </button>
-          </div>
 
           <div className={`flex flex-wrap gap-2 transition-all duration-300 ${isHeaderExpanded || window.innerWidth >= 768 ? 'opacity-100 max-h-40 pointer-events-auto' : 'opacity-0 max-h-0 pointer-events-none overflow-hidden sm:opacity-100 sm:max-h-40 sm:pointer-events-auto'}`}>
             <button onClick={onAddChapter} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-indigo-600 text-white rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center gap-2"><Plus className="w-3.5 h-3.5" /> Add Chapter</button>

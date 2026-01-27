@@ -18,6 +18,7 @@ import { saveChapterToFile } from './services/fileService';
 import { synthesizeChunk } from './services/cloudTtsService';
 import { extractChapterWithAI } from './services/geminiService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
+import { persistChapterAudio, resolveChapterAudioUrl } from './services/audioStorage';
 import { idbSet } from './services/storageService';
 import { listBooks as libraryListBooks, upsertBook as libraryUpsertBook, deleteBook as libraryDeleteBook, listChaptersPage as libraryListChaptersPage, upsertChapterMeta as libraryUpsertChapterMeta, deleteChapter as libraryDeleteChapter, saveChapterText as librarySaveChapterText, loadChapterText as libraryLoadChapterText } from './services/libraryStore';
 import { migrateLegacyLocalStorageIfNeeded } from './services/libraryMigration';
@@ -26,6 +27,7 @@ import { trace, traceError } from './utils/trace';
 import { computeMobileMode } from './utils/platform';
 import { JobRunner } from './src/plugins/jobRunner';
 import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService, deleteJob as deleteJobService, clearJobs as clearJobsService } from './services/jobRunnerService';
+import { countQueuedUploads, listQueuedUploads, type DriveUploadQueuedItem } from './services/driveUploadQueueService';
 
 const STATE_FILENAME = 'talevox_state_v2917.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
@@ -349,15 +351,38 @@ const App: React.FC = () => {
   const [authState, setAuthState] = useState<AuthState>(authManager.getState());
   const isAuthorized = authState.status === 'signed_in' && !!authManager.getToken();
 
+  const [uploadQueueCount, setUploadQueueCount] = useState(0);
+  const [uploadQueueItems, setUploadQueueItems] = useState<DriveUploadQueuedItem[]>([]);
+  const [showUploadQueue, setShowUploadQueue] = useState(false);
+
+  const refreshUploadQueueCount = useCallback(async () => {
+    try {
+      const count = await countQueuedUploads();
+      setUploadQueueCount(count);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const refreshUploadQueueList = useCallback(async () => {
+    try {
+      const items = await listQueuedUploads(20);
+      setUploadQueueItems(items);
+    } catch {
+      // ignore
+    }
+  }, []);
+
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const refreshJobs = useCallback(async () => {
     try {
       const all = await listAllJobs(state.readerSettings.uiMode);
       setJobs(all);
+      await refreshUploadQueueCount();
     } catch (e) {
       // ignore
     }
-  }, [state.readerSettings.uiMode]);
+  }, [state.readerSettings.uiMode, refreshUploadQueueCount]);
 
   useEffect(() => {
     const unsubscribe = authManager.subscribe(setAuthState);
@@ -366,7 +391,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     refreshJobs();
-  }, [refreshJobs]);
+  }, [refreshJobs, refreshUploadQueueCount]);
 
   useEffect(() => {
     let isMounted = true;
@@ -379,6 +404,7 @@ const App: React.FC = () => {
         if (idx === -1) {
           // Fallback: re-fetch so the UI stays accurate.
           refreshJobs();
+          refreshUploadQueueCount();
           return prev;
         }
         const current = prev[idx];
@@ -393,6 +419,7 @@ const App: React.FC = () => {
         copy[idx] = next;
         return copy;
       });
+      refreshUploadQueueCount();
     };
 
     JobRunner.addListener("jobProgress", applyJobEvent)
@@ -406,7 +433,16 @@ const App: React.FC = () => {
       isMounted = false;
       handles.forEach((h) => h.remove());
     };
-  }, [refreshJobs]);
+  }, [refreshJobs, refreshUploadQueueCount]);
+
+  useEffect(() => {
+    refreshUploadQueueCount();
+  }, [refreshUploadQueueCount]);
+
+  useEffect(() => {
+    if (!showUploadQueue) return;
+    refreshUploadQueueList();
+  }, [showUploadQueue, refreshUploadQueueList, uploadQueueCount]);
 
   useEffect(() => {
     if (state.googleClientId) {
@@ -855,6 +891,7 @@ const App: React.FC = () => {
 
     updatePhase('LOADING_AUDIO');
     
+    const uiMode = s.readerSettings?.uiMode ?? "auto";
     setCurrentIntroDurSec(chapter.audioIntroDurSec || 5);
     const voice = book.settings.defaultVoiceId || 'en-US-Standard-C';
     const allRules = [...s.globalRules, ...book.rules];
@@ -876,116 +913,131 @@ const App: React.FC = () => {
 
     if (session !== chapterSessionRef.current) return;
 
-    if (audioBlob && audioBlob.size > 0) {
-        const url = URL.createObjectURL(audioBlob);
-        speechController.setContext({ bookId: book.id, chapterId: chapter.id });
-        speechController.updateMetadata(textToSpeak.length, chapter.audioIntroDurSec || 5, chapter.audioChunkMap || []);
+    const localPlaybackUrl = effectiveMobileMode ? await resolveChapterAudioUrl(chapter.id, uiMode) : null;
+    let playbackUrl = localPlaybackUrl ?? null;
+    if (!playbackUrl && audioBlob && audioBlob.size > 0) {
+        playbackUrl = URL.createObjectURL(audioBlob);
+    }
 
-        let mobileQueue: PlaybackItem[] | undefined;
-        if (effectiveMobileMode) {
-            const sorted = [...book.chapters].sort((a, b) => a.index - b.index);
-            const currentIdx = sorted.findIndex(c => c.id === chapter.id);
-            const queueItems: PlaybackItem[] = [
-              { id: chapter.id, url, title: chapter.title }
-            ];
-            const maxQueue = 5;
-            for (let i = currentIdx + 1; i < sorted.length && queueItems.length < maxQueue; i++) {
-              const next = sorted[i];
-              let nextBlob: Blob | null = null;
-              if (next.audioSignature) {
-                nextBlob = await getAudioFromCache(next.audioSignature);
-              }
-              if (!nextBlob && next.cloudAudioFileId && isAuthorized) {
-                try {
-                  nextBlob = await fetchDriveBinary(next.cloudAudioFileId);
-                } catch (e) {
-                  nextBlob = null;
-                }
-              }
-              if (nextBlob && nextBlob.size > 0) {
-                const nextUrl = URL.createObjectURL(nextBlob);
-                queueItems.push({ id: next.id, url: nextUrl, title: next.title });
-              }
-            }
-            mobileQueue = queueItems.length > 0 ? queueItems : undefined;
-        }
-        
-        let startSec = 0;
-        if (!chapter.isCompleted) {
-            if (chapter.progressSec && chapter.progressSec > 0) {
-                startSec = chapter.progressSec;
-            } else if (chapter.progress && chapter.durationSec && chapter.progress < 0.99) {
-                startSec = chapter.durationSec * chapter.progress;
-            }
-        }
-        
-        if (!isFinite(startSec) || startSec < 0) startSec = 0;
-        
-        await speechController.loadAndPlayDriveFile(
-            '', 'LOCAL_ID', textToSpeak.length, chapter.audioIntroDurSec || 5, chapter.audioChunkMap, 
-            startSec, 
-            state.playbackSpeed, 
-            () => {
-                if (session === chapterSessionRef.current) {
-                    updatePhase('ENDING_SETTLE');
-                    setTimeout(() => {
-                        if (session === chapterSessionRef.current) {
-                            handleNextChapterRef.current(true); 
-                        }
-                    }, 300);
-                }
-            }, 
-            null, url, 
-            () => {
-                if (session === chapterSessionRef.current) {
-                    if (startSec > 1) {
-                       updatePhase('PLAYING_BODY');
-                       isInIntroRef.current = false;
-                    } else {
-                       updatePhase('PLAYING_INTRO'); 
-                       isInIntroRef.current = true; 
-                    }
-                }
-            },
-            undefined,
-            mobileQueue,
-            0
-        );
-
-        if (session !== chapterSessionRef.current) return;
-
-        if (effectiveMobileMode && reason === 'auto') {
-           const timeSinceGesture = Date.now() - lastGestureAt.current;
-           if (!gestureArmedRef.current || timeSinceGesture > 60000) { 
-              setAutoplayBlocked(true);
-              setIsPlaying(false);
-              updatePhase('READY');
-              return;
-           }
-        }
-
-        try {
-            const result = await speechController.safePlay();
-            if (result === 'blocked') {
-                setAutoplayBlocked(true);
-                setIsPlaying(false);
-                updatePhase('READY');
-            } else {
-                setAutoplayBlocked(false);
-                setIsPlaying(true);
-                updatePhase('PLAYING_BODY');
-                speechController.setPlaybackRate(state.playbackSpeed);
-            }
-        } catch (e: any) {
-            setAutoplayBlocked(true);
-            setIsPlaying(false);
-            updatePhase('READY');
-        }
-
-    } else {
+    if (!playbackUrl) {
         pushNotice({ message: "Audio not found. Try generating it.", type: 'info', ms: 3000 });
         updatePhase('READY');
         setIsPlaying(false);
+        return;
+    }
+
+    if (effectiveMobileMode && audioBlob) {
+        await persistChapterAudio(chapter.id, audioBlob, uiMode);
+    }
+
+    speechController.setContext({ bookId: book.id, chapterId: chapter.id });
+    speechController.updateMetadata(textToSpeak.length, chapter.audioIntroDurSec || 5, chapter.audioChunkMap || []);
+
+    let mobileQueue: PlaybackItem[] | undefined;
+    if (effectiveMobileMode) {
+        const sorted = [...book.chapters].sort((a, b) => a.index - b.index);
+        const currentIdx = sorted.findIndex(c => c.id === chapter.id);
+        const queueItems: PlaybackItem[] = [
+          { id: chapter.id, url: playbackUrl, title: chapter.title }
+        ];
+        const maxQueue = 5;
+        for (let i = currentIdx + 1; i < sorted.length && queueItems.length < maxQueue; i++) {
+          const next = sorted[i];
+          let nextUrl = await resolveChapterAudioUrl(next.id, uiMode);
+          if (!nextUrl) {
+            let nextBlob: Blob | null = null;
+            if (next.audioSignature) {
+              nextBlob = await getAudioFromCache(next.audioSignature);
+            }
+            if (!nextBlob && next.cloudAudioFileId && isAuthorized) {
+              try {
+                nextBlob = await fetchDriveBinary(next.cloudAudioFileId);
+              } catch (e) {
+                nextBlob = null;
+              }
+            }
+            if (nextBlob && nextBlob.size > 0) {
+              nextUrl = URL.createObjectURL(nextBlob);
+              await persistChapterAudio(next.id, nextBlob, uiMode);
+            }
+          }
+          if (nextUrl) {
+            queueItems.push({ id: next.id, url: nextUrl, title: next.title });
+          }
+        }
+        mobileQueue = queueItems.length > 0 ? queueItems : undefined;
+    }
+        
+    let startSec = 0;
+    if (!chapter.isCompleted) {
+        if (chapter.progressSec && chapter.progressSec > 0) {
+            startSec = chapter.progressSec;
+        } else if (chapter.progress && chapter.durationSec && chapter.progress < 0.99) {
+            startSec = chapter.durationSec * chapter.progress;
+        }
+    }
+        
+    if (!isFinite(startSec) || startSec < 0) startSec = 0;
+        
+    await speechController.loadAndPlayDriveFile(
+        '', 'LOCAL_ID', textToSpeak.length, chapter.audioIntroDurSec || 5, chapter.audioChunkMap, 
+        startSec, 
+        state.playbackSpeed, 
+        () => {
+            if (session === chapterSessionRef.current) {
+                updatePhase('ENDING_SETTLE');
+                setTimeout(() => {
+                    if (session === chapterSessionRef.current) {
+                        handleNextChapterRef.current(true); 
+                    }
+                }, 300);
+            }
+        }, 
+        null, playbackUrl, 
+        () => {
+            if (session === chapterSessionRef.current) {
+                if (startSec > 1) {
+                   updatePhase('PLAYING_BODY');
+                   isInIntroRef.current = false;
+                } else {
+                   updatePhase('PLAYING_INTRO'); 
+                   isInIntroRef.current = true; 
+                }
+            }
+        },
+        undefined,
+        mobileQueue,
+        0
+    );
+
+    if (session !== chapterSessionRef.current) return;
+
+    if (effectiveMobileMode && reason === 'auto') {
+       const timeSinceGesture = Date.now() - lastGestureAt.current;
+       if (!gestureArmedRef.current || timeSinceGesture > 60000) { 
+          setAutoplayBlocked(true);
+          setIsPlaying(false);
+          updatePhase('READY');
+          return;
+       }
+    }
+
+    try {
+        const result = await speechController.safePlay();
+        if (result === 'blocked') {
+            setAutoplayBlocked(true);
+            setIsPlaying(false);
+            updatePhase('READY');
+        } else {
+            setAutoplayBlocked(false);
+            setIsPlaying(true);
+            updatePhase('PLAYING_BODY');
+            speechController.setPlaybackRate(state.playbackSpeed);
+        }
+    } catch (e: any) {
+        setAutoplayBlocked(true);
+        setIsPlaying(false);
+        updatePhase('READY');
     }
 
   }, [isAuthorized, ensureChapterContentLoaded, pushNotice, updatePhase, effectiveMobileMode, state.playbackSpeed]);
@@ -1096,6 +1148,10 @@ const App: React.FC = () => {
       // ignore
     }
   }, [refreshJobs, state.readerSettings.uiMode]);
+
+  const handleToggleUploadQueue = useCallback(() => {
+    setShowUploadQueue((prev) => !prev);
+  }, []);
 
   const handleManualPlay = () => {
     gestureArmedRef.current = true;
@@ -1484,7 +1540,8 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className={`flex flex-col h-screen overflow-hidden font-sans transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-950 text-slate-100' : state.theme === Theme.SEPIA ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
+    <>
+      <div className={`flex flex-col h-screen overflow-hidden font-sans transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-950 text-slate-100' : state.theme === Theme.SEPIA ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
       
       {isLinkModalOpen && <LinkCloudModal />}
 
@@ -1682,6 +1739,8 @@ const App: React.FC = () => {
 
                 markDirty();
               }}
+              uploadQueueCount={uploadQueueCount}
+              onToggleUploadQueue={handleToggleUploadQueue}
             />
           )}
 
@@ -1796,7 +1855,35 @@ const App: React.FC = () => {
           isMobile={effectiveMobileMode}
         />
       )}
-    </div>
+      </div>
+      {showUploadQueue && (
+      <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 p-4">
+        <div className="w-full max-w-3xl bg-slate-950 text-white rounded-3xl p-6 space-y-4 shadow-2xl">
+          <div className="flex items-center justify-between">
+            <div className="text-lg font-black uppercase tracking-widest">Upload Queue ({uploadQueueCount})</div>
+            <button onClick={() => setShowUploadQueue(false)} className="text-sm font-bold uppercase tracking-widest text-indigo-300 px-3 py-1 border border-indigo-300 rounded-full">Close</button>
+          </div>
+          <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-2">
+            {uploadQueueItems.length === 0 ? (
+              <div className="text-sm font-black opacity-60 text-indigo-300">No pending uploads</div>
+            ) : (
+              uploadQueueItems.map((item) => (
+                <div key={item.id} className="border border-white/10 rounded-2xl p-4 bg-slate-900/70 flex flex-col gap-2">
+                  <div className="text-[11px] font-black uppercase tracking-widest text-indigo-400">{item.status}</div>
+                  <div className="flex items-center justify-between text-sm font-semibold">{item.chapterId}</div>
+                  <div className="text-[10px] opacity-60 flex flex-wrap gap-4">
+                    <span>Attempts: {item.attempts}</span>
+                    <span>Next try: {item.nextAttemptAt ? new Date(item.nextAttemptAt).toLocaleString() : 'now'}</span>
+                  </div>
+                  {item.lastError && <div className="text-[10px] text-red-400 font-mono break-words">{item.lastError}</div>}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+      )}
+    </>
   );
 };
 

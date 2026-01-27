@@ -18,6 +18,7 @@ import type {
   StorageInitResult,
   LoadResult,
   SaveResult,
+  DriveUploadQueuedItem,
 } from "./storageDriver";
 import type { JobRecord, JobType } from "../types";
 
@@ -410,6 +411,204 @@ export class SqliteStorageDriver implements StorageDriver {
     }
   }
 
+  async setChapterAudioPath(chapterId: string, localPath: string, sizeBytes: number): Promise<SaveResult> {
+    const db = this.mustDb();
+    try {
+      await db.run(
+        `INSERT INTO chapter_audio_files (chapterId, localPath, sizeBytes, updatedAt)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(chapterId) DO UPDATE SET
+           localPath = excluded.localPath,
+           sizeBytes = excluded.sizeBytes,
+           updatedAt = excluded.updatedAt`,
+        [chapterId, localPath, sizeBytes, Date.now()]
+      );
+      return { ok: true, where: "sqlite" };
+    } catch (e: any) {
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
+  }
+
+  async getChapterAudioPath(chapterId: string): Promise<LoadResult<{ localPath: string; sizeBytes: number; updatedAt: number } | null>> {
+    const db = this.mustDb();
+    try {
+      const res = await db.query(
+        `SELECT localPath, sizeBytes, updatedAt FROM chapter_audio_files WHERE chapterId = ?`,
+        [chapterId]
+      );
+      const row = (res.values?.[0] ?? null) as any;
+      if (!row) return { ok: true, where: "sqlite", value: null };
+      return {
+        ok: true,
+        where: "sqlite",
+        value: {
+          localPath: String(row.localPath),
+          sizeBytes: Number(row.sizeBytes) || 0,
+          updatedAt: Number(row.updatedAt) || 0,
+        },
+      };
+    } catch (e: any) {
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
+  }
+
+  async deleteChapterAudioPath(chapterId: string): Promise<SaveResult> {
+    const db = this.mustDb();
+    try {
+      await db.run(`DELETE FROM chapter_audio_files WHERE chapterId = ?`, [chapterId]);
+      return { ok: true, where: "sqlite" };
+    } catch (e: any) {
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
+  }
+
+  async enqueueUpload(item: DriveUploadQueuedItem): Promise<SaveResult> {
+    const db = this.mustDb();
+    try {
+      await db.run(
+        `INSERT INTO drive_upload_queue (id, chapterId, bookId, localPath, status, attempts, nextAttemptAt, lastError, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          item.id,
+          item.chapterId,
+          item.bookId,
+          item.localPath,
+          item.status,
+          item.attempts,
+          item.nextAttemptAt,
+          item.lastError ?? null,
+          item.createdAt,
+          item.updatedAt,
+        ]
+      );
+      return { ok: true, where: "sqlite" };
+    } catch (e: any) {
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
+  }
+
+  async getNextReadyUpload(now: number): Promise<LoadResult<DriveUploadQueuedItem | null>> {
+    const db = this.mustDb();
+    try {
+      const res = await db.query(
+        `SELECT * FROM drive_upload_queue
+         WHERE (status = 'queued' OR status = 'failed') AND nextAttemptAt <= ?
+         ORDER BY nextAttemptAt ASC, createdAt ASC
+         LIMIT 1`,
+        [now]
+      );
+      const row = (res.values?.[0] ?? null) as any;
+      if (!row) return { ok: true, where: "sqlite", value: null };
+      return {
+        ok: true,
+        where: "sqlite",
+        value: {
+          id: String(row.id),
+          chapterId: String(row.chapterId),
+          bookId: String(row.bookId),
+          localPath: String(row.localPath),
+          status: String(row.status) as DriveUploadQueuedItem['status'],
+          attempts: Number(row.attempts) || 0,
+          nextAttemptAt: Number(row.nextAttemptAt) || 0,
+          lastError: row.lastError == null ? undefined : String(row.lastError),
+          createdAt: Number(row.createdAt) || 0,
+          updatedAt: Number(row.updatedAt) || 0,
+        },
+      };
+    } catch (e: any) {
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
+  }
+
+  async markUploadUploading(id: string, nextAttemptAt: number): Promise<SaveResult> {
+    const db = this.mustDb();
+    try {
+      await db.run(
+        `UPDATE drive_upload_queue
+         SET status = 'uploading',
+             attempts = attempts + 1,
+             nextAttemptAt = ?,
+             updatedAt = ?
+         WHERE id = ?`,
+        [nextAttemptAt, Date.now(), id]
+      );
+      return { ok: true, where: "sqlite" };
+    } catch (e: any) {
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
+  }
+
+  async markUploadDone(id: string): Promise<SaveResult> {
+    const db = this.mustDb();
+    try {
+      await db.run(`DELETE FROM drive_upload_queue WHERE id = ?`, [id]);
+      return { ok: true, where: "sqlite" };
+    } catch (e: any) {
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
+  }
+
+  async markUploadFailed(id: string, error: string, nextAttemptAt: number): Promise<SaveResult> {
+    const db = this.mustDb();
+    try {
+      await db.run(
+        `UPDATE drive_upload_queue
+         SET status = 'failed',
+             lastError = ?,
+             nextAttemptAt = ?,
+             attempts = attempts + 1,
+             updatedAt = ?
+         WHERE id = ?`,
+        [error, nextAttemptAt, Date.now(), id]
+      );
+      return { ok: true, where: "sqlite" };
+    } catch (e: any) {
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
+  }
+
+  async countQueuedUploads(): Promise<LoadResult<number>> {
+    const db = this.mustDb();
+    try {
+      const res = await db.query(
+        `SELECT COUNT(*) AS cnt FROM drive_upload_queue WHERE status IN ('queued', 'failed')`
+      );
+      const row = (res.values?.[0] ?? null) as any;
+      return { ok: true, where: "sqlite", value: Number(row?.cnt ?? 0) };
+    } catch (e: any) {
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
+  }
+
+  async listQueuedUploads(limit?: number): Promise<LoadResult<DriveUploadQueuedItem[]>> {
+    const db = this.mustDb();
+    try {
+      const res = await db.query(
+        `SELECT id, chapterId, bookId, localPath, status, attempts, nextAttemptAt, lastError, createdAt, updatedAt
+         FROM drive_upload_queue
+         WHERE status IN ('queued', 'failed')
+         ORDER BY createdAt DESC
+         ${typeof limit === "number" ? `LIMIT ${limit}` : ""}`
+      );
+      const rows = (res.values ?? []) as any[];
+      const items = rows.map((row) => ({
+        id: String(row.id),
+        chapterId: String(row.chapterId),
+        bookId: String(row.bookId),
+        localPath: String(row.localPath),
+        status: String(row.status) as DriveUploadQueuedItem["status"],
+        attempts: Number(row.attempts) || 0,
+        nextAttemptAt: Number(row.nextAttemptAt) || 0,
+        lastError: row.lastError == null ? undefined : String(row.lastError),
+        createdAt: Number(row.createdAt) || 0,
+        updatedAt: Number(row.updatedAt) || 0,
+      }));
+      return { ok: true, where: "sqlite", value: items };
+    } catch (e: any) {
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
+  }
+
   async deleteJob(jobId: string): Promise<SaveResult> {
     const db = this.mustDb();
     try {
@@ -468,6 +667,26 @@ export class SqliteStorageDriver implements StorageDriver {
         payloadJson TEXT,
         progressJson TEXT,
         error TEXT,
+        createdAt INTEGER,
+        updatedAt INTEGER
+      );
+
+      CREATE TABLE IF NOT EXISTS chapter_audio_files (
+        chapterId TEXT PRIMARY KEY,
+        localPath TEXT,
+        sizeBytes INTEGER,
+        updatedAt INTEGER
+      );
+
+      CREATE TABLE IF NOT EXISTS drive_upload_queue (
+        id TEXT PRIMARY KEY,
+        chapterId TEXT,
+        bookId TEXT,
+        localPath TEXT,
+        status TEXT,
+        attempts INTEGER,
+        nextAttemptAt INTEGER,
+        lastError TEXT,
         createdAt INTEGER,
         updatedAt INTEGER
       );

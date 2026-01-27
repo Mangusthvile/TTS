@@ -1,5 +1,6 @@
 import { Capacitor } from '@capacitor/core';
 import { driveFetch, getValidDriveToken } from './driveAuth';
+import { driveRetry, DriveRetryOptions } from './driveRetry';
 
 export function buildMp3Name(bookId: string, chapterIdOrIndex: string | number): string {
   // New format: stable IDs (works even if chapter title changes)
@@ -17,11 +18,20 @@ export function u8ToArrayBuffer(u8: Uint8Array): ArrayBuffer {
   return ab;
 }
 
+export async function driveFetchWithRetry(
+  label: string,
+  input: RequestInfo,
+  init: RequestInit = {},
+  opts?: DriveRetryOptions
+): Promise<Response> {
+  return driveRetry(() => driveFetch(input, init), label, opts);
+}
+
 export async function checkFileExists(fileId: string): Promise<boolean> {
   if (!fileId) return false;
   try {
     const url = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,trashed&supportsAllDrives=true`;
-    const response = await driveFetch(url);
+    const response = await driveFetchWithRetry("checkFileExists", url);
     if (!response.ok) return false;
     const data = await response.json();
     return data && !data.trashed;
@@ -32,7 +42,7 @@ export async function checkFileExists(fileId: string): Promise<boolean> {
 
 export async function moveFile(fileId: string, currentParentId: string, newParentId: string): Promise<void> {
   const url = `https://www.googleapis.com/drive/v3/files/${fileId}?addParents=${newParentId}&removeParents=${currentParentId}&supportsAllDrives=true`;
-  const response = await driveFetch(url, { method: 'PATCH' });
+  const response = await driveFetchWithRetry("moveFile", url, { method: 'PATCH' });
   if (!response.ok) throw new Error("MOVE_FAILED");
 }
 
@@ -42,7 +52,7 @@ export async function moveFileToTrash(fileId: string): Promise<void> {
 
   const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?supportsAllDrives=true`;
 
-  const response = await driveFetch(url, {
+  const response = await driveFetchWithRetry("moveFileToTrash", url, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ trashed: true })
@@ -58,7 +68,8 @@ export async function copyDriveFile(
   destFolderId: string,
   newName: string
 ): Promise<string> {
-  const res = await driveFetch(
+  const res = await driveFetchWithRetry(
+    "copyDriveFile",
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(sourceFileId)}/copy?supportsAllDrives=true`,
     {
       method: "POST",
@@ -169,7 +180,7 @@ async function ensureNativeRootFolder(): Promise<{ id: string, name: string }> {
     `&supportsAllDrives=true` +
     `&includeItemsFromAllDrives=true`;
 
-  const res = await driveFetch(url);
+  const res = await driveFetchWithRetry("ensureNativeRootFolder", url);
   if (!res.ok) {
     throw new Error(`NATIVE_ROOT_LOOKUP_FAILED:${res.status}`);
   }
@@ -189,7 +200,7 @@ async function ensureNativeRootFolder(): Promise<{ id: string, name: string }> {
  * Helper to fetch all pages of a Drive API list request.
  * Required for libraries > 1000 files.
  */
-async function fetchAllPages(url: string): Promise<any[]> {
+async function fetchAllPages(url: string, label: string): Promise<any[]> {
   let files: any[] = [];
   let pageToken: string | null = null;
 
@@ -198,7 +209,7 @@ async function fetchAllPages(url: string): Promise<any[]> {
       ? (url.includes('?') ? `${url}&pageToken=${pageToken}` : `${url}?pageToken=${pageToken}`)
       : url;
 
-    const response = await driveFetch(pageUrl);
+    const response = await driveFetchWithRetry(label, pageUrl);
     if (!response.ok) throw new Error(`DRIVE_LIST_ERROR: ${response.status}`);
 
     const data = await response.json();
@@ -212,26 +223,26 @@ async function fetchAllPages(url: string): Promise<any[]> {
 export async function listFilesInFolder(folderId: string): Promise<{ id: string, name: string, mimeType: string, modifiedTime: string }[]> {
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id, name, mimeType, modifiedTime)&orderBy=name&pageSize=1000&includeItemsFromAllDrives=true&supportsAllDrives=true`;
-  return fetchAllPages(url);
+  return fetchAllPages(url, "listFilesInFolder");
 }
 
 export async function listFoldersInFolder(folderId: string): Promise<{ id: string, name: string, modifiedTime: string }[]> {
   const q = encodeURIComponent(`'${folderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id, name, modifiedTime)&orderBy=name&pageSize=1000&includeItemsFromAllDrives=true&supportsAllDrives=true`;
-  return fetchAllPages(url);
+  return fetchAllPages(url, "listFoldersInFolder");
 }
 
 export async function listFilesSortedByModified(folderId: string): Promise<{ id: string, name: string, mimeType: string, modifiedTime: string }[]> {
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id, name, mimeType, modifiedTime)&orderBy=modifiedTime desc&pageSize=1000&includeItemsFromAllDrives=true&supportsAllDrives=true`;
-  return fetchAllPages(url);
+  return fetchAllPages(url, "listFilesSortedByModified");
 }
 
 export async function listSaveFileCandidates(folderId: string): Promise<{ id: string, name: string, modifiedTime: string }[]> {
   const qStr = `'${folderId}' in parents and trashed = false and (name contains '.json' or name contains 'talevox')`;
   const q = encodeURIComponent(qStr);
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, modifiedTime)&orderBy=modifiedTime desc&pageSize=50&includeItemsFromAllDrives=true&supportsAllDrives=true`;
-  const response = await driveFetch(url);
+  const response = await driveFetchWithRetry("listSaveFileCandidates", url);
   if (!response.ok) throw new Error("DRIVE_LIST_CANDIDATES_ERROR");
   const data = await response.json();
   return data.files || [];
@@ -241,7 +252,7 @@ export async function findTaleVoxRoots(): Promise<{ id: string, name: string, ha
   const qStr = `mimeType = 'application/vnd.google-apps.folder' and trashed = false and (name contains 'TaleVox' or name contains 'talevox')`;
   const q = encodeURIComponent(qStr);
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, modifiedTime)&orderBy=modifiedTime desc&pageSize=20&includeItemsFromAllDrives=true&supportsAllDrives=true`;
-  const response = await driveFetch(url);
+  const response = await driveFetchWithRetry("findTaleVoxRoots", url);
   if (!response.ok) throw new Error("DRIVE_ROOT_SEARCH_ERROR");
   const data = await response.json();
   const folders = data.files || [];
@@ -260,7 +271,7 @@ export async function findFileSync(name: string, parentId?: string): Promise<str
   const q = encodeURIComponent(qStr);
 
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, modifiedTime)&orderBy=modifiedTime desc&includeItemsFromAllDrives=true&supportsAllDrives=true`;
-  const response = await driveFetch(url);
+  const response = await driveFetchWithRetry("findFileSync", url);
   if (!response.ok) throw new Error("DRIVE_FIND_ERROR");
   const data = await response.json();
   return data.files && data.files.length > 0 ? data.files[0].id : null;
@@ -270,7 +281,7 @@ export async function resolveFolderIdByName(rootId: string, name: string): Promi
   const qStr = `'${rootId}' in parents and name = '${name.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
   const q = encodeURIComponent(qStr);
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id, name, modifiedTime)&includeItemsFromAllDrives=true&supportsAllDrives=true`;
-  const response = await driveFetch(url);
+  const response = await driveFetchWithRetry("resolveFolderIdByName", url);
   if (!response.ok) throw new Error(`RESOLVE_FOLDER_ERROR: ${response.status}`);
   const data = await response.json();
   const folders = data.files || [];
@@ -307,21 +318,21 @@ export async function resolveFolderIdByName(rootId: string, name: string): Promi
 
 export async function fetchDriveFile(fileId: string): Promise<string> {
   const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
-  const response = await driveFetch(url);
+  const response = await driveFetchWithRetry("fetchDriveFile", url);
   if (!response.ok) throw new Error(`FETCH_FAILED: ${response.status}`);
   return response.text();
 }
 
 export async function fetchDriveBinary(fileId: string): Promise<Blob> {
   const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
-  const response = await driveFetch(url);
+  const response = await driveFetchWithRetry("fetchDriveBinary", url);
   if (!response.ok) throw new Error(`FETCH_BINARY_FAILED: ${response.status}`);
   return response.blob();
 }
 
 export async function deleteDriveFile(fileId: string): Promise<void> {
   const url = `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`;
-  const response = await driveFetch(url, { method: 'DELETE' });
+  const response = await driveFetchWithRetry("deleteDriveFile", url, { method: 'DELETE' });
   if (!response.ok && response.status !== 404) throw new Error(`DELETE_FAILED: ${response.status}`);
 }
 
@@ -365,7 +376,8 @@ export async function uploadToDrive(
     ? `https://www.googleapis.com/upload/drive/v3/files/${existingFileId}?uploadType=multipart&supportsAllDrives=true`
     : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&supportsAllDrives=true`;
 
-  const response = await driveFetch(url, {
+  const label = existingFileId ? "uploadDriveEdit" : "uploadDriveCreate";
+  const response = await driveFetchWithRetry(label, url, {
     method: existingFileId ? 'PATCH' : 'POST',
     headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
     body: bodyBuffer
@@ -380,7 +392,7 @@ export async function createDriveFolder(name: string, parentId?: string): Promis
   const metadata: any = { name, mimeType: 'application/vnd.google-apps.folder' };
   if (parentId) metadata.parents = [parentId];
 
-  const response = await driveFetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
+  const response = await driveFetchWithRetry("createDriveFolder", 'https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(metadata)
