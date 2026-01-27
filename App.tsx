@@ -367,6 +367,18 @@ const App: React.FC = () => {
     }
   }, [authState.status, authState.lastError]);
 
+  const handleReconnectDrive = useCallback(async () => {
+    try {
+      await ensureValidToken(true);
+      if (stateRef.current.driveRootFolderId) {
+        await handleSync(true);
+      }
+      pushNotice({ message: 'Drive reconnected.', type: 'success' });
+    } catch (e: any) {
+      pushNotice({ message: e?.message || 'Reconnect failed', type: 'error' });
+    }
+  }, [handleSync, pushNotice]);
+
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
 

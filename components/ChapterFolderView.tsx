@@ -292,6 +292,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       setLastInventory(inventory);
 
       // 4. Deduplicate by name, keeping newest. Collect extras as strays.
+      // Invariant: duplicates (same name, different id) are ALWAYS stray — they never go through
+      // classification and are excluded from driveFiles, so they cannot be legacy or unlinked.
       const filesByName = new Map<string, StrayFile[]>();
       for (const f of allFiles) {
         if (!f?.name) continue;
