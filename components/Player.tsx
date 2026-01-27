@@ -2,7 +2,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Play, Pause, SkipBack, SkipForward, FastForward, Rewind, Clock, Type, AlignLeft, Sparkles, Repeat, Loader2, ChevronUp, ChevronDown, X, Settings as SettingsIcon, AlertCircle, PlayCircle } from 'lucide-react';
 import { Theme, HighlightMode } from '../types';
-import { speechController } from '../services/speechService';
 
 interface PlayerProps {
   isPlaying: boolean;
@@ -86,7 +85,6 @@ const Player: React.FC<PlayerProps> = ({
 
   const handleSpeedChange = (newSpeed: number) => {
     onSpeedChange(newSpeed);
-    speechController.setPlaybackRate(newSpeed);
   };
 
   const progressPercent = useMemo(() => {

@@ -23,6 +23,12 @@ export type JsonValue =
 export type AppState = Record<string, any>;
 export type SettingsState = Record<string, any>;
 export type RulesState = Record<string, any>;
+export type AuthSession = {
+  accessToken: string | null;
+  expiresAt: number;
+  userEmail?: string;
+  status?: string;
+};
 
 export type ChapterProgress = {
   chapterId: string;
@@ -64,6 +70,10 @@ export type StorageDriver = {
 
   loadRules(): Promise<LoadResult<RulesState>>;
   saveRules(rules: RulesState): Promise<SaveResult>;
+
+  loadAuthSession(): Promise<LoadResult<AuthSession | null>>;
+  saveAuthSession(session: AuthSession): Promise<SaveResult>;
+  clearAuthSession(): Promise<SaveResult>;
 
   loadChapterProgress(chapterId: string): Promise<LoadResult<ChapterProgress | null>>;
   saveChapterProgress(progress: ChapterProgress): Promise<SaveResult>;
@@ -113,6 +123,7 @@ class MemoryStorageDriver implements StorageDriver {
   private appState: AppState | null = null;
   private settings: SettingsState | null = null;
   private rules: RulesState | null = null;
+  private authSession: AuthSession | null = null;
   private progress = new Map<string, ChapterProgress>();
   private smallBackup: Record<string, any> | null = null;
 
@@ -152,6 +163,20 @@ class MemoryStorageDriver implements StorageDriver {
     return { ok: true, where: "memory" };
   }
 
+  async loadAuthSession(): Promise<LoadResult<AuthSession | null>> {
+    return { ok: true, where: "memory", value: this.authSession };
+  }
+
+  async saveAuthSession(session: AuthSession): Promise<SaveResult> {
+    this.authSession = session;
+    return { ok: true, where: "memory" };
+  }
+
+  async clearAuthSession(): Promise<SaveResult> {
+    this.authSession = null;
+    return { ok: true, where: "memory" };
+  }
+
   async loadChapterProgress(chapterId: string): Promise<LoadResult<ChapterProgress | null>> {
     return { ok: true, where: "memory", value: this.progress.get(chapterId) ?? null };
   }
@@ -183,6 +208,7 @@ class SafeLocalStorageDriver implements StorageDriver {
   private KEY_RULES = "talevox_rules";
   private KEY_PROGRESS_PREFIX = "talevox_progress:";
   private KEY_SMALL_BACKUP = "talevox_small_backup";
+  private KEY_AUTH_SESSION = "talevox_drive_session_v3";
 
   private MAX_ITEM_BYTES = 180_000; // ~180KB per key
 
@@ -214,6 +240,23 @@ class SafeLocalStorageDriver implements StorageDriver {
 
   async saveRules(rules: RulesState): Promise<SaveResult> {
     return this.safeSetJson(this.KEY_RULES, rules, "localStorage");
+  }
+
+  async loadAuthSession(): Promise<LoadResult<AuthSession | null>> {
+    return this.safeGetJson<AuthSession>(this.KEY_AUTH_SESSION, "localStorage");
+  }
+
+  async saveAuthSession(session: AuthSession): Promise<SaveResult> {
+    return this.safeSetJson(this.KEY_AUTH_SESSION, session, "localStorage");
+  }
+
+  async clearAuthSession(): Promise<SaveResult> {
+    try {
+      localStorage.removeItem(this.KEY_AUTH_SESSION);
+      return { ok: true, where: "localStorage" };
+    } catch (e: any) {
+      return { ok: false, where: "localStorage", error: e?.message ?? String(e) };
+    }
   }
 
   async loadChapterProgress(chapterId: string): Promise<LoadResult<ChapterProgress | null>> {
