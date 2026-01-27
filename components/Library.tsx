@@ -1,6 +1,6 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { Book, StorageBackend, Theme } from "../types";
-import { BookOpen, Plus, Trash2, Image as ImageIcon, Cloud, Database, Monitor } from "lucide-react";
+import { BookOpen, Plus, Cloud, Database, Monitor } from "lucide-react";
 
 interface Props {
   books: Book[];
@@ -13,8 +13,6 @@ interface Props {
     driveFolderId?: string,
     driveFolderName?: string
   ) => Promise<void>;
-  onDeleteBook: (bookId: string) => void;
-  onUpdateBook: (book: Book) => void;
   theme: Theme;
   isCloudLinked: boolean;
   onLinkCloud: () => void;
@@ -25,8 +23,6 @@ const Library: React.FC<Props> = ({
   activeBookId,
   onSelectBook,
   onAddBook,
-  onDeleteBook,
-  onUpdateBook,
   theme,
   isCloudLinked,
   onLinkCloud,
@@ -35,8 +31,6 @@ const Library: React.FC<Props> = ({
   const [newTitle, setNewTitle] = useState("");
   const [isProcessingAdd, setIsProcessingAdd] = useState(false);
 
-  const coverInputRef = useRef<HTMLInputElement | null>(null);
-  const [uploadingCoverFor, setUploadingCoverFor] = useState<string | null>(null);
 
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
@@ -103,30 +97,8 @@ const Library: React.FC<Props> = ({
     await handleAdd(StorageBackend.DRIVE);
   };
 
-  const handleCoverSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !uploadingCoverFor) return;
-
-    try {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const url = String(reader.result ?? "");
-        const book = books.find((b) => b.id === uploadingCoverFor);
-        if (!book) return;
-        onUpdateBook({ ...book, coverImage: url, updatedAt: Date.now() });
-        setUploadingCoverFor(null);
-        if (coverInputRef.current) coverInputRef.current.value = "";
-      };
-      reader.readAsDataURL(file);
-    } catch (err: any) {
-      alert("Cover upload failed: " + (err?.message ?? String(err)));
-    }
-  };
-
   return (
     <div className="h-full w-full flex flex-col min-w-0 bg-transparent">
-      <input ref={coverInputRef} type="file" accept="image/*" className="hidden" onChange={handleCoverSelected} />
-
       {/* Header matches desktop look */}
       <div className="px-6 sm:px-10 pt-8 sm:pt-10 flex items-center justify-between flex-shrink-0">
         <div className="flex items-center gap-3">
@@ -250,32 +222,6 @@ const Library: React.FC<Props> = ({
                       {Math.min(chapterCount, 9999)}
                     </div>
                   )}
-
-                  {/* Actions overlay. Works on desktop hover. Still okay on mobile for now. */}
-                  <div className="absolute inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all gap-2">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setUploadingCoverFor(book.id);
-                        coverInputRef.current?.click();
-                      }}
-                      className="p-3 bg-white/20 backdrop-blur-md text-white rounded-2xl hover:bg-white/35 transition-all"
-                      aria-label="Change Cover"
-                    >
-                      <ImageIcon className="w-5 h-5" />
-                    </button>
-
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (confirm(`Delete '${book.title}' and all chapters?`)) onDeleteBook(book.id);
-                      }}
-                      className="p-3 bg-red-500/30 backdrop-blur-md text-white rounded-2xl hover:bg-red-500/50 transition-all"
-                      aria-label="Delete Book"
-                    >
-                      <Trash2 className="w-5 h-5" />
-                    </button>
-                  </div>
                 </div>
 
                 <div onClick={() => onSelectBook(book.id)} className="cursor-pointer">

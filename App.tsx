@@ -395,8 +395,12 @@ const App: React.FC = () => {
       });
     };
 
-    JobRunner.addListener("jobProgress", applyJobEvent).then((h) => handles.push(h));
-    JobRunner.addListener("jobFinished", applyJobEvent).then((h) => handles.push(h));
+    JobRunner.addListener("jobProgress", applyJobEvent)
+      .then((h) => handles.push(h))
+      .catch(() => {});
+    JobRunner.addListener("jobFinished", applyJobEvent)
+      .then((h) => handles.push(h))
+      .catch(() => {});
 
     return () => {
       isMounted = false;
@@ -1012,6 +1016,51 @@ const App: React.FC = () => {
     loadChapterSession(id, 'user');
   };
 
+  const handleUpdateBookMeta = useCallback(async (book: Book) => {
+    const s = stateRef.current;
+    const existing = s.books.find(b => b.id === book.id);
+    const merged = {
+      ...existing,
+      ...book,
+      chapterCount: existing?.chapterCount ?? book.chapterCount,
+      chapters: existing?.chapters ?? book.chapters ?? []
+    };
+
+    try {
+      await libraryUpsertBook({ ...merged, directoryHandle: undefined });
+    } catch (e: any) {
+      console.error('[TaleVox][Library] update failed', e);
+    }
+    setState(p => ({
+      ...p,
+      books: p.books.map(b => {
+        if (b.id !== book.id) return b;
+
+        return {
+          ...b,
+          ...book,
+          chapterCount: b.chapterCount,
+          chapters: b.chapters,
+        };
+      })
+    }));
+    markDirty();
+  }, [markDirty]);
+
+  const handleDeleteBookMeta = useCallback(async (id: string) => {
+    try {
+      await libraryDeleteBook(id);
+    } catch (e: any) {
+      console.error('[TaleVox][Library] delete failed', e);
+    }
+    setState(p => ({
+      ...p,
+      books: p.books.filter(b => b.id !== id),
+      activeBookId: p.activeBookId === id ? undefined : p.activeBookId
+    }));
+    markDirty();
+  }, [markDirty]);
+
   const handleCancelJob = useCallback(async (jobId: string) => {
     try {
       await cancelJobService(jobId, state.readerSettings.uiMode);
@@ -1543,48 +1592,6 @@ const App: React.FC = () => {
                 void loadMoreChapters(id, true);
               }} 
               onAddBook={handleAddBook}
-              onDeleteBook={async (id) => {
-                try {
-                  await libraryDeleteBook(id);
-                } catch (e: any) {
-                  console.error('[TaleVox][Library] delete failed', e);
-                }
-                setState(p => ({ ...p, books: p.books.filter(b => b.id !== id), activeBookId: p.activeBookId === id ? undefined : p.activeBookId }));
-                markDirty();
-              }}
-              onUpdateBook={async (book) => {
-                // Fix: Merge fields into existing book to preserve chapterCount
-                const s = stateRef.current;
-                const existing = s.books.find(b => b.id === book.id);
-                const merged = {
-                   ...existing,
-                   ...book,
-                   chapterCount: existing?.chapterCount ?? book.chapterCount,
-                   chapters: existing?.chapters ?? book.chapters ?? []
-                };
-
-                try {
-                  await libraryUpsertBook({ ...merged, directoryHandle: undefined });
-                } catch (e: any) {
-                  console.error('[TaleVox][Library] update failed', e);
-                }
-                setState(p => ({
-                  ...p,
-                  books: p.books.map(b => {
-                    if (b.id !== book.id) return b;
-
-                    return {
-                      ...b,
-                      ...book,
-
-                      // Preserve the currently loaded chapter page and the known total count.
-                      chapterCount: b.chapterCount,
-                      chapters: b.chapters,
-                    };
-                  })
-                }));
-                markDirty();
-              }}
               theme={state.theme}
               isCloudLinked={!!state.driveRootFolderId}
               onLinkCloud={handleSelectRoot}
@@ -1598,6 +1605,8 @@ const App: React.FC = () => {
               onToggleFavorite={() => {}} onUpdateChapterTitle={(id, t) => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(c => c.id === id ? { ...c, title: t } : c) } : b) })); markDirty(); }}
               onDeleteChapter={id => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.filter(c => c.id !== id) } : b) })); markDirty(); }}
               onUpdateChapter={c => { setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(ch => ch.id === c.id ? c : ch) } : b) })); markDirty(); }}
+              onUpdateBook={handleUpdateBookMeta}
+              onDeleteBook={(id) => { handleDeleteBookMeta(id); setActiveTab('library'); }}
               onUpdateBookSettings={s => {
                 const updatedBook = { ...activeBook, settings: { ...activeBook.settings, ...s } };
                 setState(p => {

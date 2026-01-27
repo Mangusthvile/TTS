@@ -47,6 +47,8 @@ interface ChapterFolderViewProps {
   onCancelJob: (jobId: string) => void;
   onRetryJob: (jobId: string) => void;
   onRefreshJobs: () => void;
+  onUpdateBook: (book: Book) => void;
+  onDeleteBook: (bookId: string) => void;
   onAddChapter: () => void;
   onOpenChapter: (chapterId: string) => void;
   onToggleFavorite: (chapterId: string) => void;
@@ -77,6 +79,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   onCancelJob,
   onRetryJob,
   onRefreshJobs,
+  onUpdateBook,
+  onDeleteBook,
   onAddChapter,
   onOpenChapter,
   onToggleFavorite,
@@ -150,6 +154,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [mobileMenuId, setMobileMenuId] = useState<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [bgGenProgress, setBgGenProgress] = useState<{ current: number; total: number } | null>(null);
+  const [showBookSettings, setShowBookSettings] = useState(false);
+  const coverInputRef = useRef<HTMLInputElement | null>(null);
 
   const [fixOptions, setFixOptions] = useState({
     genAudio: true,
@@ -1017,6 +1023,22 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
   };
 
+  const handleCoverSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const url = String(reader.result ?? "");
+        onUpdateBook({ ...book, coverImage: url, updatedAt: Date.now() });
+        if (coverInputRef.current) coverInputRef.current.value = "";
+      };
+      reader.readAsDataURL(file);
+    } catch (err: any) {
+      pushNotice(`Cover upload failed: ${String(err?.message ?? err)}`, "error");
+    }
+  };
+
   const renderAudioStatusIcon = (c: Chapter) => {
     if (c.cloudAudioFileId || (c as any).audioDriveId || c.audioStatus === AudioStatus.READY) {
       return (
@@ -1247,6 +1269,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   return (
     <div className={`h-full min-h-0 flex flex-col ${isDark ? 'bg-slate-900 text-slate-100' : isSepia ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
+      <input ref={coverInputRef} type="file" accept="image/*" className="hidden" onChange={handleCoverSelected} />
+
       {showVoiceModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
           <div className={`w-full max-w-md rounded-3xl shadow-2xl p-8 space-y-6 ${isDark ? 'bg-slate-900 border border-slate-800' : 'bg-white border border-black/5'}`}>
@@ -1256,6 +1280,74 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               <div className="space-y-2 max-h-[40vh] overflow-y-auto pr-1">
                 {CLOUD_VOICES.map(v => (<button key={v.id} onClick={() => handleVoiceSelect(v.id)} className={`w-full p-4 rounded-xl border-2 text-left font-black text-sm transition-all flex justify-between items-center ${isDark ? 'border-slate-800 hover:border-indigo-600 bg-slate-950/40' : 'border-slate-100 hover:border-indigo-600 bg-slate-50'}`}>{v.name}<Headphones className="w-4 h-4 opacity-40" /></button>))}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showBookSettings && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className={`w-full max-w-lg rounded-[2rem] shadow-2xl p-8 space-y-6 ${isDark ? 'bg-slate-900 border border-slate-800' : 'bg-white border border-black/5'}`}>
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Book Settings</div>
+                <div className="text-xl font-black tracking-tight">{book.title}</div>
+              </div>
+              <button onClick={() => setShowBookSettings(false)} className="p-2 opacity-60 hover:opacity-100">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Cover</div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => coverInputRef.current?.click()}
+                  className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-[10px] font-black uppercase tracking-widest"
+                >
+                  {book.coverImage ? "Change Cover" : "Add Cover"}
+                </button>
+                {book.coverImage && (
+                  <button
+                    onClick={() => onUpdateBook({ ...book, coverImage: undefined, updatedAt: Date.now() })}
+                    className="px-4 py-2 rounded-xl bg-black/5 text-black text-[10px] font-black uppercase tracking-widest"
+                  >
+                    Remove Cover
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Background Tools</div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={handleGenerateMissingAudioBackground}
+                  className="px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest"
+                >
+                  {isMobileInterface ? "Generate Missing Audio (BG)" : "Generate Missing Audio"}
+                </button>
+                <button
+                  onClick={handleInitManifests}
+                  className="px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest"
+                >
+                  Init Manifests
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Danger Zone</div>
+              <button
+                onClick={() => {
+                  if (confirm(`Delete '${book.title}' and all chapters?`)) {
+                    onDeleteBook(book.id);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-red-600/10 text-red-600 text-[10px] font-black uppercase tracking-widest"
+              >
+                Delete Book
+              </button>
             </div>
           </div>
         </div>
@@ -1312,7 +1404,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       <div className={`sticky top-0 z-50 border-b border-black/5 backdrop-blur-md transition-all duration-300 ${stickyHeaderBg}`}>
         <div className={`p-4 sm:p-6 lg:p-8 flex flex-col gap-4 ${!isHeaderExpanded ? 'md:block' : ''}`}>
           <div className="flex items-center justify-between">
-            <button onClick={onBackToLibrary} className="flex items-center gap-1 text-[10px] font-black uppercase tracking-widest text-indigo-500 hover:translate-x-[-2px] transition-transform"><ChevronLeft className="w-3 h-3" /> Library</button>
+            <div className="flex items-center gap-2">
+              <button onClick={onBackToLibrary} className="flex items-center gap-1 text-[10px] font-black uppercase tracking-widest text-indigo-500 hover:translate-x-[-2px] transition-transform"><ChevronLeft className="w-3 h-3" /> Library</button>
+              <button onClick={() => setShowBookSettings(true)} className="p-2 rounded-lg bg-black/5 hover:bg-black/10">
+                <GearIcon className="w-4 h-4" />
+              </button>
+            </div>
             <div className="flex items-center gap-1 p-1 rounded-xl bg-black/5">
               <button onClick={() => setViewMode('grid')} className={`p-1.5 rounded-lg transition-all ${viewMode === 'grid' ? 'bg-white shadow-sm text-indigo-600' : 'opacity-40'}`}><LayoutGrid className="w-3.5 h-3.5" /></button>
               <button onClick={() => setViewMode('list')} className={`p-1.5 rounded-lg transition-all ${viewMode === 'list' ? 'bg-white shadow-sm text-indigo-600' : 'opacity-40'}`}><AlignJustify className="w-3.5 h-3.5" /></button>
@@ -1327,24 +1424,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
           <div className={`flex flex-wrap gap-2 transition-all duration-300 ${isHeaderExpanded || window.innerWidth >= 768 ? 'opacity-100 max-h-40 pointer-events-auto' : 'opacity-0 max-h-0 pointer-events-none overflow-hidden sm:opacity-100 sm:max-h-40 sm:pointer-events-auto'}`}>
             <button onClick={onAddChapter} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-indigo-600 text-white rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center gap-2"><Plus className="w-3.5 h-3.5" /> Add Chapter</button>
-            <button
-              onClick={handleGenerateMissingAudioBackground}
-              className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center justify-center gap-2"
-              title={isMobileInterface ? "Queue background audio generation" : "Generate missing audio now"}
-            >
-              <Headphones className="w-3.5 h-3.5" />
-              {isMobileInterface ? "Generate Missing Audio (BG)" : "Generate Missing Audio"}
-            </button>
             <button onClick={handleCheckIntegrity} disabled={isCheckingDrive} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center justify-center gap-2">{isCheckingDrive ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}{isCheckingDrive ? '...' : 'Check'}</button>
-            <button
-              onClick={handleInitManifests}
-              disabled={isInitManifests || isCheckingDrive}
-              className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center justify-center gap-2"
-              title="Create meta/book.json and meta/inventory.json in this book folder"
-            >
-              {isInitManifests ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-              {isInitManifests ? "Initializing..." : "Init Manifests"}
-            </button>
             <button
               disabled={!hasIssues}
               className={hasIssues ? "flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-orange-500 text-white rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center gap-2" : "flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-orange-500/40 text-white/60 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest cursor-not-allowed flex items-center justify-center gap-2"}

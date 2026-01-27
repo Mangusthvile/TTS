@@ -24,7 +24,29 @@ export async function enqueueGenerateAudio(
 ): Promise<{ jobId: string }> {
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
-    return JobRunner.enqueueGenerateAudio({ payload });
+    try {
+      return await JobRunner.enqueueGenerateAudio({ payload });
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (msg.includes("not implemented")) {
+        // Fallback to local job store if plugin isn't registered yet.
+        const jobId = createJobId();
+        const now = Date.now();
+        const total = payload.chapterIds?.length ?? 0;
+        const job: JobRecord = {
+          jobId,
+          type: "generateAudio",
+          status: "queued",
+          payloadJson: payload,
+          progressJson: { total, completed: 0 },
+          createdAt: now,
+          updatedAt: now,
+        };
+        await createJob(job);
+        return { jobId };
+      }
+      throw e;
+    }
   }
 
   const jobId = createJobId();
@@ -48,7 +70,13 @@ export async function enqueueGenerateAudio(
 export async function cancelJob(jobId: string, uiMode: UiMode): Promise<void> {
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
-    await JobRunner.cancelJob({ jobId });
+    try {
+      await JobRunner.cancelJob({ jobId });
+      return;
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (!msg.includes("not implemented")) throw e;
+    }
     return;
   }
   await updateJob(jobId, { status: "canceled", updatedAt: Date.now() });
@@ -57,7 +85,12 @@ export async function cancelJob(jobId: string, uiMode: UiMode): Promise<void> {
 export async function retryJob(jobId: string, uiMode: UiMode): Promise<{ jobId: string }> {
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
-    return JobRunner.retryJob({ jobId });
+    try {
+      return await JobRunner.retryJob({ jobId });
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (!msg.includes("not implemented")) throw e;
+    }
   }
   await updateJob(jobId, { status: "queued", error: undefined, updatedAt: Date.now() });
   return { jobId };
@@ -66,8 +99,13 @@ export async function retryJob(jobId: string, uiMode: UiMode): Promise<{ jobId: 
 export async function getJobById(jobId: string, uiMode: UiMode): Promise<JobRecord | null> {
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
-    const res = await JobRunner.getJob({ jobId });
-    return res.job;
+    try {
+      const res = await JobRunner.getJob({ jobId });
+      return res.job;
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (!msg.includes("not implemented")) throw e;
+    }
   }
   return getJob(jobId);
 }
@@ -75,8 +113,13 @@ export async function getJobById(jobId: string, uiMode: UiMode): Promise<JobReco
 export async function listAllJobs(uiMode: UiMode): Promise<JobRecord[]> {
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
-    const res = await JobRunner.listJobs();
-    return res.jobs ?? [];
+    try {
+      const res = await JobRunner.listJobs();
+      return res.jobs ?? [];
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (!msg.includes("not implemented")) throw e;
+    }
   }
   return listJobs();
 }
