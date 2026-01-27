@@ -1,7 +1,7 @@
 import { WebPlugin } from "@capacitor/core";
 import type { JobRecord } from "../../../types";
 import type { JobRunnerPayload, JobRunnerPlugin } from "./index";
-import { createJob, updateJob, getJob, listJobs } from "../../../services/jobStore";
+import { createJob, updateJob, getJob, listJobs, deleteJob, clearJobs } from "../../../services/jobStore";
 
 function createJobId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -59,6 +59,21 @@ export class JobRunnerWeb extends WebPlugin implements JobRunnerPlugin {
       updatedAt: Date.now(),
     });
     return { jobId: options.jobId };
+  }
+
+  async forceStartJob(options: { jobId: string }): Promise<void> {
+    await updateJob(options.jobId, {
+      status: "queued",
+      updatedAt: Date.now(),
+    });
+  }
+
+  async deleteJob(options: { jobId: string }): Promise<void> {
+    await deleteJob(options.jobId);
+  }
+
+  async clearJobs(options: { statuses: string[] }): Promise<void> {
+    await clearJobs(options.statuses);
   }
 
   async getJob(options: { jobId: string }): Promise<{ job: JobRecord | null }> {

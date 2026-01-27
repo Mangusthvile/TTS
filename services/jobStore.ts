@@ -38,3 +38,21 @@ export async function listJobs(type?: JobType): Promise<JobRecord[]> {
   if (!res.ok) return [];
   return res.value ?? [];
 }
+
+export async function deleteJob(jobId: string): Promise<void> {
+  await initStorage();
+  const storage = getStorage();
+  const res = await storage.deleteJob(jobId);
+  if (!res.ok) {
+    console.warn("[TaleVox][Jobs] deleteJob failed:", res.error);
+  }
+}
+
+export async function clearJobs(statuses: string[]): Promise<void> {
+  await initStorage();
+  const storage = getStorage();
+  const res = await storage.clearJobs(statuses);
+  if (!res.ok) {
+    console.warn("[TaleVox][Jobs] clearJobs failed:", res.error);
+  }
+}

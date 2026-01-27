@@ -410,6 +410,28 @@ export class SqliteStorageDriver implements StorageDriver {
     }
   }
 
+  async deleteJob(jobId: string): Promise<SaveResult> {
+    const db = this.mustDb();
+    try {
+      await db.run(`DELETE FROM jobs WHERE jobId = ?`, [jobId]);
+      return { ok: true, where: "sqlite" };
+    } catch (e: any) {
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
+  }
+
+  async clearJobs(statuses: string[]): Promise<SaveResult> {
+    const db = this.mustDb();
+    if (!statuses.length) return { ok: true, where: "sqlite" };
+    const placeholders = statuses.map(() => "?").join(",");
+    try {
+      await db.run(`DELETE FROM jobs WHERE status IN (${placeholders})`, statuses);
+      return { ok: true, where: "sqlite" };
+    } catch (e: any) {
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
+  }
+
   // -----------------------
   // Internals
   // -----------------------

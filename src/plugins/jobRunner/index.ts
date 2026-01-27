@@ -23,6 +23,9 @@ export interface JobRunnerPlugin {
   enqueueFixIntegrity: (options: { payload: { bookId: string; driveFolderId?: string; options?: { genAudio?: boolean; cleanupStrays?: boolean; convertLegacy?: boolean } } }) => Promise<{ jobId: string }>;
   cancelJob: (options: { jobId: string }) => Promise<void>;
   retryJob: (options: { jobId: string }) => Promise<{ jobId: string }>;
+  forceStartJob: (options: { jobId: string }) => Promise<void>;
+  deleteJob: (options: { jobId: string }) => Promise<void>;
+  clearJobs: (options: { statuses: string[] }) => Promise<void>;
   getJob: (options: { jobId: string }) => Promise<{ job: JobRecord | null }>;
   listJobs: () => Promise<{ jobs: JobRecord[] }>;
   addListener: (

@@ -86,6 +86,8 @@ export type StorageDriver = {
   updateJob(jobId: string, patch: Partial<Omit<JobRecord, "jobId" | "createdAt">>): Promise<SaveResult>;
   getJob(jobId: string): Promise<LoadResult<JobRecord | null>>;
   listJobs(type?: JobType): Promise<LoadResult<JobRecord[]>>;
+  deleteJob(jobId: string): Promise<SaveResult>;
+  clearJobs(statuses: string[]): Promise<SaveResult>;
 };
 
 function isNativeCapacitor(): boolean {
@@ -230,6 +232,19 @@ class MemoryStorageDriver implements StorageDriver {
     const filtered = type ? all.filter((j) => j.type === type) : all;
     return { ok: true, where: "memory", value: filtered };
   }
+
+  async deleteJob(jobId: string): Promise<SaveResult> {
+    this.jobs.delete(jobId);
+    return { ok: true, where: "memory" };
+  }
+
+  async clearJobs(statuses: string[]): Promise<SaveResult> {
+    const set = new Set(statuses);
+    for (const [id, job] of this.jobs.entries()) {
+      if (set.has(job.status)) this.jobs.delete(id);
+    }
+    return { ok: true, where: "memory" };
+  }
 }
 
 // ----------------------------------------
@@ -362,6 +377,41 @@ class SafeLocalStorageDriver implements StorageDriver {
       }
     }
     return { ok: true, where: "localStorage", value: jobs };
+  }
+
+  async deleteJob(jobId: string): Promise<SaveResult> {
+    try {
+      const key = this.KEY_JOB_PREFIX + jobId;
+      localStorage.removeItem(key);
+      const idsRes = await this.safeGetJson<string[]>(this.KEY_JOBS_INDEX, "localStorage");
+      const ids = idsRes.ok && Array.isArray(idsRes.value) ? idsRes.value : [];
+      const next = ids.filter((id) => id !== jobId);
+      await this.safeSetJson(this.KEY_JOBS_INDEX, next, "localStorage");
+      return { ok: true, where: "localStorage" };
+    } catch (e: any) {
+      return { ok: false, where: "localStorage", error: e?.message ?? String(e) };
+    }
+  }
+
+  async clearJobs(statuses: string[]): Promise<SaveResult> {
+    try {
+      const idsRes = await this.safeGetJson<string[]>(this.KEY_JOBS_INDEX, "localStorage");
+      const ids = idsRes.ok && Array.isArray(idsRes.value) ? idsRes.value : [];
+      const kept: string[] = [];
+      for (const id of ids) {
+        const res = await this.getJob(id);
+        if (!res.ok || !res.value) continue;
+        if (statuses.includes(res.value.status)) {
+          localStorage.removeItem(this.KEY_JOB_PREFIX + id);
+        } else {
+          kept.push(id);
+        }
+      }
+      await this.safeSetJson(this.KEY_JOBS_INDEX, kept, "localStorage");
+      return { ok: true, where: "localStorage" };
+    } catch (e: any) {
+      return { ok: false, where: "localStorage", error: e?.message ?? String(e) };
+    }
   }
 
   private async safeGetJson<T>(key: string, where: SaveResult["where"]): Promise<LoadResult<T>> {

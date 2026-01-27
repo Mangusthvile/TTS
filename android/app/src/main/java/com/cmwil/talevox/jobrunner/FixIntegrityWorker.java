@@ -47,7 +47,7 @@ public class FixIntegrityWorker extends Worker {
     private static final String DEFAULT_ENDPOINT = "https://talevox-tts-762195576430.us-south1.run.app";
     private static final int MAX_TTS_BYTES = 4500;
     private static final int MAX_UPLOAD_RETRIES = 5;
-    private static final String CHANNEL_ID = "talevox_jobs";
+    private static final String CHANNEL_ID = "talevox_jobs_v3";
 
     public FixIntegrityWorker(@NonNull Context context, @NonNull WorkerParameters params) {
         super(context, params);

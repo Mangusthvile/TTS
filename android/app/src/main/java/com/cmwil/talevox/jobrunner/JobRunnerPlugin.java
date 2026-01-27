@@ -16,6 +16,7 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 
 import androidx.work.Data;
 import androidx.work.OneTimeWorkRequest;
+import androidx.work.OutOfQuotaPolicy;
 import androidx.work.WorkManager;
 
 import org.json.JSONArray;
@@ -103,6 +104,7 @@ public class JobRunnerPlugin extends Plugin {
         OneTimeWorkRequest request =
             new OneTimeWorkRequest.Builder(GenerateAudioWorker.class)
                 .setInputData(new Data.Builder().putString("jobId", jobId).build())
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
                 .build();
         WorkManager.getInstance(getContext()).enqueue(request);
 
@@ -141,6 +143,7 @@ public class JobRunnerPlugin extends Plugin {
         OneTimeWorkRequest request =
             new OneTimeWorkRequest.Builder(FixIntegrityWorker.class)
                 .setInputData(new Data.Builder().putString("jobId", jobId).build())
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
                 .build();
         WorkManager.getInstance(getContext()).enqueue(request);
 
@@ -218,6 +221,7 @@ public class JobRunnerPlugin extends Plugin {
         OneTimeWorkRequest request =
             new OneTimeWorkRequest.Builder(workerClass)
                 .setInputData(new Data.Builder().putString("jobId", jobId).build())
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
                 .build();
         WorkManager.getInstance(getContext()).enqueue(request);
 
@@ -230,6 +234,87 @@ public class JobRunnerPlugin extends Plugin {
         JSObject ret = new JSObject();
         ret.put("jobId", jobId);
         call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void forceStartJob(PluginCall call) {
+        String jobId = call.getString("jobId");
+        if (jobId == null) {
+            call.reject("jobId is required");
+            return;
+        }
+        JobRow row = loadJobRow(jobId);
+        if (row == null) {
+            call.reject("job not found");
+            return;
+        }
+
+        if (row.progressJson != null) {
+            String workId = row.progressJson.optString("workRequestId", null);
+            if (workId != null && !workId.isEmpty()) {
+                try {
+                    WorkManager.getInstance(getContext()).cancelWorkById(UUID.fromString(workId));
+                } catch (Exception ignored) {}
+            }
+        }
+
+        String type = row.type != null ? row.type : "generateAudio";
+        Class workerClass;
+        if ("fixIntegrity".equals(type)) {
+            workerClass = FixIntegrityWorker.class;
+        } else if ("generateAudio".equals(type)) {
+            workerClass = GenerateAudioWorker.class;
+        } else {
+            call.reject("unsupported job type");
+            return;
+        }
+
+        OneTimeWorkRequest request =
+            new OneTimeWorkRequest.Builder(workerClass)
+                .setInputData(new Data.Builder().putString("jobId", jobId).build())
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .build();
+        WorkManager.getInstance(getContext()).enqueue(request);
+
+        JSONObject progressJson = row.progressJson != null ? row.progressJson : new JSONObject();
+        try {
+            progressJson.put("workRequestId", request.getId().toString());
+        } catch (JSONException ignored) {}
+
+        updateJobProgress(jobId, "queued", progressJson, null);
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void deleteJob(PluginCall call) {
+        String jobId = call.getString("jobId");
+        if (jobId == null) {
+            call.reject("jobId is required");
+            return;
+        }
+        SQLiteDatabase db = getDb();
+        db.delete("jobs", "jobId = ?", new String[]{jobId});
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void clearJobs(PluginCall call) {
+        JSArray statuses = call.getArray("statuses");
+        if (statuses == null || statuses.length() == 0) {
+            call.resolve();
+            return;
+        }
+        StringBuilder where = new StringBuilder("status IN (");
+        String[] args = new String[statuses.length()];
+        for (int i = 0; i < statuses.length(); i++) {
+            if (i > 0) where.append(",");
+            where.append("?");
+            args[i] = statuses.optString(i);
+        }
+        where.append(")");
+        SQLiteDatabase db = getDb();
+        db.delete("jobs", where.toString(), args);
+        call.resolve();
     }
 
     @PluginMethod

@@ -36,6 +36,9 @@ interface SettingsProps {
   onRefreshJobs?: () => void;
   onCancelJob?: (jobId: string) => void;
   onRetryJob?: (jobId: string) => void;
+  onForceStartJob?: (jobId: string) => void;
+  onDeleteJob?: (jobId: string) => void;
+  onClearJobs?: (statuses: string[]) => void;
 }
 
 const Settings: React.FC<SettingsProps> = ({ 
@@ -50,7 +53,10 @@ const Settings: React.FC<SettingsProps> = ({
   jobs = [],
   onRefreshJobs,
   onCancelJob,
-  onRetryJob
+  onRetryJob,
+  onForceStartJob,
+  onDeleteJob,
+  onClearJobs
 }) => {
   const [authState, setAuthState] = useState(authManager.getState());
   const [isDiagExpanded, setIsDiagExpanded] = useState(false);
@@ -475,12 +481,12 @@ const Settings: React.FC<SettingsProps> = ({
 
             <div className="mt-4 flex flex-wrap gap-2">
               <button
-                disabled={jobBusy || queuedJobs.length === 0 || !onRetryJob}
+                disabled={jobBusy || queuedJobs.length === 0 || !onForceStartJob}
                 onClick={async () => {
-                  if (!onRetryJob) return;
+                  if (!onForceStartJob) return;
                   setJobBusy(true);
                   for (const job of queuedJobs) {
-                    try { await onRetryJob(job.jobId); } catch {}
+                    try { await onForceStartJob(job.jobId); } catch {}
                   }
                   setJobBusy(false);
                   onRefreshJobs && onRefreshJobs();
@@ -496,6 +502,19 @@ const Settings: React.FC<SettingsProps> = ({
               >
                 Refresh Jobs
               </button>
+              <button
+                disabled={jobBusy || !onClearJobs}
+                onClick={async () => {
+                  if (!onClearJobs) return;
+                  setJobBusy(true);
+                  await onClearJobs(["canceled", "failed", "completed"]);
+                  setJobBusy(false);
+                  onRefreshJobs && onRefreshJobs();
+                }}
+                className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-black/5 text-black"
+              >
+                Clear Finished
+              </button>
             </div>
 
             <div className="mt-6 space-y-3">
@@ -508,7 +527,9 @@ const Settings: React.FC<SettingsProps> = ({
                 const completed = Number(progress.completed ?? 0);
                 const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
                 const canCancel = job.status === "queued" || job.status === "running" || job.status === "paused";
-                const canRetry = job.status === "failed" || job.status === "canceled" || job.status === "queued";
+                const canRetry = job.status === "failed" || job.status === "canceled";
+                const canForceStart = job.status === "queued";
+                const canRemove = job.status === "failed" || job.status === "canceled" || job.status === "completed";
                 return (
                   <div key={job.jobId} className={`p-3 rounded-xl border ${isDark ? 'border-slate-800 bg-slate-950/40' : 'border-black/5 bg-white'}`}>
                     <div className="flex items-center justify-between gap-3">
@@ -525,7 +546,13 @@ const Settings: React.FC<SettingsProps> = ({
                           <button onClick={() => onCancelJob(job.jobId)} className="px-2 py-1 rounded-lg bg-red-500/10 text-red-600 text-[9px] font-black uppercase">Cancel</button>
                         )}
                         {canRetry && onRetryJob && (
-                          <button onClick={() => onRetryJob(job.jobId)} className="px-2 py-1 rounded-lg bg-indigo-500/10 text-indigo-600 text-[9px] font-black uppercase">{job.status === 'queued' ? 'Force Start' : 'Retry'}</button>
+                          <button onClick={() => onRetryJob(job.jobId)} className="px-2 py-1 rounded-lg bg-indigo-500/10 text-indigo-600 text-[9px] font-black uppercase">Retry</button>
+                        )}
+                        {canForceStart && onForceStartJob && (
+                          <button onClick={() => onForceStartJob(job.jobId)} className="px-2 py-1 rounded-lg bg-indigo-500/10 text-indigo-600 text-[9px] font-black uppercase">Force Start</button>
+                        )}
+                        {canRemove && onDeleteJob && (
+                          <button onClick={() => onDeleteJob(job.jobId)} className="px-2 py-1 rounded-lg bg-black/10 text-black text-[9px] font-black uppercase">Remove</button>
                         )}
                       </div>
                     </div>

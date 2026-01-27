@@ -3,7 +3,7 @@ import type { JobRecord } from "../types";
 import { computeMobileMode } from "../utils/platform";
 import { JobRunner } from "../src/plugins/jobRunner";
 import type { JobRunnerPayload } from "../src/plugins/jobRunner";
-import { createJob, updateJob, getJob, listJobs } from "./jobStore";
+import { createJob, updateJob, getJob, listJobs, deleteJob as deleteJobLocal, clearJobs as clearJobsLocal } from "./jobStore";
 
 type InterfaceMode = "mobile" | "desktop";
 
@@ -153,4 +153,45 @@ export async function listAllJobs(uiMode: UiMode): Promise<JobRecord[]> {
     }
   }
   return listJobs();
+}
+
+export async function forceStartJob(jobId: string, uiMode: UiMode): Promise<void> {
+  const interfaceMode = getInterfaceMode(uiMode);
+  if (interfaceMode === "mobile") {
+    try {
+      await JobRunner.forceStartJob({ jobId });
+      return;
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (!msg.includes("not implemented")) throw e;
+    }
+  }
+}
+
+export async function deleteJob(jobId: string, uiMode: UiMode): Promise<void> {
+  const interfaceMode = getInterfaceMode(uiMode);
+  if (interfaceMode === "mobile") {
+    try {
+      await JobRunner.deleteJob({ jobId });
+      return;
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (!msg.includes("not implemented")) throw e;
+    }
+  }
+  await deleteJobLocal(jobId);
+}
+
+export async function clearJobs(statuses: string[], uiMode: UiMode): Promise<void> {
+  const interfaceMode = getInterfaceMode(uiMode);
+  if (interfaceMode === "mobile") {
+    try {
+      await JobRunner.clearJobs({ statuses });
+      return;
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (!msg.includes("not implemented")) throw e;
+    }
+  }
+  await clearJobsLocal(statuses);
 }
