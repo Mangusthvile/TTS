@@ -43,7 +43,7 @@ export default defineConfig(({ mode }) => {
             ],
           },
           workbox: {
-            cacheId: "talevox-v2.9.11",
+            cacheId: "talevox-v2.9.17",
             cleanupOutdatedCaches: true,
           },
         }),
@@ -51,7 +51,7 @@ export default defineConfig(({ mode }) => {
 
     define: {
       "process.env": {},
-      __APP_VERSION__: JSON.stringify("2.9.11"),
+      __APP_VERSION__: JSON.stringify("2.9.17"),
     },
 
     server: {
