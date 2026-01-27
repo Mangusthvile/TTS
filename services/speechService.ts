@@ -182,8 +182,8 @@ class SpeechController {
   private commitLocalProgress(completed: boolean, reason: string) {
     const chapterId = this.getActiveChapterId();
     if (!chapterId) {
-      // Make missing-context failures visible (this was a common “silent” reason resume failed)
-      if (reason === "resume_seeked" || reason === "timeupdate" || reason === "pause" || reason === "ended") {
+      // Only surface missing context for resume/save paths that should never run without a chapter.
+      if (reason === "resume_seeked" || reason === "saveProgress" || reason === "saveProgress:completed") {
         traceError("progress:commit_local:no_context", new Error(`No context.chapterId for reason=${reason}`));
       }
       return;
@@ -929,3 +929,4 @@ class SpeechController {
 }
 
 export const speechController = new SpeechController();
+

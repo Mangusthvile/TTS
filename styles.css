@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Minimal animation utilities to replace tailwindcss-animate plugin usage. */
+.animate-in {
+  animation-duration: 150ms;
+  animation-fill-mode: both;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes tvx-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes tvx-zoom-in {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes tvx-zoom-in-95 {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes tvx-slide-in-from-bottom-2 {
+  from { opacity: 0; transform: translateY(0.5rem); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes tvx-slide-in-from-bottom-4 {
+  from { opacity: 0; transform: translateY(1rem); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes tvx-slide-in-from-left {
+  from { opacity: 0; transform: translateX(-1rem); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes tvx-slide-in-from-right {
+  from { opacity: 0; transform: translateX(1rem); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.fade-in { animation-name: tvx-fade-in; }
+.zoom-in { animation-name: tvx-zoom-in; }
+.zoom-in-95 { animation-name: tvx-zoom-in-95; }
+.slide-in-from-bottom-2 { animation-name: tvx-slide-in-from-bottom-2; }
+.slide-in-from-bottom-4 { animation-name: tvx-slide-in-from-bottom-4; }
+.slide-in-from-left { animation-name: tvx-slide-in-from-left; }
+.slide-in-from-right { animation-name: tvx-slide-in-from-right; }

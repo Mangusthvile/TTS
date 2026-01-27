@@ -1,6 +1,7 @@
 import React, { ErrorInfo, ReactNode } from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import "./styles.css";
 import { AlertTriangle, RefreshCw, ClipboardCopy, Loader2 } from "lucide-react";
 import { installGlobalTraceHandlers } from "./utils/trace";
 import { initStorage } from "./services/storageSingleton";
