@@ -1211,6 +1211,18 @@ const App: React.FC = () => {
       await performFullDriveSync(manual);
   };
 
+  const handleReconnectDrive = useCallback(async () => {
+    try {
+      await ensureValidToken(true);
+      if (stateRef.current.driveRootFolderId) {
+        await handleSync(true);
+      }
+      pushNotice({ message: 'Drive reconnected.', type: 'success' });
+    } catch (e: any) {
+      pushNotice({ message: e?.message || 'Reconnect failed', type: 'error' });
+    }
+  }, [handleSync, pushNotice]);
+
   const handleRunMigration = () => pushNotice({ message: "Not implemented", type: 'info', ms: 0 });
   
   const handleScanAndRebuild = useCallback(async () => {

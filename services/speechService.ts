@@ -842,7 +842,7 @@ class SpeechController {
       if (this.audio.currentTime === 0 && this.lastKnownTime > 0) {
         this.audio.currentTime = this.lastKnownTime;
       }
-      this.adapter.play().catch(e => traceError('resume:error', e));
+      Promise.resolve(this.adapter.play()).catch((err: unknown) => traceError('resume:error', err));
       this.commitLocalProgress(false, "resume(method)");
     }
     safeSpeechResume();
