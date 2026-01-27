@@ -964,14 +964,39 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       }
 
       // 2) Generate missing audio (when no legacy audio candidate)
-      for (const chapterId of plan.generationIds) {
-        if (abortFixRef.current) break;
-        const ch = chaptersById.get(chapterId);
-        if (!ch) { bump(); continue; }
-        setFixLog(prev => [...prev, `Generating missing audio: ${ch.title}`]);
-        const success = await generateAudio(ch);
-        if (!success) errorCount++;
-        bump();
+      if (plan.generationIds.length && isMobileInterface) {
+        setFixLog(prev => [...prev, `Queued background audio job (${plan.generationIds.length} chapters)`]);
+        try {
+          const voiceId =
+            book.settings.defaultVoiceId ||
+            book.settings.selectedVoiceName ||
+            "en-US-Standard-C";
+          await enqueueGenerateAudio(
+            {
+              bookId: book.id,
+              chapterIds: plan.generationIds,
+              voice: { id: voiceId },
+              settings: {
+                playbackSpeed: book.settings.useBookSettings ? (book.settings.playbackSpeed ?? 1.0) : 1.0
+              }
+            },
+            uiMode
+          );
+        } catch (e: any) {
+          errorCount++;
+          setFixLog(prev => [...prev, `Failed to queue background audio job: ${String(e?.message ?? e)}`]);
+        }
+        for (let i = 0; i < plan.generationIds.length; i++) bump();
+      } else {
+        for (const chapterId of plan.generationIds) {
+          if (abortFixRef.current) break;
+          const ch = chaptersById.get(chapterId);
+          if (!ch) { bump(); continue; }
+          setFixLog(prev => [...prev, `Generating missing audio: ${ch.title}`]);
+          const success = await generateAudio(ch);
+          if (!success) errorCount++;
+          bump();
+        }
       }
 
       // 3) Cleanup (only when safeToCleanup)
