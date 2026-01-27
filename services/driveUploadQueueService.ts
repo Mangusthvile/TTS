@@ -24,6 +24,10 @@ export async function enqueueUploadEntry(item: DriveUploadQueuedItem): Promise<b
 }
 
 export async function enqueueChapterUpload(bookId: string, chapterId: string, localPath: string): Promise<boolean> {
+  const existing = await listQueuedUploads();
+  if (existing.some((item) => item.bookId === bookId && item.chapterId === chapterId)) {
+    return true;
+  }
   const now = Date.now();
   const id = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
     ? crypto.randomUUID()

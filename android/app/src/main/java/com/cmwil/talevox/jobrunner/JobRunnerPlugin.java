@@ -15,7 +15,12 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
 import androidx.work.Data;
+import androidx.work.Constraints;
+import androidx.work.NetworkType;
 import androidx.work.OneTimeWorkRequest;
+import androidx.work.PeriodicWorkRequest;
+import androidx.work.ExistingPeriodicWorkPolicy;
+import androidx.work.ExistingWorkPolicy;
 import androidx.work.OutOfQuotaPolicy;
 import androidx.work.WorkManager;
 
@@ -34,6 +39,7 @@ public class JobRunnerPlugin extends Plugin {
     public void load() {
         super.load();
         instance = this;
+        schedulePeriodicUploadQueue();
     }
 
     public static void emitJobProgress(JSObject payload) {
@@ -59,6 +65,28 @@ public class JobRunnerPlugin extends Plugin {
             "payloadJson TEXT," +
             "progressJson TEXT," +
             "error TEXT," +
+            "createdAt INTEGER," +
+            "updatedAt INTEGER" +
+            ")"
+        );
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS chapter_audio_files (" +
+            "chapterId TEXT PRIMARY KEY," +
+            "localPath TEXT," +
+            "sizeBytes INTEGER," +
+            "updatedAt INTEGER" +
+            ")"
+        );
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS drive_upload_queue (" +
+            "id TEXT PRIMARY KEY," +
+            "chapterId TEXT," +
+            "bookId TEXT," +
+            "localPath TEXT," +
+            "status TEXT," +
+            "attempts INTEGER," +
+            "nextAttemptAt INTEGER," +
+            "lastError TEXT," +
             "createdAt INTEGER," +
             "updatedAt INTEGER" +
             ")"
@@ -159,6 +187,12 @@ public class JobRunnerPlugin extends Plugin {
         JSObject ret = new JSObject();
         ret.put("jobId", jobId);
         call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void kickUploadQueue(PluginCall call) {
+        scheduleUploadQueueOnce();
+        call.resolve();
     }
 
     @PluginMethod
@@ -369,6 +403,33 @@ public class JobRunnerPlugin extends Plugin {
         values.put("error", error);
         values.put("updatedAt", System.currentTimeMillis());
         db.update("jobs", values, "jobId = ?", new String[]{jobId});
+    }
+
+    private void scheduleUploadQueueOnce() {
+        Constraints constraints = new Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .build();
+
+        OneTimeWorkRequest request =
+            new OneTimeWorkRequest.Builder(DriveUploadWorker.class)
+                .setConstraints(constraints)
+                .build();
+        WorkManager.getInstance(getContext())
+            .enqueueUniqueWork("talevox_drive_upload_queue_once", ExistingWorkPolicy.KEEP, request);
+    }
+
+    private void schedulePeriodicUploadQueue() {
+        try {
+            Constraints constraints = new Constraints.Builder()
+                .setRequiredNetworkType(NetworkType.CONNECTED)
+                .build();
+            PeriodicWorkRequest request =
+                new PeriodicWorkRequest.Builder(DriveUploadWorker.class, 15, java.util.concurrent.TimeUnit.MINUTES)
+                    .setConstraints(constraints)
+                    .build();
+            WorkManager.getInstance(getContext())
+                .enqueueUniquePeriodicWork("talevox_drive_upload_queue_periodic", ExistingPeriodicWorkPolicy.KEEP, request);
+        } catch (Exception ignored) {}
     }
 
     private void updateJobProgress(String jobId, String status, JSONObject progressJson, String error) {

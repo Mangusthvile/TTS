@@ -28,6 +28,7 @@ export interface JobRunnerPlugin {
   clearJobs: (options: { statuses: string[] }) => Promise<void>;
   getJob: (options: { jobId: string }) => Promise<{ job: JobRecord | null }>;
   listJobs: () => Promise<{ jobs: JobRecord[] }>;
+  kickUploadQueue: () => Promise<void>;
   addListener: (
     eventName: "jobProgress" | "jobFinished",
     listenerFunc: (event: any) => void

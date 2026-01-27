@@ -85,4 +85,8 @@ export class JobRunnerWeb extends WebPlugin implements JobRunnerPlugin {
     const jobs = await listJobs();
     return { jobs };
   }
+
+  async kickUploadQueue(): Promise<void> {
+    return;
+  }
 }

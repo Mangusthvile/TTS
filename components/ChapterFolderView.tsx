@@ -1252,6 +1252,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                       <RotateCcw className="w-4 h-4" />
                   </button>
                   <button onClick={(e) => { e.stopPropagation(); setRememberAsDefault(true); setShowVoiceModal({ chapterId: c.id }); }} className="p-2 opacity-40 hover:opacity-100" title="Regenerate Audio"><Headphones className="w-4 h-4" /></button>
+                  <button onClick={(e) => { e.stopPropagation(); onQueueChapterUpload(c.id); }} className="p-2 opacity-40 hover:opacity-100 hover:text-emerald-500" title="Upload Chapter">
+                    <Cloud className="w-4 h-4" />
+                  </button>
                   <button onClick={(e) => { e.stopPropagation(); setEditingChapterId(c.id); setTempTitle(c.title); }} className="p-2 opacity-40 hover:opacity-100" title="Edit Title"><Edit2 className="w-4 h-4" /></button>
                   <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete?')) onDeleteChapter(c.id); }} className="p-2 opacity-40 hover:opacity-100 hover:text-red-500" title="Delete"><Trash2 className="w-4 h-4" /></button>
                 </div>

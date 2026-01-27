@@ -28,6 +28,8 @@ import { computeMobileMode } from './utils/platform';
 import { JobRunner } from './src/plugins/jobRunner';
 import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService, deleteJob as deleteJobService, clearJobs as clearJobsService } from './services/jobRunnerService';
 import { countQueuedUploads, listQueuedUploads, enqueueChapterUpload, type DriveUploadQueuedItem } from './services/driveUploadQueueService';
+import { getChapterAudioPath } from './services/chapterAudioStore';
+import { Filesystem, Directory } from '@capacitor/filesystem';
 
 const STATE_FILENAME = 'talevox_state_v2917.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
@@ -1149,34 +1151,145 @@ const App: React.FC = () => {
     }
   }, [refreshJobs, state.readerSettings.uiMode]);
 
+  const base64ToBlob = (base64: string, mimeType: string) => {
+    const cleaned = base64.replace(/^data:.*;base64,/, "");
+    const byteChars = atob(cleaned);
+    const byteNumbers = new Array(byteChars.length);
+    for (let i = 0; i < byteChars.length; i++) {
+      byteNumbers[i] = byteChars.charCodeAt(i);
+    }
+    const byteArray = new Uint8Array(byteNumbers);
+    return new Blob([byteArray], { type: mimeType });
+  };
+
+  const readLocalAudioBlob = useCallback(async (chapterId: string) => {
+    const record = await getChapterAudioPath(chapterId);
+    if (!record?.localPath) return null;
+    try {
+      const res = await Filesystem.readFile({ path: record.localPath });
+      if (res.data instanceof Blob) return res.data;
+      return base64ToBlob(res.data, 'audio/mpeg');
+    } catch {
+      try {
+        const res = await Filesystem.readFile({ path: `talevox/audio/${chapterId}.mp3`, directory: Directory.Data });
+        if (res.data instanceof Blob) return res.data;
+        return base64ToBlob(res.data, 'audio/mpeg');
+      } catch {
+        return null;
+      }
+    }
+  }, []);
+
+  const resolveLocalPathForUpload = useCallback(async (chapterId: string, fallbackPath?: string) => {
+    const record = await getChapterAudioPath(chapterId);
+    if (record?.localPath) return record.localPath;
+    if (fallbackPath && (fallbackPath.startsWith("/") || fallbackPath.startsWith("file://"))) {
+      return fallbackPath;
+    }
+    return null;
+  }, []);
+
+  const kickUploadQueue = useCallback(async () => {
+    try {
+      if (JobRunner && (JobRunner as any).kickUploadQueue) {
+        await (JobRunner as any).kickUploadQueue();
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const uploadChapterNow = useCallback(async (bookId: string, chapterId: string) => {
+    const book = state.books.find((b) => b.id === bookId);
+    if (!book || !book.driveFolderId) throw new Error("Drive folder not set");
+    const chapter = book.chapters.find((c) => c.id === chapterId);
+    if (!chapter) throw new Error("Chapter not found");
+    const blob = await readLocalAudioBlob(chapterId);
+    if (!blob) throw new Error("Local audio not found");
+    const filename = buildMp3Name(bookId, chapterId);
+    const cloudAudioFileId = await uploadToDrive(
+      book.driveFolderId,
+      filename,
+      blob,
+      chapter.cloudAudioFileId,
+      "audio/mpeg"
+    );
+    const updated: Chapter = {
+      ...chapter,
+      cloudAudioFileId,
+      audioDriveId: cloudAudioFileId,
+      audioStatus: AudioStatus.READY,
+      updatedAt: Date.now(),
+    };
+    await libraryUpsertChapterMeta(bookId, updated);
+    setState((prev) => ({
+      ...prev,
+      books: prev.books.map((b) =>
+        b.id === bookId
+          ? { ...b, chapters: b.chapters.map((c) => (c.id === chapterId ? updated : c)) }
+          : b
+      ),
+    }));
+    return true;
+  }, [readLocalAudioBlob, state.books]);
+
   const handleQueueChapterUpload = useCallback(async (chapterId: string) => {
     const book = state.books.find((b) => b.id === state.activeBookId);
     if (!book) return;
     const chapter = book.chapters.find((c) => c.id === chapterId);
     if (!chapter) return;
-    const localPath = chapter.audioSignature || `local:${chapter.id}`;
-    const ok = await enqueueChapterUpload(book.id, chapterId, localPath);
-    if (ok) {
-      pushNotice({ message: "Chapter upload queued", type: "info" });
+    try {
+      await uploadChapterNow(book.id, chapterId);
+      pushNotice({ message: "Chapter uploaded", type: "success" });
       await refreshUploadQueueCount();
       await refreshUploadQueueList();
-    } else {
-      pushNotice({ message: "Unable to queue upload", type: "error" });
+      return;
+    } catch (e: any) {
+      const localPath = await resolveLocalPathForUpload(chapterId, chapter.audioSignature);
+      if (!localPath) {
+        pushNotice({ message: "Local audio not found for upload", type: "error" });
+        return;
+      }
+      const ok = await enqueueChapterUpload(book.id, chapterId, localPath);
+      if (ok) {
+        pushNotice({ message: "Upload queued (will retry)", type: "info" });
+        await kickUploadQueue();
+        await refreshUploadQueueCount();
+        await refreshUploadQueueList();
+      } else {
+        pushNotice({ message: `Upload failed: ${String(e?.message ?? e)}`, type: "error" });
+      }
     }
-  }, [enqueueChapterUpload, state.activeBookId, state.books, pushNotice, refreshUploadQueueCount, refreshUploadQueueList]);
+  }, [enqueueChapterUpload, state.activeBookId, state.books, pushNotice, refreshUploadQueueCount, refreshUploadQueueList, resolveLocalPathForUpload, uploadChapterNow, kickUploadQueue]);
 
   const handleUploadAllChapters = useCallback(async () => {
     const book = state.books.find((b) => b.id === state.activeBookId);
     if (!book) return;
-    const promises = book.chapters.map((ch) =>
-      enqueueChapterUpload(book.id, ch.id, ch.audioSignature || `local:${ch.id}`)
-    );
-    const results = await Promise.all(promises);
-    const queued = results.filter(Boolean).length;
-    pushNotice({ message: `Queued ${queued} chapter uploads`, type: "success" });
+    let queued = 0;
+    let uploaded = 0;
+    for (const ch of book.chapters) {
+      try {
+        await uploadChapterNow(book.id, ch.id);
+        uploaded += 1;
+      } catch (e: any) {
+        const localPath = await resolveLocalPathForUpload(ch.id, ch.audioSignature);
+        if (!localPath) continue;
+        const ok = await enqueueChapterUpload(book.id, ch.id, localPath);
+        if (ok) queued += 1;
+      }
+    }
+    if (uploaded) {
+      pushNotice({ message: `Uploaded ${uploaded} chapters`, type: "success" });
+    }
+    if (queued) {
+      pushNotice({ message: `Queued ${queued} uploads (will retry)`, type: "info" });
+    }
+    if (queued) {
+      await kickUploadQueue();
+    }
     await refreshUploadQueueCount();
     await refreshUploadQueueList();
-  }, [enqueueChapterUpload, state.activeBookId, state.books, pushNotice, refreshUploadQueueCount, refreshUploadQueueList]);
+  }, [enqueueChapterUpload, state.activeBookId, state.books, pushNotice, refreshUploadQueueCount, refreshUploadQueueList, resolveLocalPathForUpload, uploadChapterNow, kickUploadQueue]);
 
   const handleToggleUploadQueue = useCallback(() => {
     setShowUploadQueue((prev) => !prev);
