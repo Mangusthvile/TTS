@@ -36,7 +36,6 @@ interface SettingsProps {
   onRefreshJobs?: () => void;
   onCancelJob?: (jobId: string) => void;
   onRetryJob?: (jobId: string) => void;
-  onForceStartJob?: (jobId: string) => void;
   onDeleteJob?: (jobId: string) => void;
   onClearJobs?: (statuses: string[]) => void;
 }
@@ -54,7 +53,6 @@ const Settings: React.FC<SettingsProps> = ({
   onRefreshJobs,
   onCancelJob,
   onRetryJob,
-  onForceStartJob,
   onDeleteJob,
   onClearJobs
 }) => {
@@ -478,23 +476,11 @@ const Settings: React.FC<SettingsProps> = ({
                 Queued: {queuedJobs.length}
               </div>
             </div>
+            <p className="text-[10px] opacity-50 mt-3">
+              Background jobs are paused right now; use Remove or Clear Finished to clean old entries.
+            </p>
 
             <div className="mt-4 flex flex-wrap gap-2">
-              <button
-                disabled={jobBusy || queuedJobs.length === 0 || !onForceStartJob}
-                onClick={async () => {
-                  if (!onForceStartJob) return;
-                  setJobBusy(true);
-                  for (const job of queuedJobs) {
-                    try { await onForceStartJob(job.jobId); } catch {}
-                  }
-                  setJobBusy(false);
-                  onRefreshJobs && onRefreshJobs();
-                }}
-                className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${queuedJobs.length ? 'bg-indigo-600 text-white' : 'bg-black/10 text-black/40'} ${jobBusy ? 'opacity-60' : ''}`}
-              >
-                Force Start Queued
-              </button>
               <button
                 disabled={jobBusy || !onRefreshJobs}
                 onClick={onRefreshJobs}
@@ -528,8 +514,7 @@ const Settings: React.FC<SettingsProps> = ({
                 const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
                 const canCancel = job.status === "queued" || job.status === "running" || job.status === "paused";
                 const canRetry = job.status === "failed" || job.status === "canceled";
-                const canForceStart = job.status === "queued";
-                const canRemove = job.status === "failed" || job.status === "canceled" || job.status === "completed";
+                const canRemove = job.status !== "running" && job.status !== "paused";
                 return (
                   <div key={job.jobId} className={`p-3 rounded-xl border ${isDark ? 'border-slate-800 bg-slate-950/40' : 'border-black/5 bg-white'}`}>
                     <div className="flex items-center justify-between gap-3">
@@ -547,9 +532,6 @@ const Settings: React.FC<SettingsProps> = ({
                         )}
                         {canRetry && onRetryJob && (
                           <button onClick={() => onRetryJob(job.jobId)} className="px-2 py-1 rounded-lg bg-indigo-500/10 text-indigo-600 text-[9px] font-black uppercase">Retry</button>
-                        )}
-                        {canForceStart && onForceStartJob && (
-                          <button onClick={() => onForceStartJob(job.jobId)} className="px-2 py-1 rounded-lg bg-indigo-500/10 text-indigo-600 text-[9px] font-black uppercase">Force Start</button>
                         )}
                         {canRemove && onDeleteJob && (
                           <button onClick={() => onDeleteJob(job.jobId)} className="px-2 py-1 rounded-lg bg-black/10 text-black text-[9px] font-black uppercase">Remove</button>

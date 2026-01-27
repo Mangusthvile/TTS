@@ -25,7 +25,7 @@ import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library 
 import { trace, traceError } from './utils/trace';
 import { computeMobileMode } from './utils/platform';
 import { JobRunner } from './src/plugins/jobRunner';
-import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService, forceStartJob as forceStartJobService, deleteJob as deleteJobService, clearJobs as clearJobsService } from './services/jobRunnerService';
+import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService, deleteJob as deleteJobService, clearJobs as clearJobsService } from './services/jobRunnerService';
 
 const STATE_FILENAME = 'talevox_state_v2917.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
@@ -1079,15 +1079,6 @@ const App: React.FC = () => {
     }
   }, [refreshJobs, state.readerSettings.uiMode]);
 
-  const handleForceStartJob = useCallback(async (jobId: string) => {
-    try {
-      await forceStartJobService(jobId, state.readerSettings.uiMode);
-      await refreshJobs();
-    } catch {
-      // ignore
-    }
-  }, [refreshJobs, state.readerSettings.uiMode]);
-
   const handleDeleteJob = useCallback(async (jobId: string) => {
     try {
       await deleteJobService(jobId, state.readerSettings.uiMode);
@@ -1770,7 +1761,6 @@ const App: React.FC = () => {
               onRefreshJobs={refreshJobs}
               onCancelJob={handleCancelJob}
               onRetryJob={handleRetryJob}
-              onForceStartJob={handleForceStartJob}
               onDeleteJob={handleDeleteJob}
               onClearJobs={handleClearJobs}
             />

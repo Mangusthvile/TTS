@@ -174,6 +174,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const chapters = useMemo(() => [...(book.chapters || [])].sort((a, b) => a.index - b.index), [book.chapters]);
   const isMobileInterface = computeMobileMode(uiMode);
+  const enableBackgroundJobs = false;
   const missingAudioIdsForBook = useMemo(() => {
     return chapters
       .filter((c) => !(c.cloudAudioFileId || (c as any).audioDriveId || c.audioStatus === AudioStatus.READY))
@@ -804,7 +805,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       return;
     }
 
-    if (isMobileInterface) {
+    if (isMobileInterface && enableBackgroundJobs) {
       const voiceId =
         book.settings.defaultVoiceId ||
         book.settings.selectedVoiceName ||
@@ -977,7 +978,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         return;
       }
 
-      if (isMobileInterface) {
+      if (isMobileInterface && enableBackgroundJobs) {
         setFixLog(prev => [...prev, `Queued background fix job`]);
         try {
           const res = await enqueueFixIntegrity(
@@ -1390,7 +1391,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                   onClick={handleGenerateMissingAudioBackground}
                   className="px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest"
                 >
-                  {isMobileInterface ? "Generate Missing Audio (BG)" : "Generate Missing Audio"}
+                  {isMobileInterface && enableBackgroundJobs ? "Generate Missing Audio (BG)" : "Generate Missing Audio"}
                 </button>
                 <button
                   onClick={handleInitManifests}
@@ -1406,7 +1407,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                     }}
                     className="px-4 py-2 rounded-xl bg-orange-500 text-white text-[10px] font-black uppercase tracking-widest"
                   >
-                    Fix Integrity (BG)
+                    {isMobileInterface && enableBackgroundJobs ? "Fix Integrity (BG)" : "Fix Integrity"}
                   </button>
                 )}
               </div>
