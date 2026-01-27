@@ -9,6 +9,7 @@ import Extractor from './components/Extractor';
 import ChapterFolderView from './components/ChapterFolderView';
 import ChapterSidebar from './components/ChapterSidebar';
 import { speechController, applyRules, PROGRESS_STORE_V4 } from './services/speechService';
+import type { PlaybackItem } from './services/playbackAdapter';
 import { reflowLineBreaks } from './services/textFormat';
 import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, openFolderPicker, listFilesSortedByModified, resolveFolderIdByName, listSaveFileCandidates, createDriveFolder, listFoldersInFolder, findTaleVoxRoots } from './services/driveService';
 import { initDriveAuth, getValidDriveToken, clearStoredToken, isTokenValid, ensureValidToken } from './services/driveAuth';
@@ -835,6 +836,35 @@ const App: React.FC = () => {
         const url = URL.createObjectURL(audioBlob);
         speechController.setContext({ bookId: book.id, chapterId: chapter.id });
         speechController.updateMetadata(textToSpeak.length, chapter.audioIntroDurSec || 5, chapter.audioChunkMap || []);
+
+        let mobileQueue: PlaybackItem[] | undefined;
+        if (effectiveMobileMode) {
+            const sorted = [...book.chapters].sort((a, b) => a.index - b.index);
+            const currentIdx = sorted.findIndex(c => c.id === chapter.id);
+            const queueItems: PlaybackItem[] = [
+              { id: chapter.id, url, title: chapter.title }
+            ];
+            const maxQueue = 5;
+            for (let i = currentIdx + 1; i < sorted.length && queueItems.length < maxQueue; i++) {
+              const next = sorted[i];
+              let nextBlob: Blob | null = null;
+              if (next.audioSignature) {
+                nextBlob = await getAudioFromCache(next.audioSignature);
+              }
+              if (!nextBlob && next.cloudAudioFileId && isAuthorized) {
+                try {
+                  nextBlob = await fetchDriveBinary(next.cloudAudioFileId);
+                } catch (e) {
+                  nextBlob = null;
+                }
+              }
+              if (nextBlob && nextBlob.size > 0) {
+                const nextUrl = URL.createObjectURL(nextBlob);
+                queueItems.push({ id: next.id, url: nextUrl, title: next.title });
+              }
+            }
+            mobileQueue = queueItems.length > 0 ? queueItems : undefined;
+        }
         
         let startSec = 0;
         if (!chapter.isCompleted) {
@@ -872,7 +902,10 @@ const App: React.FC = () => {
                        isInIntroRef.current = true; 
                     }
                 }
-            }
+            },
+            undefined,
+            mobileQueue,
+            0
         );
 
         if (session !== chapterSessionRef.current) return;
@@ -1631,7 +1664,11 @@ const App: React.FC = () => {
         <Player 
           isPlaying={isPlaying} onPlay={() => handleManualPlay()} onPause={handleManualPause} onStop={handleManualStop}
           onNext={() => handleNextChapterRef.current(false)} onPrev={handlePrevChapter} onSeek={handleSeekByDelta}
-          speed={state.playbackSpeed} onSpeedChange={s => setState(p => ({ ...p, playbackSpeed: s }))}
+          speed={state.playbackSpeed}
+          onSpeedChange={s => {
+            setState(p => ({ ...p, playbackSpeed: s }));
+            speechController.getPlaybackAdapter().setSpeed(s);
+          }}
           selectedVoice={state.selectedVoiceName || ''} onVoiceChange={() => {}}
           theme={state.theme} onThemeChange={t => setState(p => ({ ...p, theme: t }))}
           progressChars={state.currentOffsetChars} totalLengthChars={activeChapterMetadata?.content?.length || 0} wordCount={activeChapterMetadata?.wordCount || 0}
