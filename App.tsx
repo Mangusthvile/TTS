@@ -27,7 +27,7 @@ import { trace, traceError } from './utils/trace';
 import { computeMobileMode } from './utils/platform';
 import { JobRunner } from './src/plugins/jobRunner';
 import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService, deleteJob as deleteJobService, clearJobs as clearJobsService } from './services/jobRunnerService';
-import { countQueuedUploads, listQueuedUploads, type DriveUploadQueuedItem } from './services/driveUploadQueueService';
+import { countQueuedUploads, listQueuedUploads, enqueueChapterUpload, type DriveUploadQueuedItem } from './services/driveUploadQueueService';
 
 const STATE_FILENAME = 'talevox_state_v2917.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
@@ -1149,6 +1149,35 @@ const App: React.FC = () => {
     }
   }, [refreshJobs, state.readerSettings.uiMode]);
 
+  const handleQueueChapterUpload = useCallback(async (chapterId: string) => {
+    const book = state.books.find((b) => b.id === state.activeBookId);
+    if (!book) return;
+    const chapter = book.chapters.find((c) => c.id === chapterId);
+    if (!chapter) return;
+    const localPath = chapter.audioSignature || `local:${chapter.id}`;
+    const ok = await enqueueChapterUpload(book.id, chapterId, localPath);
+    if (ok) {
+      pushNotice({ message: "Chapter upload queued", type: "info" });
+      await refreshUploadQueueCount();
+      await refreshUploadQueueList();
+    } else {
+      pushNotice({ message: "Unable to queue upload", type: "error" });
+    }
+  }, [enqueueChapterUpload, state.activeBookId, state.books, pushNotice, refreshUploadQueueCount, refreshUploadQueueList]);
+
+  const handleUploadAllChapters = useCallback(async () => {
+    const book = state.books.find((b) => b.id === state.activeBookId);
+    if (!book) return;
+    const promises = book.chapters.map((ch) =>
+      enqueueChapterUpload(book.id, ch.id, ch.audioSignature || `local:${ch.id}`)
+    );
+    const results = await Promise.all(promises);
+    const queued = results.filter(Boolean).length;
+    pushNotice({ message: `Queued ${queued} chapter uploads`, type: "success" });
+    await refreshUploadQueueCount();
+    await refreshUploadQueueList();
+  }, [enqueueChapterUpload, state.activeBookId, state.books, pushNotice, refreshUploadQueueCount, refreshUploadQueueList]);
+
   const handleToggleUploadQueue = useCallback(() => {
     setShowUploadQueue((prev) => !prev);
   }, []);
@@ -1741,6 +1770,8 @@ const App: React.FC = () => {
               }}
               uploadQueueCount={uploadQueueCount}
               onToggleUploadQueue={handleToggleUploadQueue}
+              onUploadAllChapters={handleUploadAllChapters}
+              onQueueChapterUpload={handleQueueChapterUpload}
             />
           )}
 

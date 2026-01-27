@@ -55,6 +55,8 @@ interface ChapterFolderViewProps {
   onToggleFavorite: (chapterId: string) => void;
   uploadQueueCount: number;
   onToggleUploadQueue: () => void;
+  onUploadAllChapters: () => void;
+  onQueueChapterUpload: (chapterId: string) => void;
   onUpdateChapterTitle: (chapterId: string, newTitle: string) => void;
   onDeleteChapter: (chapterId: string) => void;
   onUpdateChapter: (chapter: Chapter) => void;
@@ -87,6 +89,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   onAddChapter,
   onOpenChapter,
   onToggleFavorite,
+  uploadQueueCount,
+  onToggleUploadQueue,
+  onUploadAllChapters,
+  onQueueChapterUpload,
   onUpdateChapterTitle,
   onDeleteChapter,
   onUpdateChapter,
@@ -98,8 +104,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   hasMoreChapters,
   isLoadingMoreChapters,
   onAppendChapters,
-  uploadQueueCount,
-  onToggleUploadQueue
 }) => {
   const { driveFolderId } = book;
   const VIEW_MODE_KEY = `talevox:viewMode:${book.id}`;
@@ -176,6 +180,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const textSecondary = isDark ? 'text-slate-400' : isSepia ? 'text-[#3c2f25]/70' : 'text-slate-600';
   const subtleText = textSecondary;
   const stickyHeaderBg = isDark ? 'bg-slate-900/90' : isSepia ? 'bg-[#f4ecd8]/90' : 'bg-white/90';
+  const accentButtonClass = `px-4 py-2 rounded-xl font-black uppercase tracking-widest text-[10px] transition-colors ${isDark ? 'bg-white/10 text-white border border-white/20 hover:bg-white/20' : 'bg-black/10 text-black border border-black/10 hover:bg-black/20'}`;
+  const primaryActionClass = `px-4 py-2 rounded-xl font-black uppercase tracking-widest text-[10px] transition-colors ${isDark ? 'bg-indigo-500 text-white shadow-lg hover:bg-indigo-400' : 'bg-indigo-600 text-white shadow-lg hover:bg-indigo-500'}`;
 
   const chapters = useMemo(() => [...(book.chapters || [])].sort((a, b) => a.index - b.index), [book.chapters]);
   const isMobileInterface = computeMobileMode(uiMode);
@@ -1163,13 +1169,26 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                   setShowVoiceModal({ chapterId: ch.id });
                 }}
                 className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${
-                  isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'
+                  isDark ? 'bg-white/5 text-white hover:bg-white/10' : 'bg-black/5 text-black hover:bg-black/10'
                 } ${synthesizingId === ch.id ? 'opacity-60' : ''}`}
               >
                 <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg">
                   {synthesizingId === ch.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Headphones className="w-4 h-4" />}
                 </div>
                 {ch.cloudAudioFileId || ch.hasCachedAudio ? 'Regenerate Audio' : 'Generate Audio'}
+              </button>
+
+              <button
+                onClick={() => {
+                  setMobileMenuId(null);
+                  onQueueChapterUpload(ch.id);
+                }}
+                className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'bg-white/5 text-white hover:bg-white/10' : 'bg-black/5 text-black hover:bg-black/10'}`}
+              >
+                <div className="p-2 bg-emerald-600/10 text-emerald-500 rounded-lg">
+                  <Cloud className="w-4 h-4" />
+                </div>
+                Upload Chapter
               </button>
 
               <button onClick={() => { setMobileMenuId(null); onResetChapterProgress(book.id, ch.id); }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}>
@@ -1368,14 +1387,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => coverInputRef.current?.click()}
-                  className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-[10px] font-black uppercase tracking-widest"
+                  className={`${primaryActionClass}`}
                 >
                   {book.coverImage ? "Change Cover" : "Add Cover"}
                 </button>
                 {book.coverImage && (
                   <button
                     onClick={() => onUpdateBook({ ...book, coverImage: undefined, updatedAt: Date.now() })}
-                    className="px-4 py-2 rounded-xl bg-black/5 text-black text-[10px] font-black uppercase tracking-widest"
+                    className={`${accentButtonClass}`}
                   >
                     Remove Cover
                   </button>
@@ -1383,34 +1402,54 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               </div>
             </div>
 
-            <div className="space-y-3">
-              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Background Tools</div>
-              <div className="flex flex-wrap gap-2">
+          <div className="space-y-3">
+            <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Background Tools</div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={handleGenerateMissingAudioBackground}
+                className="px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest"
+              >
+                {isMobileInterface && enableBackgroundJobs ? "Generate Missing Audio (BG)" : "Generate Missing Audio"}
+              </button>
+              <button
+                onClick={handleInitManifests}
+                className="px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest"
+              >
+                Init Manifests
+              </button>
+              {isMobileInterface && (
                 <button
-                  onClick={handleGenerateMissingAudioBackground}
-                  className="px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest"
+                  onClick={() => {
+                    setShowBookSettings(false);
+                    setShowFixModal(true);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-orange-500 text-white text-[10px] font-black uppercase tracking-widest"
                 >
-                  {isMobileInterface && enableBackgroundJobs ? "Generate Missing Audio (BG)" : "Generate Missing Audio"}
+                  {isMobileInterface && enableBackgroundJobs ? "Fix Integrity (BG)" : "Fix Integrity"}
                 </button>
-                <button
-                  onClick={handleInitManifests}
-                  className="px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest"
-                >
-                  Init Manifests
-                </button>
-                {isMobileInterface && (
-                  <button
-                    onClick={() => {
-                      setShowBookSettings(false);
-                      setShowFixModal(true);
-                    }}
-                    className="px-4 py-2 rounded-xl bg-orange-500 text-white text-[10px] font-black uppercase tracking-widest"
-                  >
-                    {isMobileInterface && enableBackgroundJobs ? "Fix Integrity (BG)" : "Fix Integrity"}
-                  </button>
-                )}
-              </div>
+              )}
             </div>
+          </div>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-black uppercase tracking-widest opacity-60">Uploads</span>
+              <span className="text-[10px] font-black tracking-widest text-indigo-400">{uploadQueueCount} queued</span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={onToggleUploadQueue}
+                className={`${accentButtonClass} px-3`}
+              >
+                View queue
+              </button>
+              <button
+                onClick={onUploadAllChapters}
+                className={`px-4 py-2 rounded-xl font-black uppercase tracking-widest text-[10px] transition-colors ${isDark ? 'bg-indigo-500 text-white hover:bg-indigo-400' : 'bg-indigo-600 text-white hover:bg-indigo-500'} shadow-lg`}
+              >
+                Upload all chapters
+              </button>
+            </div>
+          </div>
 
             <div className="space-y-3">
               <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Danger Zone</div>
@@ -1524,12 +1563,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                   <p className={`font-bold opacity-60 uppercase tracking-widest transition-all duration-300 ${isHeaderExpanded ? 'text-[10px] sm:text-xs mt-1' : 'text-[8px] sm:text-xs'}`}>{book.chapterCount ?? book.chapters.length} Chapters {isHeaderExpanded && `• ${book.backend} backend`}</p>
                 </div>
               </div>
-              {isMobileInterface && (
-                <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest">
-                  <span className="text-indigo-400">Uploads queued: {uploadQueueCount}</span>
-                  <button onClick={onToggleUploadQueue} className="text-[10px] text-indigo-500 hover:text-indigo-300">View queue</button>
-                </div>
-              )}
               <button onClick={() => setShowBookSettings(true)} className="p-2 rounded-lg bg-black/5 hover:bg-black/10">
                 <GearIcon className="w-5 h-5" />
               </button>
