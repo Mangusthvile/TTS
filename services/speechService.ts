@@ -2,6 +2,9 @@ import { Rule, RuleType, AudioChunkMetadata, PlaybackMetadata } from '../types';
 import { getDriveAudioObjectUrl, revokeObjectUrl } from "../services/driveService";
 import { trace, traceError } from '../utils/trace';
 import { isMobileMode } from '../utils/platform';
+import { Capacitor } from '@capacitor/core';
+import { DesktopPlaybackAdapter, MobilePlaybackAdapter, PlaybackAdapter, PlaybackItem } from './playbackAdapter';
+import { NativePlayer } from './nativePlayer';
 
 // Phase 2 local-first progress (SQLite-backed on Android via StorageDriver)
 import { commitProgressLocal, loadProgressLocal } from "../services/progressStore";
@@ -56,6 +59,7 @@ export function applyRules(text: string, rules: Rule[]): string {
 }
 
 class SpeechController {
+  private adapter: PlaybackAdapter;
   private audio: HTMLAudioElement;
   private currentBlobUrl: string | null = null;
   private currentTextLength: number = 0;
@@ -73,6 +77,7 @@ class SpeechController {
   private sessionToken: number = 0;
   private context: { bookId: string; chapterId: string } | null = null;
   private audioEventsBound = false;
+  private adapterUnsubscribers: Array<() => void> = [];
 
   // Seek coordination
   private seekNonce = 0;
@@ -95,13 +100,27 @@ class SpeechController {
   private lifecycleBound = false;
 
   constructor() {
-    this.audio = new Audio();
+    const desktopAdapter = new DesktopPlaybackAdapter();
+    this.adapter = desktopAdapter;
+    this.audio = desktopAdapter.getAudioElement();
     this.audio.volume = 1.0;
-    this.audio.preload = 'auto';
     this.isMobileOptimized = isMobileMode();
 
     this.setupAudioListeners();
     this.bindLifecycleListeners();
+    this.bindAdapterListeners();
+  }
+
+  public setPlaybackAdapter(adapter: PlaybackAdapter) {
+    this.adapter = adapter;
+    if (adapter instanceof DesktopPlaybackAdapter) {
+      this.audio = adapter.getAudioElement();
+    }
+    this.bindAdapterListeners();
+  }
+
+  public getPlaybackAdapter() {
+    return this.adapter;
   }
 
   // Update sync strategy on the fly
@@ -109,6 +128,12 @@ class SpeechController {
     if (this.isMobileOptimized === isMobile) return;
     this.isMobileOptimized = isMobile;
     trace('speech:mode_changed', { isMobile });
+
+    if (isMobile && Capacitor.isNativePlatform()) {
+      this.setPlaybackAdapter(new MobilePlaybackAdapter(NativePlayer));
+    } else if (!(this.adapter instanceof DesktopPlaybackAdapter)) {
+      this.setPlaybackAdapter(new DesktopPlaybackAdapter(this.audio));
+    }
 
     if (this.audio.src && !this.audio.paused) {
       this.stopSyncLoop();
@@ -503,7 +528,9 @@ class SpeechController {
     onSync: ((meta: PlaybackMetadata & { completed?: boolean }) => void) | null,
     localUrl?: string,
     onPlayStart?: () => void,
-    ctx?: { bookId: string; chapterId: string } // ✅ Optional: prevents “silent resume failure”
+    ctx?: { bookId: string; chapterId: string }, // ✅ Optional: prevents “silent resume failure”
+    queueItems?: PlaybackItem[],
+    queueStartIndex?: number
   ) {
     // If caller passed context, set it immediately so resume works
     if (ctx) this.setContext(ctx);
@@ -520,10 +547,14 @@ class SpeechController {
     // Flush local progress for previous chapter before we wipe audio
     this.commitLocalProgress(false, "before_load_new_audio");
 
-    this.audio.pause();
-    this.audio.removeAttribute("src");
-    this.audio.src = "";
-    this.audio.load();
+    if (this.adapter instanceof DesktopPlaybackAdapter) {
+      this.audio.pause();
+      this.audio.removeAttribute("src");
+      this.audio.src = "";
+      this.audio.load();
+    } else {
+      this.adapter.stop();
+    }
 
     // Always try to revoke previous object URL safely (no-op for non-blob urls)
     revokeObjectUrl(this.currentBlobUrl);
@@ -559,10 +590,19 @@ class SpeechController {
       }
 
       this.currentBlobUrl = url || null;
-      this.audio.src = url || '';
-      this.audio.load();
+      if (this.adapter instanceof DesktopPlaybackAdapter) {
+        this.audio.src = url || '';
+        this.audio.load();
 
-      await this.waitForEvent(this.audio, 'loadedmetadata', 8000, isCurrentSession);
+        await this.waitForEvent(this.audio, 'loadedmetadata', 8000, isCurrentSession);
+      } else {
+        const queue = queueItems && queueItems.length > 0 ? queueItems : undefined;
+        if (queue) {
+          await this.adapter.loadQueue(queue, queueStartIndex ?? 0);
+        } else {
+          await this.adapter.load({ id: fileId || 'local', url: url || '', title: '' });
+        }
+      }
 
       // ----------------------------
       // RESUME: prefer local SQLite progress if it exists and differs meaningfully
@@ -593,13 +633,19 @@ class SpeechController {
 
       if (resumeTime > 0) {
         trace('audio:seeking', { resumeTime });
-        this.audio.currentTime = resumeTime;
+        if (this.adapter instanceof DesktopPlaybackAdapter) {
+          this.audio.currentTime = resumeTime;
+        } else {
+          await this.adapter.seek(resumeTime * 1000);
+        }
         this.lastKnownTime = resumeTime;
 
         this.updateTargetOffset(resumeTime);
         this.renderedOffset = this.targetOffset;
 
-        await this.waitForEvent(this.audio, 'seeked', 6000, isCurrentSession);
+        if (this.adapter instanceof DesktopPlaybackAdapter) {
+          await this.waitForEvent(this.audio, 'seeked', 6000, isCurrentSession);
+        }
 
         // Persist resumed position locally (so it never snaps back)
         this.commitLocalProgress(false, "resume_seeked");
@@ -617,7 +663,7 @@ class SpeechController {
       }
 
       try {
-        await this.audio.play();
+        await this.adapter.play();
       } catch (e: any) {
         if (e.name === 'NotAllowedError') {
           throw new Error('Playback blocked');
@@ -650,9 +696,10 @@ class SpeechController {
   // ----------------------------
 
   public async safePlay(): Promise<'playing' | 'blocked'> {
-    if (!this.audio.src) throw new Error('No audio source');
+    if (!this.audio.src && this.adapter instanceof DesktopPlaybackAdapter) throw new Error('No audio source');
     try {
-      await this.audio.play();
+      await this.adapter.play();
+      this.adapter.setSpeed(this.requestedSpeed);
       this.applyRequestedSpeed();
       return 'playing';
     } catch (err: any) {
@@ -664,6 +711,13 @@ class SpeechController {
   }
 
   public async seekTo(targetSec: number): Promise<void> {
+    if (!(this.adapter instanceof DesktopPlaybackAdapter)) {
+      await this.adapter.seek(Math.max(0, targetSec * 1000));
+      this.lastKnownTime = targetSec;
+      this.emitSyncTick();
+      this.commitLocalProgress(false, "seekTo");
+      return;
+    }
     const audio = this.audio;
     const nonce = ++this.seekNonce;
 
@@ -710,7 +764,8 @@ class SpeechController {
   }
 
   public getCurrentTime() {
-    return this.audio.currentTime;
+    if (this.adapter instanceof DesktopPlaybackAdapter) return this.audio.currentTime;
+    return this.adapter.getState().currentTime;
   }
 
   public seekToOffset(offset: number) {
@@ -774,7 +829,7 @@ class SpeechController {
   }
 
   pause() {
-    this.audio.pause();
+    this.adapter.pause();
     this.lastKnownTime = this.audio.currentTime || this.lastKnownTime;
     this.emitSyncTick();
     this.commitLocalProgress(false, "pause(method)");
@@ -787,7 +842,7 @@ class SpeechController {
       if (this.audio.currentTime === 0 && this.lastKnownTime > 0) {
         this.audio.currentTime = this.lastKnownTime;
       }
-      this.audio.play().catch(e => traceError('resume:error', e));
+      this.adapter.play().catch(e => traceError('resume:error', e));
       this.commitLocalProgress(false, "resume(method)");
     }
     safeSpeechResume();
@@ -800,10 +855,13 @@ class SpeechController {
     this.sessionToken++;
     this.seekNonce++;
     this.stopSyncLoop();
-    this.audio.pause();
-    this.audio.removeAttribute("src");
-    this.audio.src = "";
-    this.audio.load();
+    this.adapter.stop();
+    if (this.adapter instanceof DesktopPlaybackAdapter) {
+      this.audio.pause();
+      this.audio.removeAttribute("src");
+      this.audio.src = "";
+      this.audio.load();
+    }
 
     revokeObjectUrl(this.currentBlobUrl);
     this.currentBlobUrl = null;
@@ -820,10 +878,13 @@ class SpeechController {
     this.sessionToken++;
     this.seekNonce++;
     this.stopSyncLoop();
-    this.audio.pause();
-    this.audio.src = "";
-    this.audio.removeAttribute("src");
-    this.audio.load();
+    this.adapter.stop();
+    if (this.adapter instanceof DesktopPlaybackAdapter) {
+      this.audio.pause();
+      this.audio.src = "";
+      this.audio.removeAttribute("src");
+      this.audio.load();
+    }
 
     revokeObjectUrl(this.currentBlobUrl);
     this.currentBlobUrl = null;
@@ -833,10 +894,38 @@ class SpeechController {
     safeSpeechCancel();
   }
 
-  setPlaybackRate(rate: number) { this.requestedSpeed = rate; if (this.audio.src) this.applyRequestedSpeed(); }
-  get isPaused() { return this.audio.paused && !isSpeechSpeaking(); }
-  get currentTime() { return this.audio.currentTime; }
-  get duration() { return this.audio.duration; }
+  setPlaybackRate(rate: number) {
+    this.requestedSpeed = rate;
+    this.adapter.setSpeed(rate);
+    if (this.audio.src) this.applyRequestedSpeed();
+  }
+  get isPaused() {
+    if (this.adapter instanceof DesktopPlaybackAdapter) {
+      return this.audio.paused && !isSpeechSpeaking();
+    }
+    return !this.adapter.getState().isPlaying && !isSpeechSpeaking();
+  }
+  get currentTime() {
+    if (this.adapter instanceof DesktopPlaybackAdapter) return this.audio.currentTime;
+    return this.adapter.getState().currentTime;
+  }
+  get duration() {
+    if (this.adapter instanceof DesktopPlaybackAdapter) return this.audio.duration;
+    return this.adapter.getState().duration;
+  }
+
+  private bindAdapterListeners() {
+    this.adapterUnsubscribers.forEach((unsub) => unsub());
+    this.adapterUnsubscribers = [];
+    const onEnded = this.adapter.onEnded(() => {
+      if (this.onEndCallback) this.onEndCallback();
+    });
+    const onState = this.adapter.onState((state) => {
+      this.lastKnownTime = state.currentTime;
+      if (this.syncCallback) this.emitSyncTick();
+    });
+    this.adapterUnsubscribers.push(onEnded, onState);
+  }
 }
 
 export const speechController = new SpeechController();
