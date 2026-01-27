@@ -1,0 +1,55 @@
+import { WebPlugin } from "@capacitor/core";
+import type { JobRecord } from "../../types";
+import type { JobRunnerPayload, JobRunnerPlugin } from "./index";
+import { createJob, updateJob, getJob, listJobs } from "../../../services/jobStore";
+
+function createJobId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return (crypto as any).randomUUID();
+  }
+  return `job_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+export class JobRunnerWeb extends WebPlugin implements JobRunnerPlugin {
+  async enqueueGenerateAudio(options: { payload: JobRunnerPayload }): Promise<{ jobId: string }> {
+    const jobId = createJobId();
+    const now = Date.now();
+    const total = options.payload.chapterIds?.length ?? 0;
+
+    const job: JobRecord = {
+      jobId,
+      type: "generateAudio",
+      status: "queued",
+      payloadJson: options.payload,
+      progressJson: { total, completed: 0 },
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await createJob(job);
+    return { jobId };
+  }
+
+  async cancelJob(options: { jobId: string }): Promise<void> {
+    await updateJob(options.jobId, { status: "canceled", updatedAt: Date.now() });
+  }
+
+  async retryJob(options: { jobId: string }): Promise<{ jobId: string }> {
+    await updateJob(options.jobId, {
+      status: "queued",
+      error: undefined,
+      updatedAt: Date.now(),
+    });
+    return { jobId: options.jobId };
+  }
+
+  async getJob(options: { jobId: string }): Promise<{ job: JobRecord | null }> {
+    const job = await getJob(options.jobId);
+    return { job };
+  }
+
+  async listJobs(): Promise<{ jobs: JobRecord[] }> {
+    const jobs = await listJobs();
+    return { jobs };
+  }
+}

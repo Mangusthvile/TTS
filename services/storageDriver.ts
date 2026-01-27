@@ -3,6 +3,7 @@
 
 import { Capacitor } from "@capacitor/core";
 import { SqliteStorageDriver } from "./sqliteStorageDriver";
+import type { JobRecord, JobType } from "../types";
 
 /**
  * Phase 2.2/2.3 — StorageDriver
@@ -80,6 +81,11 @@ export type StorageDriver = {
 
   saveSmallBackupSnapshot(snapshot: Record<string, any>): Promise<SaveResult>;
   loadSmallBackupSnapshot(): Promise<LoadResult<Record<string, any> | null>>;
+
+  createJob(job: JobRecord): Promise<SaveResult>;
+  updateJob(jobId: string, patch: Partial<Omit<JobRecord, "jobId" | "createdAt">>): Promise<SaveResult>;
+  getJob(jobId: string): Promise<LoadResult<JobRecord | null>>;
+  listJobs(type?: JobType): Promise<LoadResult<JobRecord[]>>;
 };
 
 function isNativeCapacitor(): boolean {
@@ -126,6 +132,7 @@ class MemoryStorageDriver implements StorageDriver {
   private authSession: AuthSession | null = null;
   private progress = new Map<string, ChapterProgress>();
   private smallBackup: Record<string, any> | null = null;
+  private jobs = new Map<string, JobRecord>();
 
   async init(): Promise<StorageInitResult> {
     return { driverName: this.name, mode: "memory" };
@@ -194,6 +201,35 @@ class MemoryStorageDriver implements StorageDriver {
   async loadSmallBackupSnapshot(): Promise<LoadResult<Record<string, any> | null>> {
     return { ok: true, where: "memory", value: this.smallBackup };
   }
+
+  async createJob(job: JobRecord): Promise<SaveResult> {
+    this.jobs.set(job.jobId, job);
+    return { ok: true, where: "memory" };
+  }
+
+  async updateJob(jobId: string, patch: Partial<Omit<JobRecord, "jobId" | "createdAt">>): Promise<SaveResult> {
+    const existing = this.jobs.get(jobId);
+    if (!existing) return { ok: false, where: "memory", error: "missing" };
+    const next: JobRecord = {
+      ...existing,
+      ...patch,
+      jobId,
+      createdAt: existing.createdAt,
+      updatedAt: patch.updatedAt ?? Date.now(),
+    };
+    this.jobs.set(jobId, next);
+    return { ok: true, where: "memory" };
+  }
+
+  async getJob(jobId: string): Promise<LoadResult<JobRecord | null>> {
+    return { ok: true, where: "memory", value: this.jobs.get(jobId) ?? null };
+  }
+
+  async listJobs(type?: JobType): Promise<LoadResult<JobRecord[]>> {
+    const all = Array.from(this.jobs.values());
+    const filtered = type ? all.filter((j) => j.type === type) : all;
+    return { ok: true, where: "memory", value: filtered };
+  }
 }
 
 // ----------------------------------------
@@ -209,6 +245,8 @@ class SafeLocalStorageDriver implements StorageDriver {
   private KEY_PROGRESS_PREFIX = "talevox_progress:";
   private KEY_SMALL_BACKUP = "talevox_small_backup";
   private KEY_AUTH_SESSION = "talevox_drive_session_v3";
+  private KEY_JOBS_INDEX = "talevox_jobs_index";
+  private KEY_JOB_PREFIX = "talevox_job:";
 
   private MAX_ITEM_BYTES = 180_000; // ~180KB per key
 
@@ -281,6 +319,51 @@ class SafeLocalStorageDriver implements StorageDriver {
     return { ok: true, where: "localStorage", value: res.value ?? null };
   }
 
+  async createJob(job: JobRecord): Promise<SaveResult> {
+    const key = this.KEY_JOB_PREFIX + job.jobId;
+    const res = await this.safeSetJson(key, job, "localStorage");
+    if (!res.ok) return res;
+    await this.ensureJobIndex(job.jobId);
+    return { ok: true, where: "localStorage" };
+  }
+
+  async updateJob(jobId: string, patch: Partial<Omit<JobRecord, "jobId" | "createdAt">>): Promise<SaveResult> {
+    const existing = await this.getJob(jobId);
+    if (!existing.ok || !existing.value) return { ok: false, where: "localStorage", error: "missing" };
+    const next: JobRecord = {
+      ...existing.value,
+      ...patch,
+      jobId,
+      createdAt: existing.value.createdAt,
+      updatedAt: patch.updatedAt ?? Date.now(),
+    };
+    const key = this.KEY_JOB_PREFIX + jobId;
+    const res = await this.safeSetJson(key, next, "localStorage");
+    if (!res.ok) return res;
+    await this.ensureJobIndex(jobId);
+    return { ok: true, where: "localStorage" };
+  }
+
+  async getJob(jobId: string): Promise<LoadResult<JobRecord | null>> {
+    const key = this.KEY_JOB_PREFIX + jobId;
+    const res = await this.safeGetJson<JobRecord>(key, "localStorage");
+    if (!res.ok) return { ok: true, where: "localStorage", value: null };
+    return { ok: true, where: "localStorage", value: res.value ?? null };
+  }
+
+  async listJobs(type?: JobType): Promise<LoadResult<JobRecord[]>> {
+    const idsRes = await this.safeGetJson<string[]>(this.KEY_JOBS_INDEX, "localStorage");
+    const ids = idsRes.ok && Array.isArray(idsRes.value) ? idsRes.value : [];
+    const jobs: JobRecord[] = [];
+    for (const id of ids) {
+      const res = await this.getJob(id);
+      if (res.ok && res.value) {
+        if (!type || res.value.type === type) jobs.push(res.value);
+      }
+    }
+    return { ok: true, where: "localStorage", value: jobs };
+  }
+
   private async safeGetJson<T>(key: string, where: SaveResult["where"]): Promise<LoadResult<T>> {
     try {
       const raw = window.localStorage.getItem(key);
@@ -318,5 +401,18 @@ class SafeLocalStorageDriver implements StorageDriver {
 
   private estimateBytes(s: string): number {
     return s.length * 2;
+  }
+
+  private async ensureJobIndex(jobId: string): Promise<void> {
+    try {
+      const res = await this.safeGetJson<string[]>(this.KEY_JOBS_INDEX, "localStorage");
+      const list = res.ok && Array.isArray(res.value) ? res.value : [];
+      if (!list.includes(jobId)) {
+        list.push(jobId);
+        await this.safeSetJson(this.KEY_JOBS_INDEX, list, "localStorage");
+      }
+    } catch {
+      // Best-effort only
+    }
   }
 }

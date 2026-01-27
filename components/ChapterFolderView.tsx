@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
-import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile, Rule, HighlightMode } from '../types';
+import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile, Rule, HighlightMode, UiMode, JobRecord } from '../types';
 import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon, Sparkles } from 'lucide-react';
 import { applyRules } from '../services/speechService';
 import { synthesizeChunk } from '../services/cloudTtsService';
@@ -17,6 +17,8 @@ import {
 } from "../services/driveService";
 import { isTokenValid } from '../services/driveAuth';
 import { reflowLineBreaks } from '../services/textFormat';
+import { computeMobileMode } from '../utils/platform';
+import { enqueueGenerateAudio } from '../services/jobRunnerService';
 import {
   loadChapterText as libraryLoadChapterText,
   bulkUpsertChapters as libraryBulkUpsertChapters,
@@ -40,6 +42,11 @@ interface ChapterFolderViewProps {
   theme: Theme;
   globalRules: Rule[];
   reflowLineBreaksEnabled: boolean;
+  uiMode: UiMode;
+  jobs: JobRecord[];
+  onCancelJob: (jobId: string) => void;
+  onRetryJob: (jobId: string) => void;
+  onRefreshJobs: () => void;
   onAddChapter: () => void;
   onOpenChapter: (chapterId: string) => void;
   onToggleFavorite: (chapterId: string) => void;
@@ -65,6 +72,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   theme,
   globalRules,
   reflowLineBreaksEnabled,
+  uiMode,
+  jobs,
+  onCancelJob,
+  onRetryJob,
+  onRefreshJobs,
   onAddChapter,
   onOpenChapter,
   onToggleFavorite,
@@ -137,6 +149,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [isHeaderExpanded, setIsHeaderExpanded] = useState(false);
   const [mobileMenuId, setMobileMenuId] = useState<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const [bgGenProgress, setBgGenProgress] = useState<{ current: number; total: number } | null>(null);
 
   const [fixOptions, setFixOptions] = useState({
     genAudio: true,
@@ -152,6 +165,18 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const stickyHeaderBg = isDark ? 'bg-slate-900/90' : isSepia ? 'bg-[#f4ecd8]/90' : 'bg-white/90';
 
   const chapters = useMemo(() => [...(book.chapters || [])].sort((a, b) => a.index - b.index), [book.chapters]);
+  const isMobileInterface = computeMobileMode(uiMode);
+  const missingAudioIdsForBook = useMemo(() => {
+    return chapters
+      .filter((c) => !(c.cloudAudioFileId || (c as any).audioDriveId || c.audioStatus === AudioStatus.READY))
+      .map((c) => c.id);
+  }, [chapters]);
+  const bookJobs = useMemo(() => {
+    return (jobs || []).filter((j) => {
+      const bookId = (j as any)?.payloadJson?.bookId;
+      return !bookId || bookId === book.id;
+    });
+  }, [jobs, book.id]);
 
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
 
@@ -730,6 +755,49 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
   };
 
+  const handleGenerateMissingAudioBackground = async () => {
+    if (!missingAudioIdsForBook.length) {
+      pushNotice("No missing audio found.", "info");
+      return;
+    }
+
+    if (isMobileInterface) {
+      const voiceId =
+        book.settings.defaultVoiceId ||
+        book.settings.selectedVoiceName ||
+        "en-US-Standard-C";
+
+      const payload = {
+        bookId: book.id,
+        chapterIds: missingAudioIdsForBook,
+        voice: { id: voiceId },
+        settings: {
+          playbackSpeed: book.settings.useBookSettings ? (book.settings.playbackSpeed ?? 1.0) : 1.0
+        }
+      };
+
+      try {
+        await enqueueGenerateAudio(payload, uiMode);
+        pushNotice("Background job queued.", "success");
+        onRefreshJobs();
+      } catch (e: any) {
+        pushNotice(`Failed to queue job: ${String(e?.message ?? e)}`, "error");
+      }
+      return;
+    }
+
+    // Desktop: keep in-process generation behavior.
+    setBgGenProgress({ current: 0, total: missingAudioIdsForBook.length });
+    for (const id of missingAudioIdsForBook) {
+      const ch = chapters.find((c) => c.id === id);
+      if (!ch) continue;
+      await generateAudio(ch);
+      setBgGenProgress((p) => (p ? { ...p, current: p.current + 1 } : p));
+    }
+    setBgGenProgress(null);
+    pushNotice("Audio generation complete.", "success");
+  };
+
   const buildFixPlan = useCallback((options?: { includeConversions?: boolean; includeGeneration?: boolean; includeCleanup?: boolean }) => {
     const scan = lastScan;
     const inventory = lastInventory;
@@ -1259,6 +1327,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
           <div className={`flex flex-wrap gap-2 transition-all duration-300 ${isHeaderExpanded || window.innerWidth >= 768 ? 'opacity-100 max-h-40 pointer-events-auto' : 'opacity-0 max-h-0 pointer-events-none overflow-hidden sm:opacity-100 sm:max-h-40 sm:pointer-events-auto'}`}>
             <button onClick={onAddChapter} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-indigo-600 text-white rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center gap-2"><Plus className="w-3.5 h-3.5" /> Add Chapter</button>
+            <button
+              onClick={handleGenerateMissingAudioBackground}
+              className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center justify-center gap-2"
+              title={isMobileInterface ? "Queue background audio generation" : "Generate missing audio now"}
+            >
+              <Headphones className="w-3.5 h-3.5" />
+              {isMobileInterface ? "Generate Missing Audio (BG)" : "Generate Missing Audio"}
+            </button>
             <button onClick={handleCheckIntegrity} disabled={isCheckingDrive} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center justify-center gap-2">{isCheckingDrive ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}{isCheckingDrive ? '...' : 'Check'}</button>
             <button
               onClick={handleInitManifests}
@@ -1292,6 +1368,71 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             }`}
           >
             {notice.message}
+          </div>
+        </div>
+      )}
+
+      {bgGenProgress && (
+        <div className="px-4 sm:px-6 mt-3">
+          <div className={`p-4 rounded-2xl border ${isDark ? 'border-slate-800 bg-slate-900/60' : 'border-black/5 bg-white'}`}>
+            <div className="flex items-center justify-between text-xs font-black uppercase tracking-widest">
+              <span>Generating Audio</span>
+              <span>{bgGenProgress.current} / {bgGenProgress.total}</span>
+            </div>
+            <div className={`mt-3 h-2 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-800' : 'bg-black/5'}`}>
+              <div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${bgGenProgress.total ? (bgGenProgress.current / bgGenProgress.total) * 100 : 0}%` }} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {bookJobs.length > 0 && (
+        <div className="px-4 sm:px-6 mt-3">
+          <div className={`p-4 rounded-2xl border ${isDark ? 'border-slate-800 bg-slate-900/60' : 'border-black/5 bg-white'}`}>
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-black uppercase tracking-widest">Jobs</div>
+              <button onClick={onRefreshJobs} className="text-[10px] font-black uppercase tracking-widest text-indigo-500">Refresh</button>
+            </div>
+            <div className="mt-3 space-y-3">
+              {bookJobs.map((job) => {
+                const progress = (job as any).progressJson || {};
+                const total = Number(progress.total ?? 0);
+                const completed = Number(progress.completed ?? 0);
+                const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
+                const currentChapterId = progress.currentChapterId || "";
+                const canCancel = job.status === "queued" || job.status === "running" || job.status === "paused";
+                const canRetry = job.status === "failed" || job.status === "canceled";
+
+                return (
+                  <div key={job.jobId} className={`p-3 rounded-xl border ${isDark ? 'border-slate-800 bg-slate-950/40' : 'border-black/5 bg-white'}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Generate Audio</div>
+                        <div className="text-xs font-black truncate">Status: {job.status}</div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {canCancel && (
+                          <button onClick={() => onCancelJob(job.jobId)} className="px-2 py-1 rounded-lg bg-red-500/10 text-red-600 text-[9px] font-black uppercase">Cancel</button>
+                        )}
+                        {canRetry && (
+                          <button onClick={() => onRetryJob(job.jobId)} className="px-2 py-1 rounded-lg bg-indigo-500/10 text-indigo-600 text-[9px] font-black uppercase">Retry</button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="mt-2 flex items-center justify-between text-[10px] font-black uppercase tracking-widest opacity-60">
+                      <span>{completed} / {total}</span>
+                      {currentChapterId ? <span className="truncate max-w-[50%]">Current: {currentChapterId}</span> : <span>&nbsp;</span>}
+                    </div>
+                    <div className={`mt-2 h-2 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-800' : 'bg-black/5'}`}>
+                      <div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${percent}%` }} />
+                    </div>
+                    {job.error && (
+                      <div className="mt-2 text-[10px] font-bold text-red-500 truncate">Error: {job.error}</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       )}

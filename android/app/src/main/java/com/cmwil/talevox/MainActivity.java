@@ -2,10 +2,12 @@ package com.cmwil.talevox;
 
 import android.content.Intent;
 import android.util.Log;
+import android.os.Bundle;
 
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginHandle;
+import com.cmwil.talevox.jobrunner.JobRunnerPlugin;
 
 import ee.forgr.capacitor.social.login.GoogleProvider;
 import ee.forgr.capacitor.social.login.SocialLoginPlugin;
@@ -13,6 +15,12 @@ import ee.forgr.capacitor.social.login.ModifiedMainActivityForSocialLoginPlugin;
 
 // ModifiedMainActivityForSocialLoginPlugin is VERY VERY important !!!!!!
 public class MainActivity extends BridgeActivity implements ModifiedMainActivityForSocialLoginPlugin {
+
+  @Override
+  protected void onCreate(Bundle savedInstanceState) {
+    super.onCreate(savedInstanceState);
+    registerPlugin(JobRunnerPlugin.class);
+  }
 
   @Override
   public void onActivityResult(int requestCode, int resultCode, Intent data) {

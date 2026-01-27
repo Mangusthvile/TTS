@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, PlaybackPhase, UiMode, ReaderSettings } from './types';
+import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, PlaybackPhase, UiMode, ReaderSettings, JobRecord } from './types';
 import Library from './components/Library';
 import Reader from './components/Reader';
 import Player from './components/Player';
@@ -24,6 +24,8 @@ import { migrateLegacyLocalStorageIfNeeded } from './services/libraryMigration';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud, Terminal, List, FolderSync, CheckCircle2, Plus } from 'lucide-react';
 import { trace, traceError } from './utils/trace';
 import { computeMobileMode } from './utils/platform';
+import { JobRunner } from './src/plugins/jobRunner';
+import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService } from './services/jobRunnerService';
 
 const STATE_FILENAME = 'talevox_state_v2917.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
@@ -347,10 +349,60 @@ const App: React.FC = () => {
   const [authState, setAuthState] = useState<AuthState>(authManager.getState());
   const isAuthorized = authState.status === 'signed_in' && !!authManager.getToken();
 
+  const [jobs, setJobs] = useState<JobRecord[]>([]);
+  const refreshJobs = useCallback(async () => {
+    try {
+      const all = await listAllJobs(state.readerSettings.uiMode);
+      setJobs(all);
+    } catch (e) {
+      // ignore
+    }
+  }, [state.readerSettings.uiMode]);
+
   useEffect(() => {
     const unsubscribe = authManager.subscribe(setAuthState);
     return () => { unsubscribe(); };
   }, []);
+
+  useEffect(() => {
+    refreshJobs();
+  }, [refreshJobs]);
+
+  useEffect(() => {
+    let isMounted = true;
+    const handles: Array<{ remove: () => Promise<void> }> = [];
+
+    const applyJobEvent = (event: any) => {
+      if (!isMounted || !event?.jobId) return;
+      setJobs((prev) => {
+        const idx = prev.findIndex((j) => j.jobId === event.jobId);
+        if (idx === -1) {
+          // Fallback: re-fetch so the UI stays accurate.
+          refreshJobs();
+          return prev;
+        }
+        const current = prev[idx];
+        const next: JobRecord = {
+          ...current,
+          status: event.status ?? current.status,
+          progressJson: event.progress ?? current.progressJson,
+          error: event.error ?? current.error,
+          updatedAt: Date.now(),
+        };
+        const copy = [...prev];
+        copy[idx] = next;
+        return copy;
+      });
+    };
+
+    JobRunner.addListener("jobProgress", applyJobEvent).then((h) => handles.push(h));
+    JobRunner.addListener("jobFinished", applyJobEvent).then((h) => handles.push(h));
+
+    return () => {
+      isMounted = false;
+      handles.forEach((h) => h.remove());
+    };
+  }, [refreshJobs]);
 
   useEffect(() => {
     if (state.googleClientId) {
@@ -960,6 +1012,24 @@ const App: React.FC = () => {
     loadChapterSession(id, 'user');
   };
 
+  const handleCancelJob = useCallback(async (jobId: string) => {
+    try {
+      await cancelJobService(jobId, state.readerSettings.uiMode);
+      await refreshJobs();
+    } catch {
+      // ignore
+    }
+  }, [refreshJobs, state.readerSettings.uiMode]);
+
+  const handleRetryJob = useCallback(async (jobId: string) => {
+    try {
+      await retryJobService(jobId, state.readerSettings.uiMode);
+      await refreshJobs();
+    } catch {
+      // ignore
+    }
+  }, [refreshJobs, state.readerSettings.uiMode]);
+
   const handleManualPlay = () => {
     gestureArmedRef.current = true;
     lastGestureAt.current = Date.now();
@@ -1548,6 +1618,11 @@ const App: React.FC = () => {
               isLoadingMoreChapters={chapterPagingByBook[activeBook.id]?.loading ?? false}
               globalRules={state.globalRules}
               reflowLineBreaksEnabled={state.readerSettings.reflowLineBreaks}
+              jobs={jobs}
+              uiMode={state.readerSettings.uiMode}
+              onCancelJob={handleCancelJob}
+              onRetryJob={handleRetryJob}
+              onRefreshJobs={refreshJobs}
               onAppendChapters={(newChapters) => {
                 setState((prev) => ({
                   ...prev,

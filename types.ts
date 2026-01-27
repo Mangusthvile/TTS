@@ -42,6 +42,35 @@ export enum AudioStatus {
   FAILED = 'failed'
 }
 
+export type JobType = "generateAudio";
+
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "canceled";
+
+export type JobProgress = {
+  total: number;
+  completed: number;
+  currentChapterId?: string;
+  startedAt?: number;
+  finishedAt?: number;
+};
+
+export type JobRecord = {
+  jobId: string;
+  type: JobType;
+  status: JobStatus;
+  payloadJson: any;
+  progressJson?: JobProgress;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type UiMode = 'auto' | 'desktop' | 'mobile';
 
 export const CLOUD_VOICES = [

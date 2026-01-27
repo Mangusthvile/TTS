@@ -19,6 +19,7 @@ import type {
   LoadResult,
   SaveResult,
 } from "./storageDriver";
+import type { JobRecord, JobType } from "../types";
 
 /**
  * Phase 2.3 — SqliteStorageDriver
@@ -290,6 +291,126 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   // -----------------------
+  // Jobs (WorkManager)
+  // -----------------------
+
+  async createJob(job: JobRecord): Promise<SaveResult> {
+    const db = this.mustDb();
+    try {
+      await db.run(
+        `INSERT INTO jobs (jobId, type, status, payloadJson, progressJson, error, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          job.jobId,
+          job.type,
+          job.status,
+          JSON.stringify(job.payloadJson ?? null),
+          job.progressJson ? JSON.stringify(job.progressJson) : null,
+          job.error ?? null,
+          job.createdAt,
+          job.updatedAt,
+        ]
+      );
+      return { ok: true, where: "sqlite" };
+    } catch (e: any) {
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
+  }
+
+  async updateJob(jobId: string, patch: Partial<Omit<JobRecord, "jobId" | "createdAt">>): Promise<SaveResult> {
+    const existing = await this.getJob(jobId);
+    if (!existing.ok || !existing.value) return { ok: false, where: "sqlite", error: "missing" };
+
+    const next: JobRecord = {
+      ...existing.value,
+      ...patch,
+      jobId,
+      createdAt: existing.value.createdAt,
+      updatedAt: patch.updatedAt ?? nowMs(),
+    };
+
+    const db = this.mustDb();
+    try {
+      await db.run(
+        `UPDATE jobs
+         SET type = ?, status = ?, payloadJson = ?, progressJson = ?, error = ?, updatedAt = ?
+         WHERE jobId = ?`,
+        [
+          next.type,
+          next.status,
+          JSON.stringify(next.payloadJson ?? null),
+          next.progressJson ? JSON.stringify(next.progressJson) : null,
+          next.error ?? null,
+          next.updatedAt,
+          jobId,
+        ]
+      );
+      return { ok: true, where: "sqlite" };
+    } catch (e: any) {
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
+  }
+
+  async getJob(jobId: string): Promise<LoadResult<JobRecord | null>> {
+    const db = this.mustDb();
+    try {
+      const res = await db.query(
+        `SELECT jobId, type, status, payloadJson, progressJson, error, createdAt, updatedAt
+         FROM jobs
+         WHERE jobId = ?`,
+        [jobId]
+      );
+
+      const row = (res.values?.[0] ?? null) as any;
+      if (!row) return { ok: true, where: "sqlite", value: null };
+
+      const value: JobRecord = {
+        jobId: String(row.jobId),
+        type: String(row.type) as JobType,
+        status: String(row.status) as JobRecord["status"],
+        payloadJson: row.payloadJson ? JSON.parse(String(row.payloadJson)) : null,
+        progressJson: row.progressJson ? JSON.parse(String(row.progressJson)) : undefined,
+        error: row.error == null ? undefined : String(row.error),
+        createdAt: Number(row.createdAt) || 0,
+        updatedAt: Number(row.updatedAt) || 0,
+      };
+
+      return { ok: true, where: "sqlite", value };
+    } catch (e: any) {
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
+  }
+
+  async listJobs(type?: JobType): Promise<LoadResult<JobRecord[]>> {
+    const db = this.mustDb();
+    try {
+      const res = await db.query(
+        `SELECT jobId, type, status, payloadJson, progressJson, error, createdAt, updatedAt
+         FROM jobs
+         ${type ? "WHERE type = ?" : ""}
+         ORDER BY createdAt DESC`,
+        type ? [type] : []
+      );
+
+      const rows = (res.values ?? []) as any[];
+      const jobs = rows.map((row) => ({
+        jobId: String(row.jobId),
+        type: String(row.type) as JobType,
+        status: String(row.status) as JobRecord["status"],
+        payloadJson: row.payloadJson ? JSON.parse(String(row.payloadJson)) : null,
+        progressJson: row.progressJson ? JSON.parse(String(row.progressJson)) : undefined,
+        error: row.error == null ? undefined : String(row.error),
+        createdAt: Number(row.createdAt) || 0,
+        updatedAt: Number(row.updatedAt) || 0,
+      }));
+
+      return { ok: true, where: "sqlite", value: jobs };
+    } catch (e: any) {
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
+  }
+
+  // -----------------------
   // Internals
   // -----------------------
 
@@ -316,6 +437,17 @@ export class SqliteStorageDriver implements StorageDriver {
         percent REAL,
         isComplete INTEGER NOT NULL,
         updatedAt INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS jobs (
+        jobId TEXT PRIMARY KEY,
+        type TEXT,
+        status TEXT,
+        payloadJson TEXT,
+        progressJson TEXT,
+        error TEXT,
+        createdAt INTEGER,
+        updatedAt INTEGER
       );
     `);
 
