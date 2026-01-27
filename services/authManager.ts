@@ -1,8 +1,9 @@
 import { trace, traceError } from '../utils/trace';
 import { Capacitor } from '@capacitor/core';
 import { SocialLogin } from '@capgo/capacitor-social-login';
+import { initStorage } from './storageSingleton';
 
-export type AuthStatus = 'signed_out' | 'signing_in' | 'signed_in' | 'error';
+export type AuthStatus = 'signed_out' | 'signing_in' | 'signed_in' | 'expired' | 'error';
 
 export interface AuthState {
   status: AuthStatus;
@@ -13,8 +14,6 @@ export interface AuthState {
 }
 
 type AuthListener = (state: AuthState) => void;
-
-const SESSION_KEY = "talevox_drive_session_v3";
 
 class AuthManager {
   private clientId: string | null = null;
@@ -30,46 +29,61 @@ class AuthManager {
   private listeners: Set<AuthListener> = new Set();
   private tokenClient: any = null;
   private validationAbortController: AbortController | null = null;
+  private lastStatus: AuthStatus | null = null;
 
   constructor() {
-    this.loadFromStorage();
+    void this.loadFromStorage();
   }
 
-  private loadFromStorage() {
+  private async loadFromStorage() {
     try {
-      const raw = sessionStorage.getItem(SESSION_KEY);
-      if (raw) {
-        const data = JSON.parse(raw);
-        if (data.accessToken && data.expiresAt > Date.now()) {
-          this.state = {
-            ...this.state,
-            accessToken: data.accessToken,
-            expiresAt: data.expiresAt,
-            status: 'signed_in',
-            userEmail: data.userEmail
-          };
-          setTimeout(() => this.validateToken(), 1000);
-        }
+      const driver = await initStorage();
+      const res = await driver.loadAuthSession();
+      const data = res.ok ? res.value : null;
+      if (data?.accessToken && data.expiresAt > Date.now()) {
+        this.state = {
+          ...this.state,
+          accessToken: data.accessToken,
+          expiresAt: data.expiresAt,
+          status: 'signed_in',
+          userEmail: data.userEmail
+        };
+        const secondsRemaining = Math.max(0, Math.floor((data.expiresAt - Date.now()) / 1000));
+        console.log(
+          `[TaleVox][Auth] Loaded token (expiresAt=${data.expiresAt}, remaining=${secondsRemaining}s, source=${res.where})`
+        );
+        setTimeout(() => this.validateToken(), 1000);
+        return;
+      }
+
+      if (!data) {
+        console.log(`[TaleVox][Auth] No stored token found (source=${res.where})`);
       }
     } catch (e) {
       traceError('auth:load_failed', e);
     }
   }
 
-  private saveToStorage() {
+  private async saveToStorage() {
     try {
+      const driver = await initStorage();
       if (this.state.accessToken) {
-        sessionStorage.setItem(SESSION_KEY, JSON.stringify({
+        await driver.saveAuthSession({
           accessToken: this.state.accessToken,
           expiresAt: this.state.expiresAt,
-          userEmail: this.state.userEmail
-        }));
+          userEmail: this.state.userEmail,
+          status: this.state.status
+        });
       } else {
-        sessionStorage.removeItem(SESSION_KEY);
+        await driver.clearAuthSession();
       }
     } catch (e) {
       traceError('auth:save_failed', e);
     }
+  }
+
+  public markExpired(reason?: string) {
+    this.updateState({ status: 'expired', lastError: reason });
   }
 
   public subscribe(listener: AuthListener) {
@@ -138,14 +152,56 @@ class AuthManager {
       status: 'signed_in',
       lastError: undefined
     });
-    this.saveToStorage();
+    void this.saveToStorage();
     this.validateToken();
     trace('auth:token_received');
   }
 
+  public async ensureValidToken(interactive: boolean): Promise<string> {
+    console.log(`[TaleVox][Auth] ensureValidToken ${interactive ? 'interactive' : 'silent'}`);
+    const token = this.getToken();
+    if (token) {
+      return token;
+    }
+
+    if (Capacitor.isNativePlatform()) {
+      const tokenFromNative = await this.nativeSignIn({
+        interactive,
+        filterByAuthorizedAccounts: !interactive,
+        autoSelectEnabled: !interactive,
+        forceRefreshToken: !interactive
+      });
+      if (tokenFromNative) {
+        this.updateState({ status: 'signed_in' });
+        return tokenFromNative;
+      }
+      this.markExpired('Reconnect required');
+      throw new Error('AUTH_EXPIRED');
+    }
+
+    if (interactive) {
+      this.signIn();
+      return new Promise((resolve, reject) => {
+        const unsub = this.subscribe((state) => {
+          if (state.status === 'signed_in' && state.accessToken) {
+            unsub();
+            resolve(state.accessToken);
+          } else if (state.status === 'expired' || state.status === 'error') {
+            unsub();
+            this.markExpired(state.lastError || 'Reconnect required');
+            reject(new Error(state.lastError || 'Reconnect required'));
+          }
+        });
+      });
+    }
+
+    this.markExpired('Reconnect required');
+    throw new Error('AUTH_EXPIRED');
+  }
+
   public signIn() {
     if (Capacitor.isNativePlatform()) {
-      void this.nativeSignIn();
+      void this.nativeSignIn({ interactive: true });
       return;
     }
 
@@ -168,7 +224,12 @@ class AuthManager {
     this.tokenClient.requestAccessToken({ prompt: 'consent' });
   }
 
-  private async nativeSignIn() {
+  private async nativeSignIn(opts?: {
+    interactive?: boolean;
+    filterByAuthorizedAccounts?: boolean;
+    autoSelectEnabled?: boolean;
+    forceRefreshToken?: boolean;
+  }) {
     this.updateState({ status: 'signing_in', lastError: undefined });
     trace('auth:signin_start:native');
 
@@ -187,7 +248,12 @@ class AuthManager {
 
       const raw: any = await (SocialLogin as any).login({
         provider: 'google',
-        options: { scopes }
+        options: {
+          scopes,
+          filterByAuthorizedAccounts: !!opts?.filterByAuthorizedAccounts,
+          autoSelectEnabled: !!opts?.autoSelectEnabled,
+          forceRefreshToken: !!opts?.forceRefreshToken
+        }
       });
 
       // Some versions wrap everything inside `result`
@@ -222,7 +288,11 @@ class AuthManager {
 
       if (!accessToken) {
         traceError('auth:native_no_access_token', raw);
-        this.updateState({ status: 'error', lastError: 'Google sign-in returned no access token' });
+        if (opts?.interactive) {
+          this.updateState({ status: 'error', lastError: 'Google sign-in returned no access token' });
+        } else {
+          this.markExpired('Google sign-in returned no access token');
+        }
         return;
       }
 
@@ -233,13 +303,20 @@ class AuthManager {
         lastError: undefined
       });
 
-      this.saveToStorage();
+      void this.saveToStorage();
       await this.validateToken();
       trace('auth:token_received:native');
+      return accessToken;
 
     } catch (e: any) {
       traceError('auth:native_signin_failed', e);
-      this.updateState({ status: 'error', lastError: e?.message || 'Native sign-in failed' });
+      const message = e?.message || 'Native sign-in failed';
+      if (opts?.interactive) {
+        this.updateState({ status: 'error', lastError: message });
+      } else {
+        this.markExpired(message);
+      }
+      return null;
     } finally {
       clearTimeout(watchdog);
     }
@@ -247,7 +324,7 @@ class AuthManager {
 
   public signOut() {
     this.updateState({ status: 'signed_out', accessToken: null, expiresAt: 0, userEmail: undefined });
-    this.saveToStorage();
+    void this.saveToStorage();
 
     if (Capacitor.isNativePlatform()) {
       void (SocialLogin as any).logout?.({ provider: 'google' }).catch(() => {});
@@ -258,25 +335,25 @@ class AuthManager {
   }
 
   public async validateToken() {
-    if (!this.state.accessToken) return;
+    if (!this.state.accessToken) return false;
 
     if (this.validationAbortController) this.validationAbortController.abort();
     this.validationAbortController = new AbortController();
 
     try {
+      const token = await this.ensureValidToken(false);
       const res = await fetch('https://www.googleapis.com/drive/v3/about?fields=user', {
-        headers: { Authorization: `Bearer ${this.state.accessToken}` },
+        headers: { Authorization: `Bearer ${token}` },
         signal: this.validationAbortController.signal
       });
 
       if (!res.ok) {
         if (res.status === 401) {
-          this.signOut();
-          this.updateState({ lastError: 'Session expired' });
+          this.markExpired('Session expired');
         } else {
           trace('auth:validate_http_error', { status: res.status });
         }
-        return;
+        return false;
       }
 
       const data = await res.json();
@@ -284,12 +361,15 @@ class AuthManager {
         status: 'signed_in',
         userEmail: data.user?.emailAddress
       });
-      this.saveToStorage();
+      void this.saveToStorage();
       trace('auth:validated', { email: data.user?.emailAddress });
+      return true;
 
     } catch (e: any) {
       if (e.name === 'AbortError') return;
+      this.markExpired('Reconnect required');
       traceError('auth:validate_failed', e);
+      return false;
     }
   }
 
@@ -304,6 +384,10 @@ class AuthManager {
 
   private updateState(partial: Partial<AuthState>) {
     this.state = { ...this.state, ...partial };
+    if (partial.status && partial.status !== this.lastStatus) {
+      this.lastStatus = partial.status;
+      console.log(`[TaleVox][Auth] status -> ${partial.status}`);
+    }
     this.notify();
   }
 }

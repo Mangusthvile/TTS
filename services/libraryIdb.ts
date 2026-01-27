@@ -25,7 +25,11 @@ const STORE_BOOKS = "books";
 const STORE_CHAPTERS = "chapters";
 const STORE_CHAPTER_TEXT = "chapter_text";
 
-export type ChapterPage = { chapters: Chapter[]; nextAfterIndex: number | null };
+export type ChapterPage = {
+  chapters: Chapter[];
+  nextAfterIndex: number | null;
+  totalCount?: number;
+};
 
 type BookRow = {
   id: string;
@@ -201,6 +205,8 @@ export async function upsertBook(book: Book): Promise<void> {
   const tx = db.transaction([STORE_BOOKS], "readwrite");
   const store = tx.objectStore(STORE_BOOKS);
 
+  const existing = (await reqToPromise(store.get(book.id))) as BookRow | undefined;
+
   const row: BookRow = {
     id: book.id,
     title: book.title,
@@ -212,7 +218,7 @@ export async function upsertBook(book: Book): Promise<void> {
     currentChapterId: book.currentChapterId,
     settings: book.settings ?? { useBookSettings: false, highlightMode: HighlightMode.WORD },
     rules: book.rules ?? [],
-    chapterCount: book.chapterCount ?? book.chapters?.length ?? 0,
+    chapterCount: book.chapterCount ?? existing?.chapterCount ?? book.chapters?.length ?? 0,
     updatedAt: book.updatedAt ?? Date.now(),
   };
 
@@ -361,6 +367,7 @@ export async function listChaptersPage(
   const range = IDBKeyRange.bound([bookId, start], [bookId, Number.MAX_SAFE_INTEGER]);
 
   const chapters: Chapter[] = [];
+  let totalCount: number | undefined;
 
   await new Promise<void>((resolve, reject) => {
     const req = idx.openCursor(range, "next");
@@ -378,10 +385,21 @@ export async function listChaptersPage(
     };
   });
 
+  try {
+    const countIdx = store.index("byBookId");
+    totalCount = Number(await reqToPromise(countIdx.count(IDBKeyRange.only(bookId))));
+  } catch {
+    totalCount = undefined;
+  }
+
   await txDone(tx);
 
   const nextAfterIndex = chapters.length ? chapters[chapters.length - 1].index : null;
-  return { chapters, nextAfterIndex: chapters.length < limit ? null : nextAfterIndex };
+  return {
+    chapters,
+    nextAfterIndex: chapters.length < limit ? null : nextAfterIndex,
+    totalCount,
+  };
 }
 
 export async function bulkUpsertChapters(
