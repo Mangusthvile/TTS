@@ -893,7 +893,7 @@ public class FixIntegrityWorker extends Worker {
             NotificationChannel channel = new NotificationChannel(
                 CHANNEL_ID,
                 "TaleVox Jobs",
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager.IMPORTANCE_DEFAULT
             );
             nm.createNotificationChannel(channel);
         }
@@ -939,6 +939,7 @@ public class FixIntegrityWorker extends Worker {
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setProgress(total > 0 ? total : 100, total > 0 ? completed : percent, total == 0)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .build();
     }
 

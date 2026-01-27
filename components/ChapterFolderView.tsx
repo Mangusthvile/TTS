@@ -144,8 +144,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [showFixModal, setShowFixModal] = useState(false);
   const [isFixing, setIsFixing] = useState(false);
   const [fixProgress, setFixProgress] = useState({ current: 0, total: 0 });
+  const [fixJobId, setFixJobId] = useState<string | null>(null);
   const abortFixRef = useRef(false);
   const [previewOnly, setPreviewOnly] = useState(true);
+  const lastFixStatusRef = useRef<string | null>(null);
 
   const [showVoiceModal, setShowVoiceModal] = useState<{ chapterId?: string } | null>(null);
   const [rememberAsDefault, setRememberAsDefault] = useState(true);
@@ -183,6 +185,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       return !bookId || bookId === book.id;
     });
   }, [jobs, book.id]);
+  const activeFixJob = useMemo(() => {
+    if (fixJobId) {
+      return (bookJobs || []).find((j) => j.jobId === fixJobId) || null;
+    }
+    return (bookJobs || []).find((j) => j.type === "fixIntegrity" && (j.status === "queued" || j.status === "running" || j.status === "paused")) || null;
+  }, [bookJobs, fixJobId]);
 
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
 
@@ -211,6 +219,35 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       }
     }
   }, [hasMoreChapters, isLoadingMoreChapters, onLoadMoreChapters]);
+
+  useEffect(() => {
+    if (!isMobileInterface || !activeFixJob) return;
+    const progress = (activeFixJob as any).progressJson || {};
+    const total = Number(progress.total ?? 0);
+    const completed = Number(progress.completed ?? 0);
+    if (total || completed) {
+      setFixProgress({ current: completed, total });
+    }
+    const status = activeFixJob.status;
+    if (status !== lastFixStatusRef.current) {
+      lastFixStatusRef.current = status;
+      if (status === "completed") {
+        setIsFixing(false);
+        setFixJobId(null);
+        pushNotice("Fix complete. Run CHECK again to verify.", "success");
+      } else if (status === "failed") {
+        setIsFixing(false);
+        setFixJobId(null);
+        pushNotice("Fix failed. See Jobs for details.", "error", 6000);
+      } else if (status === "canceled") {
+        setIsFixing(false);
+        setFixJobId(null);
+        pushNotice("Fix canceled.", "info");
+      } else if (status === "queued" || status === "running" || status === "paused") {
+        setIsFixing(true);
+      }
+    }
+  }, [activeFixJob, isMobileInterface, pushNotice]);
 
   const handleInitManifests = useCallback(async () => {
     if (!driveFolderId) {
@@ -943,7 +980,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       if (isMobileInterface) {
         setFixLog(prev => [...prev, `Queued background fix job`]);
         try {
-          await enqueueFixIntegrity(
+          const res = await enqueueFixIntegrity(
             {
               bookId: book.id,
               driveFolderId: book.driveFolderId,
@@ -955,8 +992,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             },
             uiMode
           );
-          pushNotice("Background fix queued. Track it in Jobs or notifications.", "success", 4000);
-          setShowFixModal(false);
+          setFixProgress({ current: 0, total: totalSteps });
+          setFixJobId(res.jobId);
+          setIsFixing(true);
+          onRefreshJobs();
+          pushNotice("Fix started in background. Progress is shown here.", "success", 3000);
         } catch (e: any) {
           errorCount++;
           setFixLog(prev => [...prev, `Failed to queue background fix job: ${String(e?.message ?? e)}`]);
@@ -1420,9 +1460,32 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
              </div>
              {isFixing ? (
                <div className="space-y-4 pt-4">
-                 <div className="flex justify-between items-center"><span className="text-sm font-black">Restoring Integrity...</span><span className="text-xs font-mono font-black">{fixProgress.current} / {fixProgress.total}</span></div>
-                 <div className="h-3 w-full bg-black/5 rounded-full overflow-hidden"><div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${fixProgress.total ? (fixProgress.current / fixProgress.total) * 100 : 0}%` }} /></div>
-                 <button onClick={() => { abortFixRef.current = true; }} className="w-full py-3 mt-2 bg-red-500/10 text-red-600 rounded-xl font-black uppercase text-[10px] tracking-widest hover:bg-red-500/20">Stop Generation</button>
+                <div className="flex justify-between items-center">
+                  <span className="text-sm font-black">Restoring Integrity...</span>
+                  <span className="text-xs font-mono font-black">{fixProgress.current} / {fixProgress.total}</span>
+                </div>
+                <div className="h-3 w-full bg-black/5 rounded-full overflow-hidden">
+                  <div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${fixProgress.total ? (fixProgress.current / fixProgress.total) * 100 : 0}%` }} />
+                </div>
+                {isMobileInterface && activeFixJob && (
+                  <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest opacity-70">
+                    <span>Status: {activeFixJob.status}</span>
+                    <button onClick={onRefreshJobs} className="text-indigo-500">Refresh</button>
+                  </div>
+                )}
+                <button
+                  onClick={() => {
+                    if (isMobileInterface && activeFixJob?.jobId) {
+                      onCancelJob(activeFixJob.jobId);
+                      pushNotice("Cancel requested.", "info");
+                      return;
+                    }
+                    abortFixRef.current = true;
+                  }}
+                  className="w-full py-3 mt-2 bg-red-500/10 text-red-600 rounded-xl font-black uppercase text-[10px] tracking-widest hover:bg-red-500/20"
+                >
+                  Stop Fix
+                </button>
                </div>
              ) : (
                <div className="grid grid-cols-2 gap-4">
