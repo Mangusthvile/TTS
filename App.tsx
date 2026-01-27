@@ -1739,6 +1739,10 @@ const App: React.FC = () => {
               showDiagnostics={state.showDiagnostics}
               onSetShowDiagnostics={v => setState(p => ({ ...p, showDiagnostics: v }))}
               onRecalculateProgress={handleReconcileProgress}
+              jobs={jobs}
+              onRefreshJobs={refreshJobs}
+              onCancelJob={handleCancelJob}
+              onRetryJob={handleRetryJob}
             />
           )}
         </div>

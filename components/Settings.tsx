@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { ReaderSettings, Theme, SyncDiagnostics, UiMode } from '../types';
-import { RefreshCw, Cloud, CloudOff, Loader2, LogOut, Save, LogIn, Check, Sun, Coffee, Moon, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer, ClipboardCopy, FileWarning, Bug, Smartphone, Type, Palette, Monitor, LayoutTemplate, Library } from 'lucide-react';
+import { ReaderSettings, Theme, SyncDiagnostics, UiMode, JobRecord } from '../types';
+import { RefreshCw, Cloud, CloudOff, Loader2, LogOut, Save, LogIn, Check, Sun, Coffee, Moon, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer, ClipboardCopy, FileWarning, Bug, Smartphone, Type, Palette, Monitor, LayoutTemplate, Library, List } from 'lucide-react';
 import { getAuthSessionInfo, isTokenValid, getValidDriveToken } from '../services/driveAuth';
 import { authManager } from '../services/authManager';
 import { getTraceDump } from '../utils/trace';
@@ -32,6 +32,10 @@ interface SettingsProps {
   showDiagnostics: boolean;
   onSetShowDiagnostics: (v: boolean) => void;
   onRecalculateProgress?: () => void;
+  jobs?: JobRecord[];
+  onRefreshJobs?: () => void;
+  onCancelJob?: (jobId: string) => void;
+  onRetryJob?: (jobId: string) => void;
 }
 
 const Settings: React.FC<SettingsProps> = ({ 
@@ -42,10 +46,16 @@ const Settings: React.FC<SettingsProps> = ({
   driveRootName, onSelectRoot, onRunMigration,
   syncDiagnostics, autoSaveInterval, onSetAutoSaveInterval, isDirty,
   showDiagnostics, onSetShowDiagnostics,
-  onRecalculateProgress
+  onRecalculateProgress,
+  jobs = [],
+  onRefreshJobs,
+  onCancelJob,
+  onRetryJob
 }) => {
   const [authState, setAuthState] = useState(authManager.getState());
   const [isDiagExpanded, setIsDiagExpanded] = useState(false);
+  const [activeTab, setActiveTab] = useState<'general' | 'jobs'>('general');
+  const [jobBusy, setJobBusy] = useState(false);
   
   const lastFatalError = useMemo(() => {
     try {
@@ -67,6 +77,12 @@ const Settings: React.FC<SettingsProps> = ({
   
   const isAuthorized = authState.status === 'signed_in';
   const expiryMinutes = authState.expiresAt > 0 ? Math.max(0, Math.round((authState.expiresAt - Date.now()) / 60000)) : 0;
+  const sortedJobs = useMemo(() => {
+    return [...jobs].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+  }, [jobs]);
+  const queuedJobs = useMemo(() => sortedJobs.filter(j => j.status === 'queued'), [sortedJobs]);
+  const activeJobs = useMemo(() => sortedJobs.filter(j => j.status === 'queued' || j.status === 'running' || j.status === 'paused'), [sortedJobs]);
+  const jobCount = jobs.length;
 
   const themes = [
     { id: Theme.LIGHT, name: 'Light Mode', icon: Sun, desc: 'Clean high contrast', color: 'bg-white border-slate-200' },
@@ -117,6 +133,22 @@ const Settings: React.FC<SettingsProps> = ({
           </button>
         </div>
 
+        <div className={`flex items-center gap-2 p-1 rounded-2xl ${isDark ? 'bg-black/20' : 'bg-black/5'}`}>
+          <button
+            onClick={() => setActiveTab('general')}
+            className={`flex-1 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === 'general' ? 'bg-indigo-600 text-white shadow-md' : 'opacity-60 hover:opacity-100'}`}
+          >
+            General
+          </button>
+          <button
+            onClick={() => setActiveTab('jobs')}
+            className={`flex-1 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${activeTab === 'jobs' ? 'bg-indigo-600 text-white shadow-md' : 'opacity-60 hover:opacity-100'}`}
+          >
+            <List className="w-3.5 h-3.5" /> Jobs {jobCount > 0 ? `(${jobCount})` : ''}
+          </button>
+        </div>
+
+        <div className={activeTab === 'general' ? 'space-y-8 sm:space-y-12' : 'hidden'}>
         {/* --- APPEARANCE --- */}
         <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
           <label className={labelClass}><Palette className="w-3.5 h-3.5 inline mr-2" /> Appearance</label>
@@ -416,6 +448,101 @@ const Settings: React.FC<SettingsProps> = ({
                  )}
               </div>
            </div>
+        </div>
+
+        </div>
+
+        <div className={activeTab === 'jobs' ? 'space-y-6' : 'hidden'}>
+          <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
+            <div className="flex items-center justify-between">
+              <label className={labelClass}><List className="w-3.5 h-3.5 inline mr-2" /> Jobs</label>
+              <button
+                onClick={onRefreshJobs}
+                className="text-[10px] font-black uppercase tracking-widest text-indigo-500"
+              >
+                Refresh
+              </button>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <div className={`px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest ${isDark ? 'bg-white/5' : 'bg-black/5'}`}>
+                Active: {activeJobs.length}
+              </div>
+              <div className={`px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest ${isDark ? 'bg-white/5' : 'bg-black/5'}`}>
+                Queued: {queuedJobs.length}
+              </div>
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button
+                disabled={jobBusy || queuedJobs.length === 0 || !onRetryJob}
+                onClick={async () => {
+                  if (!onRetryJob) return;
+                  setJobBusy(true);
+                  for (const job of queuedJobs) {
+                    try { await onRetryJob(job.jobId); } catch {}
+                  }
+                  setJobBusy(false);
+                  onRefreshJobs && onRefreshJobs();
+                }}
+                className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${queuedJobs.length ? 'bg-indigo-600 text-white' : 'bg-black/10 text-black/40'} ${jobBusy ? 'opacity-60' : ''}`}
+              >
+                Force Start Queued
+              </button>
+              <button
+                disabled={jobBusy || !onRefreshJobs}
+                onClick={onRefreshJobs}
+                className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-white text-indigo-600 border border-indigo-600/20"
+              >
+                Refresh Jobs
+              </button>
+            </div>
+
+            <div className="mt-6 space-y-3">
+              {sortedJobs.length === 0 && (
+                <div className="text-xs font-bold opacity-50">No jobs yet.</div>
+              )}
+              {sortedJobs.map((job) => {
+                const progress = (job as any).progressJson || {};
+                const total = Number(progress.total ?? 0);
+                const completed = Number(progress.completed ?? 0);
+                const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
+                const canCancel = job.status === "queued" || job.status === "running" || job.status === "paused";
+                const canRetry = job.status === "failed" || job.status === "canceled" || job.status === "queued";
+                return (
+                  <div key={job.jobId} className={`p-3 rounded-xl border ${isDark ? 'border-slate-800 bg-slate-950/40' : 'border-black/5 bg-white'}`}>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-xs font-black">
+                          {job.type === "fixIntegrity" ? "Fix Integrity" : "Generate Audio"}
+                        </div>
+                        <div className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                          Status: {job.status}
+                        </div>
+                      </div>
+                      <div className="flex gap-2 flex-shrink-0">
+                        {canCancel && onCancelJob && (
+                          <button onClick={() => onCancelJob(job.jobId)} className="px-2 py-1 rounded-lg bg-red-500/10 text-red-600 text-[9px] font-black uppercase">Cancel</button>
+                        )}
+                        {canRetry && onRetryJob && (
+                          <button onClick={() => onRetryJob(job.jobId)} className="px-2 py-1 rounded-lg bg-indigo-500/10 text-indigo-600 text-[9px] font-black uppercase">{job.status === 'queued' ? 'Force Start' : 'Retry'}</button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="mt-2">
+                      <div className={`h-2 rounded-full overflow-hidden ${isDark ? 'bg-slate-800' : 'bg-black/5'}`}>
+                        <div className="h-full bg-indigo-600" style={{ width: `${percent}%` }} />
+                      </div>
+                      <div className="mt-1 text-[10px] font-black opacity-60">{completed}/{total} ({percent}%)</div>
+                    </div>
+                    {job.error && (
+                      <div className="mt-2 text-[10px] font-bold text-red-500 truncate">Error: {job.error}</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         </div>
       </div>
     </div>

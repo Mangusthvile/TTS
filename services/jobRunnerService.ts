@@ -101,11 +101,13 @@ export async function cancelJob(jobId: string, uiMode: UiMode): Promise<void> {
   if (interfaceMode === "mobile") {
     try {
       await JobRunner.cancelJob({ jobId });
+      await updateJob(jobId, { status: "canceled", updatedAt: Date.now() });
       return;
     } catch (e: any) {
       const msg = String(e?.message ?? e);
       if (!msg.includes("not implemented")) throw e;
     }
+    await updateJob(jobId, { status: "canceled", updatedAt: Date.now() });
     return;
   }
   await updateJob(jobId, { status: "canceled", updatedAt: Date.now() });
@@ -118,7 +120,7 @@ export async function retryJob(jobId: string, uiMode: UiMode): Promise<{ jobId: 
       return await JobRunner.retryJob({ jobId });
     } catch (e: any) {
       const msg = String(e?.message ?? e);
-      if (!msg.includes("not implemented")) throw e;
+      if (!msg.includes("not implemented") && !msg.includes("not failed or canceled")) throw e;
     }
   }
   await updateJob(jobId, { status: "queued", error: undefined, updatedAt: Date.now() });

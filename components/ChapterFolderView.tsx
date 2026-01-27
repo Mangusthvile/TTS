@@ -1573,59 +1573,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         </div>
       )}
 
-      {bookJobs.length > 0 && (
-        <div className="px-4 sm:px-6 mt-3">
-          <div className={`p-4 rounded-2xl border ${isDark ? 'border-slate-800 bg-slate-900/60' : 'border-black/5 bg-white'}`}>
-            <div className="flex items-center justify-between">
-              <div className="text-xs font-black uppercase tracking-widest">Jobs</div>
-              <button onClick={onRefreshJobs} className="text-[10px] font-black uppercase tracking-widest text-indigo-500">Refresh</button>
-            </div>
-            <div className="mt-3 space-y-3">
-              {bookJobs.map((job) => {
-                const progress = (job as any).progressJson || {};
-                const total = Number(progress.total ?? 0);
-                const completed = Number(progress.completed ?? 0);
-                const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
-                const currentChapterId = progress.currentChapterId || "";
-                const canCancel = job.status === "queued" || job.status === "running" || job.status === "paused";
-                const canRetry = job.status === "failed" || job.status === "canceled";
-
-                return (
-                  <div key={job.jobId} className={`p-3 rounded-xl border ${isDark ? 'border-slate-800 bg-slate-950/40' : 'border-black/5 bg-white'}`}>
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="min-w-0">
-                      <div className="text-[10px] font-black uppercase tracking-widest opacity-60">
-                        {job.type === "fixIntegrity" ? "Fix Integrity" : "Generate Audio"}
-                      </div>
-                        <div className="text-xs font-black truncate">Status: {job.status}</div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {canCancel && (
-                          <button onClick={() => onCancelJob(job.jobId)} className="px-2 py-1 rounded-lg bg-red-500/10 text-red-600 text-[9px] font-black uppercase">Cancel</button>
-                        )}
-                        {canRetry && (
-                          <button onClick={() => onRetryJob(job.jobId)} className="px-2 py-1 rounded-lg bg-indigo-500/10 text-indigo-600 text-[9px] font-black uppercase">Retry</button>
-                        )}
-                      </div>
-                    </div>
-                    <div className="mt-2 flex items-center justify-between text-[10px] font-black uppercase tracking-widest opacity-60">
-                      <span>{completed} / {total}</span>
-                      {currentChapterId ? <span className="truncate max-w-[50%]">Current: {currentChapterId}</span> : <span>&nbsp;</span>}
-                    </div>
-                    <div className={`mt-2 h-2 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-800' : 'bg-black/5'}`}>
-                      <div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${percent}%` }} />
-                    </div>
-                    {job.error && (
-                      <div className="mt-2 text-[10px] font-bold text-red-500 truncate">Error: {job.error}</div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      )}
-
       <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-4 sm:px-6 py-6 sm:py-8">{chapters.length === 0 ? (<div className="p-12 text-center text-xs font-black opacity-30 uppercase">No chapters found</div>) : (<>{viewMode === 'details' && renderDetailsView()}{viewMode === 'list' && renderListView()}{viewMode === 'grid' && renderGridView()}</>)}</div>
     </div>
   );

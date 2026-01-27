@@ -190,9 +190,18 @@ public class JobRunnerPlugin extends Plugin {
             call.reject("job not found");
             return;
         }
-        if (!"failed".equals(row.status) && !"canceled".equals(row.status)) {
+        if (!"failed".equals(row.status) && !"canceled".equals(row.status) && !"queued".equals(row.status)) {
             call.reject("job is not failed or canceled");
             return;
+        }
+
+        if ("queued".equals(row.status) && row.progressJson != null) {
+            String workId = row.progressJson.optString("workRequestId", null);
+            if (workId != null && !workId.isEmpty()) {
+                try {
+                    WorkManager.getInstance(getContext()).cancelWorkById(UUID.fromString(workId));
+                } catch (Exception ignored) {}
+            }
         }
 
         String type = row.type != null ? row.type : "generateAudio";
