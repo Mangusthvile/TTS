@@ -74,6 +74,7 @@ interface ChapterFolderViewProps {
   
   // Optional UI refresh callback
   onAppendChapters?: (chapters: Chapter[]) => void;
+  onQueueGenerateJob?: (chapterIds: string[], voiceId?: string) => Promise<boolean>;
 }
 
 const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
@@ -108,6 +109,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   hasMoreChapters,
   isLoadingMoreChapters,
   onAppendChapters,
+  onQueueGenerateJob,
 }) => {
   const { driveFolderId } = book;
   const VIEW_MODE_KEY = `talevox:viewMode:${book.id}`;
@@ -851,29 +853,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       return;
     }
 
-    if (isMobileInterface && enableBackgroundJobs) {
-      const voiceId =
-        book.settings.defaultVoiceId ||
-        book.settings.selectedVoiceName ||
-        "en-US-Standard-C";
-
-      const payload = {
-        bookId: book.id,
-        chapterIds: chapters.map((c) => c.id),
-        voice: { id: voiceId },
-        settings: {
-          playbackSpeed: book.settings.useBookSettings ? (book.settings.playbackSpeed ?? 1.0) : 1.0
-        }
-      };
-
-      try {
-        await enqueueGenerateAudio(payload, uiMode);
-        pushNotice("Background job queued.", "success");
-        onRefreshJobs();
-      } catch (e: any) {
-        pushNotice(`Failed to queue job: ${String(e?.message ?? e)}`, "error");
-      }
-      return;
+    if (isMobileInterface && enableBackgroundJobs && onQueueGenerateJob) {
+      const ok = await onQueueGenerateJob(chapters.map((c) => c.id));
+      if (ok) return;
     }
 
     setIsRegeneratingAudio(true);
@@ -1135,7 +1117,15 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     setShowVoiceModal(null);
     if (chId) {
       const chapter = chapters.find(c => c.id === chId);
-      if (chapter) generateAudio(chapter, voiceId, { upload: false });
+      if (!chapter) return;
+
+      // Mobile: queue background job instead of inline synthesis
+      if (enableBackgroundJobs && onQueueGenerateJob) {
+        void onQueueGenerateJob([chapter.id], voiceId);
+        return;
+      }
+
+      generateAudio(chapter, voiceId, { upload: false });
     }
   };
 

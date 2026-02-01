@@ -26,7 +26,7 @@ import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library 
 import { trace, traceError } from './utils/trace';
 import { computeMobileMode } from './utils/platform';
 import { JobRunner } from './src/plugins/jobRunner';
-import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService, deleteJob as deleteJobService, clearJobs as clearJobsService } from './services/jobRunnerService';
+import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService, deleteJob as deleteJobService, clearJobs as clearJobsService, enqueueGenerateAudio } from './services/jobRunnerService';
 import { countQueuedUploads, listQueuedUploads, enqueueChapterUpload, removeQueuedUpload, type DriveUploadQueuedItem } from './services/driveUploadQueueService';
 import { getChapterAudioPath } from './services/chapterAudioStore';
 import { Filesystem, Directory } from '@capacitor/filesystem';
@@ -1501,6 +1501,18 @@ const App: React.FC = () => {
       setIsLinkModalOpen(true);
   };
 
+  const listAllChapterMeta = async (bookId: string): Promise<Chapter[]> => {
+    const all: Chapter[] = [];
+    let after: number | null = -1;
+    for (;;) {
+      const page = await libraryListChaptersPage(bookId, after, 500);
+      all.push(...page.chapters);
+      if (page.nextAfterIndex == null) break;
+      after = page.nextAfterIndex;
+    }
+    return all;
+  };
+
   const performFullDriveSync = async (manual = false) => {
       if(!isAuthorized || !stateRef.current.driveRootFolderId) return;
       setIsSyncing(true);
@@ -1516,6 +1528,20 @@ const App: React.FC = () => {
          for (const db of driveBooks) {
              const files = await listFilesInFolder(db.id);
              const chaptersMap = new Map<string, Partial<Chapter>>();
+             const existingBookIdx = updatedBooks.findIndex(b => b.driveFolderId === db.id);
+             let existingMetaById = new Map<string, Chapter>();
+
+             if (existingBookIdx !== -1) {
+               try {
+                 const existingBook = updatedBooks[existingBookIdx];
+                 const existingMeta = await listAllChapterMeta(existingBook.id);
+                 existingMetaById = new Map(existingMeta.map((c) => [c.id, c]));
+               } catch {
+                 // best-effort: fall back to in-memory data if the library fetch fails
+                 const existingBook = updatedBooks[existingBookIdx];
+                 existingMetaById = new Map(existingBook.chapters.map((c) => [c.id, c]));
+               }
+             }
              
              for (const f of files) {
                  // Support new c_<id> format
@@ -1525,7 +1551,18 @@ const App: React.FC = () => {
                      const ext = match[2].toLowerCase();
                      
                      if (!chaptersMap.has(id)) {
-                         chaptersMap.set(id, { id, index: 0, title: 'Imported Chapter', filename: '', content: '', wordCount: 0, progress: 0, progressChars: 0, updatedAt: Date.now() });
+                         const existing = existingMetaById.get(id);
+                         chaptersMap.set(id, {
+                           id,
+                           index: existing?.index ?? 0,
+                           title: existing?.title ?? 'Imported Chapter',
+                           filename: existing?.filename ?? '',
+                           content: existing?.content ?? '',
+                           wordCount: existing?.wordCount ?? 0,
+                           progress: existing?.progress ?? 0,
+                           progressChars: existing?.progressChars ?? 0,
+                           updatedAt: existing?.updatedAt ?? Date.now()
+                         });
                      }
                      const ch = chaptersMap.get(id)!;
                      if (ext === 'txt') {
@@ -1546,7 +1583,6 @@ const App: React.FC = () => {
                      id: c.id || crypto.randomUUID(),
                  } as Chapter));
 
-             const existingBookIdx = updatedBooks.findIndex(b => b.driveFolderId === db.id);
              if (existingBookIdx !== -1) {
                  const existingBook = updatedBooks[existingBookIdx];
                  const mergedChapters = [...existingBook.chapters];
@@ -1556,18 +1592,25 @@ const App: React.FC = () => {
                          ec.id === dc.id || ec.cloudTextFileId === dc.cloudTextFileId
                      );
                      
-                     if (existingChIdx !== -1) {
-                         mergedChapters[existingChIdx] = {
-                             ...mergedChapters[existingChIdx],
-                             ...dc,
-                             progress: mergedChapters[existingChIdx].progress,
-                             progressSec: mergedChapters[existingChIdx].progressSec,
-                             isCompleted: mergedChapters[existingChIdx].isCompleted
-                         };
-                     } else {
-                         mergedChapters.push(dc);
-                     }
-                 }
+                      if (existingChIdx !== -1) {
+                          const existing = mergedChapters[existingChIdx];
+                          const isPlaceholder =
+                            (dc.title === 'Imported Chapter' || !dc.title) &&
+                            (dc.index === 0 || dc.index == null);
+                          mergedChapters[existingChIdx] = {
+                              ...existing,
+                              ...dc,
+                              title: isPlaceholder ? existing.title : dc.title,
+                              index: isPlaceholder ? existing.index : dc.index,
+                              filename: isPlaceholder && existing.filename ? existing.filename : dc.filename,
+                              progress: existing.progress,
+                              progressSec: existing.progressSec,
+                              isCompleted: existing.isCompleted
+                          };
+                      } else {
+                          mergedChapters.push(dc);
+                      }
+                  }
                  updatedBooks[existingBookIdx] = { ...existingBook, chapters: mergedChapters.sort((a,b) => a.index - b.index) };
              } else {
                  updatedBooks.push({
@@ -1913,6 +1956,33 @@ const App: React.FC = () => {
               onCancelJob={handleCancelJob}
               onRetryJob={handleRetryJob}
               onRefreshJobs={refreshJobs}
+              onQueueGenerateJob={async (chapterIds: string[], voiceId?: string) => {
+                if (!computeMobileMode(state.readerSettings.uiMode)) return false;
+                const voice =
+                  voiceId ||
+                  activeBook.settings.defaultVoiceId ||
+                  activeBook.settings.selectedVoiceName ||
+                  "en-US-Standard-C";
+                const payload = {
+                  bookId: activeBook.id,
+                  chapterIds,
+                  voice: { id: voice },
+                  settings: {
+                    playbackSpeed: activeBook.settings.useBookSettings
+                      ? activeBook.settings.playbackSpeed ?? 1.0
+                      : 1.0,
+                  },
+                };
+                try {
+                  await enqueueGenerateAudio(payload, state.readerSettings.uiMode);
+                  await refreshJobs();
+                  pushNotice({ message: "Background job queued.", type: "success" });
+                  return true;
+                } catch (e: any) {
+                  pushNotice({ message: `Failed to queue job: ${String(e?.message ?? e)}`, type: "error" });
+                  return false;
+                }
+              }}
               onAppendChapters={(newChapters) => {
                 setState((prev) => ({
                   ...prev,
