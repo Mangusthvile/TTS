@@ -190,7 +190,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const chapters = useMemo(() => [...(book.chapters || [])].sort((a, b) => a.index - b.index), [book.chapters]);
   const isMobileInterface = computeMobileMode(uiMode);
-  const enableBackgroundJobs = false;
+  // Allow background-capable flows (WorkManager / native plugin) when we're in mobile mode.
+  const enableBackgroundJobs = isMobileInterface;
   const bookJobs = useMemo(() => {
     return (jobs || []).filter((j) => {
       const bookId = (j as any)?.payloadJson?.bookId;
@@ -722,7 +723,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
   }, [book.backend, handleCheckDriveIntegrity, handleCheckLocalIntegrity, pushNotice, lastScan]);
 
-  const generateAudio = async (chapter: Chapter, voiceIdOverride?: string): Promise<boolean> => {
+  const generateAudio = async (
+    chapter: Chapter,
+    voiceIdOverride?: string,
+    options?: { upload?: boolean }
+  ): Promise<boolean> => {
     if (synthesizingId) return false;
 
     setSynthesizingId(chapter.id);
@@ -773,8 +778,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         await saveAudioToCache(cacheKey, audioBlob);
       }
 
+      let localPath: string | null = null;
       if (audioBlob) {
-        await persistChapterAudio(chapter.id, audioBlob, uiMode);
+        localPath = await persistChapterAudio(chapter.id, audioBlob, uiMode);
       }
 
       onUpdateChapter({
@@ -786,28 +792,40 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         updatedAt: Date.now(),
       });
 
-      if (book.backend === StorageBackend.DRIVE && driveFolderId) {
+      const shouldUpload = options?.upload ?? false;
+
+      if (shouldUpload && book.backend === StorageBackend.DRIVE && driveFolderId) {
         setSynthesisProgress({ current: 0, total: 1, message: "Uploading to Drive..." });
 
         const filename = buildMp3Name(book.id, chapter.id);
 
-        const cloudAudioFileId = await uploadToDrive(
-          driveFolderId,
-          filename,
-          audioBlob,
-          chapter.cloudAudioFileId,
-          "audio/mpeg"
-        );
+        try {
+          const cloudAudioFileId = await uploadToDrive(
+            driveFolderId,
+            filename,
+            audioBlob,
+            chapter.cloudAudioFileId,
+            "audio/mpeg"
+          );
 
-        onUpdateChapter({
-          ...chapter,
-          cloudAudioFileId,
-          audioStatus: AudioStatus.READY,
-          audioSignature: cacheKey,
-          audioPrefixLen: introText.length,
-          hasCachedAudio: true,
-          updatedAt: Date.now(),
-        });
+          onUpdateChapter({
+            ...chapter,
+            cloudAudioFileId,
+            audioStatus: AudioStatus.READY,
+            audioSignature: cacheKey,
+            audioPrefixLen: introText.length,
+            hasCachedAudio: true,
+            updatedAt: Date.now(),
+          });
+        } catch (err: any) {
+          // If upload fails, keep the local file and queue an upload so it can resume later.
+          if (localPath && onQueueChapterUpload) {
+            await onQueueChapterUpload(chapter.id);
+            pushNotice("Upload will retry when online. Chapter kept locally.", "info", 4000);
+          } else {
+            pushNotice(`Upload failed: ${String(err?.message ?? err)}`, "error", 4000);
+          }
+        }
       }
       return true;
     } catch (err: any) {
@@ -862,7 +880,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     setBgGenProgress({ current: 0, total: chapters.length });
     try {
       for (const chapter of chapters) {
-        await generateAudio(chapter);
+        await generateAudio(chapter, undefined, { upload: false });
         setBgGenProgress((p) =>
           p ? { ...p, current: Math.min(p.total, p.current + 1) } : null
         );
@@ -1067,7 +1085,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         const ch = chaptersById.get(chapterId);
         if (!ch) { bump(); continue; }
         setFixLog(prev => [...prev, `Generating missing audio: ${ch.title}`]);
-        const success = await generateAudio(ch);
+        const success = await generateAudio(ch, undefined, { upload: true });
         if (!success) errorCount++;
         bump();
       }
@@ -1117,7 +1135,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     setShowVoiceModal(null);
     if (chId) {
       const chapter = chapters.find(c => c.id === chId);
-      if (chapter) generateAudio(chapter, voiceId);
+      if (chapter) generateAudio(chapter, voiceId, { upload: false });
     }
   };
 

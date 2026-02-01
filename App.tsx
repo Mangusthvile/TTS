@@ -2115,6 +2115,14 @@ const App: React.FC = () => {
                         <span>Next try: {item.nextAttemptAt ? new Date(item.nextAttemptAt).toLocaleString() : 'now'}</span>
                       </div>
                       {item.lastError && <div className="text-[10px] text-red-400 font-mono break-words">{item.lastError}</div>}
+                      <div className="flex gap-2 justify-end">
+                        <button
+                          onClick={() => handleDismissQueuedUpload(item.id)}
+                          className="text-[10px] font-black uppercase tracking-widest text-red-300 px-3 py-1 border border-red-300/40 rounded-full hover:bg-red-300/10"
+                        >
+                          Remove
+                        </button>
+                      </div>
                     </div>
                   ))
                 )}
