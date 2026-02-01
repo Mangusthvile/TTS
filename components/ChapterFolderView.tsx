@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile, Rule, HighlightMode, UiMode, JobRecord } from '../types';
-import { LayoutGrid, List, AlignJustify, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon, Sparkles } from 'lucide-react';
+import { LayoutGrid, List, AlignJustify, Eye, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon, Sparkles } from 'lucide-react';
 import { applyRules } from '../services/speechService';
 import { synthesizeChunk } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache, hasAudioInCache } from '../services/audioCache';
@@ -57,6 +57,8 @@ interface ChapterFolderViewProps {
   onToggleUploadQueue: () => void;
   onUploadAllChapters: () => void;
   onQueueChapterUpload: (chapterId: string) => void;
+  uploadedChapterCount: number;
+  isUploadingAll: boolean;
   onUpdateChapterTitle: (chapterId: string, newTitle: string) => void;
   onDeleteChapter: (chapterId: string) => void;
   onUpdateChapter: (chapter: Chapter) => void;
@@ -93,6 +95,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   onToggleUploadQueue,
   onUploadAllChapters,
   onQueueChapterUpload,
+  uploadedChapterCount,
+  isUploadingAll,
   onUpdateChapterTitle,
   onDeleteChapter,
   onUpdateChapter,
@@ -165,6 +169,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [mobileMenuId, setMobileMenuId] = useState<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [bgGenProgress, setBgGenProgress] = useState<{ current: number; total: number } | null>(null);
+  const [isRegeneratingAudio, setIsRegeneratingAudio] = useState(false);
   const [showBookSettings, setShowBookSettings] = useState(false);
   const coverInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -186,11 +191,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const chapters = useMemo(() => [...(book.chapters || [])].sort((a, b) => a.index - b.index), [book.chapters]);
   const isMobileInterface = computeMobileMode(uiMode);
   const enableBackgroundJobs = false;
-  const missingAudioIdsForBook = useMemo(() => {
-    return chapters
-      .filter((c) => !(c.cloudAudioFileId || (c as any).audioDriveId || c.audioStatus === AudioStatus.READY))
-      .map((c) => c.id);
-  }, [chapters]);
   const bookJobs = useMemo(() => {
     return (jobs || []).filter((j) => {
       const bookId = (j as any)?.payloadJson?.bookId;
@@ -827,9 +827,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
   };
 
-  const handleGenerateMissingAudioBackground = async () => {
-    if (!missingAudioIdsForBook.length) {
-      pushNotice("No missing audio found.", "info");
+  const handleRegenerateAudio = async () => {
+    if (!chapters.length) {
+      pushNotice("No chapters to regenerate.", "info");
       return;
     }
 
@@ -841,7 +841,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       const payload = {
         bookId: book.id,
-        chapterIds: missingAudioIdsForBook,
+        chapterIds: chapters.map((c) => c.id),
         voice: { id: voiceId },
         settings: {
           playbackSpeed: book.settings.useBookSettings ? (book.settings.playbackSpeed ?? 1.0) : 1.0
@@ -858,16 +858,22 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       return;
     }
 
-    // Desktop: keep in-process generation behavior.
-    setBgGenProgress({ current: 0, total: missingAudioIdsForBook.length });
-    for (const id of missingAudioIdsForBook) {
-      const ch = chapters.find((c) => c.id === id);
-      if (!ch) continue;
-      await generateAudio(ch);
-      setBgGenProgress((p) => (p ? { ...p, current: p.current + 1 } : p));
+    setIsRegeneratingAudio(true);
+    setBgGenProgress({ current: 0, total: chapters.length });
+    try {
+      for (const chapter of chapters) {
+        await generateAudio(chapter);
+        setBgGenProgress((p) =>
+          p ? { ...p, current: Math.min(p.total, p.current + 1) } : null
+        );
+      }
+      pushNotice("Audio generation complete.", "success");
+    } catch (e: any) {
+      pushNotice(`Audio regeneration failed: ${String(e?.message ?? e)}`, "error");
+    } finally {
+      setBgGenProgress(null);
+      setIsRegeneratingAudio(false);
     }
-    setBgGenProgress(null);
-    pushNotice("Audio generation complete.", "success");
   };
   const buildFixPlan = useCallback((options?: { includeConversions?: boolean; includeGeneration?: boolean; includeCleanup?: boolean }) => {
     const scan = lastScan;
@@ -1369,16 +1375,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const generateCount = planPreview.generationIds.length;
   const cleanupCount = planPreview.safeToCleanup ? planPreview.cleanup.length : 0;
 
-  const planPreview = buildFixPlan({
-    includeConversions: fixOptions.convertLegacy,
-    includeGeneration: fixOptions.genAudio,
-    includeCleanup: fixOptions.cleanupStrays
-  });
-  const legacyTextCount = planPreview.conversions.filter(c => c.type === "text").length;
-  const legacyAudioCount = planPreview.conversions.filter(c => c.type === "audio").length;
-  const generateCount = planPreview.generationIds.length;
-  const cleanupCount = planPreview.safeToCleanup ? planPreview.cleanup.length : 0;
-
   return (
     <div className={`h-full min-h-0 flex flex-col ${isDark ? 'bg-slate-900 text-slate-100' : isSepia ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
       <input ref={coverInputRef} type="file" accept="image/*" className="hidden" onChange={handleCoverSelected} />
@@ -1434,16 +1430,20 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Background Tools</div>
             <div className="flex flex-wrap gap-2">
               <button
-                onClick={handleGenerateMissingAudioBackground}
-                className="px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest"
+                onClick={handleRegenerateAudio}
+                disabled={isRegeneratingAudio}
+                className={`px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 transition-all ${isRegeneratingAudio ? 'cursor-not-allowed opacity-60' : 'hover:bg-indigo-50'}`}
               >
-                {isMobileInterface && enableBackgroundJobs ? "Generate Missing Audio (BG)" : "Generate Missing Audio"}
+                {isRegeneratingAudio ? <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" /> : <RotateCcw className="w-4 h-4 text-indigo-600" />}
+                {isRegeneratingAudio ? 'Regenerating...' : 'Regenerate Audio'}
               </button>
               <button
                 onClick={handleInitManifests}
-                className="px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest"
+                disabled={isInitManifests}
+                className={`px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 transition-all ${isInitManifests ? 'cursor-not-allowed opacity-60' : 'hover:bg-indigo-50'}`}
               >
-                Init Manifests
+                {isInitManifests ? <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" /> : <Cloud className="w-4 h-4 text-indigo-600" />}
+                {isInitManifests ? 'Initializing...' : 'Init Manifests'}
               </button>
               {isMobileInterface && (
                 <button
@@ -1451,9 +1451,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                     setShowBookSettings(false);
                     setShowFixModal(true);
                   }}
-                  className="px-4 py-2 rounded-xl bg-orange-500 text-white text-[10px] font-black uppercase tracking-widest"
+                  className="px-4 py-2 rounded-xl bg-orange-500 text-white text-[10px] font-black uppercase tracking-widest flex items-center gap-2"
                 >
-                  {isMobileInterface && enableBackgroundJobs ? "Fix Integrity (BG)" : "Fix Integrity"}
+                  {isFixing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wrench className="w-4 h-4" />}
+                  {isFixing ? "Fixing..." : isMobileInterface && enableBackgroundJobs ? "Fix Integrity (BG)" : "Fix Integrity"}
                 </button>
               )}
             </div>
@@ -1461,20 +1462,23 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-black uppercase tracking-widest opacity-60">Uploads</span>
-              <span className="text-[10px] font-black tracking-widest text-indigo-400">{uploadQueueCount} queued</span>
+              <span className="text-[10px] font-black tracking-widest text-indigo-400">{uploadedChapterCount} uploaded · {uploadQueueCount} pending</span>
             </div>
             <div className="flex flex-wrap gap-2">
               <button
                 onClick={onToggleUploadQueue}
-                className={`${accentButtonClass} px-3`}
+                className={`${accentButtonClass} px-3 flex items-center gap-2`}
               >
-                View queue
+                <Eye className="w-3.5 h-3.5" />
+                View uploads
               </button>
               <button
                 onClick={onUploadAllChapters}
-                className={`px-4 py-2 rounded-xl font-black uppercase tracking-widest text-[10px] transition-colors ${isDark ? 'bg-indigo-500 text-white hover:bg-indigo-400' : 'bg-indigo-600 text-white hover:bg-indigo-500'} shadow-lg`}
+                disabled={isUploadingAll}
+                className={`px-4 py-2 rounded-xl font-black uppercase tracking-widest text-[10px] transition-all flex items-center gap-2 ${isUploadingAll ? 'bg-indigo-500/60 text-white cursor-not-allowed shadow-none' : isDark ? 'bg-indigo-500 text-white hover:bg-indigo-400 shadow-lg' : 'bg-indigo-600 text-white hover:bg-indigo-500 shadow-lg'}`}
               >
-                Upload all chapters
+                {isUploadingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Cloud className="w-3.5 h-3.5" />}
+                {isUploadingAll ? 'Uploading...' : 'Upload all chapters'}
               </button>
             </div>
           </div>

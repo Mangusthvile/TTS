@@ -354,6 +354,7 @@ const App: React.FC = () => {
   const isAuthorized = authState.status === 'signed_in' && !!authManager.getToken();
 
   const [uploadQueueCount, setUploadQueueCount] = useState(0);
+  const [isUploadingAll, setIsUploadingAll] = useState(false);
   const [uploadQueueItems, setUploadQueueItems] = useState<DriveUploadQueuedItem[]>([]);
   const [showUploadQueue, setShowUploadQueue] = useState(false);
 
@@ -465,6 +466,13 @@ const App: React.FC = () => {
   useEffect(() => { stateRef.current = state; }, [state]);
 
   const activeBook = useMemo(() => state.books.find(b => b.id === state.activeBookId), [state.books, state.activeBookId]);
+  const uploadedChapters = useMemo(() => {
+    if (!activeBook) return [];
+    return activeBook.chapters
+      .filter((ch) => !!(ch.cloudAudioFileId || ch.audioDriveId))
+      .sort((a, b) => a.index - b.index);
+  }, [activeBook]);
+  const uploadedChapterCount = uploadedChapters.length;
   const activeChapterMetadata = useMemo(() => activeBook?.chapters.find(c => c.id === activeBook.currentChapterId), [activeBook]);
 
   const [toast, setToast] = useState<{ message: string; type: 'info' | 'success' | 'error' | 'reconnect' } | null>(null);
@@ -1263,32 +1271,37 @@ const App: React.FC = () => {
   }, [enqueueChapterUpload, state.activeBookId, state.books, pushNotice, refreshUploadQueueCount, refreshUploadQueueList, resolveLocalPathForUpload, uploadChapterNow, kickUploadQueue]);
 
   const handleUploadAllChapters = useCallback(async () => {
-    const book = state.books.find((b) => b.id === state.activeBookId);
-    if (!book) return;
-    let queued = 0;
-    let uploaded = 0;
-    for (const ch of book.chapters) {
-      try {
-        await uploadChapterNow(book.id, ch.id);
-        uploaded += 1;
-      } catch (e: any) {
-        const localPath = await resolveLocalPathForUpload(ch.id, ch.audioSignature);
-        if (!localPath) continue;
-        const ok = await enqueueChapterUpload(book.id, ch.id, localPath);
-        if (ok) queued += 1;
+    setIsUploadingAll(true);
+    try {
+      const book = state.books.find((b) => b.id === state.activeBookId);
+      if (!book) return;
+      let queued = 0;
+      let uploaded = 0;
+      for (const ch of book.chapters) {
+        try {
+          await uploadChapterNow(book.id, ch.id);
+          uploaded += 1;
+        } catch (e: any) {
+          const localPath = await resolveLocalPathForUpload(ch.id, ch.audioSignature);
+          if (!localPath) continue;
+          const ok = await enqueueChapterUpload(book.id, ch.id, localPath);
+          if (ok) queued += 1;
+        }
       }
+      if (uploaded) {
+        pushNotice({ message: `Uploaded ${uploaded} chapters`, type: "success" });
+      }
+      if (queued) {
+        pushNotice({ message: `Queued ${queued} uploads (will retry)`, type: "info" });
+      }
+      if (queued) {
+        await kickUploadQueue();
+      }
+      await refreshUploadQueueCount();
+      await refreshUploadQueueList();
+    } finally {
+      setIsUploadingAll(false);
     }
-    if (uploaded) {
-      pushNotice({ message: `Uploaded ${uploaded} chapters`, type: "success" });
-    }
-    if (queued) {
-      pushNotice({ message: `Queued ${queued} uploads (will retry)`, type: "info" });
-    }
-    if (queued) {
-      await kickUploadQueue();
-    }
-    await refreshUploadQueueCount();
-    await refreshUploadQueueList();
   }, [enqueueChapterUpload, state.activeBookId, state.books, pushNotice, refreshUploadQueueCount, refreshUploadQueueList, resolveLocalPathForUpload, uploadChapterNow, kickUploadQueue]);
 
   const handleToggleUploadQueue = useCallback(() => {
@@ -1885,6 +1898,8 @@ const App: React.FC = () => {
               onToggleUploadQueue={handleToggleUploadQueue}
               onUploadAllChapters={handleUploadAllChapters}
               onQueueChapterUpload={handleQueueChapterUpload}
+              uploadedChapterCount={uploadedChapterCount}
+              isUploadingAll={isUploadingAll}
             />
           )}
 
@@ -2004,25 +2019,62 @@ const App: React.FC = () => {
       <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 p-4">
         <div className="w-full max-w-3xl bg-slate-950 text-white rounded-3xl p-6 space-y-4 shadow-2xl">
           <div className="flex items-center justify-between">
-            <div className="text-lg font-black uppercase tracking-widest">Upload Queue ({uploadQueueCount})</div>
+            <div className="text-lg font-black uppercase tracking-widest">Drive Uploads</div>
             <button onClick={() => setShowUploadQueue(false)} className="text-sm font-bold uppercase tracking-widest text-indigo-300 px-3 py-1 border border-indigo-300 rounded-full">Close</button>
           </div>
-          <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-2">
-            {uploadQueueItems.length === 0 ? (
-              <div className="text-sm font-black opacity-60 text-indigo-300">No pending uploads</div>
-            ) : (
-              uploadQueueItems.map((item) => (
-                <div key={item.id} className="border border-white/10 rounded-2xl p-4 bg-slate-900/70 flex flex-col gap-2">
-                  <div className="text-[11px] font-black uppercase tracking-widest text-indigo-400">{item.status}</div>
-                  <div className="flex items-center justify-between text-sm font-semibold">{item.chapterId}</div>
-                  <div className="text-[10px] opacity-60 flex flex-wrap gap-4">
-                    <span>Attempts: {item.attempts}</span>
-                    <span>Next try: {item.nextAttemptAt ? new Date(item.nextAttemptAt).toLocaleString() : 'now'}</span>
-                  </div>
-                  {item.lastError && <div className="text-[10px] text-red-400 font-mono break-words">{item.lastError}</div>}
+          <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-2">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest">
+                <span>Uploaded chapters</span>
+                <span className="text-emerald-300">{uploadedChapters.length}</span>
+              </div>
+              {uploadedChapters.length === 0 ? (
+                <div className="text-sm font-black opacity-60 text-emerald-300">No chapters uploaded yet</div>
+              ) : (
+                <div className="space-y-3">
+                  {uploadedChapters.map((chapter) => (
+                    <div key={chapter.id} className="border border-emerald-500/30 rounded-2xl p-4 bg-emerald-500/5 flex flex-col gap-1">
+                      <div className="text-[11px] font-black uppercase tracking-widest text-emerald-400">Uploaded</div>
+                      <div className="flex items-center justify-between text-sm font-semibold">
+                        <span>Ch. {chapter.index}</span>
+                        <span className="text-[10px] uppercase opacity-60">{(chapter.audioStatus || "ready").toUpperCase()}</span>
+                      </div>
+                      <div className="text-[12px] font-semibold">{chapter.title || "Untitled chapter"}</div>
+                      <div className="text-[10px] opacity-60">
+                        {chapter.cloudAudioFileId
+                          ? `${chapter.cloudAudioFileId.slice(0, 10)}${chapter.cloudAudioFileId.length > 10 ? '…' : ''}`
+                          : chapter.audioDriveId
+                            ? `${chapter.audioDriveId.slice(0, 10)}${chapter.audioDriveId.length > 10 ? '…' : ''}`
+                            : "Drive audio"}
+                      </div>
+                    </div>
+                  ))}
                 </div>
-              ))
-            )}
+              )}
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest">
+                <span>Pending uploads</span>
+                <span className="text-indigo-300">{uploadQueueCount}</span>
+              </div>
+              <div className="space-y-3 max-h-[40vh] overflow-y-auto">
+                {uploadQueueItems.length === 0 ? (
+                  <div className="text-sm font-black opacity-60 text-indigo-300">No pending uploads</div>
+                ) : (
+                  uploadQueueItems.map((item) => (
+                    <div key={item.id} className="border border-white/10 rounded-2xl p-4 bg-slate-900/70 flex flex-col gap-2">
+                      <div className="text-[11px] font-black uppercase tracking-widest text-indigo-400">{item.status}</div>
+                      <div className="flex items-center justify-between text-sm font-semibold">{item.chapterId}</div>
+                      <div className="text-[10px] opacity-60 flex flex-wrap gap-4">
+                        <span>Attempts: {item.attempts}</span>
+                        <span>Next try: {item.nextAttemptAt ? new Date(item.nextAttemptAt).toLocaleString() : 'now'}</span>
+                      </div>
+                      {item.lastError && <div className="text-[10px] text-red-400 font-mono break-words">{item.lastError}</div>}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </div>
