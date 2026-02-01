@@ -27,9 +27,17 @@ import { trace, traceError } from './utils/trace';
 import { computeMobileMode } from './utils/platform';
 import { JobRunner } from './src/plugins/jobRunner';
 import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService, deleteJob as deleteJobService, clearJobs as clearJobsService } from './services/jobRunnerService';
-import { countQueuedUploads, listQueuedUploads, enqueueChapterUpload, type DriveUploadQueuedItem } from './services/driveUploadQueueService';
+import { countQueuedUploads, listQueuedUploads, enqueueChapterUpload, removeQueuedUpload, type DriveUploadQueuedItem } from './services/driveUploadQueueService';
 import { getChapterAudioPath } from './services/chapterAudioStore';
 import { Filesystem, Directory } from '@capacitor/filesystem';
+
+type DownloadedChapterInfo = {
+  id: string;
+  title: string;
+  index: number;
+  localPath: string;
+  hasDriveAudio: boolean;
+};
 
 const STATE_FILENAME = 'talevox_state_v2917.json';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
@@ -356,6 +364,8 @@ const App: React.FC = () => {
   const [uploadQueueCount, setUploadQueueCount] = useState(0);
   const [isUploadingAll, setIsUploadingAll] = useState(false);
   const [uploadQueueItems, setUploadQueueItems] = useState<DriveUploadQueuedItem[]>([]);
+  const [downloadedChapters, setDownloadedChapters] = useState<DownloadedChapterInfo[]>([]);
+  const [showDownloadedChapters, setShowDownloadedChapters] = useState(false);
   const [showUploadQueue, setShowUploadQueue] = useState(false);
 
   const refreshUploadQueueCount = useCallback(async () => {
@@ -443,9 +453,43 @@ const App: React.FC = () => {
   }, [refreshUploadQueueCount]);
 
   useEffect(() => {
-    if (!showUploadQueue) return;
-    refreshUploadQueueList();
-  }, [showUploadQueue, refreshUploadQueueList, uploadQueueCount]);
+    let mounted = true;
+    const book = state.books.find((b) => b.id === state.activeBookId);
+    if (!book) {
+      setDownloadedChapters([]);
+      return;
+    }
+    const loadDownloads = async () => {
+      const entries: DownloadedChapterInfo[] = [];
+      for (const chapter of book.chapters) {
+        const record = await getChapterAudioPath(chapter.id);
+        if (!record?.localPath) continue;
+        try {
+          await Filesystem.stat({
+            path: `talevox/audio/${chapter.id}.mp3`,
+            directory: Directory.Data,
+          });
+        } catch {
+          continue;
+        }
+        if (!mounted) return;
+        entries.push({
+          id: chapter.id,
+          title: chapter.title,
+          index: chapter.index,
+          localPath: record.localPath,
+          hasDriveAudio: !!(chapter.cloudAudioFileId || chapter.audioDriveId),
+        });
+      }
+      if (mounted) {
+        setDownloadedChapters(entries);
+      }
+    };
+    loadDownloads();
+    return () => {
+      mounted = false;
+    };
+  }, [state.activeBookId, state.books]);
 
   useEffect(() => {
     if (state.googleClientId) {
@@ -466,13 +510,6 @@ const App: React.FC = () => {
   useEffect(() => { stateRef.current = state; }, [state]);
 
   const activeBook = useMemo(() => state.books.find(b => b.id === state.activeBookId), [state.books, state.activeBookId]);
-  const uploadedChapters = useMemo(() => {
-    if (!activeBook) return [];
-    return activeBook.chapters
-      .filter((ch) => !!(ch.cloudAudioFileId || ch.audioDriveId))
-      .sort((a, b) => a.index - b.index);
-  }, [activeBook]);
-  const uploadedChapterCount = uploadedChapters.length;
   const activeChapterMetadata = useMemo(() => activeBook?.chapters.find(c => c.id === activeBook.currentChapterId), [activeBook]);
 
   const [toast, setToast] = useState<{ message: string; type: 'info' | 'success' | 'error' | 'reconnect' } | null>(null);
@@ -1304,9 +1341,23 @@ const App: React.FC = () => {
     }
   }, [enqueueChapterUpload, state.activeBookId, state.books, pushNotice, refreshUploadQueueCount, refreshUploadQueueList, resolveLocalPathForUpload, uploadChapterNow, kickUploadQueue]);
 
+  const handleDismissQueuedUpload = useCallback(async (id: string) => {
+    const ok = await removeQueuedUpload(id);
+    if (ok) {
+      await refreshUploadQueueCount();
+      await refreshUploadQueueList();
+    }
+  }, [refreshUploadQueueCount, refreshUploadQueueList]);
+
+  const handleToggleDownloadedChapters = useCallback(() => {
+    setShowDownloadedChapters((prev) => !prev);
+  }, []);
+
   const handleToggleUploadQueue = useCallback(() => {
     setShowUploadQueue((prev) => !prev);
   }, []);
+
+  const uploadedChapterCount = downloadedChapters.length;
 
   const handleManualPlay = () => {
     gestureArmedRef.current = true;
@@ -2019,34 +2070,28 @@ const App: React.FC = () => {
       <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 p-4">
         <div className="w-full max-w-3xl bg-slate-950 text-white rounded-3xl p-6 space-y-4 shadow-2xl">
           <div className="flex items-center justify-between">
-            <div className="text-lg font-black uppercase tracking-widest">Drive Uploads</div>
+            <div className="text-lg font-black uppercase tracking-widest">Offline uploads</div>
             <button onClick={() => setShowUploadQueue(false)} className="text-sm font-bold uppercase tracking-widest text-indigo-300 px-3 py-1 border border-indigo-300 rounded-full">Close</button>
           </div>
           <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-2">
             <div className="space-y-2">
               <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest">
-                <span>Uploaded chapters</span>
-                <span className="text-emerald-300">{uploadedChapters.length}</span>
+                <span>Downloaded chapters</span>
+                <span className="text-emerald-300">{uploadedChapterCount}</span>
               </div>
-              {uploadedChapters.length === 0 ? (
-                <div className="text-sm font-black opacity-60 text-emerald-300">No chapters uploaded yet</div>
+              {downloadedChapters.length === 0 ? (
+                <div className="text-sm font-black opacity-60 text-emerald-300">No offline chapters</div>
               ) : (
                 <div className="space-y-3">
-                  {uploadedChapters.map((chapter) => (
+                  {downloadedChapters.map((chapter) => (
                     <div key={chapter.id} className="border border-emerald-500/30 rounded-2xl p-4 bg-emerald-500/5 flex flex-col gap-1">
-                      <div className="text-[11px] font-black uppercase tracking-widest text-emerald-400">Uploaded</div>
+                      <div className="text-[11px] font-black uppercase tracking-widest text-emerald-400">Offline ready</div>
                       <div className="flex items-center justify-between text-sm font-semibold">
                         <span>Ch. {chapter.index}</span>
-                        <span className="text-[10px] uppercase opacity-60">{(chapter.audioStatus || "ready").toUpperCase()}</span>
+                        <span className="text-[10px] uppercase opacity-60">{chapter.hasDriveAudio ? 'Cloud copy present' : 'Offline only'}</span>
                       </div>
                       <div className="text-[12px] font-semibold">{chapter.title || "Untitled chapter"}</div>
-                      <div className="text-[10px] opacity-60">
-                        {chapter.cloudAudioFileId
-                          ? `${chapter.cloudAudioFileId.slice(0, 10)}${chapter.cloudAudioFileId.length > 10 ? '…' : ''}`
-                          : chapter.audioDriveId
-                            ? `${chapter.audioDriveId.slice(0, 10)}${chapter.audioDriveId.length > 10 ? '…' : ''}`
-                            : "Drive audio"}
-                      </div>
+                      <div className="text-[10px] opacity-60 break-words">{chapter.localPath}</div>
                     </div>
                   ))}
                 </div>

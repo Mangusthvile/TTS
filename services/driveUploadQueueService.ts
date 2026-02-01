@@ -45,3 +45,10 @@ export async function enqueueChapterUpload(bookId: string, chapterId: string, lo
   };
   return enqueueUploadEntry(item);
 }
+
+export async function removeQueuedUpload(id: string): Promise<boolean> {
+  await initStorage();
+  const storage = getStorage();
+  const res = await storage.markUploadDone(id);
+  return res.ok;
+}
