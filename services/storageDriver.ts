@@ -361,13 +361,10 @@ class SafeLocalStorageDriver implements StorageDriver {
   private KEY_PROGRESS_PREFIX = "talevox_progress:";
   private KEY_SMALL_BACKUP = "talevox_small_backup";
   private KEY_AUTH_SESSION = "talevox_drive_session_v3";
-<<<<<<< ours
   private KEY_JOBS_INDEX = "talevox_jobs_index";
   private KEY_JOB_PREFIX = "talevox_job:";
   private KEY_CHAPTER_AUDIO = "talevox_chapter_audio_map";
   private KEY_UPLOAD_QUEUE = "talevox_drive_upload_queue";
-=======
->>>>>>> theirs
 
   private MAX_ITEM_BYTES = 180_000; // ~180KB per key
 

@@ -331,24 +331,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       // 1. List root files
       const rootFiles = await listFilesInFolder(driveFolderId);
 
-<<<<<<< ours
-      // 2. Identify meta folder (manifest lives there)
-      const subfolders = rootFiles.filter(f => f.mimeType === "application/vnd.google-apps.folder");
-      let metaFiles: StrayFile[] = [];
-
-      const metaFolder = subfolders.find(f => f.name === "meta");
-      if (!metaFolder) {
-        throw new Error("meta folder not found in this Drive book.");
-      }
-
-      metaFiles = await listFilesInFolder(metaFolder.id);
-
-      const inventoryFile = metaFiles.find(f => f.name === "inventory.json");
-      if (!inventoryFile) {
-        throw new Error("inventory.json not found in meta folder.");
-      }
-
-=======
       // 2. Identify subfolders (meta, text, audio, trash)
       const subfolders = rootFiles.filter(f => f.mimeType === "application/vnd.google-apps.folder");
       const targetSubfolders = ["meta", "text", "audio", "trash"];
@@ -382,8 +364,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       if (!inventoryFile) {
         throw new Error("inventory.json not found in meta folder.");
       }
-
->>>>>>> theirs
       let inventory: InventoryManifest;
       try {
         const rawInventory = await fetchDriveFile(inventoryFile.id);
@@ -402,7 +382,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       // Invariant: duplicates (same name, different id) are ALWAYS stray — they never go through
       // classification and are excluded from driveFiles, so they cannot be legacy or unlinked.
       const filesByName = new Map<string, StrayFile[]>();
-      for (const f of rootFiles) {
+      for (const f of allFiles) {
         if (!f?.name) continue;
         const arr = filesByName.get(f.name) || [];
         arr.push(f);
@@ -603,7 +583,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         };
       }
 
-<<<<<<< ours
       let safeToCleanup = true;
       for (const ch of inventory.chapters) {
         const chapterId = ch.chapterId;
@@ -623,32 +602,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         if ((!hasTextExpected && !hasLegacyText) || (!hasAudioExpected && !hasLegacyAudio)) {
           safeToCleanup = false;
           break;
-=======
-      const expectedInventoryCount = 848;
-      const hasExpectedCount = inventory.chapters.length === expectedInventoryCount;
-      let safeToCleanup = hasExpectedCount;
-
-      if (safeToCleanup) {
-        for (const ch of inventory.chapters) {
-          const chapterId = ch.chapterId;
-          if (!chapterId) {
-            safeToCleanup = false;
-            break;
-          }
-
-          const txtName = `c_${chapterId}.txt`;
-          const mp3Name = `c_${chapterId}.mp3`;
-          const hasTextExpected = hasName(txtName);
-          const hasAudioExpected = hasName(mp3Name);
-          const legacyCandidate = legacyRecoveryCandidates[chapterId];
-          const hasLegacyText = !!legacyCandidate?.legacyTextCandidate;
-          const hasLegacyAudio = !!legacyCandidate?.legacyAudioCandidate;
-
-          if ((!hasTextExpected && !hasLegacyText) || (!hasAudioExpected && !hasLegacyAudio)) {
-            safeToCleanup = false;
-            break;
-          }
->>>>>>> theirs
         }
       }
 
@@ -673,11 +626,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       setLastScan(scan);
       setMissingTextIds(scan.missingTextIds);
       setMissingAudioIds(scan.missingAudioIds);
-<<<<<<< ours
-      setLastDriveFiles(rootFiles);
-=======
       setLastDriveFiles(allFiles);
->>>>>>> theirs
       if (!safeToCleanup) {
         pushNotice("Not safe to cleanup. Some inventory chapters cannot be recovered yet.", "error", 6000);
       }
@@ -878,7 +827,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
   };
 
-<<<<<<< ours
   const handleGenerateMissingAudioBackground = async () => {
     if (!missingAudioIdsForBook.length) {
       pushNotice("No missing audio found.", "info");
@@ -921,9 +869,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     setBgGenProgress(null);
     pushNotice("Audio generation complete.", "success");
   };
-
-=======
->>>>>>> theirs
   const buildFixPlan = useCallback((options?: { includeConversions?: boolean; includeGeneration?: boolean; includeCleanup?: boolean }) => {
     const scan = lastScan;
     const inventory = lastInventory;
@@ -1060,7 +1005,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         return;
       }
 
-<<<<<<< ours
       if (isMobileInterface && enableBackgroundJobs) {
         setFixLog(prev => [...prev, `Queued background fix job`]);
         try {
@@ -1111,32 +1055,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         }
         bump();
       }
-
-=======
-      const chaptersById = new Map(allChapters.map((c) => [c.id, c]));
-
-      // 1) Convert legacy candidates into expected files
-      for (const conversion of plan.conversions) {
-        if (abortFixRef.current) break;
-        setFixLog(prev => [...prev, `Copy legacy ${conversion.type}: ${conversion.targetName}`]);
-        try {
-          const newId = await copyDriveFile(conversion.source.id, driveFolderId, conversion.targetName);
-          const ch = chaptersById.get(conversion.chapterId);
-          if (ch) {
-            if (conversion.type === "text") {
-              onUpdateChapter({ ...ch, cloudTextFileId: newId, hasTextOnDrive: true, updatedAt: Date.now() } as any);
-            } else {
-              onUpdateChapter({ ...ch, cloudAudioFileId: newId, audioStatus: AudioStatus.READY, updatedAt: Date.now() } as any);
-            }
-          }
-        } catch {
-          errorCount++;
-          setFixLog(p => [...p, `Failed to copy legacy ${conversion.targetName}`]);
-        }
-        bump();
-      }
-
->>>>>>> theirs
       // 2) Generate missing audio (when no legacy audio candidate)
       for (const chapterId of plan.generationIds) {
         if (abortFixRef.current) break;

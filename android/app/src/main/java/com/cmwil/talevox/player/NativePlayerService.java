@@ -30,10 +30,6 @@ public class NativePlayerService extends MediaSessionService {
 
         mediaSession = new MediaSession.Builder(this, player).build();
         setMediaNotificationProvider(new DefaultMediaNotificationProvider(this));
-<<<<<<< ours
-=======
-        setSession(mediaSession);
->>>>>>> theirs
     }
 
     @Nullable

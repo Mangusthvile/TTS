@@ -352,7 +352,6 @@ const App: React.FC = () => {
   
   const [authState, setAuthState] = useState<AuthState>(authManager.getState());
   const isAuthorized = authState.status === 'signed_in' && !!authManager.getToken();
-<<<<<<< ours
 
   const [uploadQueueCount, setUploadQueueCount] = useState(0);
   const [uploadQueueItems, setUploadQueueItems] = useState<DriveUploadQueuedItem[]>([]);
@@ -386,8 +385,6 @@ const App: React.FC = () => {
       // ignore
     }
   }, [state.readerSettings.uiMode, refreshUploadQueueCount]);
-=======
->>>>>>> theirs
 
   useEffect(() => {
     const unsubscribe = authManager.subscribe(setAuthState);
@@ -918,7 +915,6 @@ const App: React.FC = () => {
 
     if (session !== chapterSessionRef.current) return;
 
-<<<<<<< ours
     const localPlaybackUrl = effectiveMobileMode ? await resolveChapterAudioUrl(chapter.id, uiMode) : null;
     let playbackUrl = localPlaybackUrl ?? null;
     if (!playbackUrl && audioBlob && audioBlob.size > 0) {
@@ -965,48 +961,6 @@ const App: React.FC = () => {
             if (nextBlob && nextBlob.size > 0) {
               nextUrl = URL.createObjectURL(nextBlob);
               await persistChapterAudio(next.id, nextBlob, uiMode);
-=======
-    if (audioBlob && audioBlob.size > 0) {
-        const url = URL.createObjectURL(audioBlob);
-        speechController.setContext({ bookId: book.id, chapterId: chapter.id });
-        speechController.updateMetadata(textToSpeak.length, chapter.audioIntroDurSec || 5, chapter.audioChunkMap || []);
-
-        let mobileQueue: PlaybackItem[] | undefined;
-        if (effectiveMobileMode) {
-            const sorted = [...book.chapters].sort((a, b) => a.index - b.index);
-            const currentIdx = sorted.findIndex(c => c.id === chapter.id);
-            const queueItems: PlaybackItem[] = [
-              { id: chapter.id, url, title: chapter.title }
-            ];
-            const maxQueue = 5;
-            for (let i = currentIdx + 1; i < sorted.length && queueItems.length < maxQueue; i++) {
-              const next = sorted[i];
-              let nextBlob: Blob | null = null;
-              if (next.audioSignature) {
-                nextBlob = await getAudioFromCache(next.audioSignature);
-              }
-              if (!nextBlob && next.cloudAudioFileId && isAuthorized) {
-                try {
-                  nextBlob = await fetchDriveBinary(next.cloudAudioFileId);
-                } catch (e) {
-                  nextBlob = null;
-                }
-              }
-              if (nextBlob && nextBlob.size > 0) {
-                const nextUrl = URL.createObjectURL(nextBlob);
-                queueItems.push({ id: next.id, url: nextUrl, title: next.title });
-              }
-            }
-            mobileQueue = queueItems.length > 0 ? queueItems : undefined;
-        }
-        
-        let startSec = 0;
-        if (!chapter.isCompleted) {
-            if (chapter.progressSec && chapter.progressSec > 0) {
-                startSec = chapter.progressSec;
-            } else if (chapter.progress && chapter.durationSec && chapter.progress < 0.99) {
-                startSec = chapter.durationSec * chapter.progress;
->>>>>>> theirs
             }
           }
           if (nextUrl) {
@@ -1051,20 +1005,12 @@ const App: React.FC = () => {
                    updatePhase('PLAYING_INTRO'); 
                    isInIntroRef.current = true; 
                 }
-<<<<<<< ours
             }
         },
         undefined,
         mobileQueue,
         0
     );
-=======
-            },
-            undefined,
-            mobileQueue,
-            0
-        );
->>>>>>> theirs
 
     if (session !== chapterSessionRef.current) return;
 
