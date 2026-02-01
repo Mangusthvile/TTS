@@ -412,6 +412,14 @@ const App: React.FC = () => {
 
     const applyJobEvent = (event: any) => {
       if (!isMounted || !event?.jobId) return;
+      let progress = event.progress ?? event.progressJson;
+      if (typeof progress === "string") {
+        try {
+          progress = JSON.parse(progress);
+        } catch {
+          progress = undefined;
+        }
+      }
       setJobs((prev) => {
         const idx = prev.findIndex((j) => j.jobId === event.jobId);
         if (idx === -1) {
@@ -424,7 +432,7 @@ const App: React.FC = () => {
         const next: JobRecord = {
           ...current,
           status: event.status ?? current.status,
-          progressJson: event.progress ?? current.progressJson,
+          progressJson: progress ?? current.progressJson,
           error: event.error ?? current.error,
           updatedAt: Date.now(),
         };
@@ -451,6 +459,20 @@ const App: React.FC = () => {
   useEffect(() => {
     refreshUploadQueueCount();
   }, [refreshUploadQueueCount]);
+
+  const hasActiveJobs = useMemo(() => {
+    return jobs.some((j) => j.status === "queued" || j.status === "running" || j.status === "paused");
+  }, [jobs]);
+
+  useEffect(() => {
+    if (!hasActiveJobs) return;
+    const handle = window.setInterval(() => {
+      refreshJobs();
+    }, 3000);
+    return () => {
+      window.clearInterval(handle);
+    };
+  }, [hasActiveJobs, refreshJobs]);
 
   useEffect(() => {
     let mounted = true;

@@ -85,7 +85,7 @@ const Settings: React.FC<SettingsProps> = ({
     return [...jobs].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
   }, [jobs]);
   const queuedJobs = useMemo(() => sortedJobs.filter(j => j.status === 'queued'), [sortedJobs]);
-  const activeJobs = useMemo(() => sortedJobs.filter(j => j.status === 'queued' || j.status === 'running' || j.status === 'paused'), [sortedJobs]);
+  const activeJobs = useMemo(() => sortedJobs.filter(j => j.status === 'running' || j.status === 'paused'), [sortedJobs]);
   const jobCount = jobs.length;
 
   const themes = [
