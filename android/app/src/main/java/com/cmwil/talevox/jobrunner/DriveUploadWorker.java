@@ -45,6 +45,11 @@ public class DriveUploadWorker extends Worker {
         String jobId = getInputData().getString("jobId");
         try {
             ProgressState progress = loadJobProgress(jobId);
+            progress.json.put("jobType", "drive_upload_queue");
+            progress.json.put("queuedTotal", countPendingUploads());
+            progress.json.put("processedThisRun", 0);
+            progress.json.put("succeededCount", progress.completed);
+            progress.json.put("failedCount", progress.json.optInt("failedCount", 0));
             updateJob(jobId, "running", progress.json, null);
             if (progress.total == 0) {
                 progress.total = countPendingUploads();
@@ -63,10 +68,11 @@ public class DriveUploadWorker extends Worker {
             showProgressNotification(jobId, progress);
             JobRunnerPlugin.noteForegroundHeartbeat();
 
-            while (true) {
+            int processedThisRun = 0;
+            while (processedThisRun < 20) {
                 DriveUploadItem item = getNextReadyUpload(System.currentTimeMillis());
                 if (item == null) {
-                    finishJob(jobId, progress, "completed", "Uploads complete");
+                    finishJob(jobId, progress, "succeeded", "Uploads complete");
                     return Result.success();
                 }
 
@@ -92,9 +98,12 @@ public class DriveUploadWorker extends Worker {
                     markUploadDone(item.id);
 
                     progress.completed += 1;
+                    processedThisRun += 1;
                     progress.json.put("completed", progress.completed);
                     progress.json.put("total", progress.total);
                     progress.json.put("lastChapterId", item.chapterId);
+                    progress.json.put("processedThisRun", processedThisRun);
+                    progress.json.put("succeededCount", progress.completed);
                     updateJob(jobId, "running", progress.json, null);
                     emitProgress(jobId, progress);
                     setForegroundAsync(JobNotificationHelper.buildForegroundInfo(
@@ -111,21 +120,23 @@ public class DriveUploadWorker extends Worker {
                     JobRunnerPlugin.noteForegroundHeartbeat();
                 } catch (RetryableUploadException e) {
                     long backoffMs = computeBackoff(item.attempts + 1);
-                markUploadFailed(item.id, e.getMessage(), System.currentTimeMillis() + backoffMs);
-                updateJob(jobId, "running", progress.json, null);
-                emitProgress(jobId, progress);
-                progress.json.put("lastError", e.getMessage());
-                JobRunnerPlugin.noteForegroundHeartbeat();
-                return Result.success();
-            } catch (Exception e) {
-                long backoffMs = computeBackoff(item.attempts + 1);
-                markUploadFailed(item.id, e.getMessage(), System.currentTimeMillis() + backoffMs);
-                updateJob(jobId, "running", progress.json, null);
-                emitProgress(jobId, progress);
-                progress.json.put("lastError", e.getMessage());
-                JobRunnerPlugin.noteForegroundHeartbeat();
-                return Result.success();
-            }
+                    markUploadFailed(item.id, e.getMessage(), System.currentTimeMillis() + backoffMs);
+                    progress.json.put("failedCount", progress.json.optInt("failedCount", 0) + 1);
+                    updateJob(jobId, "running", progress.json, null);
+                    emitProgress(jobId, progress);
+                    progress.json.put("lastError", e.getMessage());
+                    JobRunnerPlugin.noteForegroundHeartbeat();
+                    return Result.success();
+                } catch (Exception e) {
+                    long backoffMs = computeBackoff(item.attempts + 1);
+                    markUploadFailed(item.id, e.getMessage(), System.currentTimeMillis() + backoffMs);
+                    progress.json.put("failedCount", progress.json.optInt("failedCount", 0) + 1);
+                    updateJob(jobId, "running", progress.json, null);
+                    emitProgress(jobId, progress);
+                    progress.json.put("lastError", e.getMessage());
+                    JobRunnerPlugin.noteForegroundHeartbeat();
+                    return Result.success();
+                }
 
                 if (isStopped()) {
                     finishJob(jobId, progress, "canceled", "Uploads canceled");

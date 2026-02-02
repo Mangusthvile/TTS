@@ -9,6 +9,7 @@ import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginHandle;
 import com.cmwil.talevox.jobrunner.JobRunnerPlugin;
+import com.cmwil.talevox.player.NativePlayerPlugin;
 import com.cmwil.talevox.notifications.JobNotificationChannels;
 
 import androidx.core.app.ActivityCompat;
@@ -24,8 +25,9 @@ import ee.forgr.capacitor.social.login.ModifiedMainActivityForSocialLoginPlugin;
 public class MainActivity extends BridgeActivity implements ModifiedMainActivityForSocialLoginPlugin {
   @Override
   protected void onCreate(Bundle savedInstanceState) {
-    super.onCreate(savedInstanceState);
     registerPlugin(JobRunnerPlugin.class);
+    registerPlugin(NativePlayerPlugin.class);
+    super.onCreate(savedInstanceState);
     JobNotificationChannels.ensureChannels(getApplicationContext());
   }
 

@@ -49,6 +49,8 @@ import android.content.pm.PackageManager;
 import android.provider.Settings;
 import androidx.core.content.ContextCompat;
 import androidx.core.app.NotificationManagerCompat;
+import com.cmwil.talevox.notifications.JobNotificationChannels;
+import com.cmwil.talevox.notifications.JobNotificationHelper;
 
 @CapacitorPlugin(
     name = "JobRunner",
@@ -65,6 +67,7 @@ public class JobRunnerPlugin extends Plugin {
     public void load() {
         super.load();
         instance = this;
+        try { JobNotificationChannels.ensureChannels(getContext()); } catch (Exception ignored) {}
         schedulePeriodicUploadQueue();
     }
 
@@ -191,7 +194,7 @@ public class JobRunnerPlugin extends Plugin {
                 return;
             }
             SQLiteDatabase db = getDb();
-            Cursor c2 = db.query("jobs", new String[]{"jobId", "status"}, "type = ? AND status IN ('queued','running')", new String[]{"uploadQueue"}, null, null, null, "1");
+            Cursor c2 = db.query("jobs", new String[]{"jobId", "status"}, "type = ? AND status IN ('queued','running')", new String[]{"drive_upload_queue"}, null, null, null, "1");
             if (c2.moveToFirst()) {
                 String jobId = c2.getString(c2.getColumnIndexOrThrow("jobId"));
                 c2.close();
@@ -210,7 +213,7 @@ public class JobRunnerPlugin extends Plugin {
 
             ContentValues values = new ContentValues();
             values.put("jobId", jobId);
-            values.put("type", "uploadQueue");
+            values.put("type", "drive_upload_queue");
             values.put("status", "queued");
             values.put("payloadJson", (String) null);
             values.put("progressJson", progress.toString());
@@ -301,7 +304,7 @@ public class JobRunnerPlugin extends Plugin {
 
         ContentValues values = new ContentValues();
         values.put("jobId", jobId);
-        values.put("type", "uploadQueue");
+        values.put("type", "drive_upload_queue");
         values.put("status", "queued");
         values.put("payloadJson", "{}");
         values.put("progressJson", progressJson.toString());
@@ -593,14 +596,14 @@ public class JobRunnerPlugin extends Plugin {
     @PluginMethod
     public void sendTestNotification(PluginCall call) {
         try {
-            com.cmwil.talevox.notifications.JobNotificationChannels.ensureChannels(getContext());
+            JobNotificationChannels.ensureChannels(getContext());
             NotificationManager nm = (NotificationManager) getContext().getSystemService(Context.NOTIFICATION_SERVICE);
             if (nm != null) {
-                Notification notification = com.cmwil.talevox.notifications.JobNotificationHelper.buildFinished(
+                Notification notification = JobNotificationHelper.buildFinished(
                     getContext(),
                     "test-job",
-                    "Job notifications enabled",
-                    "This is a test notification",
+                    "TaleVox test",
+                    "Notifications are working",
                     true
                 );
                 nm.notify(123456, notification);
@@ -617,16 +620,29 @@ public class JobRunnerPlugin extends Plugin {
         try {
             Context ctx = getContext();
             int perm = ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS);
-            String permStr = perm == PackageManager.PERMISSION_GRANTED ? "granted" : "denied";
+            String permStr = "prompt";
+            if (android.os.Build.VERSION.SDK_INT < 33) {
+                permStr = "granted";
+            } else if (perm == PackageManager.PERMISSION_GRANTED) {
+                permStr = "granted";
+            } else {
+                PermissionState state = getPermissionState("notifications");
+                if (state == PermissionState.DENIED) permStr = "denied";
+            }
             out.put("permission", permStr);
 
             NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
             boolean channelExists = false;
             if (nm != null) {
-                NotificationChannel ch = nm.getNotificationChannel(com.cmwil.talevox.notifications.JobNotificationChannels.CHANNEL_JOBS_ID);
+                NotificationChannel ch = nm.getNotificationChannel(JobNotificationChannels.CHANNEL_JOBS_ID);
                 channelExists = (ch != null);
             }
             out.put("channelExists", channelExists);
+            JSArray chans = new JSArray();
+            chans.put(JobNotificationChannels.CHANNEL_JOBS_ID);
+            out.put("channels", chans);
+            out.put("hasPlugin", true);
+            out.put("plugin", "JobRunner");
 
             long ageMs = System.currentTimeMillis() - lastForegroundAt;
             out.put("foregroundRecent", lastForegroundAt > 0 && ageMs < 30000);

@@ -36,6 +36,17 @@ export interface JobRunnerPlugin {
   getJob: (options: { jobId: string }) => Promise<{ job: JobRecord | null }>;
   listJobs: () => Promise<{ jobs: JobRecord[] }>;
   kickUploadQueue: () => Promise<void>;
+  getDiagnostics?: () => Promise<{
+    hasPlugin?: boolean;
+    plugin?: string;
+    permission?: "granted" | "denied" | "prompt" | "unknown";
+    channels?: string[];
+    interfaceMode?: string;
+    platform?: string;
+    androidBuild?: number;
+    notifications?: { permission?: string; enabled?: boolean };
+    notes?: string[];
+  }>;
   addListener: (
     eventName: "jobProgress" | "jobFinished",
     listenerFunc: (event: any) => void

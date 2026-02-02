@@ -11,6 +11,16 @@ function getInterfaceMode(uiMode: UiMode): InterfaceMode {
   return computeMobileMode(uiMode) ? "mobile" : "desktop";
 }
 
+export async function jobRunnerHealthCheck(uiMode: UiMode): Promise<void> {
+  if (!computeMobileMode(uiMode)) return;
+  try {
+    const res = await JobRunner.getDiagnostics?.();
+    console.log("[JobRunner][native] health check", res);
+  } catch (e) {
+    console.warn("[JobRunner][native] health check failed", e);
+  }
+}
+
 function createJobId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return (crypto as any).randomUUID();

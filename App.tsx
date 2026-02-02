@@ -26,7 +26,7 @@ import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library 
 import { trace, traceError } from './utils/trace';
 import { computeMobileMode } from './utils/platform';
 import { JobRunner } from './src/plugins/jobRunner';
-import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService, deleteJob as deleteJobService, clearJobs as clearJobsService, enqueueGenerateAudio, enqueueUploadJob, getWorkInfo, forceStartJob as forceStartJobService, getJobById } from './services/jobRunnerService';
+import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService, deleteJob as deleteJobService, clearJobs as clearJobsService, enqueueGenerateAudio, enqueueUploadJob, getWorkInfo, forceStartJob as forceStartJobService, getJobById, jobRunnerHealthCheck } from './services/jobRunnerService';
 import { countQueuedUploads, listQueuedUploads, enqueueChapterUpload, removeQueuedUpload, type DriveUploadQueuedItem } from './services/driveUploadQueueService';
 import { getChapterAudioPath } from './services/chapterAudioStore';
 import { Filesystem, Directory } from '@capacitor/filesystem';
@@ -430,6 +430,8 @@ const App: React.FC = () => {
       setJobs(all);
       if (logJobs) console.log('[Jobs][refresh]', all);
       await refreshUploadQueueCount();
+      // Lightweight plugin health check to surface missing native registration
+      await jobRunnerHealthCheck(state.readerSettings.uiMode);
     } catch (e) {
       // ignore
     }

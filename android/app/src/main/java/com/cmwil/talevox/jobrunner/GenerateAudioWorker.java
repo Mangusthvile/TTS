@@ -105,6 +105,7 @@ public class GenerateAudioWorker extends Worker {
             progressJson.put("total", total);
             progressJson.put("completed", completed);
             updateJobProgress(jobId, "running", progressJson, null);
+            Log.d("GenerateAudioWorker", "Job " + jobId + " starting chapters; total=" + total);
             setForegroundAsync(JobNotificationHelper.buildForegroundInfo(getApplicationContext(), jobId, "Generating audio", "", total, completed, false, true));
             JobRunnerPlugin.noteForegroundHeartbeat();
             showProgressNotification(jobId, "Generating audio", progressJson);
@@ -177,8 +178,8 @@ public class GenerateAudioWorker extends Worker {
 
             progressJson.put("currentChapterId", JSONObject.NULL);
             progressJson.put("finishedAt", System.currentTimeMillis());
-            updateJobProgress(jobId, "completed", progressJson, null);
-            emitFinished(jobId, "completed", progressJson, null);
+            updateJobProgress(jobId, "succeeded", progressJson, null);
+            emitFinished(jobId, "succeeded", progressJson, null);
             showFinishedNotification(jobId, "Audio generation complete");
             setForegroundAsync(JobNotificationHelper.buildForegroundInfo(getApplicationContext(), jobId, "Audio generation complete", "", total, total, false, false));
             JobRunnerPlugin.noteForegroundHeartbeat();
