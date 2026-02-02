@@ -9,6 +9,7 @@ import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginHandle;
 import com.cmwil.talevox.jobrunner.JobRunnerPlugin;
+import com.cmwil.talevox.notifications.JobNotificationChannels;
 
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
@@ -21,23 +22,11 @@ import ee.forgr.capacitor.social.login.ModifiedMainActivityForSocialLoginPlugin;
 
 // ModifiedMainActivityForSocialLoginPlugin is VERY VERY important !!!!!!
 public class MainActivity extends BridgeActivity implements ModifiedMainActivityForSocialLoginPlugin {
-  private static final int REQ_POST_NOTIFICATIONS = 1001;
-
   @Override
   protected void onCreate(Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
     registerPlugin(JobRunnerPlugin.class);
-
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-      if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-          != PackageManager.PERMISSION_GRANTED) {
-        ActivityCompat.requestPermissions(
-          this,
-          new String[]{Manifest.permission.POST_NOTIFICATIONS},
-          REQ_POST_NOTIFICATIONS
-        );
-      }
-    }
+    JobNotificationChannels.ensureChannels(getApplicationContext());
   }
 
   @Override

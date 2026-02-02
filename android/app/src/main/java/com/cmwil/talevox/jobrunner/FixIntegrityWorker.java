@@ -5,19 +5,18 @@ import android.content.ContentValues;
 import android.content.Context;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.Cursor;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.app.Notification;
-import android.os.Build;
 import android.util.Base64;
 
 import androidx.annotation.NonNull;
-import androidx.core.app.NotificationCompat;
 import androidx.work.ForegroundInfo;
 import androidx.work.Worker;
 import androidx.work.WorkerParameters;
+import android.app.Notification;
+import android.app.NotificationManager;
 
 import com.getcapacitor.JSObject;
+import com.cmwil.talevox.notifications.JobNotificationChannels;
+import com.cmwil.talevox.notifications.JobNotificationHelper;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -47,7 +46,7 @@ public class FixIntegrityWorker extends Worker {
     private static final String DEFAULT_ENDPOINT = "https://talevox-tts-762195576430.us-south1.run.app";
     private static final int MAX_TTS_BYTES = 4500;
     private static final int MAX_UPLOAD_RETRIES = 5;
-    private static final String CHANNEL_ID = "talevox_jobs_v3";
+    private static final String CHANNEL_ID = JobNotificationChannels.CHANNEL_JOBS_ID;
 
     public FixIntegrityWorker(@NonNull Context context, @NonNull WorkerParameters params) {
         super(context, params);
@@ -91,7 +90,7 @@ public class FixIntegrityWorker extends Worker {
             JSONObject progressJson = job.progressJson != null ? job.progressJson : new JSONObject();
             progressJson.put("startedAt", System.currentTimeMillis());
             updateJobProgress(jobId, "running", progressJson, null);
-            showProgressNotification(jobId, "Fixing integrity", progressJson);
+            updateForeground(jobId, progressJson);
 
             DriveFolder metaFolder = findSubfolder(accessToken, driveFolderId, "meta");
             if (metaFolder == null) {
@@ -199,7 +198,7 @@ public class FixIntegrityWorker extends Worker {
             progressJson.put("total", totalSteps);
             progressJson.put("completed", 0);
             updateJobProgress(jobId, "running", progressJson, null);
-            showProgressNotification(jobId, "Fixing integrity", progressJson);
+            updateForeground(jobId, progressJson);
 
             List<Rule> rules = loadRulesForBook(bookId);
 
@@ -216,7 +215,7 @@ public class FixIntegrityWorker extends Worker {
                 progressJson.put("currentChapterId", conv.chapterId);
                 updateJobProgress(jobId, "running", progressJson, null);
                 emitProgress(jobId, "running", progressJson);
-                showProgressNotification(jobId, "Fixing integrity", progressJson);
+                updateForeground(jobId, progressJson);
             }
 
             for (String chapterId : generationIds) {
@@ -224,7 +223,7 @@ public class FixIntegrityWorker extends Worker {
                 progressJson.put("currentChapterId", chapterId);
                 updateJobProgress(jobId, "running", progressJson, null);
                 emitProgress(jobId, "running", progressJson);
-                showProgressNotification(jobId, "Fixing integrity", progressJson);
+                updateForeground(jobId, progressJson);
 
                 InventoryChapter inv = findInv(invChapters, chapterId);
                 if (inv == null) continue;
@@ -259,7 +258,7 @@ public class FixIntegrityWorker extends Worker {
                 progressJson.put("completed", completed);
                 updateJobProgress(jobId, "running", progressJson, null);
                 emitProgress(jobId, "running", progressJson);
-                showProgressNotification(jobId, "Fixing integrity", progressJson);
+                updateForeground(jobId, progressJson);
             }
 
             for (DriveFile stray : cleanupFiles) {
@@ -269,7 +268,7 @@ public class FixIntegrityWorker extends Worker {
                 progressJson.put("completed", completed);
                 updateJobProgress(jobId, "running", progressJson, null);
                 emitProgress(jobId, "running", progressJson);
-                showProgressNotification(jobId, "Fixing integrity", progressJson);
+                updateForeground(jobId, progressJson);
             }
 
             progressJson.put("finishedAt", System.currentTimeMillis());
@@ -884,63 +883,57 @@ public class FixIntegrityWorker extends Worker {
         JobRunnerPlugin.emitJobFinished(payload);
     }
 
-    private void showProgressNotification(String jobId, String title, JSONObject progressJson) {
-        Notification notification = buildProgressNotification(jobId, title, progressJson);
+    private void showProgressNotification(String jobId, JSONObject progressJson) {
         NotificationManager nm = (NotificationManager) getApplicationContext().getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm == null) return;
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
-                CHANNEL_ID,
-                "TaleVox Jobs",
-                NotificationManager.IMPORTANCE_DEFAULT
-            );
-            nm.createNotificationChannel(channel);
+        int total = progressJson != null ? progressJson.optInt("total", 0) : 0;
+        int completed = progressJson != null ? progressJson.optInt("completed", 0) : 0;
+        String currentChapterId = progressJson != null ? progressJson.optString("currentChapterId", "") : "";
+        String text = total > 0 ? ("Step " + Math.min(completed + 1, total) + " of " + total) : "";
+        if (currentChapterId != null && !currentChapterId.isEmpty()) {
+            text = text.isEmpty() ? currentChapterId : (text + " · " + currentChapterId);
         }
-
-        nm.notify(notificationId(jobId), notification);
-        setForegroundAsync(new ForegroundInfo(notificationId(jobId), notification));
+        Notification notification = JobNotificationHelper.buildProgress(
+            getApplicationContext(),
+            jobId,
+            "Fixing integrity",
+            text,
+            total > 0 ? total : 100,
+            completed,
+            total == 0,
+            true
+        );
+        nm.notify(JobNotificationHelper.getNotificationId(jobId), notification);
     }
 
     private void showFinishedNotification(String jobId, String title) {
         NotificationManager nm = (NotificationManager) getApplicationContext().getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm == null) return;
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
-                CHANNEL_ID,
-                "TaleVox Jobs",
-                NotificationManager.IMPORTANCE_LOW
-            );
-            nm.createNotificationChannel(channel);
-        }
-
-        Notification notification = new NotificationCompat.Builder(getApplicationContext(), CHANNEL_ID)
-            .setContentTitle(title)
-            .setSmallIcon(android.R.drawable.stat_sys_download_done)
-            .setOngoing(false)
-            .build();
-
-        nm.notify(notificationId(jobId), notification);
+        Notification notification = JobNotificationHelper.buildFinished(
+            getApplicationContext(),
+            jobId,
+            title,
+            "",
+            true
+        );
+        nm.notify(JobNotificationHelper.getNotificationId(jobId), notification);
     }
 
-    private int notificationId(String jobId) {
-        return Math.abs(jobId.hashCode());
-    }
-
-    private Notification buildProgressNotification(String jobId, String title, JSONObject progressJson) {
+    private void updateForeground(String jobId, JSONObject progressJson) {
         int total = progressJson != null ? progressJson.optInt("total", 0) : 0;
         int completed = progressJson != null ? progressJson.optInt("completed", 0) : 0;
-        int percent = total > 0 ? Math.min(100, Math.round((completed * 100f) / total)) : 0;
-
-        return new NotificationCompat.Builder(getApplicationContext(), CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(percent + "% (" + completed + "/" + total + ")")
-            .setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setProgress(total > 0 ? total : 100, total > 0 ? completed : percent, total == 0)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .build();
+        setForegroundAsync(JobNotificationHelper.buildForegroundInfo(
+            getApplicationContext(),
+            jobId,
+            "Fixing integrity",
+            "",
+            total > 0 ? total : 100,
+            completed,
+            total == 0,
+            true
+        ));
+        showProgressNotification(jobId, progressJson);
     }
 
     private Result failJob(String jobId, String message, JSONObject progressJson) {

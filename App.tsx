@@ -26,7 +26,7 @@ import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library 
 import { trace, traceError } from './utils/trace';
 import { computeMobileMode } from './utils/platform';
 import { JobRunner } from './src/plugins/jobRunner';
-import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService, deleteJob as deleteJobService, clearJobs as clearJobsService, enqueueGenerateAudio } from './services/jobRunnerService';
+import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService, deleteJob as deleteJobService, clearJobs as clearJobsService, enqueueGenerateAudio, enqueueUploadJob, getWorkInfo, forceStartJob as forceStartJobService, getJobById } from './services/jobRunnerService';
 import { countQueuedUploads, listQueuedUploads, enqueueChapterUpload, removeQueuedUpload, type DriveUploadQueuedItem } from './services/driveUploadQueueService';
 import { getChapterAudioPath } from './services/chapterAudioStore';
 import { Filesystem, Directory } from '@capacitor/filesystem';
@@ -40,6 +40,7 @@ type DownloadedChapterInfo = {
 };
 
 const STATE_FILENAME = 'talevox_state_v2917.json';
+const LOG_JOBS_KEY = 'talevox_log_jobs';
 const STABLE_POINTER_NAME = 'talevox-latest.json';
 const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
@@ -282,6 +283,23 @@ const App: React.FC = () => {
   const [isChapterSidebarOpen, setIsChapterSidebarOpen] = useState(false);
   const [chapterPagingByBook, setChapterPagingByBook] = useState<Record<string, { afterIndex: number; hasMore: boolean; loading: boolean }>>({});
   const chapterPagingRef = useRef<Record<string, { afterIndex: number; hasMore: boolean; loading: boolean }>>({});
+  const [logJobs, setLogJobs] = useState<boolean>(() => localStorage.getItem(LOG_JOBS_KEY) === 'true');
+  const [notificationStatus, setNotificationStatus] = useState<{ supported: boolean; granted: boolean; enabled: boolean } | null>(null);
+  useEffect(() => { localStorage.setItem(LOG_JOBS_KEY, logJobs ? 'true' : 'false'); }, [logJobs]);
+
+  const refreshNotificationStatus = useCallback(async () => {
+    try {
+      const res = await JobRunner.checkNotificationPermission();
+      setNotificationStatus(res);
+      if (logJobs) console.log("[Jobs][notifications][status]", res);
+    } catch {
+      setNotificationStatus(null);
+    }
+  }, [logJobs]);
+
+  useEffect(() => {
+    refreshNotificationStatus();
+  }, [refreshNotificationStatus]);
 
   useEffect(() => { chapterPagingRef.current = chapterPagingByBook; }, [chapterPagingByBook]);
 
@@ -391,11 +409,12 @@ const App: React.FC = () => {
     try {
       const all = await listAllJobs(state.readerSettings.uiMode);
       setJobs(all);
+      if (logJobs) console.log('[Jobs][refresh]', all);
       await refreshUploadQueueCount();
     } catch (e) {
       // ignore
     }
-  }, [state.readerSettings.uiMode, refreshUploadQueueCount]);
+  }, [state.readerSettings.uiMode, refreshUploadQueueCount, logJobs]);
 
   useEffect(() => {
     const unsubscribe = authManager.subscribe(setAuthState);
@@ -410,7 +429,7 @@ const App: React.FC = () => {
     let isMounted = true;
     const handles: Array<{ remove: () => Promise<void> }> = [];
 
-    const applyJobEvent = (event: any) => {
+  const applyJobEvent = (event: any) => {
       if (!isMounted || !event?.jobId) return;
       let progress = event.progress ?? event.progressJson;
       if (typeof progress === "string") {
@@ -420,6 +439,7 @@ const App: React.FC = () => {
           progress = undefined;
         }
       }
+      if (logJobs) console.log('[Jobs][event]', event);
       setJobs((prev) => {
         const idx = prev.findIndex((j) => j.jobId === event.jobId);
         if (idx === -1) {
@@ -468,7 +488,7 @@ const App: React.FC = () => {
     if (!hasActiveJobs) return;
     const handle = window.setInterval(() => {
       refreshJobs();
-    }, 3000);
+    }, 1500);
     return () => {
       window.clearInterval(handle);
     };
@@ -550,6 +570,34 @@ const App: React.FC = () => {
     return () => {
       if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
     };
+  }, []);
+
+  const handleRequestNotifications = useCallback(async () => {
+    try {
+      const res = await JobRunner.requestNotificationPermission();
+      if (!res.granted) {
+        pushNotice({ type: "error", message: "Notifications are required for background jobs. Permission denied." });
+      }
+      await refreshNotificationStatus();
+    } catch (e: any) {
+      pushNotice({ type: "error", message: `Notification request failed: ${String(e?.message ?? e)}` });
+    }
+  }, [refreshNotificationStatus, pushNotice]);
+
+  const handleOpenNotificationSettings = useCallback(async () => {
+    try {
+      await JobRunner.openNotificationSettings();
+    } catch (e) {
+      console.warn("openNotificationSettings failed", e);
+    }
+  }, []);
+
+  const handleSendTestNotification = useCallback(async () => {
+    try {
+      await JobRunner.sendTestNotification();
+    } catch (e) {
+      console.warn("sendTestNotification failed", e);
+    }
   }, []);
 
   const updatePhase = useCallback((p: PlaybackPhase) => {
@@ -1186,28 +1234,65 @@ const App: React.FC = () => {
     try {
       await cancelJobService(jobId, state.readerSettings.uiMode);
       await refreshJobs();
-    } catch {
-      // ignore
+    } catch (e: any) {
+      pushNotice({ type: "error", message: `Cancel failed: ${String(e?.message ?? e)}` });
     }
-  }, [refreshJobs, state.readerSettings.uiMode]);
+  }, [refreshJobs, state.readerSettings.uiMode, pushNotice]);
 
   const handleRetryJob = useCallback(async (jobId: string) => {
     try {
       await retryJobService(jobId, state.readerSettings.uiMode);
       await refreshJobs();
-    } catch {
-      // ignore
+    } catch (e: any) {
+      pushNotice({ type: "error", message: `Retry failed: ${String(e?.message ?? e)}` });
     }
-  }, [refreshJobs, state.readerSettings.uiMode]);
+  }, [refreshJobs, state.readerSettings.uiMode, pushNotice]);
 
   const handleDeleteJob = useCallback(async (jobId: string) => {
     try {
       await deleteJobService(jobId, state.readerSettings.uiMode);
       await refreshJobs();
+    } catch (e: any) {
+      pushNotice({ type: "error", message: `Remove failed: ${String(e?.message ?? e)}` });
+    }
+  }, [refreshJobs, state.readerSettings.uiMode, pushNotice]);
+
+  const handleRefreshSingleJob = useCallback(async (jobId: string) => {
+    try {
+      const job = await getJobById(jobId, state.readerSettings.uiMode);
+      if (job) {
+        setJobs(prev => {
+          const idx = prev.findIndex(j => j.jobId === jobId);
+          if (idx === -1) return prev;
+          const copy = [...prev];
+          copy[idx] = job;
+          return copy;
+        });
+      } else {
+        await refreshJobs();
+      }
     } catch {
-      // ignore
+      await refreshJobs();
     }
   }, [refreshJobs, state.readerSettings.uiMode]);
+
+  const handleForceStartJob = useCallback(async (jobId: string) => {
+    try {
+      await forceStartJobService(jobId, state.readerSettings.uiMode);
+      await refreshJobs();
+    } catch (e: any) {
+      pushNotice({ type: "error", message: `Force start failed: ${String(e?.message ?? e)}` });
+    }
+  }, [refreshJobs, state.readerSettings.uiMode, pushNotice]);
+
+  const handleShowWorkInfo = useCallback(async (jobId: string) => {
+    try {
+      const info = await getWorkInfo(jobId, state.readerSettings.uiMode);
+      alert(`WorkInfo for ${jobId}:\n${JSON.stringify(info, null, 2)}`);
+    } catch (e: any) {
+      pushNotice({ type: "error", message: `WorkInfo failed: ${String(e?.message ?? e)}` });
+    }
+  }, [state.readerSettings.uiMode, pushNotice]);
 
   const handleClearJobs = useCallback(async (statuses: string[]) => {
     try {
@@ -1321,6 +1406,9 @@ const App: React.FC = () => {
       if (ok) {
         pushNotice({ message: "Upload queued (will retry)", type: "info" });
         await kickUploadQueue();
+        if (computeMobileMode(state.readerSettings.uiMode)) {
+          await enqueueUploadJob(state.readerSettings.uiMode);
+        }
         await refreshUploadQueueCount();
         await refreshUploadQueueList();
       } else {
@@ -1996,12 +2084,20 @@ const App: React.FC = () => {
                   },
                 };
                 try {
+                  if (logJobs) console.log('[Jobs][enqueueGenerateAudio]', payload);
                   await enqueueGenerateAudio(payload, state.readerSettings.uiMode);
                   await refreshJobs();
                   pushNotice({ message: "Background job queued.", type: "success" });
                   return true;
                 } catch (e: any) {
-                  pushNotice({ message: `Failed to queue job: ${String(e?.message ?? e)}`, type: "error" });
+                  const msg = String(e?.message ?? e);
+                  if (msg.includes("notifications_not_granted")) {
+                    pushNotice({ message: "Enable notifications to run background jobs.", type: "error" });
+                    setActiveTab('settings');
+                    await refreshNotificationStatus();
+                  } else {
+                    pushNotice({ message: `Failed to queue job: ${msg}`, type: "error" });
+                  }
                   return false;
                 }
               }}
@@ -2124,6 +2220,16 @@ const App: React.FC = () => {
               onRetryJob={handleRetryJob}
               onDeleteJob={handleDeleteJob}
               onClearJobs={handleClearJobs}
+              logJobs={logJobs}
+              onToggleLogJobs={setLogJobs}
+              notificationStatus={notificationStatus}
+              onRequestNotifications={handleRequestNotifications}
+              onOpenNotificationSettings={handleOpenNotificationSettings}
+              onSendTestNotification={handleSendTestNotification}
+              onRefreshNotificationStatus={refreshNotificationStatus}
+              onRefreshJob={handleRefreshSingleJob}
+              onForceStartJob={handleForceStartJob}
+              onShowWorkInfo={handleShowWorkInfo}
             />
           )}
         </div>

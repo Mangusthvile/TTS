@@ -43,7 +43,15 @@ export async function enqueueChapterUpload(bookId: string, chapterId: string, lo
     createdAt: now,
     updatedAt: now,
   };
-  return enqueueUploadEntry(item);
+  const ok = await enqueueUploadEntry(item);
+  try {
+    const uiMode = (localStorage.getItem("talevox_ui_mode") as any) || "auto";
+    const { ensureUploadQueueJob } = await import("./jobRunnerService");
+    await ensureUploadQueueJob(uiMode as any);
+  } catch {
+    // best effort
+  }
+  return ok;
 }
 
 export async function removeQueuedUpload(id: string): Promise<boolean> {

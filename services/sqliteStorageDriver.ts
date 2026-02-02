@@ -467,7 +467,12 @@ export class SqliteStorageDriver implements StorageDriver {
     try {
       await db.run(
         `INSERT INTO drive_upload_queue (id, chapterId, bookId, localPath, status, attempts, nextAttemptAt, lastError, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(chapterId) DO UPDATE SET
+           status = excluded.status,
+           localPath = excluded.localPath,
+           nextAttemptAt = excluded.nextAttemptAt,
+           updatedAt = excluded.updatedAt`,
         [
           item.id,
           item.chapterId,

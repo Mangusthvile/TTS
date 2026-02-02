@@ -51,7 +51,7 @@ export default defineConfig(({ mode }) => {
 
     define: {
       "process.env": {},
-      __APP_VERSION__: JSON.stringify("2.9.22"),
+      __APP_VERSION__: JSON.stringify("2.9.23"),
     },
 
     server: {

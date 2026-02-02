@@ -48,6 +48,43 @@ export class JobRunnerWeb extends WebPlugin implements JobRunnerPlugin {
     return { jobId };
   }
 
+  async enqueueUploadJob(): Promise<{ jobId: string }> {
+    const jobId = createJobId();
+    const now = Date.now();
+    const total = 0;
+    const job: JobRecord = {
+      jobId,
+      type: "uploadQueue",
+      status: "queued",
+      payloadJson: {},
+      progressJson: { total, completed: 0 },
+      createdAt: now,
+      updatedAt: now,
+    };
+    await createJob(job);
+    return { jobId };
+  }
+
+  async ensureUploadQueueJob(): Promise<{ jobId: string | null }> {
+    return { jobId: null };
+  }
+
+  async checkNotificationPermission(): Promise<{ supported: boolean; granted: boolean; enabled: boolean }> {
+    return { supported: false, granted: true, enabled: true };
+  }
+
+  async requestNotificationPermission(): Promise<{ granted: boolean }> {
+    return { granted: true };
+  }
+
+  async openNotificationSettings(): Promise<void> {
+    return;
+  }
+
+  async sendTestNotification(): Promise<void> {
+    return;
+  }
+
   async cancelJob(options: { jobId: string }): Promise<void> {
     await updateJob(options.jobId, { status: "canceled", updatedAt: Date.now() });
   }
@@ -66,6 +103,10 @@ export class JobRunnerWeb extends WebPlugin implements JobRunnerPlugin {
       status: "queued",
       updatedAt: Date.now(),
     });
+  }
+
+  async getWorkInfo(): Promise<{ workInfo?: { state: string; runAttemptCount: number } }> {
+    return { workInfo: { state: "unsupported", runAttemptCount: 0 } };
   }
 
   async deleteJob(options: { jobId: string }): Promise<void> {

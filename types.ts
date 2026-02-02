@@ -42,7 +42,7 @@ export enum AudioStatus {
   FAILED = 'failed'
 }
 
-export type JobType = "generateAudio" | "fixIntegrity";
+export type JobType = "generateAudio" | "fixIntegrity" | "uploadQueue";
 
 export type JobStatus =
   | "queued"
@@ -58,6 +58,8 @@ export type JobProgress = {
   currentChapterId?: string;
   startedAt?: number;
   finishedAt?: number;
+  workRequestId?: string;
+  lastError?: string;
 };
 
 export type JobRecord = {

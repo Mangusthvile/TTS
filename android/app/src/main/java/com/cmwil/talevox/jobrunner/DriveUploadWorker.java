@@ -9,6 +9,12 @@ import android.net.Uri;
 import androidx.annotation.NonNull;
 import androidx.work.Worker;
 import androidx.work.WorkerParameters;
+import androidx.work.ForegroundInfo;
+import android.app.Notification;
+import android.app.NotificationManager;
+import com.getcapacitor.JSObject;
+import com.cmwil.talevox.notifications.JobNotificationHelper;
+import com.cmwil.talevox.notifications.JobNotificationChannels;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -26,6 +32,7 @@ import java.nio.charset.StandardCharsets;
 public class DriveUploadWorker extends Worker {
     private static final String DB_NAME = "talevox_db";
     private static final int MAX_UPLOAD_RETRIES = 5;
+    private static final String CHANNEL_ID = JobNotificationChannels.CHANNEL_JOBS_ID;
 
     public DriveUploadWorker(@NonNull Context context, @NonNull WorkerParameters params) {
         super(context, params);
@@ -34,10 +41,31 @@ public class DriveUploadWorker extends Worker {
     @NonNull
     @Override
     public Result doWork() {
+        String jobId = getInputData().getString("jobId");
         try {
+            ProgressState progress = loadJobProgress(jobId);
+            updateJob(jobId, "running", progress.json, null);
+            if (progress.total == 0) {
+                progress.total = countPendingUploads();
+                progress.json.put("total", progress.total);
+            }
+            setForegroundAsync(JobNotificationHelper.buildForegroundInfo(
+                getApplicationContext(),
+                jobId,
+                "Uploading audio",
+                "",
+                progress.total,
+                progress.completed,
+                false,
+                true
+            ));
+            showProgressNotification(jobId, progress);
+            JobRunnerPlugin.noteForegroundHeartbeat();
+
             while (true) {
                 DriveUploadItem item = getNextReadyUpload(System.currentTimeMillis());
                 if (item == null) {
+                    finishJob(jobId, progress, "completed", "Uploads complete");
                     return Result.success();
                 }
 
@@ -61,21 +89,75 @@ public class DriveUploadWorker extends Worker {
                     String uploadedId = uploadToDriveWithRetry(accessToken, folderId, filename, "audio/mpeg", bytes, existingId);
                     updateChapterAfterUpload(item.bookId, item.chapterId, uploadedId);
                     markUploadDone(item.id);
+
+                    progress.completed += 1;
+                    progress.json.put("completed", progress.completed);
+                    progress.json.put("total", progress.total);
+                    progress.json.put("lastChapterId", item.chapterId);
+                    updateJob(jobId, "running", progress.json, null);
+                    emitProgress(jobId, progress);
+                    setForegroundAsync(JobNotificationHelper.buildForegroundInfo(
+                        getApplicationContext(),
+                        jobId,
+                        "Uploading audio",
+                        "",
+                        progress.total,
+                        progress.completed,
+                        false,
+                        true
+                    ));
+                    showProgressNotification(jobId, progress);
+                    JobRunnerPlugin.noteForegroundHeartbeat();
                 } catch (RetryableUploadException e) {
                     long backoffMs = computeBackoff(item.attempts + 1);
-                    markUploadFailed(item.id, e.getMessage(), System.currentTimeMillis() + backoffMs);
-                    return Result.success();
-                } catch (Exception e) {
-                    long backoffMs = computeBackoff(item.attempts + 1);
-                    markUploadFailed(item.id, e.getMessage(), System.currentTimeMillis() + backoffMs);
+                markUploadFailed(item.id, e.getMessage(), System.currentTimeMillis() + backoffMs);
+                updateJob(jobId, "running", progress.json, null);
+                emitProgress(jobId, progress);
+                progress.json.put("lastError", e.getMessage());
+                JobRunnerPlugin.noteForegroundHeartbeat();
+                return Result.success();
+            } catch (Exception e) {
+                long backoffMs = computeBackoff(item.attempts + 1);
+                markUploadFailed(item.id, e.getMessage(), System.currentTimeMillis() + backoffMs);
+                updateJob(jobId, "running", progress.json, null);
+                emitProgress(jobId, progress);
+                progress.json.put("lastError", e.getMessage());
+                JobRunnerPlugin.noteForegroundHeartbeat();
+                return Result.success();
+            }
+
+                if (isStopped()) {
+                    finishJob(jobId, progress, "canceled", "Uploads canceled");
+                    JobRunnerPlugin.noteForegroundHeartbeat();
                     return Result.success();
                 }
-
-                if (isStopped()) return Result.success();
             }
         } catch (Exception e) {
+            ProgressState progress = loadJobProgress(jobId);
+            finishJob(jobId, progress, "failed", e.getMessage());
             return Result.failure();
         }
+    }
+
+    private void finishJob(String jobId, ProgressState progress, String status, String message) {
+        try {
+            if (progress != null) {
+                updateJob(jobId, status, progress.json, message);
+                emitFinished(jobId, status, progress, message);
+                NotificationManager nm = (NotificationManager) getApplicationContext().getSystemService(Context.NOTIFICATION_SERVICE);
+                if (nm != null) {
+                    JobNotificationChannels.ensureChannels(getApplicationContext());
+                    Notification notification = JobNotificationHelper.buildFinished(
+                        getApplicationContext(),
+                        jobId,
+                        "Upload complete",
+                        message != null ? message : "",
+                        "completed".equals(status)
+                    );
+                    nm.notify(JobNotificationHelper.getNotificationId(jobId), notification);
+                }
+            }
+        } catch (Exception ignored) {}
     }
 
     private SQLiteDatabase getDb() {
@@ -137,7 +219,110 @@ public class DriveUploadWorker extends Worker {
             "updatedAt INTEGER" +
             ")"
         );
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS jobs (" +
+            "jobId TEXT PRIMARY KEY," +
+            "type TEXT," +
+            "status TEXT," +
+            "payloadJson TEXT," +
+            "progressJson TEXT," +
+            "error TEXT," +
+            "createdAt INTEGER," +
+            "updatedAt INTEGER" +
+            ")"
+        );
         return db;
+    }
+
+    private ProgressState loadJobProgress(String jobId) {
+        ProgressState state = new ProgressState();
+        state.json = new JSONObject();
+        if (jobId == null || jobId.isEmpty()) return state;
+        try {
+            SQLiteDatabase db = getDb();
+            Cursor cursor = db.query("jobs", new String[]{"progressJson", "status"}, "jobId = ?", new String[]{jobId}, null, null, null);
+            if (cursor.moveToFirst()) {
+                String progressStr = cursor.getString(cursor.getColumnIndexOrThrow("progressJson"));
+                if (progressStr != null) state.json = new JSONObject(progressStr);
+            }
+            cursor.close();
+        } catch (Exception ignored) {}
+        state.total = state.json.optInt("total", countPendingUploads());
+        state.completed = state.json.optInt("completed", 0);
+        return state;
+    }
+
+    private int countPendingUploads() {
+        int count = 0;
+        try {
+            SQLiteDatabase db = getDb();
+            Cursor cursor = db.rawQuery("SELECT COUNT(*) as c FROM drive_upload_queue WHERE status IN ('queued','failed','uploading')", null);
+            if (cursor.moveToFirst()) {
+                count = cursor.getInt(cursor.getColumnIndexOrThrow("c"));
+            }
+            cursor.close();
+        } catch (Exception ignored) {}
+        return count;
+    }
+
+    private void updateJob(String jobId, String status, JSONObject progress, String error) {
+        if (jobId == null || jobId.isEmpty()) return;
+        try {
+            SQLiteDatabase db = getDb();
+            ContentValues values = new ContentValues();
+            values.put("status", status);
+            values.put("updatedAt", System.currentTimeMillis());
+            if (progress != null) values.put("progressJson", progress.toString());
+            if (error != null) values.put("error", error);
+            db.update("jobs", values, "jobId = ?", new String[]{jobId});
+        } catch (Exception ignored) {}
+    }
+
+    private void emitProgress(String jobId, ProgressState progress) {
+        if (jobId == null) return;
+        JSObject payload = new JSObject();
+        payload.put("jobId", jobId);
+        payload.put("status", "running");
+        payload.put("progress", progress.json);
+        JobRunnerPlugin.emitJobProgress(payload);
+    }
+
+    private void emitFinished(String jobId, String status, ProgressState progress, String error) {
+        if (jobId == null) return;
+        JSObject payload = new JSObject();
+        payload.put("jobId", jobId);
+        payload.put("status", status);
+        payload.put("progress", progress != null ? progress.json : new JSONObject());
+        if (error != null) payload.put("error", error);
+        JobRunnerPlugin.emitJobFinished(payload);
+    }
+
+    private int countPendingUploads() {
+        SQLiteDatabase db = getDb();
+        Cursor cursor = db.rawQuery("SELECT COUNT(*) FROM drive_upload_queue WHERE status IN ('queued','failed','uploading')", null);
+        int total = 0;
+        if (cursor.moveToFirst()) {
+            total = cursor.getInt(0);
+        }
+        cursor.close();
+        return total;
+    }
+
+    private void showProgressNotification(String jobId, ProgressState progress) {
+        NotificationManager nm = (NotificationManager) getApplicationContext().getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm == null) return;
+        String text = progress.total > 0 ? ("Uploaded " + progress.completed + " of " + progress.total) : "Uploading audio";
+        Notification n = JobNotificationHelper.buildProgress(
+            getApplicationContext(),
+            jobId,
+            "Uploading audio",
+            text,
+            progress.total > 0 ? progress.total : 100,
+            progress.completed,
+            progress.total == 0,
+            true
+        );
+        nm.notify(JobNotificationHelper.getNotificationId(jobId), n);
     }
 
     private DriveUploadItem getNextReadyUpload(long now) {

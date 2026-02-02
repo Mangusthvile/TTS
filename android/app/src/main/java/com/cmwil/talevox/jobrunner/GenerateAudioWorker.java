@@ -5,18 +5,16 @@ import android.content.Context;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.Cursor;
 import android.util.Base64;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.app.Notification;
-import android.os.Build;
 
 import androidx.annotation.NonNull;
-import androidx.core.app.NotificationCompat;
 import androidx.work.ForegroundInfo;
 import androidx.work.Worker;
 import androidx.work.WorkerParameters;
+import android.app.NotificationManager;
 
 import com.getcapacitor.JSObject;
+import com.cmwil.talevox.notifications.JobNotificationChannels;
+import com.cmwil.talevox.notifications.JobNotificationHelper;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -42,7 +40,7 @@ public class GenerateAudioWorker extends Worker {
     private static final String DEFAULT_ENDPOINT = "https://talevox-tts-762195576430.us-south1.run.app";
     private static final int MAX_TTS_BYTES = 4500;
     private static final int MAX_UPLOAD_RETRIES = 5;
-    private static final String CHANNEL_ID = "talevox_jobs_v3";
+    private static final String CHANNEL_ID = JobNotificationChannels.CHANNEL_JOBS_ID;
 
     public GenerateAudioWorker(@NonNull Context context, @NonNull WorkerParameters params) {
         super(context, params);
@@ -96,7 +94,11 @@ public class GenerateAudioWorker extends Worker {
                 progressJson.put("startedAt", System.currentTimeMillis());
             }
 
+            progressJson.put("total", total);
+            progressJson.put("completed", completed);
             updateJobProgress(jobId, "running", progressJson, null);
+            setForegroundAsync(JobNotificationHelper.buildForegroundInfo(getApplicationContext(), jobId, "Generating audio", "", total, completed, false, true));
+            JobRunnerPlugin.noteForegroundHeartbeat();
             showProgressNotification(jobId, "Generating audio", progressJson);
 
             List<Rule> rules = loadRulesForBook(bookId);
@@ -113,6 +115,8 @@ public class GenerateAudioWorker extends Worker {
                 progressJson.put("currentChapterId", chapterId);
                 updateJobProgress(jobId, "running", progressJson, null);
                 emitProgress(jobId, "running", progressJson);
+                setForegroundAsync(JobNotificationHelper.buildForegroundInfo(getApplicationContext(), jobId, "Generating audio", "", total, completed, false, true));
+                JobRunnerPlugin.noteForegroundHeartbeat();
                 showProgressNotification(jobId, "Generating audio", progressJson);
 
                 String content = loadChapterText(bookId, chapterId);
@@ -146,6 +150,10 @@ public class GenerateAudioWorker extends Worker {
                 }
 
                 updateChapterAudioStatus(bookId, chapterId, "ready", filePath, uploadedId);
+                if (uploadError != null || uploadedId == null) {
+                    enqueueUploadQueueItem(bookId, chapterId, filePath);
+                    ensureUploadQueueJob();
+                }
 
                 completed = i + 1;
                 progressJson.put("completed", completed);
@@ -164,6 +172,8 @@ public class GenerateAudioWorker extends Worker {
             updateJobProgress(jobId, "completed", progressJson, null);
             emitFinished(jobId, "completed", progressJson, null);
             showFinishedNotification(jobId, "Audio generation complete");
+            setForegroundAsync(JobNotificationHelper.buildForegroundInfo(getApplicationContext(), jobId, "Audio generation complete", "", total, total, false, false));
+            JobRunnerPlugin.noteForegroundHeartbeat();
             return Result.success();
         } catch (Exception e) {
             return failJob(jobId, e.getMessage(), null);
@@ -713,63 +723,94 @@ public class GenerateAudioWorker extends Worker {
         JobRunnerPlugin.emitJobFinished(payload);
     }
 
+    private void enqueueUploadQueueItem(String bookId, String chapterId, String localPath) {
+        try {
+            SQLiteDatabase db = getDb();
+            String id = "q_" + chapterId;
+            long now = System.currentTimeMillis();
+            ContentValues values = new ContentValues();
+            values.put("id", id);
+            values.put("chapterId", chapterId);
+            values.put("bookId", bookId);
+            values.put("localPath", localPath);
+            values.put("status", "queued");
+            values.put("attempts", 0);
+            values.put("nextAttemptAt", now);
+            values.put("lastError", (String) null);
+            values.put("createdAt", now);
+            values.put("updatedAt", now);
+            db.insertWithOnConflict("drive_upload_queue", null, values, SQLiteDatabase.CONFLICT_REPLACE);
+        } catch (Exception ignored) {}
+    }
+
+    private void ensureUploadQueueJob() {
+        try {
+            SQLiteDatabase db = getDb();
+            Cursor c2 = db.query("jobs", new String[]{"jobId"}, "type = ? AND status IN ('queued','running')", new String[]{"uploadQueue"}, null, null, null, "1");
+            if (c2.moveToFirst()) {
+                c2.close();
+                return;
+            }
+            c2.close();
+            String jobId = UUID.randomUUID().toString();
+            long now = System.currentTimeMillis();
+            int total = countPendingUploads();
+            JSONObject progress = new JSONObject();
+            progress.put("total", total);
+            progress.put("completed", 0);
+
+            ContentValues values = new ContentValues();
+            values.put("jobId", jobId);
+            values.put("type", "uploadQueue");
+            values.put("status", "queued");
+            values.put("payloadJson", (String) null);
+            values.put("progressJson", progress.toString());
+            values.put("error", (String) null);
+            values.put("createdAt", now);
+            values.put("updatedAt", now);
+            db.insertWithOnConflict("jobs", null, values, SQLiteDatabase.CONFLICT_REPLACE);
+
+            OneTimeWorkRequest request =
+                new OneTimeWorkRequest.Builder(DriveUploadWorker.class)
+                    .setInputData(new Data.Builder().putString("jobId", jobId).build())
+                    .build();
+            WorkManager.getInstance(getContext()).enqueue(request);
+
+            progress.put("workRequestId", request.getId().toString());
+            ContentValues update = new ContentValues();
+            update.put("progressJson", progress.toString());
+            update.put("updatedAt", System.currentTimeMillis());
+            db.update("jobs", update, "jobId = ?", new String[]{jobId});
+        } catch (Exception ignored) {}
+    }
+
     private void showProgressNotification(String jobId, String title, JSONObject progressJson) {
-        Notification notification = buildProgressNotification(jobId, title, progressJson);
         NotificationManager nm = (NotificationManager) getApplicationContext().getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm == null) return;
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
-                CHANNEL_ID,
-                "TaleVox Jobs",
-                NotificationManager.IMPORTANCE_DEFAULT
-            );
-            nm.createNotificationChannel(channel);
-        }
-
-        nm.notify(notificationId(jobId), notification);
-        setForegroundAsync(new ForegroundInfo(notificationId(jobId), notification));
+        int total = progressJson != null ? progressJson.optInt("total", 0) : 0;
+        int completed = progressJson != null ? progressJson.optInt("completed", 0) : 0;
+        String currentChapterId = progressJson != null ? progressJson.optString("currentChapterId", "") : "";
+        String text = total > 0 ? ("Chapter " + Math.min(completed + 1, total) + " of " + total) : "";
+        if (currentChapterId != null && !currentChapterId.isEmpty()) text = text.isEmpty() ? currentChapterId : (text + " · " + currentChapterId);
+        Notification notification = JobNotificationHelper.buildProgress(
+            getApplicationContext(),
+            jobId,
+            title,
+            text,
+            total > 0 ? total : 100,
+            completed,
+            total == 0,
+            true
+        );
+        nm.notify(JobNotificationHelper.getNotificationId(jobId), notification);
     }
 
     private void showFinishedNotification(String jobId, String title) {
         NotificationManager nm = (NotificationManager) getApplicationContext().getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm == null) return;
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
-                CHANNEL_ID,
-                "TaleVox Jobs",
-                NotificationManager.IMPORTANCE_LOW
-            );
-            nm.createNotificationChannel(channel);
-        }
-
-        Notification notification = new NotificationCompat.Builder(getApplicationContext(), CHANNEL_ID)
-            .setContentTitle(title)
-            .setSmallIcon(android.R.drawable.stat_sys_download_done)
-            .setOngoing(false)
-            .build();
-
-        nm.notify(notificationId(jobId), notification);
-    }
-
-    private int notificationId(String jobId) {
-        return Math.abs(jobId.hashCode());
-    }
-
-    private Notification buildProgressNotification(String jobId, String title, JSONObject progressJson) {
-        int total = progressJson != null ? progressJson.optInt("total", 0) : 0;
-        int completed = progressJson != null ? progressJson.optInt("completed", 0) : 0;
-        int percent = total > 0 ? Math.min(100, Math.round((completed * 100f) / total)) : 0;
-
-        return new NotificationCompat.Builder(getApplicationContext(), CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(percent + "% (" + completed + "/" + total + ")")
-            .setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setProgress(total > 0 ? total : 100, total > 0 ? completed : percent, total == 0)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .build();
+        Notification notification = JobNotificationHelper.buildFinished(getApplicationContext(), jobId, title, "", true);
+        nm.notify(JobNotificationHelper.getNotificationId(jobId), notification);
     }
 
     private Result failJob(String jobId, String message, JSONObject progressJson) {
@@ -778,7 +819,18 @@ public class GenerateAudioWorker extends Worker {
         try { progress.put("error", message); } catch (JSONException ignored) {}
         emitFinished(jobId, "failed", progress, message);
         showFinishedNotification(jobId, "Audio generation failed");
+        setForegroundAsync(JobNotificationHelper.buildForegroundInfo(getApplicationContext(), jobId, "Audio generation failed", "", 0, 0, true, false));
+        JobRunnerPlugin.noteForegroundHeartbeat();
         return Result.failure();
+    }
+
+    private int countPendingUploads() {
+        SQLiteDatabase db = getDb();
+        Cursor cursor = db.rawQuery("SELECT COUNT(*) FROM drive_upload_queue WHERE status IN ('queued','failed','uploading')", null);
+        int total = 0;
+        if (cursor.moveToFirst()) total = cursor.getInt(0);
+        cursor.close();
+        return total;
     }
 
     private static class JobRow {

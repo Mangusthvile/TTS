@@ -21,9 +21,16 @@ export type JobRunnerPayload = {
 export interface JobRunnerPlugin {
   enqueueGenerateAudio: (options: { payload: JobRunnerPayload }) => Promise<{ jobId: string }>;
   enqueueFixIntegrity: (options: { payload: { bookId: string; driveFolderId?: string; options?: { genAudio?: boolean; cleanupStrays?: boolean; convertLegacy?: boolean } } }) => Promise<{ jobId: string }>;
+  enqueueUploadJob: (options?: {}) => Promise<{ jobId: string }>;
+  ensureUploadQueueJob: () => Promise<{ jobId: string | null }>;
+  checkNotificationPermission: () => Promise<{ supported: boolean; granted: boolean; enabled: boolean }>;
+  requestNotificationPermission: () => Promise<{ granted: boolean }>;
+  openNotificationSettings: () => Promise<void>;
+  sendTestNotification: () => Promise<void>;
   cancelJob: (options: { jobId: string }) => Promise<void>;
   retryJob: (options: { jobId: string }) => Promise<{ jobId: string }>;
   forceStartJob: (options: { jobId: string }) => Promise<void>;
+  getWorkInfo: (options: { jobId: string }) => Promise<{ workInfo?: { state: string; runAttemptCount: number } }>;
   deleteJob: (options: { jobId: string }) => Promise<void>;
   clearJobs: (options: { statuses: string[] }) => Promise<void>;
   getJob: (options: { jobId: string }) => Promise<{ job: JobRecord | null }>;

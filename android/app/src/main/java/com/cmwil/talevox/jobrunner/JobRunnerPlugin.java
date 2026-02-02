@@ -12,7 +12,9 @@ import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
+import com.getcapacitor.PermissionState;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.Permission;
 
 import androidx.work.Data;
 import androidx.work.Constraints;
@@ -23,17 +25,40 @@ import androidx.work.ExistingPeriodicWorkPolicy;
 import androidx.work.ExistingWorkPolicy;
 import androidx.work.OutOfQuotaPolicy;
 import androidx.work.WorkManager;
+import androidx.work.WorkInfo;
+
+import android.Manifest;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.content.pm.PackageManager;
+import android.util.Log;
+import androidx.core.content.ContextCompat;
 
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.util.UUID;
+import android.Manifest;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.provider.Settings;
+import androidx.core.content.ContextCompat;
+import androidx.core.app.NotificationManagerCompat;
 
-@CapacitorPlugin(name = "JobRunner")
+@CapacitorPlugin(
+    name = "JobRunner",
+    permissions = {
+        @Permission(alias = "notifications", strings = { Manifest.permission.POST_NOTIFICATIONS })
+    }
+)
 public class JobRunnerPlugin extends Plugin {
     private static final String DB_NAME = "talevox_db";
     private static JobRunnerPlugin instance;
+    private static volatile long lastForegroundAt = 0;
 
     @Override
     public void load() {
@@ -52,6 +77,10 @@ public class JobRunnerPlugin extends Plugin {
         JobRunnerPlugin inst = instance;
         if (inst == null) return;
         inst.notifyListeners("jobFinished", payload);
+    }
+
+    public static void noteForegroundHeartbeat() {
+        lastForegroundAt = System.currentTimeMillis();
     }
 
     private SQLiteDatabase getDb() {
@@ -96,6 +125,7 @@ public class JobRunnerPlugin extends Plugin {
 
     @PluginMethod
     public void enqueueGenerateAudio(PluginCall call) {
+        if (!ensureNotificationAllowed(call)) return;
         JSObject payload = call.getObject("payload");
         String jobId = UUID.randomUUID().toString();
         long now = System.currentTimeMillis();
@@ -150,7 +180,70 @@ public class JobRunnerPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void ensureUploadQueueJob(PluginCall call) {
+        try {
+            SQLiteDatabase db = getDb();
+            Cursor cursor = db.rawQuery("SELECT COUNT(*) FROM drive_upload_queue WHERE status IN ('queued','failed','uploading')", null);
+            int pending = 0;
+            if (cursor.moveToFirst()) pending = cursor.getInt(0);
+            cursor.close();
+            if (pending == 0) {
+                JSObject out = new JSObject();
+                out.put("jobId", (String) null);
+                call.resolve(out);
+                return;
+            }
+            Cursor c2 = db.query("jobs", new String[]{"jobId", "status"}, "type = ? AND status IN ('queued','running')", new String[]{"uploadQueue"}, null, null, null, "1");
+            if (c2.moveToFirst()) {
+                String jobId = c2.getString(c2.getColumnIndexOrThrow("jobId"));
+                c2.close();
+                JSObject out = new JSObject();
+                out.put("jobId", jobId);
+                call.resolve(out);
+                return;
+            }
+            c2.close();
+
+            String jobId = UUID.randomUUID().toString();
+            long now = System.currentTimeMillis();
+            JSONObject progress = new JSONObject();
+            progress.put("total", pending);
+            progress.put("completed", 0);
+
+            ContentValues values = new ContentValues();
+            values.put("jobId", jobId);
+            values.put("type", "uploadQueue");
+            values.put("status", "queued");
+            values.put("payloadJson", (String) null);
+            values.put("progressJson", progress.toString());
+            values.put("error", (String) null);
+            values.put("createdAt", now);
+            values.put("updatedAt", now);
+            db.insertWithOnConflict("jobs", null, values, SQLiteDatabase.CONFLICT_REPLACE);
+
+            OneTimeWorkRequest request =
+                new OneTimeWorkRequest.Builder(DriveUploadWorker.class)
+                    .setInputData(new Data.Builder().putString("jobId", jobId).build())
+                    .build();
+            WorkManager.getInstance(getContext()).enqueue(request);
+
+            progress.put("workRequestId", request.getId().toString());
+            ContentValues update = new ContentValues();
+            update.put("progressJson", progress.toString());
+            update.put("updatedAt", System.currentTimeMillis());
+            db.update("jobs", update, "jobId = ?", new String[]{jobId});
+
+            JSObject out = new JSObject();
+            out.put("jobId", jobId);
+            call.resolve(out);
+        } catch (Exception e) {
+            call.reject(e.getMessage());
+        }
+    }
+
+    @PluginMethod
     public void enqueueFixIntegrity(PluginCall call) {
+        if (!ensureNotificationAllowed(call)) return;
         JSObject payload = call.getObject("payload");
         String jobId = UUID.randomUUID().toString();
         long now = System.currentTimeMillis();
@@ -193,6 +286,52 @@ public class JobRunnerPlugin extends Plugin {
     public void kickUploadQueue(PluginCall call) {
         scheduleUploadQueueOnce();
         call.resolve();
+    }
+
+    @PluginMethod
+    public void enqueueUploadJob(PluginCall call) {
+        if (!ensureNotificationAllowed(call)) return;
+        long now = System.currentTimeMillis();
+        String jobId = UUID.randomUUID().toString();
+
+        int total = countQueuedUploads();
+        JSONObject progressJson = new JSONObject();
+        try {
+            progressJson.put("total", total);
+            progressJson.put("completed", 0);
+        } catch (JSONException ignored) {}
+
+        ContentValues values = new ContentValues();
+        values.put("jobId", jobId);
+        values.put("type", "uploadQueue");
+        values.put("status", "queued");
+        values.put("payloadJson", "{}");
+        values.put("progressJson", progressJson.toString());
+        values.put("error", (String) null);
+        values.put("createdAt", now);
+        values.put("updatedAt", now);
+
+        SQLiteDatabase db = getDb();
+        db.insertWithOnConflict("jobs", null, values, SQLiteDatabase.CONFLICT_REPLACE);
+
+        OneTimeWorkRequest request =
+            new OneTimeWorkRequest.Builder(DriveUploadWorker.class)
+                .setInputData(new Data.Builder().putString("jobId", jobId).build())
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .build();
+        WorkManager.getInstance(getContext()).enqueue(request);
+
+        try {
+            progressJson.put("workRequestId", request.getId().toString());
+            ContentValues update = new ContentValues();
+            update.put("progressJson", progressJson.toString());
+            update.put("updatedAt", System.currentTimeMillis());
+            db.update("jobs", update, "jobId = ?", new String[]{jobId});
+        } catch (JSONException ignored) {}
+
+        JSObject ret = new JSObject();
+        ret.put("jobId", jobId);
+        call.resolve(ret);
     }
 
     @PluginMethod
@@ -382,6 +521,7 @@ public class JobRunnerPlugin extends Plugin {
 
     @PluginMethod
     public void listJobs(PluginCall call) {
+        reconcileWithWorkManager();
         SQLiteDatabase db = getDb();
         Cursor cursor = db.query("jobs", null, null, null, null, null, "createdAt DESC");
 
@@ -394,6 +534,109 @@ public class JobRunnerPlugin extends Plugin {
         JSObject ret = new JSObject();
         ret.put("jobs", jobs);
         call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void checkNotificationPermission(PluginCall call) {
+        JSObject out = new JSObject();
+        boolean supported = android.os.Build.VERSION.SDK_INT >= 33;
+        boolean granted = true;
+        boolean enabled = true;
+        try {
+            PermissionState state = getPermissionState("notifications");
+            granted = state == PermissionState.GRANTED || !supported;
+            enabled = NotificationManagerCompat.from(getContext()).areNotificationsEnabled();
+            NotificationManager nm = (NotificationManager) getContext().getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null && supported) {
+                NotificationChannel ch = nm.getNotificationChannel(com.cmwil.talevox.notifications.JobNotificationChannels.CHANNEL_JOBS_ID);
+                if (ch != null && ch.getImportance() == NotificationManager.IMPORTANCE_NONE) {
+                    enabled = false;
+                }
+            }
+        } catch (Exception ignored) {}
+        out.put("supported", supported);
+        out.put("granted", granted);
+        out.put("enabled", enabled);
+        call.resolve(out);
+    }
+
+    @PluginMethod
+    public void requestNotificationPermission(PluginCall call) {
+        if (android.os.Build.VERSION.SDK_INT < 33) {
+            JSObject ret = new JSObject();
+            ret.put("granted", true);
+            call.resolve(ret);
+            return;
+        }
+        requestPermissionForAlias("notifications", call, "notificationsCallback");
+    }
+
+    @PluginMethod
+    public void notificationsCallback(PluginCall call) {
+        JSObject ret = new JSObject();
+        PermissionState state = getPermissionState("notifications");
+        ret.put("granted", state == PermissionState.GRANTED);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void openNotificationSettings(PluginCall call) {
+        try {
+            Intent intent = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+            intent.putExtra(Settings.EXTRA_APP_PACKAGE, getContext().getPackageName());
+            intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(intent);
+            call.resolve();
+        } catch (Exception e) {
+            call.reject(e.getMessage());
+        }
+    }
+
+    @PluginMethod
+    public void sendTestNotification(PluginCall call) {
+        try {
+            com.cmwil.talevox.notifications.JobNotificationChannels.ensureChannels(getContext());
+            NotificationManager nm = (NotificationManager) getContext().getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null) {
+                Notification notification = com.cmwil.talevox.notifications.JobNotificationHelper.buildFinished(
+                    getContext(),
+                    "test-job",
+                    "Job notifications enabled",
+                    "This is a test notification",
+                    true
+                );
+                nm.notify(123456, notification);
+            }
+            call.resolve();
+        } catch (Exception e) {
+            call.reject(e.getMessage());
+        }
+    }
+
+    @PluginMethod
+    public void getNotificationDiagnostics(PluginCall call) {
+        JSObject out = new JSObject();
+        try {
+            Context ctx = getContext();
+            int perm = ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS);
+            String permStr = perm == PackageManager.PERMISSION_GRANTED ? "granted" : "denied";
+            out.put("permission", permStr);
+
+            NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+            boolean channelExists = false;
+            if (nm != null) {
+                NotificationChannel ch = nm.getNotificationChannel(GenerateAudioWorker.CHANNEL_ID);
+                channelExists = (ch != null);
+            }
+            out.put("channelExists", channelExists);
+
+            long ageMs = System.currentTimeMillis() - lastForegroundAt;
+            out.put("foregroundRecent", lastForegroundAt > 0 && ageMs < 30000);
+            out.put("foregroundAgeMs", ageMs);
+        } catch (Exception e) {
+            out.put("error", e.getMessage());
+        }
+        call.resolve(out);
     }
 
     private void updateStatus(String jobId, String status, @Nullable String error) {
@@ -444,6 +687,43 @@ public class JobRunnerPlugin extends Plugin {
         db.update("jobs", values, "jobId = ?", new String[]{jobId});
     }
 
+    @PluginMethod
+    public void getWorkInfo(PluginCall call) {
+        String jobId = call.getString("jobId");
+        if (jobId == null) {
+            call.reject("jobId is required");
+            return;
+        }
+        try {
+            SQLiteDatabase db = getDb();
+            Cursor cursor = db.query("jobs", new String[]{"progressJson"}, "jobId = ?", new String[]{jobId}, null, null, null);
+            String workId = null;
+            if (cursor.moveToFirst()) {
+                String progressStr = cursor.getString(cursor.getColumnIndexOrThrow("progressJson"));
+                JSONObject prog = parseJsonObject(progressStr);
+                workId = prog.optString("workRequestId", null);
+            }
+            cursor.close();
+            if (workId == null || workId.isEmpty()) {
+                call.resolve(new JSObject());
+                return;
+            }
+            WorkInfo info = WorkManager.getInstance(getContext()).getWorkInfoById(UUID.fromString(workId)).get();
+            if (info == null) {
+                call.resolve(new JSObject());
+                return;
+            }
+            JSObject out = new JSObject();
+            JSObject wi = new JSObject();
+            wi.put("state", info.getState().name());
+            wi.put("runAttemptCount", info.getRunAttemptCount());
+            out.put("workInfo", wi);
+            call.resolve(out);
+        } catch (Exception e) {
+            call.reject(e.getMessage());
+        }
+    }
+
     private JobRow loadJobRow(String jobId) {
         SQLiteDatabase db = getDb();
         Cursor cursor = db.query(
@@ -472,6 +752,49 @@ public class JobRunnerPlugin extends Plugin {
         } catch (JSONException e) {
             return new JobRow(jobId, status, type, null, null);
         }
+    }
+
+    private void reconcileWithWorkManager() {
+        try {
+            SQLiteDatabase db = getDb();
+            Cursor cursor = db.query("jobs", new String[]{"jobId", "status", "progressJson"}, null, null, null, null, null);
+            while (cursor.moveToNext()) {
+                String jobId = cursor.getString(cursor.getColumnIndexOrThrow("jobId"));
+                String status = cursor.getString(cursor.getColumnIndexOrThrow("status"));
+                String progressStr = cursor.getString(cursor.getColumnIndexOrThrow("progressJson"));
+                JSONObject progress = parseJsonObject(progressStr);
+                String workId = progress != null ? progress.optString("workRequestId", null) : null;
+                if (workId == null || workId.isEmpty()) continue;
+
+                WorkManager wm = WorkManager.getInstance(getContext());
+                List<WorkInfo> infos = wm.getWorkInfosById(UUID.fromString(workId)).get();
+                if (infos == null || infos.isEmpty()) continue;
+                WorkInfo info = infos.get(0);
+                String mapped = mapWorkState(info.getState());
+                if (mapped != null && !mapped.equals(status)) {
+                    Log.d("JobRunner", "Reconcile job " + jobId + " from " + status + " -> " + mapped);
+                    updateStatus(jobId, mapped, null);
+                }
+            }
+            cursor.close();
+        } catch (Exception ignored) {}
+    }
+
+    private String mapWorkState(WorkInfo.State s) {
+        if (s == WorkInfo.State.ENQUEUED) return "queued";
+        if (s == WorkInfo.State.RUNNING) return "running";
+        if (s == WorkInfo.State.SUCCEEDED) return "completed";
+        if (s == WorkInfo.State.FAILED) return "failed";
+        if (s == WorkInfo.State.CANCELLED) return "canceled";
+        return null;
+    }
+
+    private boolean ensureNotificationAllowed(PluginCall call) {
+        if (android.os.Build.VERSION.SDK_INT < 33) return true;
+        PermissionState state = getPermissionState("notifications");
+        if (state == PermissionState.GRANTED) return true;
+        call.reject("notifications_not_granted");
+        return false;
     }
 
     private JSObject rowToJob(Cursor cursor) {
