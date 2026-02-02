@@ -144,6 +144,11 @@ public class DriveUploadWorker extends Worker {
                     return Result.success();
                 }
             }
+            // More work remains; keep job running and let WorkManager reschedule.
+            updateJob(jobId, "running", progress.json, null);
+            emitProgress(jobId, progress);
+            showProgressNotification(jobId, progress);
+            return Result.retry();
         } catch (Exception e) {
             ProgressState progress = loadJobProgress(jobId);
             finishJob(jobId, progress, "failed", e.getMessage());
