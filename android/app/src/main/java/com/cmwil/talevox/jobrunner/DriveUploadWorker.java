@@ -582,6 +582,12 @@ public class DriveUploadWorker extends Worker {
         int attempts;
     }
 
+    private static class ProgressState {
+        int total;
+        int completed;
+        JSONObject json;
+    }
+
     private static class RetryableUploadException extends Exception {
         RetryableUploadException(String message) {
             super(message);
