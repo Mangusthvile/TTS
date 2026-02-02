@@ -10,6 +10,7 @@ import androidx.annotation.NonNull;
 import androidx.work.Worker;
 import androidx.work.WorkerParameters;
 import androidx.work.ForegroundInfo;
+import androidx.work.ListenableWorker.Result;
 import android.app.Notification;
 import android.app.NotificationManager;
 import com.getcapacitor.JSObject;
@@ -295,17 +296,6 @@ public class DriveUploadWorker extends Worker {
         payload.put("progress", progress != null ? progress.json : new JSONObject());
         if (error != null) payload.put("error", error);
         JobRunnerPlugin.emitJobFinished(payload);
-    }
-
-    private int countPendingUploads() {
-        SQLiteDatabase db = getDb();
-        Cursor cursor = db.rawQuery("SELECT COUNT(*) FROM drive_upload_queue WHERE status IN ('queued','failed','uploading')", null);
-        int total = 0;
-        if (cursor.moveToFirst()) {
-            total = cursor.getInt(0);
-        }
-        cursor.close();
-        return total;
     }
 
     private void showProgressNotification(String jobId, ProgressState progress) {
