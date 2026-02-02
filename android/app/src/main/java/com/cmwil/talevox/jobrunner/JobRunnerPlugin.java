@@ -190,6 +190,7 @@ public class JobRunnerPlugin extends Plugin {
                 call.resolve(out);
                 return;
             }
+            SQLiteDatabase db = getDb();
             Cursor c2 = db.query("jobs", new String[]{"jobId", "status"}, "type = ? AND status IN ('queued','running')", new String[]{"uploadQueue"}, null, null, null, "1");
             if (c2.moveToFirst()) {
                 String jobId = c2.getString(c2.getColumnIndexOrThrow("jobId"));

@@ -513,59 +513,69 @@ const Settings: React.FC<SettingsProps> = ({
               Background jobs are paused right now; use Remove or Clear Finished to clean old entries.
             </p>
 
-            <div className="mt-4 flex flex-wrap gap-2">
-              <button
-                disabled={jobBusy || !onRefreshJobs}
-                onClick={onRefreshJobs}
-                className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-white text-indigo-600 border border-indigo-600/20"
-              >
-                Refresh Jobs
-              </button>
-              <button
-                disabled={jobBusy || !onClearJobs}
-                onClick={async () => {
-                  if (!onClearJobs) return;
-                  setJobBusy(true);
-                  await onClearJobs(["canceled", "failed", "completed"]);
-                  setJobBusy(false);
-                  onRefreshJobs && onRefreshJobs();
-                }}
-                className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-black/5 text-black"
-              >
-                Clear Finished
-              </button>
-              <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest">
-                <input type="checkbox" checked={!!logJobs} onChange={e => onToggleLogJobs && onToggleLogJobs(e.target.checked)} />
-                Log Jobs
-              </label>
-              <button
-                disabled={!onRequestNotifications}
-                onClick={onRequestNotifications}
-                className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-indigo-600 text-white disabled:opacity-50"
-              >
-                Enable job notifications
-              </button>
-              <button
-                disabled={!onOpenNotificationSettings}
-                onClick={onOpenNotificationSettings}
-                className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-black/10 text-black disabled:opacity-50"
-              >
-                Open notification settings
-              </button>
-              <button
-                disabled={!onSendTestNotification}
-                onClick={() => onSendTestNotification && onSendTestNotification()}
-                className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-white text-indigo-600 border border-indigo-600/20 disabled:opacity-50"
-              >
-                Send test notification
-              </button>
-              <button
-                disabled={!onRefreshNotificationStatus}
-                onClick={onRefreshNotificationStatus}
-                className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-black/5 text-black disabled:opacity-50"
-              >
-                Refresh notification status
-              </button>
+            <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className={`p-3 rounded-xl border ${isDark ? 'border-slate-800 bg-slate-950/40' : 'border-black/5 bg-white'}`}>
+                <div className="text-[10px] font-black uppercase tracking-widest opacity-60 mb-2">Job Controls</div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    disabled={jobBusy || !onRefreshJobs}
+                    onClick={onRefreshJobs}
+                    className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-white text-indigo-600 border border-indigo-600/20"
+                  >
+                    Refresh Jobs
+                  </button>
+                  <button
+                    disabled={jobBusy || !onClearJobs}
+                    onClick={async () => {
+                      if (!onClearJobs) return;
+                      setJobBusy(true);
+                      await onClearJobs(["canceled", "failed", "completed"]);
+                      setJobBusy(false);
+                      onRefreshJobs && onRefreshJobs();
+                    }}
+                    className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-black/5 text-black"
+                  >
+                    Clear Finished
+                  </button>
+                  <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest">
+                    <input type="checkbox" checked={!!logJobs} onChange={e => onToggleLogJobs && onToggleLogJobs(e.target.checked)} />
+                    Log Jobs
+                  </label>
+                </div>
+              </div>
+              <div className={`p-3 rounded-xl border ${isDark ? 'border-slate-800 bg-slate-950/40' : 'border-black/5 bg-white'}`}>
+                <div className="text-[10px] font-black uppercase tracking-widest opacity-60 mb-2">Notifications</div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    disabled={!onRequestNotifications}
+                    onClick={onRequestNotifications}
+                    className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-indigo-600 text-white disabled:opacity-50"
+                  >
+                    Enable job notifications
+                  </button>
+                  <button
+                    disabled={!onOpenNotificationSettings}
+                    onClick={onOpenNotificationSettings}
+                    className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-black/10 text-black disabled:opacity-50"
+                  >
+                    Open notification settings
+                  </button>
+                  <button
+                    disabled={!onSendTestNotification}
+                    onClick={() => onSendTestNotification && onSendTestNotification()}
+                    className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-white text-indigo-600 border border-indigo-600/20 disabled:opacity-50"
+                  >
+                    Send test notification
+                  </button>
+                  <button
+                    disabled={!onRefreshNotificationStatus}
+                    onClick={onRefreshNotificationStatus}
+                    className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-black/5 text-black disabled:opacity-50"
+                  >
+                    Refresh notification status
+                  </button>
+                </div>
+              </div>
             </div>
 
             <div className="mt-6 space-y-3">
