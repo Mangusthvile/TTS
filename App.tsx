@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, PlaybackPhase, UiMode, ReaderSettings, JobRecord } from './types';
+import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, PlaybackPhase, UiMode, ReaderSettings, JobRecord, CueMap } from './types';
 import Library from './components/Library';
 import Reader from './components/Reader';
 import Player from './components/Player';
@@ -30,6 +30,8 @@ import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService
 import { countQueuedUploads, listQueuedUploads, enqueueChapterUpload, removeQueuedUpload, type DriveUploadQueuedItem } from './services/driveUploadQueueService';
 import { getChapterAudioPath } from './services/chapterAudioStore';
 import { Filesystem, Directory } from '@capacitor/filesystem';
+import { cueMapFromChunkMap, cueMapFallback, findCueIndex } from './services/cueMaps';
+import { saveChapterCueMap, getChapterCueMap, deleteChapterCueMap } from './services/libraryStore';
 
 type DownloadedChapterInfo = {
   id: string;
@@ -232,6 +234,13 @@ const App: React.FC = () => {
     localStorage.setItem(UI_MODE_KEY, pref);
   }, [state.readerSettings.uiMode]);
 
+  // Sync body theme to avoid black text on dark mode
+  useEffect(() => {
+    document.body.classList.remove('dark-theme', 'sepia-theme');
+    if (state.theme === Theme.DARK) document.body.classList.add('dark-theme');
+    else if (state.theme === Theme.SEPIA) document.body.classList.add('sepia-theme');
+  }, [state.theme]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -385,6 +394,16 @@ const App: React.FC = () => {
   const [downloadedChapters, setDownloadedChapters] = useState<DownloadedChapterInfo[]>([]);
   const [showDownloadedChapters, setShowDownloadedChapters] = useState(false);
   const [showUploadQueue, setShowUploadQueue] = useState(false);
+  const [activeCueRange, setActiveCueRange] = useState<{ start: number; end: number } | null>(null);
+  const [activeCueIndex, setActiveCueIndex] = useState<number | null>(null);
+  const [activeCueMap, setActiveCueMap] = useState<CueMap | null>(null);
+  const [cueMeta, setCueMeta] = useState<{ method?: string; count?: number } | null>(null);
+  const activeCueMapRef = useRef<CueMap | null>(null);
+  const activeCueIndexRef = useRef<number | null>(null);
+  const pendingCueFallbackRef = useRef<{ chapterId: string; text: string; introMs: number } | null>(null);
+
+  useEffect(() => { activeCueMapRef.current = activeCueMap; }, [activeCueMap]);
+  useEffect(() => { activeCueIndexRef.current = activeCueIndex; }, [activeCueIndex]);
 
   const refreshUploadQueueCount = useCallback(async () => {
     try {
@@ -729,9 +748,54 @@ const App: React.FC = () => {
 
     setAudioCurrentTime(meta.currentTime);
     setAudioDuration(meta.duration);
-    
-    if (Math.abs(meta.charOffset - stateRef.current.currentOffsetChars) > 5) {
-        setState(p => ({ ...p, currentOffsetChars: meta.charOffset }));
+
+    const pendingFallback = pendingCueFallbackRef.current;
+    if (pendingFallback && meta.duration > 0) {
+        const s = stateRef.current;
+        const b = s.books.find(bk => bk.id === s.activeBookId);
+        if (b?.currentChapterId === pendingFallback.chapterId && !activeCueMapRef.current) {
+            pendingCueFallbackRef.current = null;
+            void (async () => {
+                const built = cueMapFallback(
+                  pendingFallback.text,
+                  Math.floor(meta.duration * 1000),
+                  pendingFallback.chapterId,
+                  pendingFallback.introMs
+                );
+                await saveChapterCueMap(pendingFallback.chapterId, built);
+                setActiveCueMap(built);
+                setCueMeta({ method: built.method, count: built.cues.length });
+            })().catch((e) => {
+                console.warn("Cue map fallback build failed", e);
+            });
+        }
+    }
+
+    const cueMap = activeCueMapRef.current;
+    if (cueMap && cueMap.cues.length > 0) {
+        const positionMs = Math.floor(meta.currentTime * 1000);
+        const introMs = cueMap.introOffsetMs || 0;
+        if (introMs > 0 && positionMs < introMs) {
+            if (activeCueIndexRef.current !== null) {
+                setActiveCueIndex(null);
+                setActiveCueRange(null);
+            }
+        } else {
+            const idx = findCueIndex(cueMap.cues, positionMs);
+            if (idx !== activeCueIndexRef.current) {
+                const cue = cueMap.cues[idx];
+                setActiveCueIndex(idx);
+                setActiveCueRange({ start: cue.startChar, end: cue.endChar });
+                if (stateRef.current.currentOffsetChars !== cue.startChar) {
+                    setState(p => ({ ...p, currentOffsetChars: cue.startChar }));
+                }
+            }
+        }
+    } else {
+        const nextOffset = Number.isFinite(meta.charOffset) ? meta.charOffset : stateRef.current.currentOffsetChars;
+        if (Math.abs(nextOffset - stateRef.current.currentOffsetChars) > 5) {
+            setState(p => ({ ...p, currentOffsetChars: nextOffset }));
+        }
     }
 
     const s = stateRef.current;
@@ -992,6 +1056,11 @@ const App: React.FC = () => {
         books: p.books.map(b => b.id === book.id ? { ...b, currentChapterId: targetChapterId } : b),
         currentOffsetChars: 0 
     }));
+    setActiveCueRange(null);
+    setActiveCueIndex(null);
+    setActiveCueMap(null);
+    setCueMeta(null);
+    pendingCueFallbackRef.current = null;
     setAudioCurrentTime(0);
     setAudioDuration(0);
     setPlaybackSnapshot(null);
@@ -1049,6 +1118,34 @@ const App: React.FC = () => {
 
     speechController.setContext({ bookId: book.id, chapterId: chapter.id });
     speechController.updateMetadata(textToSpeak.length, chapter.audioIntroDurSec || 5, chapter.audioChunkMap || []);
+
+    // Load or build cue map
+    try {
+      const existingCue = await getChapterCueMap(chapter.id);
+      if (existingCue) {
+        setActiveCueMap(existingCue);
+        setCueMeta({ method: existingCue.method, count: existingCue.cues.length });
+        pendingCueFallbackRef.current = null;
+      } else {
+        let builtCue: CueMap | null = null;
+        const introMs = (chapter.audioIntroDurSec || 0) * 1000;
+        if (chapter.audioChunkMap && chapter.audioChunkMap.length > 0) {
+          builtCue = cueMapFromChunkMap(chapter.id, chapter.audioChunkMap, introMs);
+        } else if (audioDuration > 0) {
+          builtCue = cueMapFallback(textToSpeak, Math.floor(audioDuration * 1000), chapter.id, introMs);
+        } else {
+          pendingCueFallbackRef.current = { chapterId: chapter.id, text: textToSpeak, introMs };
+        }
+        if (builtCue) {
+          await saveChapterCueMap(chapter.id, builtCue);
+          setActiveCueMap(builtCue);
+          setCueMeta({ method: builtCue.method, count: builtCue.cues.length });
+          pendingCueFallbackRef.current = null;
+        }
+      }
+    } catch (e) {
+      console.warn("Cue map load/build failed", e);
+    }
 
     let mobileQueue: PlaybackItem[] | undefined;
     if (effectiveMobileMode) {
@@ -1302,6 +1399,42 @@ const App: React.FC = () => {
       // ignore
     }
   }, [refreshJobs, state.readerSettings.uiMode]);
+
+  const handleRegenerateCueMap = useCallback(async () => {
+    const s = stateRef.current;
+    const book = s.books.find(b => b.id === s.activeBookId);
+    if (!book || !book.currentChapterId) return;
+    const chapter = book.chapters.find(c => c.id === book.currentChapterId);
+    if (!chapter) return;
+    try {
+      await deleteChapterCueMap(chapter.id);
+      setActiveCueMap(null);
+      setActiveCueIndex(null);
+      setActiveCueRange(null);
+      const introMs = (chapter.audioIntroDurSec || 0) * 1000;
+      let built: CueMap | null = null;
+      const rules = [...s.globalRules, ...book.rules];
+      let textToSpeak = applyRules((chapter.content ?? ""), rules);
+      if (s.readerSettings?.reflowLineBreaks) textToSpeak = reflowLineBreaks(textToSpeak);
+      if (chapter.audioChunkMap && chapter.audioChunkMap.length > 0) {
+        built = cueMapFromChunkMap(chapter.id, chapter.audioChunkMap, introMs);
+      } else if (textToSpeak.length > 0 && audioDuration > 0) {
+        built = cueMapFallback(textToSpeak, Math.floor(audioDuration * 1000), chapter.id, introMs);
+      } else if (textToSpeak.length > 0) {
+        pendingCueFallbackRef.current = { chapterId: chapter.id, text: textToSpeak, introMs };
+      }
+      if (built) {
+        await saveChapterCueMap(chapter.id, built);
+        setActiveCueMap(built);
+        setActiveCueIndex(null);
+        setActiveCueRange(null);
+        setCueMeta({ method: built.method, count: built.cues.length });
+        pendingCueFallbackRef.current = null;
+      }
+    } catch (e) {
+      console.warn("Regenerate cue map failed", e);
+    }
+  }, [audioDuration]);
 
   const base64ToBlob = (base64: string, mimeType: string) => {
     const cleaned = base64.replace(/^data:.*;base64,/, "");
@@ -1980,6 +2113,7 @@ const App: React.FC = () => {
                 onChapterExtracted={handleChapterExtracted} 
                 suggestedIndex={activeBook?.chapters.length ? Math.max(...activeBook.chapters.map(c => c.index)) + 1 : 1} 
                 theme={state.theme} 
+                uiMode={state.readerSettings.uiMode}
                 defaultVoiceId={activeBook?.settings.defaultVoiceId} 
                 existingChapters={activeBook?.chapters || []}
               />
@@ -1992,6 +2126,7 @@ const App: React.FC = () => {
              <ChapterSidebar 
                book={activeBook} theme={state.theme} onSelectChapter={handleSmartOpenChapter} 
                onClose={() => {}} isDrawer={false}
+               isMobile={computeMobileMode(state.readerSettings.uiMode)}
                playbackSnapshot={playbackSnapshot}
                onLoadMoreChapters={() => void loadMoreChapters(activeBook.id, false)}
                hasMoreChapters={chapterPagingByBook[activeBook.id]?.hasMore ?? true}
@@ -2007,6 +2142,7 @@ const App: React.FC = () => {
               <ChapterSidebar 
                 book={activeBook} theme={state.theme} onSelectChapter={(id) => { handleSmartOpenChapter(id); setIsChapterSidebarOpen(false); }} 
                 onClose={() => setIsChapterSidebarOpen(false)} isDrawer={true}
+                isMobile={computeMobileMode(state.readerSettings.uiMode)}
                 playbackSnapshot={playbackSnapshot}
                 onLoadMoreChapters={() => void loadMoreChapters(activeBook.id, false)}
                 hasMoreChapters={chapterPagingByBook[activeBook.id]?.hasMore ?? true}
@@ -2145,6 +2281,10 @@ const App: React.FC = () => {
           {activeTab === 'reader' && activeBook && activeChapterMetadata && (
             <Reader 
               chapter={activeChapterMetadata} rules={[...state.globalRules, ...activeBook.rules]} currentOffsetChars={state.currentOffsetChars} theme={state.theme}
+              activeHighlightRange={activeCueRange}
+              activeCueIndex={activeCueIndex}
+              cueMeta={cueMeta || undefined}
+              onRegenerateCueMap={handleRegenerateCueMap}
               debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset}
               onBackToCollection={() => setActiveTab('collection')} onAddChapter={() => setIsAddChapterOpen(true)}
               highlightMode={activeBook.settings.highlightMode} readerSettings={state.readerSettings}

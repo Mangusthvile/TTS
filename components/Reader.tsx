@@ -8,6 +8,10 @@ interface ReaderProps {
   chapter: Chapter | null;
   rules: Rule[];
   currentOffsetChars: number; 
+  activeHighlightRange?: { start: number; end: number } | null;
+  activeCueIndex?: number | null;
+  cueMeta?: { method?: string; count?: number };
+  onRegenerateCueMap?: () => void;
   theme: Theme;
   debugMode: boolean;
   onToggleDebug: () => void;
@@ -48,7 +52,7 @@ const WordWrapper = React.memo(({ word, currentOffset, highlightMode, sentences 
 });
 
 const Reader: React.FC<ReaderProps> = ({ 
-  chapter, rules, currentOffsetChars, theme, debugMode, onToggleDebug, onJumpToOffset, 
+  chapter, rules, currentOffsetChars, activeHighlightRange, activeCueIndex, cueMeta, onRegenerateCueMap, theme, debugMode, onToggleDebug, onJumpToOffset, 
   onBackToCollection, onAddChapter, highlightMode, readerSettings, isMobile
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -61,6 +65,17 @@ const Reader: React.FC<ReaderProps> = ({
     const ruled = applyRules((chapter.content ?? ""), rules);
     return readerSettings.reflowLineBreaks ? reflowLineBreaks(ruled) : ruled;
   }, [chapter, rules, readerSettings.reflowLineBreaks]);
+
+  const slices = useMemo(() => {
+    if (!chapter || !speakText || !activeHighlightRange) return null;
+    const { start, end } = activeHighlightRange;
+    return {
+      before: speakText.slice(0, Math.max(0, start)),
+      mid: speakText.slice(Math.max(0, start), Math.max(start, end)),
+      after: speakText.slice(Math.max(start, end)),
+      key: `${chapter.id}-${start}-${end}`
+    };
+  }, [chapter, speakText, activeHighlightRange?.start, activeHighlightRange?.end]);
 
   const segments = useMemo(() => {
     if (!speakText) return { words: [], sentences: [], nodes: [] };
@@ -109,16 +124,18 @@ const Reader: React.FC<ReaderProps> = ({
     return { words, sentences, nodes };
   }, [speakText, currentOffsetChars, highlightMode]);
 
+  const highlightRef = useRef<HTMLSpanElement | null>(null);
+
   // Screen follows highlight
   useEffect(() => {
     if (!readerSettings.followHighlight || userScrollingRef.current) return;
     scrollToActive();
-  }, [currentOffsetChars, readerSettings.followHighlight]);
+  }, [currentOffsetChars, activeHighlightRange?.start, activeHighlightRange?.end, readerSettings.followHighlight]);
 
   const scrollToActive = () => {
-    const activeEl = containerRef.current?.querySelector('[data-active="true"]');
-    if (activeEl) {
-      activeEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const target = highlightRef.current || containerRef.current?.querySelector('[data-active="true"]');
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   };
 
@@ -206,6 +223,21 @@ const Reader: React.FC<ReaderProps> = ({
                 </button>
                 <div className="text-[11px] font-black uppercase tracking-widest text-indigo-600 mb-1">Chapter {chapter?.index || 0}</div>
                 <h1 className="text-2xl lg:text-4xl font-black tracking-tight leading-tight truncate">{chapter?.title || "Untitled"}</h1>
+                {debugMode && (
+                  <div className="mt-2 text-[10px] font-mono text-indigo-400 flex items-center gap-3">
+                    <span>Cues: {cueMeta?.count ?? 'n/a'}</span>
+                    <span>Method: {cueMeta?.method ?? 'n/a'}</span>
+                    <span>Active idx: {activeCueIndex ?? '--'}</span>
+                    {onRegenerateCueMap && chapter && (
+                      <button
+                        onClick={onRegenerateCueMap}
+                        className="px-2 py-1 rounded bg-indigo-700 text-white text-[10px] font-black uppercase tracking-widest"
+                      >
+                        Regenerate cue map
+                      </button>
+                    )}
+                  </div>
+                )}
              </div>
              <div className="flex items-center gap-1">
                 {onAddChapter && (
@@ -218,7 +250,20 @@ const Reader: React.FC<ReaderProps> = ({
              </div>
           </div>
           <div className={paragraphClass}>
-            {segments.nodes}
+            {activeHighlightRange && slices ? (
+              <div data-base="0" className="leading-relaxed">
+                {slices.before}
+                <span
+                  ref={highlightRef}
+                  className="bg-[var(--highlight-color)] text-white shadow-md rounded px-0.5 transition-colors duration-100"
+                >
+                  {slices.mid || " "}
+                </span>
+                {slices.after}
+              </div>
+            ) : (
+              segments.nodes
+            )}
           </div>
         </div>
       </div>

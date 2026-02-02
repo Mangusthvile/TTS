@@ -5,6 +5,10 @@ export type PlaybackState = {
   duration: number;
   isPlaying: boolean;
   speed: number;
+  positionMs: number;
+  durationMs: number;
+  playbackRate: number;
+  currentItemId?: string | null;
 };
 
 export type PlaybackStateListener = (state: PlaybackState) => void;
@@ -34,6 +38,7 @@ export class DesktopPlaybackAdapter implements PlaybackAdapter {
   private itemListeners = new Set<PlaybackItemListener>();
   private endedListeners = new Set<() => void>();
   private errorListeners = new Set<PlaybackErrorListener>();
+  private stateInterval: any = null;
 
   constructor(audio?: HTMLAudioElement) {
     this.audio = audio ?? new Audio();
@@ -91,6 +96,10 @@ export class DesktopPlaybackAdapter implements PlaybackAdapter {
       duration: Number.isFinite(this.audio.duration) ? this.audio.duration : 0,
       isPlaying: !this.audio.paused,
       speed: this.audio.playbackRate || 1,
+      positionMs: Math.floor((this.audio.currentTime || 0) * 1000),
+      durationMs: Math.floor(((Number.isFinite(this.audio.duration) ? this.audio.duration : 0) || 0) * 1000),
+      playbackRate: this.audio.playbackRate || 1,
+      currentItemId: this.queue[this.currentIndex]?.id ?? null,
     };
   }
 
@@ -141,6 +150,21 @@ export class DesktopPlaybackAdapter implements PlaybackAdapter {
   private emitState() {
     const state = this.getState();
     this.stateListeners.forEach((listener) => listener(state));
+
+    // Throttle state emit while playing
+    if (state.isPlaying && this.stateInterval === null) {
+      this.stateInterval = setInterval(() => {
+        const s = this.getState();
+        this.stateListeners.forEach((listener) => listener(s));
+        if (!s.isPlaying) {
+          clearInterval(this.stateInterval);
+          this.stateInterval = null;
+        }
+      }, 250);
+    } else if (!state.isPlaying && this.stateInterval !== null) {
+      clearInterval(this.stateInterval);
+      this.stateInterval = null;
+    }
   }
 }
 
@@ -150,12 +174,17 @@ export class MobilePlaybackAdapter implements PlaybackAdapter {
     duration: 0,
     isPlaying: false,
     speed: 1,
+    positionMs: 0,
+    durationMs: 0,
+    playbackRate: 1,
   };
   private stateListeners = new Set<PlaybackStateListener>();
   private itemListeners = new Set<PlaybackItemListener>();
   private endedListeners = new Set<() => void>();
   private errorListeners = new Set<PlaybackErrorListener>();
   private nativeListenersBound = false;
+  private pollTimer: any = null;
+  private currentItemId: string | null = null;
 
   constructor(private plugin: typeof import('./nativePlayer').NativePlayer) {
     void this.bindNativeListeners();
@@ -163,12 +192,14 @@ export class MobilePlaybackAdapter implements PlaybackAdapter {
 
   async load(item: PlaybackItem) {
     await this.plugin.load({ item });
+    this.currentItemId = item.id;
     this.itemListeners.forEach((listener) => listener(item));
   }
 
   async loadQueue(items: PlaybackItem[], startIndex: number) {
     await this.plugin.loadQueue({ items, startIndex });
     const current = items[startIndex] ?? null;
+    this.currentItemId = current?.id ?? null;
     this.itemListeners.forEach((listener) => listener(current));
   }
 
@@ -195,7 +226,13 @@ export class MobilePlaybackAdapter implements PlaybackAdapter {
   }
 
   getState(): PlaybackState {
-    return { ...this.state };
+    return {
+      ...this.state,
+      positionMs: Math.floor((this.state.currentTime ?? 0) * 1000),
+      durationMs: Math.floor((this.state.duration ?? 0) * 1000),
+      playbackRate: this.state.speed ?? 1,
+      currentItemId: this.currentItemId,
+    };
   }
 
   onState(listener: PlaybackStateListener) {
@@ -233,12 +270,17 @@ export class MobilePlaybackAdapter implements PlaybackAdapter {
         duration: event?.duration ?? 0,
         isPlaying: !!event?.isPlaying,
         speed: event?.speed ?? this.state.speed,
+        positionMs: Math.floor((event?.currentTime ?? 0) * 1000),
+        durationMs: Math.floor((event?.duration ?? 0) * 1000),
+        playbackRate: event?.speed ?? this.state.speed ?? 1,
       };
+      this.handlePolling();
       this.emitState();
     });
 
     await this.plugin.addListener('itemChanged', (event: any) => {
       const item = event?.item ?? null;
+      this.currentItemId = item?.id ?? null;
       this.itemListeners.forEach((listener) => listener(item));
     });
 
@@ -250,5 +292,36 @@ export class MobilePlaybackAdapter implements PlaybackAdapter {
       const error = event?.error ?? new Error('NativePlayer error');
       this.errorListeners.forEach((listener) => listener(error));
     });
+  }
+
+  private handlePolling() {
+    if (this.state.isPlaying) {
+      if (this.pollTimer == null) {
+        this.pollTimer = setInterval(async () => {
+          try {
+            const res = await this.plugin.getState();
+            this.state = {
+              currentTime: res?.currentTime ?? this.state.currentTime,
+              duration: res?.duration ?? this.state.duration,
+              isPlaying: res?.isPlaying ?? this.state.isPlaying,
+              speed: res?.speed ?? this.state.speed,
+              positionMs: Math.floor((res?.currentTime ?? this.state.currentTime ?? 0) * 1000),
+              durationMs: Math.floor((res?.duration ?? this.state.duration ?? 0) * 1000),
+              playbackRate: res?.speed ?? this.state.speed ?? 1,
+            };
+            this.emitState();
+            if (!this.state.isPlaying) {
+              clearInterval(this.pollTimer);
+              this.pollTimer = null;
+            }
+          } catch {
+            // ignore transient errors
+          }
+        }, 250);
+      }
+    } else if (this.pollTimer != null) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
   }
 }

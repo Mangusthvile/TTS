@@ -1,7 +1,9 @@
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Upload, Plus, AlertCircle, Trash2, Sparkles, FileText, Headphones, Check, X, Loader2, Files } from 'lucide-react';
-import { Theme, CLOUD_VOICES, Chapter } from '../types';
+import { Theme, CLOUD_VOICES, Chapter, UiMode } from '../types';
+import { getImportAdapter, PickedFile } from '../services/importAdapter';
+import { computeMobileMode } from '../utils/platform';
 
 interface ImporterProps {
   onChapterExtracted: (data: { 
@@ -15,20 +17,21 @@ interface ImporterProps {
   }) => void;
   suggestedIndex: number;
   theme: Theme;
+  uiMode: UiMode;
   defaultVoiceId?: string;
   existingChapters: Chapter[];
 }
 
 interface SmartFile {
   id: string;
-  file: File;
+  fileName: string;
   parsedIndex: number | null;
   parsedTitle: string | null;
   status: 'pending' | 'ready' | 'duplicate' | 'error' | 'uploaded';
   content: string | null;
 }
 
-const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex, theme, defaultVoiceId, existingChapters }) => {
+const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex, theme, defaultVoiceId, existingChapters, uiMode }) => {
   const [activeTab, setActiveTab] = useState<'manual' | 'smart'>('manual');
   
   // Manual Tab State
@@ -45,8 +48,8 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
   const [isProcessingFiles, setIsProcessingFiles] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const bulkInputRef = useRef<HTMLInputElement>(null);
+  const importAdapter = useMemo(() => getImportAdapter(uiMode), [uiMode]);
+  const isMobile = computeMobileMode(uiMode);
 
   useEffect(() => {
     setChapterNum(suggestedIndex);
@@ -69,20 +72,20 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
     return result.trim();
   };
 
-  const handleManualFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const text = event.target?.result as string;
+  const handleManualPick = async () => {
+    try {
+      const picks = await importAdapter.pickTextFiles();
+      if (!picks.length) return;
+      const picked = picks[0];
+      const text = await importAdapter.readText(picked);
       setContent(text);
-      const guessedTitle = file.name.replace(/\.txt$/i, '').replace(/^\d+\s*/, '');
+      const guessedTitle = picked.name.replace(/\.txt$/i, '').replace(/^\d+\s*/, '');
       setTitle(prev => prev || guessedTitle);
-      const match = file.name.match(/^(\d+)/);
+      const match = picked.name.match(/^(\d+)/);
       if (match) setChapterNum(parseInt(match[1]));
-    };
-    reader.readAsText(file);
-    e.target.value = '';
+    } catch (err: any) {
+      setError(err?.message || 'Import failed');
+    }
   };
 
   const handleAddManual = () => {
@@ -106,8 +109,9 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
   };
 
   // -- Smart Bulk Logic --
-  const parseFile = async (file: File): Promise<SmartFile> => {
-    const text = await file.text();
+  const parseFile = async (picked: PickedFile): Promise<SmartFile> => {
+    const text = await importAdapter.readText(picked);
+    const fileName = picked.name || 'Untitled.txt';
     const lines = text.split(/\r?\n/);
     const firstLine = lines.find(l => l.trim().length > 0) || '';
     
@@ -127,7 +131,7 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
       }
     } else {
       // B) Try Filename Match
-      const fileMatch = file.name.match(/Chapter[_\s-]*(\d+)[_\s-]*(.*)\.txt/i);
+      const fileMatch = fileName.match(/Chapter[_\s-]*(\d+)[_\s-]*(.*)\.txt/i);
       if (fileMatch) {
         index = parseInt(fileMatch[1]);
         chTitle = fileMatch[2].trim().replace(/_/g, ' ') || `Chapter ${index}`;
@@ -146,7 +150,7 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
 
     return {
       id: crypto.randomUUID(),
-      file,
+      fileName,
       parsedIndex: index,
       parsedTitle: chTitle,
       status,
@@ -154,18 +158,49 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
     };
   };
 
-  const handleBulkFiles = async (files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    setIsProcessingFiles(true);
-    const newSmartFiles: SmartFile[] = [];
-    for (let i = 0; i < files.length; i++) {
-      if (files[i].name.toLowerCase().endsWith('.txt')) {
-        newSmartFiles.push(await parseFile(files[i]));
+  const handleBulkPick = async () => {
+    try {
+      setIsProcessingFiles(true);
+      const picks = await importAdapter.pickTextFiles();
+      if (!picks.length) {
+        setIsProcessingFiles(false);
+        return;
       }
+      const filtered = picks.filter(p => (p.name || '').toLowerCase().match(/\.(txt|md|html|htm)$/));
+      const newSmartFiles: SmartFile[] = [];
+      for (const p of filtered) {
+        newSmartFiles.push(await parseFile(p));
+      }
+      setSmartFiles(prev => [...prev, ...newSmartFiles]);
+    } catch (err: any) {
+      setError(err?.message || 'Import failed');
+    } finally {
+      setIsProcessingFiles(false);
     }
-    setSmartFiles(prev => [...prev, ...newSmartFiles]);
-    setIsProcessingFiles(false);
-    if (bulkInputRef.current) bulkInputRef.current.value = '';
+  };
+
+  const handleDroppedFiles = async (files: FileList | null) => {
+    if (!files || !files.length) return;
+    if (isMobile) return; // skip on mobile
+    setIsProcessingFiles(true);
+    try {
+      const picked: PickedFile[] = Array.from(files).map((f) => ({
+        name: f.name,
+        mimeType: f.type,
+        size: f.size,
+        file: f,
+      }));
+      const filtered = picked.filter(p => (p.name || '').toLowerCase().match(/\.(txt|md|html|htm)$/));
+      const newSmartFiles: SmartFile[] = [];
+      for (const p of filtered) {
+        newSmartFiles.push(await parseFile(p));
+      }
+      setSmartFiles(prev => [...prev, ...newSmartFiles]);
+    } catch (err: any) {
+      setError(err?.message || 'Import failed');
+    } finally {
+      setIsProcessingFiles(false);
+    }
   };
 
   const handleBulkImport = async () => {
@@ -297,10 +332,9 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
-                  <button onClick={() => fileInputRef.current?.click()} className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-[10px] font-black uppercase border transition-all ${isDark ? 'border-slate-700 hover:bg-white/5' : 'border-slate-200 hover:bg-black/5'}`}>
+                  <button onClick={handleManualPick} className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-[10px] font-black uppercase border transition-all ${isDark ? 'border-slate-700 hover:bg-white/5' : 'border-slate-200 hover:bg-black/5'}`}>
                     <Upload className="w-3.5 h-3.5" /> Upload .TXT
                   </button>
-                  <input type="file" ref={fileInputRef} className="hidden" accept=".txt" onChange={handleManualFileUpload} />
                   <button onClick={() => setContent(cleanText(content))} disabled={!content.trim()} className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[10px] font-black uppercase bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition-all shadow-md">
                     <Sparkles className="w-3.5 h-3.5" /> Quick Clean
                   </button>
@@ -329,10 +363,9 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
             <div 
               className={`border-2 border-dashed rounded-3xl p-8 text-center transition-all cursor-pointer ${isDark ? 'border-slate-700 hover:bg-slate-800' : 'border-slate-300 hover:bg-slate-50'}`}
               onDragOver={e => e.preventDefault()}
-              onDrop={e => { e.preventDefault(); handleBulkFiles(e.dataTransfer.files); }}
-              onClick={() => bulkInputRef.current?.click()}
+              onDrop={e => { e.preventDefault(); if (!isMobile && e.dataTransfer?.files?.length) { void handleDroppedFiles(e.dataTransfer.files); } }}
+              onClick={handleBulkPick}
             >
-              <input type="file" ref={bulkInputRef} className="hidden" accept=".txt" multiple onChange={e => handleBulkFiles(e.target.files)} />
               <div className="flex flex-col items-center gap-4">
                 <div className={`p-4 rounded-full ${isDark ? 'bg-indigo-900/30 text-indigo-400' : 'bg-indigo-50 text-indigo-600'}`}>
                   <Files className="w-8 h-8" />
@@ -369,7 +402,7 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
                         {f.status === 'error' && <span className="inline-flex items-center gap-1 text-red-600 bg-red-100 px-2 py-1 rounded-lg text-[10px] font-black uppercase"><X className="w-3 h-3" /> Error</span>}
                         {f.status === 'uploaded' && <span className="inline-flex items-center gap-1 text-indigo-600 bg-indigo-100 px-2 py-1 rounded-lg text-[10px] font-black uppercase"><Check className="w-3 h-3" /> Done</span>}
                       </td>
-                      <td className="p-3 truncate max-w-[150px]" title={f.file.name}>{f.file.name}</td>
+                      <td className="p-3 truncate max-w-[150px]" title={f.fileName}>{f.fileName}</td>
                       <td className="p-3">
                         {f.parsedIndex !== null ? (
                           <div className="flex flex-col">

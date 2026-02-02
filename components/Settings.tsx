@@ -148,6 +148,46 @@ const Settings: React.FC<SettingsProps> = ({
     return counts;
   }, [jobs]);
 
+  const logPagingChecklist = () => {
+    const lines = [
+      '[QA][Paging] 1) Open a large book in Mobile UiMode',
+      '[QA][Paging] 2) Scroll near bottom; expect next page to load (IO or fallback)',
+      '[QA][Paging] 3) Confirm no duplicate rows and sentinel shows/hides correctly'
+    ];
+    console.log(lines.join('\n'));
+    alert('Paging checklist logged to console.');
+  };
+
+  const logImportChecklist = () => {
+    const lines = [
+      '[QA][Import] 1) Switch UiMode to Mobile',
+      '[QA][Import] 2) Tap Import -> pick a .txt file via mobile picker',
+      '[QA][Import] 3) Confirm chapter appears and survives app restart'
+    ];
+    console.log(lines.join('\n'));
+    alert('Import checklist logged to console.');
+  };
+
+  const logHighlightChecklist = () => {
+    const lines = [
+      '[QA][Highlight] Play chapter with cues',
+      '[QA][Highlight] Seek + change speed; highlight follows cue index',
+      '[QA][Highlight] Offline playback still highlights when local audio exists'
+    ];
+    console.log(lines.join('\n'));
+    alert('Highlight checklist logged to console.');
+  };
+
+  const logBuildChecklist = () => {
+    const lines = [
+      `[QA][Build] Tailwind bundled; version ${window.__APP_VERSION__}`,
+      '[QA][Build] No importmap/CDN overrides; run vite build --mode capacitor',
+      '[QA][Build] Prod preview shows styles/colors intact'
+    ];
+    console.log(lines.join('\n'));
+    alert('Build checklist logged to console.');
+  };
+
   const platform = Capacitor.getPlatform?.() ?? 'web';
   const androidVersion = (navigator.userAgent || '').match(/Android ([0-9.]+)/)?.[1] || 'n/a';
   const notifSummary = notificationStatus
@@ -455,6 +495,17 @@ const Settings: React.FC<SettingsProps> = ({
                  </div>
                  <input type="checkbox" checked={showDiagnostics} onChange={e => onSetShowDiagnostics(e.target.checked)} className="w-5 h-5 accent-indigo-600" />
               </label>
+
+              <div className={`p-4 rounded-xl border ${isDark ? 'border-slate-800 bg-slate-950/40' : 'border-black/5 bg-white'}`}>
+                <div className="text-[10px] font-black uppercase tracking-widest opacity-60 mb-2">QA Sweep Shortcuts</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button onClick={logPagingChecklist} className="px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20">Paging Test</button>
+                  <button onClick={logImportChecklist} className="px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20">Import Test</button>
+                  <button onClick={logHighlightChecklist} className="px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20">Highlight Test</button>
+                  <button onClick={logBuildChecklist} className="px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20">Build/Tailwind Check</button>
+                </div>
+                <p className="text-[10px] opacity-50 mt-2">Each button logs a 3-step checklist to the console so you can sweep the main features in under 10 minutes.</p>
+              </div>
 
               <div className={`rounded-xl overflow-hidden border ${isDark ? 'bg-black/20 border-slate-800' : 'bg-black/5 border-black/5'}`}>
                  <button onClick={() => setIsDiagExpanded(!isDiagExpanded)} className="w-full px-4 py-3 flex items-center justify-between text-[10px] font-black uppercase tracking-widest opacity-60 hover:opacity-100">

@@ -128,6 +128,17 @@ export interface AudioChunkMetadata {
   durSec: number;
 }
 
+export type Cue = { tMs: number; startChar: number; endChar: number };
+
+export type CueMap = {
+  chapterId: string;
+  cues: Cue[];
+  version: number;
+  generatedAt: number;
+  method: "chunkmap" | "timepoints" | "fallback";
+  introOffsetMs?: number;
+};
+
 export interface Chapter {
   id: string;
   index: number;

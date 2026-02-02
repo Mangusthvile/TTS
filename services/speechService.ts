@@ -92,12 +92,23 @@ class SpeechController {
 
   // Highlight buffer to account for synthesis pauses and speech pacing
   private readonly HIGHLIGHT_DELAY_SEC = 0.5;
+  private readonly CUE_PREFIX = 'talevox_cuemap_';
 
   // Local progress commit guard (extra protection; commitProgressLocal also throttles)
   private lastLocalCommitAt = 0;
 
   // Lifecycle listeners bound once
   private lifecycleBound = false;
+
+  private loadStoredCueMap(chapterId: string): AudioChunkMetadata[] | null {
+    try {
+      const raw = localStorage.getItem(`${this.CUE_PREFIX}${chapterId}`);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed as AudioChunkMetadata[];
+    } catch { /* ignore */ }
+    return null;
+  }
 
   constructor() {
     const desktopAdapter = new DesktopPlaybackAdapter();
@@ -151,6 +162,12 @@ class SpeechController {
     this.currentTextLength = textLen;
     this.currentIntroDurSec = introDurSec;
     this.currentChunkMap = chunkMap || null;
+    const ctx = this.context;
+    if (ctx?.chapterId && chunkMap && chunkMap.length > 0) {
+      try {
+        localStorage.setItem(`talevox_cuemap_${ctx.chapterId}`, JSON.stringify(chunkMap));
+      } catch { /* ignore storage errors */ }
+    }
     this.renderedOffset = 0;
     this.targetOffset = 0;
   }
@@ -329,80 +346,51 @@ class SpeechController {
   // ----------------------------
 
   private updateTargetOffset(time: number) {
-    this.targetOffset = this.getOffsetFromTime(time, this.audio.duration);
+    const { duration } = this.getCurrentTimeAndDuration();
+    this.targetOffset = this.getOffsetFromTime(time, duration);
   }
 
   private smoothTick(deltaMs: number) {
     if (!this.syncCallback) return;
 
-    // Use lastKnownTime as the authoritative clock when mobile throttles events
-    const t = (Number.isFinite(this.audio.currentTime) ? this.audio.currentTime : this.lastKnownTime) || 0;
+    const { currentTime, duration } = this.getCurrentTimeAndDuration();
+    const t = (Number.isFinite(currentTime) ? currentTime : this.lastKnownTime) || 0;
     if (t > 0) this.lastKnownTime = t;
 
-    // Always refresh target from clock (not just from timeupdate)
-    this.updateTargetOffset(this.lastKnownTime);
-
-    // 1) Intro/title: keep highlight at 0
-    if (this.lastKnownTime < this.currentIntroDurSec) {
-      this.renderedOffset = 0;
-      this.emitSyncTick();
-      return;
-    }
-
-    // 2) Backward jump: snap instantly
-    if (this.targetOffset < this.renderedOffset) {
-      this.renderedOffset = this.targetOffset;
-      this.emitSyncTick();
-      return;
-    }
-
-    // 3) Forward: smooth toward target with easing (reduces “skipping words”)
-    const diff = this.targetOffset - this.renderedOffset;
-    if (diff <= 0) {
-      this.emitSyncTick();
-      return;
-    }
-
-    const duration = (Number.isFinite(this.audio.duration) ? this.audio.duration : 0) || 0;
-    const contentDur = Math.max(1, duration - this.currentIntroDurSec);
-    const cps = this.currentTextLength > 0 ? (this.currentTextLength / contentDur) : 20;
-
-    // Base step based on time and speed
-    const baseStep = cps * (deltaMs / 1000) * Math.max(0.5, this.requestedSpeed);
-
-    // Easing factor (more responsive when behind, but still smooth)
-    const behindSec = cps > 0 ? diff / cps : 0;
-    const alpha =
-      behindSec > 2.5 ? 0.35 :
-      behindSec > 1.5 ? 0.28 :
-      behindSec > 0.8 ? 0.22 : 0.16;
-
-    let step = diff * alpha;
-
-    // Clamp to avoid big jumps that look like word-skips
-    const maxStep = Math.max(1, baseStep * 1.5);
-    step = Math.max(1, Math.min(step, maxStep));
-
-    this.renderedOffset += step;
-
+    this.targetOffset = this.getOffsetFromTime(this.lastKnownTime, duration);
+    this.renderedOffset = this.targetOffset;
     this.emitSyncTick();
   }
 
   public emitSyncTick(completed = false) {
-    if (this.syncCallback) {
-      this.syncCallback({
-        currentTime: this.audio.currentTime,
-        duration: this.audio.duration,
-        charOffset: Math.floor(this.renderedOffset),
-        textLength: this.currentTextLength,
-        completed
-      });
-    }
+    if (!this.syncCallback) return;
+    const state = this.adapter.getState();
+    const currentTime = (state.positionMs ?? state.currentTime * 1000) / 1000;
+    const duration = (state.durationMs ?? state.duration * 1000) / 1000;
+    const offset = Math.floor(this.renderedOffset);
+    this.syncCallback({
+      currentTime,
+      duration,
+      charOffset: offset,
+      textLength: this.currentTextLength,
+      completed
+    });
   }
 
   private applyRequestedSpeed() {
     this.audio.defaultPlaybackRate = this.requestedSpeed;
     this.audio.playbackRate = this.requestedSpeed;
+  }
+
+  private getCurrentTimeAndDuration(): { currentTime: number; duration: number } {
+    if (this.adapter instanceof DesktopPlaybackAdapter) {
+      return {
+        currentTime: this.audio.currentTime || 0,
+        duration: Number.isFinite(this.audio.duration) ? this.audio.duration : 0,
+      };
+    }
+    const state = this.adapter.getState();
+    return { currentTime: state.currentTime ?? 0, duration: state.duration ?? 0 };
   }
 
   public saveProgress(completed: boolean = false) {
@@ -567,7 +555,11 @@ class SpeechController {
 
     this.currentTextLength = totalContentChars;
     this.currentIntroDurSec = introDurSec;
-    this.currentChunkMap = chunkMap || null;
+    let effectiveChunkMap = chunkMap || null;
+    if ((!effectiveChunkMap || effectiveChunkMap.length === 0) && ctx?.chapterId) {
+      effectiveChunkMap = this.loadStoredCueMap(ctx.chapterId);
+    }
+    this.currentChunkMap = effectiveChunkMap;
     this.lastKnownTime = startTimeSec;
 
     // Reset offset smoothing

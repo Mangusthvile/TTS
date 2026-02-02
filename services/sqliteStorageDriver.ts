@@ -91,6 +91,12 @@ const LIBRARY_SCHEMA_SQL = `
   );
 
   CREATE INDEX IF NOT EXISTS idx_chapter_text_bookId ON chapter_text(bookId);
+
+  CREATE TABLE IF NOT EXISTS chapter_cue_maps (
+    chapterId TEXT PRIMARY KEY,
+    cueJson TEXT NOT NULL,
+    updatedAt INTEGER NOT NULL
+  );
 `;
 
 function nowMs() {

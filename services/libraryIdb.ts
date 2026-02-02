@@ -19,11 +19,12 @@ import { HighlightMode } from "../types";
 import type { Book, Chapter, StorageBackend, AudioStatus, BookSettings, Rule } from "../types";
 
 const DB_NAME = "TalevoxLibrary";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 const STORE_BOOKS = "books";
 const STORE_CHAPTERS = "chapters";
 const STORE_CHAPTER_TEXT = "chapter_text";
+const STORE_CHAPTER_CUE_MAPS = "chapter_cue_maps";
 
 export type ChapterPage = {
   chapters: Chapter[];
@@ -76,6 +77,12 @@ type ChapterTextRow = {
   updatedAt: number;
 };
 
+type ChapterCueMapRow = {
+  chapterId: string;
+  cueJson: string;
+  updatedAt: number;
+};
+
 let dbPromise: Promise<IDBDatabase> | null = null;
 
 function ensureIndexedDbAvailable(): void {
@@ -117,6 +124,10 @@ function openDb(): Promise<IDBDatabase> {
       } else {
         const s = req.transaction!.objectStore(STORE_CHAPTER_TEXT);
         if (!s.indexNames.contains("byBookId")) s.createIndex("byBookId", "bookId", { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains(STORE_CHAPTER_CUE_MAPS)) {
+        db.createObjectStore(STORE_CHAPTER_CUE_MAPS, { keyPath: "chapterId" });
       }
     };
 
@@ -348,6 +359,44 @@ export async function loadChapterText(bookId: string, chapterId: string): Promis
   await txDone(tx);
   return row.content ?? "";
 }
+
+export async function saveChapterCueMap(chapterId: string, cueMap: any): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_CHAPTER_CUE_MAPS], "readwrite");
+  const store = tx.objectStore(STORE_CHAPTER_CUE_MAPS);
+  const row: ChapterCueMapRow = {
+    chapterId,
+    cueJson: JSON.stringify(cueMap),
+    updatedAt: Date.now(),
+  };
+  store.put(row);
+  await txDone(tx);
+}
+
+export async function getChapterCueMap(chapterId: string): Promise<any | null> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_CHAPTER_CUE_MAPS], "readonly");
+  const store = tx.objectStore(STORE_CHAPTER_CUE_MAPS);
+  const row = (await reqToPromise(store.get(chapterId))) as ChapterCueMapRow | undefined;
+  await txDone(tx);
+  if (!row) return null;
+  try {
+    return JSON.parse(row.cueJson);
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteChapterCueMap(chapterId: string): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_CHAPTER_CUE_MAPS], "readwrite");
+  tx.objectStore(STORE_CHAPTER_CUE_MAPS).delete(chapterId);
+  await txDone(tx);
+}
+
+export const idbSaveChapterCueMap = saveChapterCueMap;
+export const idbGetChapterCueMap = getChapterCueMap;
+export const idbDeleteChapterCueMap = deleteChapterCueMap;
 
 export async function listChaptersPage(
   bookId: string,

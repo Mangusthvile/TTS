@@ -3,7 +3,7 @@
 
 import { Capacitor } from "@capacitor/core";
 import { HighlightMode } from "../types";
-import type { Book, Chapter, StorageBackend, AudioStatus, BookSettings, Rule } from "../types";
+import type { Book, Chapter, StorageBackend, AudioStatus, BookSettings, Rule, CueMap } from "../types";
 import { initStorage, getStorage } from "./storageSingleton";
 import {
   listBooks as idbListBooks,
@@ -14,7 +14,10 @@ import {
   saveChapterText as idbSaveChapterText,
   loadChapterText as idbLoadChapterText,
   listChaptersPage as idbListChaptersPage,
-  bulkUpsertChapters as idbBulkUpsertChapters
+  bulkUpsertChapters as idbBulkUpsertChapters,
+  saveChapterCueMap as idbSaveChapterCueMap,
+  getChapterCueMap as idbGetChapterCueMap,
+  deleteChapterCueMap as idbDeleteChapterCueMap,
 } from "./libraryIdb";
 import type { SQLiteDBConnection } from "@capacitor-community/sqlite";
 
@@ -239,6 +242,7 @@ export async function deleteChapter(bookId: string, chapterId: string): Promise<
   const db = mustSqliteDb();
   await db.run(`DELETE FROM chapter_text WHERE chapterId = ?`, [chapterId]);
   await db.run(`DELETE FROM chapters WHERE id = ? AND bookId = ?`, [chapterId, bookId]);
+  await db.run(`DELETE FROM chapter_cue_maps WHERE chapterId = ?`, [chapterId]);
 }
 
 export async function saveChapterText(bookId: string, chapterId: string, content: string): Promise<void> {
@@ -295,6 +299,54 @@ export async function loadChapterText(bookId: string, chapterId: string): Promis
   }
 
   return content;
+}
+
+// Cue maps
+async function nativeSaveChapterCueMap(chapterId: string, cueMap: CueMap): Promise<void> {
+  const db = mustSqliteDb();
+  await db.run(
+    `INSERT INTO chapter_cue_maps (chapterId, cueJson, updatedAt)
+     VALUES (?, ?, ?)
+     ON CONFLICT(chapterId) DO UPDATE SET
+       cueJson=excluded.cueJson,
+       updatedAt=excluded.updatedAt`,
+    [chapterId, JSON.stringify(cueMap), Date.now()]
+  );
+}
+
+async function nativeGetChapterCueMap(chapterId: string): Promise<CueMap | null> {
+  const db = mustSqliteDb();
+  const res = await db.query(`SELECT cueJson FROM chapter_cue_maps WHERE chapterId = ?`, [chapterId]);
+  const row = (res.values?.[0] ?? null) as any;
+  if (!row) return null;
+  try {
+    return JSON.parse(row.cueJson) as CueMap;
+  } catch {
+    return null;
+  }
+}
+
+async function nativeDeleteChapterCueMap(chapterId: string): Promise<void> {
+  const db = mustSqliteDb();
+  await db.run(`DELETE FROM chapter_cue_maps WHERE chapterId = ?`, [chapterId]);
+}
+
+export async function saveChapterCueMap(chapterId: string, cueMap: CueMap): Promise<void> {
+  await ensureInit();
+  if (!isNative()) return idbSaveChapterCueMap(chapterId, cueMap);
+  return nativeSaveChapterCueMap(chapterId, cueMap);
+}
+
+export async function getChapterCueMap(chapterId: string): Promise<CueMap | null> {
+  await ensureInit();
+  if (!isNative()) return idbGetChapterCueMap(chapterId);
+  return nativeGetChapterCueMap(chapterId);
+}
+
+export async function deleteChapterCueMap(chapterId: string): Promise<void> {
+  await ensureInit();
+  if (!isNative()) return idbDeleteChapterCueMap(chapterId);
+  return nativeDeleteChapterCueMap(chapterId);
 }
 
 export async function listChaptersPage(
