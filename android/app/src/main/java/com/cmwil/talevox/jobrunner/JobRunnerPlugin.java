@@ -39,6 +39,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.util.UUID;
+import java.util.List;
 import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -182,11 +183,7 @@ public class JobRunnerPlugin extends Plugin {
     @PluginMethod
     public void ensureUploadQueueJob(PluginCall call) {
         try {
-            SQLiteDatabase db = getDb();
-            Cursor cursor = db.rawQuery("SELECT COUNT(*) FROM drive_upload_queue WHERE status IN ('queued','failed','uploading')", null);
-            int pending = 0;
-            if (cursor.moveToFirst()) pending = cursor.getInt(0);
-            cursor.close();
+            int pending = countQueuedUploads();
             if (pending == 0) {
                 JSObject out = new JSObject();
                 out.put("jobId", (String) null);
@@ -625,7 +622,7 @@ public class JobRunnerPlugin extends Plugin {
             NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
             boolean channelExists = false;
             if (nm != null) {
-                NotificationChannel ch = nm.getNotificationChannel(GenerateAudioWorker.CHANNEL_ID);
+                NotificationChannel ch = nm.getNotificationChannel(com.cmwil.talevox.notifications.JobNotificationChannels.CHANNEL_JOBS_ID);
                 channelExists = (ch != null);
             }
             out.put("channelExists", channelExists);
@@ -673,6 +670,17 @@ public class JobRunnerPlugin extends Plugin {
             WorkManager.getInstance(getContext())
                 .enqueueUniquePeriodicWork("talevox_drive_upload_queue_periodic", ExistingPeriodicWorkPolicy.KEEP, request);
         } catch (Exception ignored) {}
+    }
+
+    private int countQueuedUploads() {
+        int total = 0;
+        try {
+            SQLiteDatabase db = getDb();
+            Cursor cursor = db.rawQuery("SELECT COUNT(*) FROM drive_upload_queue WHERE status IN ('queued','failed','uploading')", null);
+            if (cursor.moveToFirst()) total = cursor.getInt(0);
+            cursor.close();
+        } catch (Exception ignored) {}
+        return total;
     }
 
     private void updateJobProgress(String jobId, String status, JSONObject progressJson, String error) {
@@ -767,9 +775,8 @@ public class JobRunnerPlugin extends Plugin {
                 if (workId == null || workId.isEmpty()) continue;
 
                 WorkManager wm = WorkManager.getInstance(getContext());
-                List<WorkInfo> infos = wm.getWorkInfosById(UUID.fromString(workId)).get();
-                if (infos == null || infos.isEmpty()) continue;
-                WorkInfo info = infos.get(0);
+                WorkInfo info = wm.getWorkInfoById(UUID.fromString(workId)).get();
+                if (info == null) continue;
                 String mapped = mapWorkState(info.getState());
                 if (mapped != null && !mapped.equals(status)) {
                     Log.d("JobRunner", "Reconcile job " + jobId + " from " + status + " -> " + mapped);

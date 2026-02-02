@@ -16,6 +16,7 @@ import androidx.work.OneTimeWorkRequest;
 import androidx.work.WorkManager;
 import androidx.work.OutOfQuotaPolicy;
 import androidx.work.ExistingWorkPolicy;
+import android.app.Notification;
 import android.app.NotificationManager;
 
 import com.getcapacitor.JSObject;
@@ -781,7 +782,7 @@ public class GenerateAudioWorker extends Worker {
                 new OneTimeWorkRequest.Builder(DriveUploadWorker.class)
                     .setInputData(new Data.Builder().putString("jobId", jobId).build())
                     .build();
-            WorkManager.getInstance(getContext()).enqueue(request);
+            WorkManager.getInstance(getApplicationContext()).enqueue(request);
 
             progress.put("workRequestId", request.getId().toString());
             ContentValues update = new ContentValues();
