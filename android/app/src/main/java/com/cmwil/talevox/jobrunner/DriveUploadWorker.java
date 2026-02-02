@@ -72,7 +72,7 @@ public class DriveUploadWorker extends Worker {
             while (processedThisRun < 20) {
                 DriveUploadItem item = getNextReadyUpload(System.currentTimeMillis());
                 if (item == null) {
-                    finishJob(jobId, progress, "succeeded", "Uploads complete");
+                    finishJob(jobId, progress, "completed", "Uploads complete");
                     return Result.success();
                 }
 

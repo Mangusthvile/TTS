@@ -47,6 +47,15 @@ export interface JobRunnerPlugin {
     notifications?: { permission?: string; enabled?: boolean };
     notes?: string[];
   }>;
+  getNotificationDiagnostics?: () => Promise<{
+    hasPlugin?: boolean;
+    plugin?: string;
+    permission?: "granted" | "denied" | "prompt" | "unknown";
+    channels?: string[];
+    channelExists?: boolean;
+    foregroundRecent?: boolean;
+    foregroundAgeMs?: number;
+  }>;
   addListener: (
     eventName: "jobProgress" | "jobFinished",
     listenerFunc: (event: any) => void

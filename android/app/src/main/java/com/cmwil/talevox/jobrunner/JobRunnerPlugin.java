@@ -15,6 +15,7 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.PermissionState;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
 
 import androidx.work.Data;
 import androidx.work.Constraints;
@@ -572,7 +573,7 @@ public class JobRunnerPlugin extends Plugin {
         requestPermissionForAlias("notifications", call, "notificationsCallback");
     }
 
-    @PluginMethod
+    @PermissionCallback
     public void notificationsCallback(PluginCall call) {
         JSObject ret = new JSObject();
         PermissionState state = getPermissionState("notifications");
@@ -612,6 +613,11 @@ public class JobRunnerPlugin extends Plugin {
         } catch (Exception e) {
             call.reject(e.getMessage());
         }
+    }
+
+    @PluginMethod
+    public void getDiagnostics(PluginCall call) {
+        getNotificationDiagnostics(call);
     }
 
     @PluginMethod

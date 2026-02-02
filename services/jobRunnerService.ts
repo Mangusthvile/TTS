@@ -14,7 +14,7 @@ function getInterfaceMode(uiMode: UiMode): InterfaceMode {
 export async function jobRunnerHealthCheck(uiMode: UiMode): Promise<void> {
   if (!computeMobileMode(uiMode)) return;
   try {
-    const res = await JobRunner.getDiagnostics?.();
+    const res = (await JobRunner.getDiagnostics?.()) ?? (await JobRunner.getNotificationDiagnostics?.());
     console.log("[JobRunner][native] health check", res);
   } catch (e) {
     console.warn("[JobRunner][native] health check failed", e);
@@ -150,7 +150,7 @@ export async function enqueueUploadJob(uiMode: UiMode): Promise<{ jobId: string 
   const now = Date.now();
   const job: JobRecord = {
     jobId,
-    type: "uploadQueue",
+    type: "drive_upload_queue",
     status: "queued",
     payloadJson: {},
     progressJson: { total: 0, completed: 0 },

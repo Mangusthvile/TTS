@@ -79,6 +79,10 @@ public class GenerateAudioWorker extends Worker {
             if (bookId == null || chapterIds == null) {
                 return failJob(jobId, "Invalid payload", null);
             }
+            String resolvedBookId = resolveBookId(bookId);
+            if (resolvedBookId == null || resolvedBookId.isEmpty()) {
+                return failJob(jobId, "Book not found for bookId/driveFolderId", null);
+            }
 
             String voiceId = "en-US-Standard-C";
             JSONObject voice = payload.optJSONObject("voice");
@@ -97,6 +101,7 @@ public class GenerateAudioWorker extends Worker {
 
             JSONObject progressJson = job.progressJson != null ? job.progressJson : new JSONObject();
             int completed = progressJson.optInt("completed", 0);
+            int skipped = progressJson.optInt("skipped", 0);
             int total = progressJson.optInt("total", chapterIds.length());
             if (total <= 0) total = chapterIds.length();
             if (!progressJson.has("startedAt")) {
@@ -105,13 +110,14 @@ public class GenerateAudioWorker extends Worker {
 
             progressJson.put("total", total);
             progressJson.put("completed", completed);
+            progressJson.put("skipped", skipped);
             updateJobProgress(jobId, "running", progressJson, null);
             Log.d("GenerateAudioWorker", "Job " + jobId + " starting chapters; total=" + total);
             setForegroundAsync(JobNotificationHelper.buildForegroundInfo(getApplicationContext(), jobId, "Generating audio", "", total, completed, false, true));
             JobRunnerPlugin.noteForegroundHeartbeat();
             showProgressNotification(jobId, "Generating audio", progressJson);
 
-            List<Rule> rules = loadRulesForBook(bookId);
+            List<Rule> rules = loadRulesForBook(resolvedBookId);
 
             for (int i = completed; i < chapterIds.length(); i++) {
                 if (isStopped()) {
@@ -129,9 +135,14 @@ public class GenerateAudioWorker extends Worker {
                 JobRunnerPlugin.noteForegroundHeartbeat();
                 showProgressNotification(jobId, "Generating audio", progressJson);
 
-                String content = loadChapterText(bookId, chapterId);
+                String content = loadChapterText(resolvedBookId, chapterId);
                 if (content == null || content.isEmpty()) {
-                    return failJob(jobId, "Missing chapter text", progressJson);
+                    skipped++;
+                    progressJson.put("skipped", skipped);
+                    addSkippedChapter(progressJson, chapterId);
+                    updateJobProgress(jobId, "running", progressJson, null);
+                    emitProgress(jobId, "running", progressJson);
+                    continue;
                 }
 
                 String processed = applyRules(content, rules);
@@ -159,9 +170,9 @@ public class GenerateAudioWorker extends Worker {
                     uploadError = "UPLOAD_PENDING_MISSING_TOKEN_OR_FOLDER";
                 }
 
-                updateChapterAudioStatus(bookId, chapterId, "ready", filePath, uploadedId);
+                updateChapterAudioStatus(resolvedBookId, chapterId, "ready", filePath, uploadedId);
                 if (uploadError != null || uploadedId == null) {
-                    enqueueUploadQueueItem(bookId, chapterId, filePath);
+                    enqueueUploadQueueItem(resolvedBookId, chapterId, filePath);
                     ensureUploadQueueJob();
                 }
 
@@ -179,14 +190,17 @@ public class GenerateAudioWorker extends Worker {
 
             progressJson.put("currentChapterId", JSONObject.NULL);
             progressJson.put("finishedAt", System.currentTimeMillis());
-            updateJobProgress(jobId, "succeeded", progressJson, null);
-            emitFinished(jobId, "succeeded", progressJson, null);
+            if (completed == 0 && skipped >= total) {
+                return failJob(jobId, "Missing chapter text", progressJson);
+            }
+            updateJobProgress(jobId, "completed", progressJson, null);
+            emitFinished(jobId, "completed", progressJson, null);
             showFinishedNotification(jobId, "Audio generation complete");
             setForegroundAsync(JobNotificationHelper.buildForegroundInfo(getApplicationContext(), jobId, "Audio generation complete", "", total, total, false, false));
             JobRunnerPlugin.noteForegroundHeartbeat();
             return Result.success();
-        } catch (Exception e) {
-            return failJob(jobId, e.getMessage(), null);
+        } catch (Throwable t) {
+            return failJob(jobId, t != null ? t.getMessage() : "Unknown error", null);
         }
     }
 
@@ -203,6 +217,56 @@ public class GenerateAudioWorker extends Worker {
             "error TEXT," +
             "createdAt INTEGER," +
             "updatedAt INTEGER" +
+            ")"
+        );
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS kv (" +
+            "key TEXT PRIMARY KEY," +
+            "json TEXT NOT NULL," +
+            "updatedAt INTEGER NOT NULL" +
+            ")"
+        );
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS books (" +
+            "id TEXT PRIMARY KEY," +
+            "title TEXT," +
+            "author TEXT," +
+            "coverImage TEXT," +
+            "backend TEXT," +
+            "driveFolderId TEXT," +
+            "driveFolderName TEXT," +
+            "currentChapterId TEXT," +
+            "settingsJson TEXT," +
+            "rulesJson TEXT," +
+            "updatedAt INTEGER" +
+            ")"
+        );
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS chapters (" +
+            "id TEXT PRIMARY KEY," +
+            "bookId TEXT," +
+            "idx INTEGER," +
+            "title TEXT," +
+            "filename TEXT," +
+            "sourceUrl TEXT," +
+            "cloudTextFileId TEXT," +
+            "cloudAudioFileId TEXT," +
+            "audioDriveId TEXT," +
+            "audioStatus TEXT," +
+            "audioSignature TEXT," +
+            "durationSec REAL," +
+            "textLength INTEGER," +
+            "wordCount INTEGER," +
+            "isFavorite INTEGER," +
+            "updatedAt INTEGER" +
+            ")"
+        );
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS chapter_text (" +
+            "chapterId TEXT PRIMARY KEY," +
+            "bookId TEXT NOT NULL," +
+            "content TEXT NOT NULL," +
+            "updatedAt INTEGER NOT NULL" +
             ")"
         );
         return db;
@@ -291,6 +355,51 @@ public class GenerateAudioWorker extends Worker {
         }
         cursor2.close();
         return null;
+    }
+
+    private String resolveBookId(String inputBookId) {
+        SQLiteDatabase db = getDb();
+        Cursor c = db.query(
+            "books",
+            new String[]{"id"},
+            "id = ?",
+            new String[]{inputBookId},
+            null,
+            null,
+            null
+        );
+        if (c.moveToFirst()) {
+            String id = c.getString(c.getColumnIndexOrThrow("id"));
+            c.close();
+            return id;
+        }
+        c.close();
+
+        Cursor c2 = db.query(
+            "books",
+            new String[]{"id"},
+            "driveFolderId = ?",
+            new String[]{inputBookId},
+            null,
+            null,
+            null
+        );
+        if (c2.moveToFirst()) {
+            String id = c2.getString(c2.getColumnIndexOrThrow("id"));
+            c2.close();
+            return id;
+        }
+        c2.close();
+        return null;
+    }
+
+    private void addSkippedChapter(JSONObject progressJson, String chapterId) {
+        try {
+            JSONArray arr = progressJson.optJSONArray("skippedChapterIds");
+            if (arr == null) arr = new JSONArray();
+            if (arr.length() < 50) arr.put(chapterId);
+            progressJson.put("skippedChapterIds", arr);
+        } catch (JSONException ignored) {}
     }
 
     private void updateChapterAudioStatus(String bookId, String chapterId, String status, String filePath) {
@@ -756,7 +865,7 @@ public class GenerateAudioWorker extends Worker {
     private void ensureUploadQueueJob() {
         try {
             SQLiteDatabase db = getDb();
-            Cursor c2 = db.query("jobs", new String[]{"jobId"}, "type = ? AND status IN ('queued','running')", new String[]{"uploadQueue"}, null, null, null, "1");
+            Cursor c2 = db.query("jobs", new String[]{"jobId"}, "type = ? AND status IN ('queued','running')", new String[]{"drive_upload_queue"}, null, null, null, "1");
             if (c2.moveToFirst()) {
                 c2.close();
                 return;
@@ -771,7 +880,7 @@ public class GenerateAudioWorker extends Worker {
 
             ContentValues values = new ContentValues();
             values.put("jobId", jobId);
-            values.put("type", "uploadQueue");
+            values.put("type", "drive_upload_queue");
             values.put("status", "queued");
             values.put("payloadJson", (String) null);
             values.put("progressJson", progress.toString());
@@ -824,12 +933,20 @@ public class GenerateAudioWorker extends Worker {
     }
 
     private Result failJob(String jobId, String message, JSONObject progressJson) {
-        updateStatus(jobId, "failed", message);
+        try {
+            updateStatus(jobId, "failed", message);
+        } catch (Exception ignored) {}
         JSONObject progress = progressJson != null ? progressJson : new JSONObject();
         try { progress.put("error", message); } catch (JSONException ignored) {}
-        emitFinished(jobId, "failed", progress, message);
-        showFinishedNotification(jobId, "Audio generation failed");
-        setForegroundAsync(JobNotificationHelper.buildForegroundInfo(getApplicationContext(), jobId, "Audio generation failed", "", 0, 0, true, false));
+        try {
+            emitFinished(jobId, "failed", progress, message);
+        } catch (Exception ignored) {}
+        try {
+            showFinishedNotification(jobId, "Audio generation failed");
+        } catch (Exception ignored) {}
+        try {
+            setForegroundAsync(JobNotificationHelper.buildForegroundInfo(getApplicationContext(), jobId, "Audio generation failed", "", 0, 0, true, false));
+        } catch (Exception ignored) {}
         JobRunnerPlugin.noteForegroundHeartbeat();
         return Result.failure();
     }

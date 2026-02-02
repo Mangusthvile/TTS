@@ -54,7 +54,7 @@ export class JobRunnerWeb extends WebPlugin implements JobRunnerPlugin {
     const total = 0;
     const job: JobRecord = {
       jobId,
-      type: "uploadQueue",
+      type: "drive_upload_queue",
       status: "queued",
       payloadJson: {},
       progressJson: { total, completed: 0 },
@@ -71,6 +71,14 @@ export class JobRunnerWeb extends WebPlugin implements JobRunnerPlugin {
 
   async checkNotificationPermission(): Promise<{ supported: boolean; granted: boolean; enabled: boolean }> {
     return { supported: false, granted: true, enabled: true };
+  }
+
+  async getDiagnostics(): Promise<any> {
+    return { hasPlugin: false, permission: "unknown", channels: [] };
+  }
+
+  async getNotificationDiagnostics(): Promise<any> {
+    return { hasPlugin: false, permission: "unknown", channels: [] };
   }
 
   async requestNotificationPermission(): Promise<{ granted: boolean }> {

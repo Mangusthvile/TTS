@@ -4,6 +4,8 @@ import android.app.Notification;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
+import android.os.Build;
 import androidx.core.app.NotificationCompat;
 import androidx.work.ForegroundInfo;
 
@@ -80,6 +82,9 @@ public class JobNotificationHelper {
 
     public static ForegroundInfo buildForegroundInfo(Context ctx, String jobId, String title, String text, int total, int done, boolean indeterminate, boolean ongoing) {
         Notification n = buildProgress(ctx, jobId, title, text, total, done, indeterminate, ongoing);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return new ForegroundInfo(getNotificationId(jobId), n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+        }
         return new ForegroundInfo(getNotificationId(jobId), n);
     }
 }

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { ReaderSettings, Theme, SyncDiagnostics, UiMode, JobRecord } from '../types';
-import { RefreshCw, Cloud, CloudOff, Loader2, LogOut, Save, LogIn, Check, Sun, Coffee, Moon, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer, ClipboardCopy, FileWarning, Bug, Smartphone, Type, Palette, Monitor, LayoutTemplate, Library, List } from 'lucide-react';
+import { RefreshCw, Cloud, CloudOff, Loader2, LogOut, Save, LogIn, Check, Sun, Coffee, Moon, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer, ClipboardCopy, FileWarning, Bug, Smartphone, Type, Palette, Monitor, LayoutTemplate, Library, List, Bell } from 'lucide-react';
 import { getAuthSessionInfo, isTokenValid, getValidDriveToken } from '../services/driveAuth';
 import { authManager } from '../services/authManager';
 import { getTraceDump } from '../utils/trace';
@@ -475,6 +475,44 @@ const Settings: React.FC<SettingsProps> = ({
            </div>
         </div>
 
+        {/* --- BACKGROUND NOTIFICATIONS --- */}
+        <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
+          <label className={labelClass}><Bell className="w-3.5 h-3.5 inline mr-2" /> Background Notifications</label>
+          <div className="flex flex-wrap gap-2">
+            <button
+              disabled={!onRequestNotifications}
+              onClick={onRequestNotifications}
+              className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-indigo-600 text-white disabled:opacity-50"
+            >
+              Enable job notifications
+            </button>
+            <button
+              disabled={!onOpenNotificationSettings}
+              onClick={onOpenNotificationSettings}
+              className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest disabled:opacity-50 ${isDark ? 'bg-white/10 text-slate-100' : 'bg-black/10 text-black'}`}
+            >
+              Open notification settings
+            </button>
+            <button
+              disabled={!onSendTestNotification}
+              onClick={() => onSendTestNotification && onSendTestNotification()}
+              className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-white text-indigo-600 border border-indigo-600/20 disabled:opacity-50"
+            >
+              Send test notification
+            </button>
+            <button
+              disabled={!onRefreshNotificationStatus}
+              onClick={onRefreshNotificationStatus}
+              className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest disabled:opacity-50 ${isDark ? 'bg-white/10 text-slate-100' : 'bg-black/5 text-black'}`}
+            >
+              Refresh notification status
+            </button>
+          </div>
+          <div className="mt-3 text-[10px] font-mono opacity-60">
+            Status: {notifSummary}
+          </div>
+        </div>
+
         {/* --- SYSTEM --- */}
         <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
            <label className={labelClass}><Terminal className="w-3.5 h-3.5 inline mr-2" /> System</label>
@@ -584,7 +622,7 @@ const Settings: React.FC<SettingsProps> = ({
                       setJobBusy(false);
                       onRefreshJobs && onRefreshJobs();
                     }}
-                    className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-black/5 text-black"
+                    className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${isDark ? 'bg-white/10 text-slate-100' : 'bg-black/5 text-black'}`}
                   >
                     Clear Finished
                   </button>
@@ -592,39 +630,6 @@ const Settings: React.FC<SettingsProps> = ({
                     <input type="checkbox" checked={!!logJobs} onChange={e => onToggleLogJobs && onToggleLogJobs(e.target.checked)} />
                     Log Jobs
                   </label>
-                </div>
-              </div>
-              <div className={`p-3 rounded-xl border ${isDark ? 'border-slate-800 bg-slate-950/40' : 'border-black/5 bg-white'}`}>
-                <div className="text-[10px] font-black uppercase tracking-widest opacity-60 mb-2">Notifications</div>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    disabled={!onRequestNotifications}
-                    onClick={onRequestNotifications}
-                    className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-indigo-600 text-white disabled:opacity-50"
-                  >
-                    Enable job notifications
-                  </button>
-                  <button
-                    disabled={!onOpenNotificationSettings}
-                    onClick={onOpenNotificationSettings}
-                    className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-black/10 text-black disabled:opacity-50"
-                  >
-                    Open notification settings
-                  </button>
-                  <button
-                    disabled={!onSendTestNotification}
-                    onClick={() => onSendTestNotification && onSendTestNotification()}
-                    className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-white text-indigo-600 border border-indigo-600/20 disabled:opacity-50"
-                  >
-                    Send test notification
-                  </button>
-                  <button
-                    disabled={!onRefreshNotificationStatus}
-                    onClick={onRefreshNotificationStatus}
-                    className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-black/5 text-black disabled:opacity-50"
-                  >
-                    Refresh notification status
-                  </button>
                 </div>
               </div>
             </div>
@@ -688,7 +693,7 @@ const Settings: React.FC<SettingsProps> = ({
                           <button onClick={() => onRetryJob(job.jobId)} className="px-2 py-1 rounded-lg bg-indigo-500/10 text-indigo-600 text-[9px] font-black uppercase">Retry</button>
                         )}
                         {canRemove && onDeleteJob && (
-                          <button onClick={() => onDeleteJob(job.jobId)} className="px-2 py-1 rounded-lg bg-black/10 text-black text-[9px] font-black uppercase">Remove</button>
+                          <button onClick={() => onDeleteJob(job.jobId)} className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase ${isDark ? 'bg-white/10 text-slate-100' : 'bg-black/10 text-black'}`}>Remove</button>
                         )}
                       </div>
                     </div>
@@ -705,7 +710,7 @@ const Settings: React.FC<SettingsProps> = ({
                       <div className="mt-2 text-[10px] font-bold text-red-500 truncate">Error: {job.error}</div>
                     )}
                     <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-widest">
-                      {onRefreshJob && <button onClick={() => onRefreshJob(job.jobId)} className="px-2 py-1 rounded-lg bg-black/10">Refresh</button>}
+                      {onRefreshJob && <button onClick={() => onRefreshJob(job.jobId)} className={`px-2 py-1 rounded-lg ${isDark ? 'bg-white/10 text-slate-100' : 'bg-black/10 text-black'}`}>Refresh</button>}
                       {onForceStartJob && <button onClick={() => onForceStartJob(job.jobId)} className="px-2 py-1 rounded-lg bg-amber-500/20 text-amber-600">Force Start</button>}
                       {canCancel && onCancelJob && (
                           <button onClick={() => onCancelJob(job.jobId)} className="px-2 py-1 rounded-lg bg-red-500/10 text-red-600">Cancel</button>
@@ -715,7 +720,7 @@ const Settings: React.FC<SettingsProps> = ({
                       )}
                       {onShowWorkInfo && <button onClick={() => onShowWorkInfo(job.jobId)} className="px-2 py-1 rounded-lg bg-slate-700/20 text-slate-200">Show work info</button>}
                       {canRemove && onDeleteJob && (
-                          <button onClick={() => onDeleteJob(job.jobId)} className="px-2 py-1 rounded-lg bg-black/10 text-black">Remove</button>
+                          <button onClick={() => onDeleteJob(job.jobId)} className={`px-2 py-1 rounded-lg ${isDark ? 'bg-white/10 text-slate-100' : 'bg-black/10 text-black'}`}>Remove</button>
                       )}
                     </div>
                   </div>

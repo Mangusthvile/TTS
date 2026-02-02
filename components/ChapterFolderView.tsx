@@ -856,6 +856,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     if (isMobileInterface && enableBackgroundJobs && onQueueGenerateJob) {
       const ok = await onQueueGenerateJob(chapters.map((c) => c.id));
       if (ok) return;
+      pushNotice("Failed to queue background generation. Check Jobs/Notifications.", "error", 5000);
+      return;
     }
 
     setIsRegeneratingAudio(true);

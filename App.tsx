@@ -888,6 +888,9 @@ const App: React.FC = () => {
 
       // If we already have content in memory, accept it even if short.
       if (typeof chapter.content === "string") {
+        try {
+          await librarySaveChapterText(bookId, chapterId, chapter.content);
+        } catch {}
         return chapter.content;
       }
 
@@ -2211,6 +2214,22 @@ const App: React.FC = () => {
                   activeBook.settings.defaultVoiceId ||
                   activeBook.settings.selectedVoiceName ||
                   "en-US-Standard-C";
+                for (const chapterId of chapterIds) {
+                  const loaded = await ensureChapterContentLoaded(
+                    activeBook.id,
+                    chapterId,
+                    chapterSessionRef.current
+                  );
+                  if (loaded == null) {
+                    const chapterTitle =
+                      activeBook.chapters.find((c) => c.id === chapterId)?.title ?? chapterId;
+                    pushNotice({
+                      message: `Missing chapter text for "${chapterTitle}". Open the chapter to sync text first.`,
+                      type: "error",
+                    });
+                    return false;
+                  }
+                }
                 const payload = {
                   bookId: activeBook.id,
                   chapterIds,
