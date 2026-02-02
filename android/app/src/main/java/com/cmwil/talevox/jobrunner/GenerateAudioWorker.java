@@ -11,6 +11,11 @@ import androidx.work.ForegroundInfo;
 import androidx.work.Worker;
 import androidx.work.WorkerParameters;
 import androidx.work.ListenableWorker.Result;
+import androidx.work.Data;
+import androidx.work.OneTimeWorkRequest;
+import androidx.work.WorkManager;
+import androidx.work.OutOfQuotaPolicy;
+import androidx.work.ExistingWorkPolicy;
 import android.app.NotificationManager;
 
 import com.getcapacitor.JSObject;
@@ -35,6 +40,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.regex.Pattern;
 import java.util.regex.Matcher;
+import java.util.UUID;
 
 public class GenerateAudioWorker extends Worker {
     private static final String DB_NAME = "talevox_db";
