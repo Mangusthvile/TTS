@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo, Suspense } from 'react';
-import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, PlaybackPhase, UiMode, ReaderSettings, JobRecord, CueMap } from './types';
+import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, PlaybackPhase, UiMode, ReaderSettings, JobRecord, CueMap, AudioChunkMetadata } from './types';
 import Library from './src/features/library/Library';
 import Reader from './src/features/reader/Reader';
 import Player from './src/features/reader/Player';
@@ -15,7 +15,7 @@ import { saveChapterToFile } from './services/fileService';
 import { synthesizeChunk } from './services/cloudTtsService';
 import { extractChapterWithAI } from './services/geminiService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
-import { persistChapterAudio, resolveChapterAudioUrl, getAudioStorage } from './services/audioStorage';
+import { persistChapterAudio, resolveChapterAudioUrl, resolveChapterAudioLocalPath, getAudioStorage } from './services/audioStorage';
 import { idbSet } from './services/storageService';
 import { listBooks as libraryListBooks, upsertBook as libraryUpsertBook, deleteBook as libraryDeleteBook, listChaptersPage as libraryListChaptersPage, upsertChapterMeta as libraryUpsertChapterMeta, deleteChapter as libraryDeleteChapter, saveChapterText as librarySaveChapterText, loadChapterText as libraryLoadChapterText, bulkUpsertChapters as libraryBulkUpsertChapters } from './services/libraryStore';
 import { bootstrapCore } from './src/app/bootstrap';
@@ -31,6 +31,7 @@ import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService
 import { getNativeChapterTextCount, ensureNativeBook, ensureNativeChapter, ensureNativeChapterText, hasNativeBook } from "./services/nativeLibraryBridge";
 import { countQueuedUploads, listQueuedUploads, enqueueChapterUpload, removeQueuedUpload, type DriveUploadQueuedItem } from './services/driveUploadQueueService';
 import { getChapterAudioPath } from './services/chapterAudioStore';
+import { Capacitor } from "@capacitor/core";
 import { Filesystem, Directory, Encoding } from "@capacitor/filesystem";
 import { createDriveFolderAdapter } from "./services/driveFolderAdapter";
 import { cueMapFromChunkMap, cueMapFallback, findCueIndex } from './services/cueMaps';
@@ -94,6 +95,85 @@ const normalizeChapterProgress = (c: Chapter): Chapter => {
     percent = 1;
   }
   return { ...c, progress: percent, isCompleted };
+};
+
+const getEffectivePrefixLen = (chapter: Chapter, fallbackIntroLen: number): number => {
+  if (Number.isFinite(chapter.audioPrefixLen)) {
+    return Math.max(0, Number(chapter.audioPrefixLen));
+  }
+  if (chapter.audioSignature) {
+    return Math.max(0, fallbackIntroLen);
+  }
+  return 0;
+};
+
+const deriveIntroMsFromChunkMap = (chunkMap: AudioChunkMetadata[], prefixLen: number): number => {
+  if (!chunkMap.length || prefixLen <= 0) return 0;
+  let introMs = 0;
+  for (const chunk of chunkMap) {
+    const segLen = Math.max(1, chunk.endChar - chunk.startChar);
+    if (chunk.endChar <= prefixLen) {
+      introMs += chunk.durSec * 1000;
+    } else if (chunk.startChar < prefixLen) {
+      const ratio = (prefixLen - chunk.startChar) / segLen;
+      introMs += chunk.durSec * 1000 * Math.max(0, Math.min(1, ratio));
+    }
+  }
+  return Math.floor(introMs);
+};
+
+const normalizeChunkMapForChapter = (
+  chunkMap: AudioChunkMetadata[] | undefined,
+  textLen: number,
+  prefixLen: number
+): { chunkMap: AudioChunkMetadata[]; introMsFromChunk: number } => {
+  if (!chunkMap || chunkMap.length === 0 || textLen <= 0) {
+    return { chunkMap: [], introMsFromChunk: 0 };
+  }
+  const safePrefix = Math.max(0, prefixLen);
+  const maxEnd = chunkMap.reduce((acc, c) => Math.max(acc, c.endChar), 0);
+  const looksPrefixed = safePrefix > 0 && maxEnd > textLen + 2;
+  let introMsFromChunk = 0;
+  let mapped = chunkMap;
+  if (looksPrefixed) {
+    introMsFromChunk = deriveIntroMsFromChunkMap(chunkMap, safePrefix);
+    mapped = chunkMap.map((c) => ({
+      ...c,
+      startChar: c.startChar - safePrefix,
+      endChar: c.endChar - safePrefix,
+    }));
+  }
+  const clamped = mapped
+    .filter((c) => c.endChar > 0)
+    .map((c) => ({
+      ...c,
+      startChar: Math.max(0, c.startChar),
+      endChar: Math.min(textLen, Math.max(0, c.endChar)),
+    }))
+    .filter((c) => c.endChar > c.startChar);
+  return { chunkMap: clamped, introMsFromChunk };
+};
+
+const computeIntroMs = (opts: {
+  audioIntroDurSec?: number;
+  audioPrefixLen?: number;
+  textLen: number;
+  durationMs?: number;
+  introMsFromChunk?: number;
+}): number => {
+  if (opts.audioIntroDurSec && opts.audioIntroDurSec > 0) {
+    return Math.floor(opts.audioIntroDurSec * 1000);
+  }
+  if (opts.introMsFromChunk && opts.introMsFromChunk > 0) {
+    return Math.floor(opts.introMsFromChunk);
+  }
+  const prefixLen = Math.max(0, opts.audioPrefixLen ?? 0);
+  const durationMs = Math.max(0, opts.durationMs ?? 0);
+  if (prefixLen > 0 && durationMs > 0) {
+    const totalLen = prefixLen + Math.max(1, opts.textLen);
+    return Math.min(durationMs, Math.floor((prefixLen / totalLen) * durationMs));
+  }
+  return 0;
 };
 
 const App: React.FC = () => {
@@ -457,7 +537,7 @@ const App: React.FC = () => {
     if (!isOnline && pendingChangeCount > 0) {
       const plural = pendingChangeCount === 1 ? "" : "s";
       return {
-        label: `Offline: ${pendingChangeCount} change${plural} pending`,
+        label: `Offline: ${pendingChangeCount} change${plural} pending save`,
         tone: "text-amber-300",
         icon: "offline" as const,
       };
@@ -465,7 +545,7 @@ const App: React.FC = () => {
     if (pendingChangeCount > 0) {
       const plural = pendingChangeCount === 1 ? "" : "s";
       return {
-        label: `${pendingChangeCount} change${plural} pending sync`,
+        label: `${pendingChangeCount} change${plural} pending save`,
         tone: "text-amber-200",
         icon: "pending" as const,
       };
@@ -485,7 +565,7 @@ const App: React.FC = () => {
   const [cueMeta, setCueMeta] = useState<{ method?: string; count?: number } | null>(null);
   const activeCueMapRef = useRef<CueMap | null>(null);
   const activeCueIndexRef = useRef<number | null>(null);
-  const pendingCueFallbackRef = useRef<{ chapterId: string; text: string; introMs: number } | null>(null);
+  const pendingCueFallbackRef = useRef<{ chapterId: string; text: string; prefixLen: number } | null>(null);
 
   useEffect(() => { activeCueMapRef.current = activeCueMap; }, [activeCueMap]);
   useEffect(() => { activeCueIndexRef.current = activeCueIndex; }, [activeCueIndex]);
@@ -709,6 +789,10 @@ const App: React.FC = () => {
   useEffect(() => { stateRef.current = state; }, [state]);
 
   const activeBook = useMemo(() => state.books.find(b => b.id === state.activeBookId), [state.books, state.activeBookId]);
+  const effectivePlaybackSpeedForUi =
+    activeBook?.settings.useBookSettings && activeBook.settings.playbackSpeed
+      ? activeBook.settings.playbackSpeed
+      : state.playbackSpeed;
   const activeChapterMetadata = useMemo(() => activeBook?.chapters.find(c => c.id === activeBook.currentChapterId), [activeBook]);
 
   const [toast, setToast] = useState<{ message: string; type: 'info' | 'success' | 'error' | 'reconnect' } | null>(null);
@@ -833,9 +917,8 @@ const App: React.FC = () => {
 
   const markDirty = useCallback(() => {
     setIsDirty(true);
-    triggerSavePulse();
     updateDiagnostics({ isDirty: true, dirtySince: Date.now() });
-  }, [updateDiagnostics, triggerSavePulse]);
+  }, [updateDiagnostics]);
 
   const commitProgressUpdate = useCallback((
     bookId: string, 
@@ -952,11 +1035,21 @@ const App: React.FC = () => {
         if (b?.currentChapterId === pendingFallback.chapterId && !activeCueMapRef.current) {
             pendingCueFallbackRef.current = null;
             void (async () => {
+                const chapter = b.chapters.find(c => c.id === pendingFallback.chapterId);
+                const introMs = computeIntroMs({
+                  audioIntroDurSec: chapter?.audioIntroDurSec,
+                  audioPrefixLen: pendingFallback.prefixLen,
+                  textLen: pendingFallback.text.length,
+                  durationMs: Math.floor(meta.duration * 1000),
+                });
+                if (introMs > 0) {
+                  setCurrentIntroDurSec(introMs / 1000);
+                }
                 const built = cueMapFallback(
                   pendingFallback.text,
                   Math.floor(meta.duration * 1000),
                   pendingFallback.chapterId,
-                  pendingFallback.introMs
+                  introMs
                 );
                 await saveChapterCueMap(pendingFallback.chapterId, built);
                 setActiveCueMap(built);
@@ -1023,7 +1116,10 @@ const App: React.FC = () => {
       if (!stateRef.current.driveRootFolderId) return;
       if (!force && !isDirty) return;
       
-      if (!silent) pushNotice({ message: "Saving to Cloud...", type: 'info', ms: 0 });
+      if (!silent) {
+          triggerSavePulse();
+          pushNotice({ message: "Saving to Cloud...", type: 'info', ms: 0 });
+      }
       
       try {
           const s = stateRef.current;
@@ -1247,6 +1343,13 @@ const App: React.FC = () => {
       pushNotice({ message: "Reset", type: 'info', ms: 1000 });
   };
 
+  const getEffectivePlaybackSpeed = useCallback(() => {
+    const s = stateRef.current;
+    const book = s.books.find(b => b.id === s.activeBookId);
+    const bookSpeed = book?.settings?.useBookSettings ? book?.settings?.playbackSpeed : null;
+    return bookSpeed && bookSpeed > 0 ? bookSpeed : s.playbackSpeed;
+  }, []);
+
   const handleNextChapterRef = useRef<(autoTrigger?: boolean) => void>(() => {});
 
   const loadChapterSession = useCallback(async (targetChapterId: string, reason: 'user' | 'auto') => {
@@ -1290,7 +1393,6 @@ const App: React.FC = () => {
     updatePhase('LOADING_AUDIO');
     
     const uiMode = s.readerSettings?.uiMode ?? "auto";
-    setCurrentIntroDurSec(chapter.audioIntroDurSec || 5);
     const voice = book.settings.defaultVoiceId || 'en-US-Standard-C';
     const allRules = [...s.globalRules, ...book.rules];
     let textToSpeak = applyRules((content ?? chapter.content ?? ""), allRules);
@@ -1298,6 +1400,20 @@ const App: React.FC = () => {
 
     const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
     const introText = applyRules(rawIntro, allRules);
+    const prefixLen = getEffectivePrefixLen(chapter, introText.length);
+    const { chunkMap: normalizedChunkMap, introMsFromChunk } = normalizeChunkMapForChapter(
+      chapter.audioChunkMap,
+      textToSpeak.length,
+      prefixLen
+    );
+    const introMs = computeIntroMs({
+      audioIntroDurSec: chapter.audioIntroDurSec,
+      audioPrefixLen: prefixLen,
+      textLen: textToSpeak.length,
+      introMsFromChunk,
+    });
+    const introSec = introMs / 1000;
+    setCurrentIntroDurSec(introSec);
     
     const cacheKey = generateAudioKey(introText + textToSpeak, voice, 1.0);
     let audioBlob = await getAudioFromCache(cacheKey);
@@ -1311,10 +1427,24 @@ const App: React.FC = () => {
 
     if (session !== chapterSessionRef.current) return;
 
-    const localPlaybackUrl = effectiveMobileMode ? await resolveChapterAudioUrl(chapter.id, uiMode) : null;
-    let playbackUrl = localPlaybackUrl ?? null;
-    if (!playbackUrl && audioBlob && audioBlob.size > 0) {
-        playbackUrl = URL.createObjectURL(audioBlob);
+    const isNativePlatform = Capacitor.isNativePlatform?.() ?? false;
+    const effectiveSpeed = getEffectivePlaybackSpeed();
+
+    let playbackUrl: string | null = null;
+    if (effectiveMobileMode && isNativePlatform) {
+        playbackUrl = await resolveChapterAudioLocalPath(chapter.id);
+        if (!playbackUrl && audioBlob && audioBlob.size > 0) {
+            playbackUrl = (await persistChapterAudio(chapter.id, audioBlob, uiMode)) ?? null;
+        }
+    } else {
+        const localPlaybackUrl = effectiveMobileMode ? await resolveChapterAudioUrl(chapter.id, uiMode) : null;
+        playbackUrl = localPlaybackUrl ?? null;
+        if (!playbackUrl && audioBlob && audioBlob.size > 0) {
+            playbackUrl = URL.createObjectURL(audioBlob);
+        }
+        if (effectiveMobileMode && audioBlob) {
+            await persistChapterAudio(chapter.id, audioBlob, uiMode);
+        }
     }
 
     if (!playbackUrl) {
@@ -1324,36 +1454,45 @@ const App: React.FC = () => {
         return;
     }
 
-    if (effectiveMobileMode && audioBlob) {
-        await persistChapterAudio(chapter.id, audioBlob, uiMode);
-    }
-
     speechController.setContext({ bookId: book.id, chapterId: chapter.id });
-    speechController.updateMetadata(textToSpeak.length, chapter.audioIntroDurSec || 5, chapter.audioChunkMap || []);
+    speechController.updateMetadata(textToSpeak.length, introSec, normalizedChunkMap);
 
     // Load or build cue map
     try {
       const existingCue = await getChapterCueMap(chapter.id);
-      if (existingCue) {
-        setActiveCueMap(existingCue);
-        setCueMeta({ method: existingCue.method, count: existingCue.cues.length });
-        pendingCueFallbackRef.current = null;
-      } else {
+      let cueToUse: CueMap | null = existingCue;
+      const existingIntro = existingCue?.introOffsetMs ?? 0;
+      const maxExistingEnd = existingCue?.cues?.length
+        ? Math.max(...existingCue.cues.map((c) => c.endChar))
+        : 0;
+      const needsRebuild =
+        !existingCue ||
+        !existingCue.cues?.length ||
+        maxExistingEnd > textToSpeak.length + 2 ||
+        (introMs > 0 && Math.abs(existingIntro - introMs) > 500) ||
+        (introMs === 0 && existingIntro > 0);
+
+      if (needsRebuild) {
         let builtCue: CueMap | null = null;
-        const introMs = (chapter.audioIntroDurSec || 0) * 1000;
-        if (chapter.audioChunkMap && chapter.audioChunkMap.length > 0) {
-          builtCue = cueMapFromChunkMap(chapter.id, chapter.audioChunkMap, introMs);
-        } else if (audioDuration > 0) {
+        if (normalizedChunkMap.length > 0) {
+          builtCue = cueMapFromChunkMap(chapter.id, normalizedChunkMap, introMs);
+        } else if (textToSpeak.length > 0 && audioDuration > 0) {
           builtCue = cueMapFallback(textToSpeak, Math.floor(audioDuration * 1000), chapter.id, introMs);
-        } else {
-          pendingCueFallbackRef.current = { chapterId: chapter.id, text: textToSpeak, introMs };
+        } else if (textToSpeak.length > 0) {
+          pendingCueFallbackRef.current = { chapterId: chapter.id, text: textToSpeak, prefixLen };
         }
         if (builtCue) {
           await saveChapterCueMap(chapter.id, builtCue);
-          setActiveCueMap(builtCue);
-          setCueMeta({ method: builtCue.method, count: builtCue.cues.length });
+          cueToUse = builtCue;
           pendingCueFallbackRef.current = null;
         }
+      } else {
+        pendingCueFallbackRef.current = null;
+      }
+
+      if (cueToUse) {
+        setActiveCueMap(cueToUse);
+        setCueMeta({ method: cueToUse.method, count: cueToUse.cues.length });
       }
     } catch (e) {
       console.warn("Cue map load/build failed", e);
@@ -1369,7 +1508,9 @@ const App: React.FC = () => {
         const maxQueue = 5;
         for (let i = currentIdx + 1; i < sorted.length && queueItems.length < maxQueue; i++) {
           const next = sorted[i];
-          let nextUrl = await resolveChapterAudioUrl(next.id, uiMode);
+          let nextUrl = effectiveMobileMode && isNativePlatform
+            ? await resolveChapterAudioLocalPath(next.id)
+            : await resolveChapterAudioUrl(next.id, uiMode);
           if (!nextUrl) {
             let nextBlob: Blob | null = null;
             if (next.audioSignature) {
@@ -1383,8 +1524,12 @@ const App: React.FC = () => {
               }
             }
             if (nextBlob && nextBlob.size > 0) {
-              nextUrl = URL.createObjectURL(nextBlob);
-              await persistChapterAudio(next.id, nextBlob, uiMode);
+              if (effectiveMobileMode && isNativePlatform) {
+                nextUrl = (await persistChapterAudio(next.id, nextBlob, uiMode)) ?? null;
+              } else {
+                nextUrl = URL.createObjectURL(nextBlob);
+                await persistChapterAudio(next.id, nextBlob, uiMode);
+              }
             }
           }
           if (nextUrl) {
@@ -1406,9 +1551,9 @@ const App: React.FC = () => {
     if (!isFinite(startSec) || startSec < 0) startSec = 0;
         
     await speechController.loadAndPlayDriveFile(
-        '', 'LOCAL_ID', textToSpeak.length, chapter.audioIntroDurSec || 5, chapter.audioChunkMap, 
+        '', 'LOCAL_ID', textToSpeak.length, introSec, normalizedChunkMap, 
         startSec, 
-        state.playbackSpeed, 
+        effectiveSpeed, 
         () => {
             if (session === chapterSessionRef.current) {
                 updatePhase('ENDING_SETTLE');
@@ -1458,7 +1603,7 @@ const App: React.FC = () => {
             setAutoplayBlocked(false);
             setIsPlaying(true);
             updatePhase('PLAYING_BODY');
-            speechController.setPlaybackRate(state.playbackSpeed);
+            speechController.setPlaybackRate(effectiveSpeed);
         }
     } catch (e: any) {
         setAutoplayBlocked(true);
@@ -1466,7 +1611,7 @@ const App: React.FC = () => {
         updatePhase('READY');
     }
 
-  }, [isAuthorized, ensureChapterContentLoaded, pushNotice, updatePhase, effectiveMobileMode, state.playbackSpeed]);
+  }, [isAuthorized, ensureChapterContentLoaded, pushNotice, updatePhase, effectiveMobileMode, getEffectivePlaybackSpeed]);
 
   const handleSmartOpenChapter = (id: string) => {
     const s = stateRef.current;
@@ -1715,17 +1860,32 @@ const App: React.FC = () => {
       setActiveCueMap(null);
       setActiveCueIndex(null);
       setActiveCueRange(null);
-      const introMs = (chapter.audioIntroDurSec || 0) * 1000;
       let built: CueMap | null = null;
       const rules = [...s.globalRules, ...book.rules];
       let textToSpeak = applyRules((chapter.content ?? ""), rules);
       if (s.readerSettings?.reflowLineBreaks) textToSpeak = reflowLineBreaks(textToSpeak);
-      if (chapter.audioChunkMap && chapter.audioChunkMap.length > 0) {
-        built = cueMapFromChunkMap(chapter.id, chapter.audioChunkMap, introMs);
+      const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
+      const introText = applyRules(rawIntro, rules);
+      const prefixLen = getEffectivePrefixLen(chapter, introText.length);
+      const { chunkMap: normalizedChunkMap, introMsFromChunk } = normalizeChunkMapForChapter(
+        chapter.audioChunkMap,
+        textToSpeak.length,
+        prefixLen
+      );
+      const introMs = computeIntroMs({
+        audioIntroDurSec: chapter.audioIntroDurSec,
+        audioPrefixLen: prefixLen,
+        textLen: textToSpeak.length,
+        durationMs: audioDuration > 0 ? Math.floor(audioDuration * 1000) : undefined,
+        introMsFromChunk,
+      });
+      setCurrentIntroDurSec(introMs / 1000);
+      if (normalizedChunkMap.length > 0) {
+        built = cueMapFromChunkMap(chapter.id, normalizedChunkMap, introMs);
       } else if (textToSpeak.length > 0 && audioDuration > 0) {
         built = cueMapFallback(textToSpeak, Math.floor(audioDuration * 1000), chapter.id, introMs);
       } else if (textToSpeak.length > 0) {
-        pendingCueFallbackRef.current = { chapterId: chapter.id, text: textToSpeak, introMs };
+        pendingCueFallbackRef.current = { chapterId: chapter.id, text: textToSpeak, prefixLen };
       }
       if (built) {
         await saveChapterCueMap(chapter.id, built);
@@ -2063,7 +2223,8 @@ const App: React.FC = () => {
   const handleManualPlay = () => {
     gestureArmedRef.current = true;
     lastGestureAt.current = Date.now();
-    speechController.setPlaybackRate(state.playbackSpeed);
+    const effectiveSpeed = getEffectivePlaybackSpeed();
+    speechController.setPlaybackRate(effectiveSpeed);
     
     speechController.safePlay().then(res => {
         if (res === 'blocked') {
@@ -2261,7 +2422,10 @@ const App: React.FC = () => {
       const runId = ++syncRunRef.current;
       const isCancelled = () => syncRunRef.current !== runId;
       setIsSyncing(true);
-      if(manual) pushNotice({ message: "Scanning Drive...", type: 'info', ms: 0 });
+      if(manual) {
+        triggerSavePulse();
+        pushNotice({ message: "Scanning Drive...", type: 'info', ms: 0 });
+      }
       
       try {
          const s = stateRef.current;
@@ -2534,7 +2698,6 @@ const App: React.FC = () => {
          }
          if (isCancelled()) return;
          setState(p => ({ ...p, books: updatedBooks, driveSubfolders: { booksId, savesId, trashId } }));
-         markDirty();
          if(manual) pushNotice({ message: "Sync Complete", type: 'success' });
       } catch (e: any) {
          pushNotice({ message: "Sync Failed: " + e.message, type: 'error', ms: 0 });
@@ -2912,6 +3075,12 @@ const App: React.FC = () => {
                 lastSavedAt={state.lastSavedAt}
                 onQueueGenerateJob={async (chapterIds: string[], voiceId?: string) => {
                 if (!computeMobileMode(state.readerSettings.uiMode)) return false;
+                if (jobRunnerAvailable && notificationStatus && !notificationStatus.granted) {
+                  pushNotice({ message: "Enable notifications to run background jobs.", type: "error" });
+                  setActiveTab('settings');
+                  await refreshNotificationStatus();
+                  return false;
+                }
                 const activeJobChapterIds = new Set<string>();
                 for (const job of jobs) {
                   if (job.type !== "generateAudio") continue;
@@ -3105,7 +3274,10 @@ const App: React.FC = () => {
                   return true;
                   } catch (e: any) {
                     const msg = toUserMessage(e);
-                    if (msg.includes("notifications_not_granted")) {
+                    const causeMsg = String((e as any)?.cause?.message ?? (e as any)?.cause ?? "");
+                    const notifDenied =
+                      msg.includes("notifications_not_granted") || causeMsg.includes("notifications_not_granted");
+                    if (notifDenied) {
                       pushNotice({ message: "Enable notifications to run background jobs.", type: "error" });
                       setActiveTab('settings');
                       await refreshNotificationStatus();
@@ -3291,10 +3463,21 @@ const App: React.FC = () => {
         <Player 
           isPlaying={isPlaying} onPlay={() => handleManualPlay()} onPause={handleManualPause} onStop={handleManualStop}
           onNext={() => handleNextChapterRef.current(false)} onPrev={handlePrevChapter} onSeek={handleSeekByDelta}
-          speed={state.playbackSpeed}
+          speed={effectivePlaybackSpeedForUi}
           onSpeedChange={s => {
-            setState(p => ({ ...p, playbackSpeed: s }));
+            if (activeBook?.settings.useBookSettings) {
+              setState(p => ({
+                ...p,
+                books: p.books.map(b => b.id === activeBook.id
+                  ? { ...b, settings: { ...b.settings, playbackSpeed: s } }
+                  : b
+                )
+              }));
+            } else {
+              setState(p => ({ ...p, playbackSpeed: s }));
+            }
             speechController.getPlaybackAdapter().setSpeed(s);
+            speechController.setPlaybackRate(s);
           }}
           selectedVoice={state.selectedVoiceName || ''} onVoiceChange={() => {}}
           theme={state.theme} onThemeChange={t => setState(p => ({ ...p, theme: t }))}

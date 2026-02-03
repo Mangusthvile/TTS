@@ -56,10 +56,14 @@ export type JobProgress = {
   total: number;
   completed: number;
   currentChapterId?: string;
+  currentChunkIndex?: number;
+  currentChunkTotal?: number;
+  currentChapterProgress?: number;
   startedAt?: number;
   finishedAt?: number;
   workRequestId?: string;
   lastError?: string;
+  lastMessage?: string;
 };
 
 export type JobRecord = {

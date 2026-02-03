@@ -81,7 +81,12 @@ public class DriveUploadWorker extends Worker {
                 markUploadUploading(item.id, nextAttemptAt);
 
                 try {
-                    byte[] bytes = readFileBytes(item.localPath);
+                    String resolvedPath = resolveExistingPath(item.localPath, item.chapterId);
+                    if (resolvedPath != null && (item.localPath == null || !resolvedPath.equals(item.localPath))) {
+                        updateUploadLocalPath(item.id, resolvedPath);
+                        item.localPath = resolvedPath;
+                    }
+                    byte[] bytes = readFileBytes(resolvedPath);
                     String accessToken = loadDriveAccessToken();
                     if (accessToken == null || accessToken.isEmpty()) {
                         markUploadFailed(item.id, "MISSING_DRIVE_TOKEN", System.currentTimeMillis() + 60000);
@@ -160,8 +165,12 @@ public class DriveUploadWorker extends Worker {
     private void finishJob(String jobId, ProgressState progress, String status, String message) {
         try {
             if (progress != null) {
-                updateJob(jobId, status, progress.json, message);
-                emitFinished(jobId, status, progress, message);
+                String errorToStore = "completed".equals(status) ? null : message;
+                if ("completed".equals(status) && message != null) {
+                    progress.json.put("lastMessage", message);
+                }
+                updateJob(jobId, status, progress.json, errorToStore);
+                emitFinished(jobId, status, progress, errorToStore);
                 NotificationManager nm = (NotificationManager) getApplicationContext().getSystemService(Context.NOTIFICATION_SERVICE);
                 if (nm != null) {
                     JobNotificationChannels.ensureChannels(getApplicationContext());
@@ -378,6 +387,35 @@ public class DriveUploadWorker extends Worker {
             "UPDATE drive_upload_queue SET status = 'failed', lastError = ?, nextAttemptAt = ?, attempts = attempts + 1, updatedAt = ? WHERE id = ?",
             new Object[]{error, nextAttemptAt, System.currentTimeMillis(), id}
         );
+    }
+
+    private void updateUploadLocalPath(String id, String localPath) {
+        try {
+            SQLiteDatabase db = getDb();
+            db.execSQL(
+                "UPDATE drive_upload_queue SET localPath = ?, updatedAt = ? WHERE id = ?",
+                new Object[]{localPath, System.currentTimeMillis(), id}
+            );
+        } catch (Exception ignored) {}
+    }
+
+    private String resolveExistingPath(String localPath, String chapterId) {
+        if (isPathReadable(localPath)) return localPath;
+        if (chapterId != null && !chapterId.isEmpty()) {
+            File primary = new File(getApplicationContext().getFilesDir(), "talevox/audio/" + chapterId + ".mp3");
+            if (isPathReadable(primary.getAbsolutePath())) return primary.getAbsolutePath();
+            File legacy = new File(getApplicationContext().getFilesDir(), "audio/" + chapterId + ".mp3");
+            if (isPathReadable(legacy.getAbsolutePath())) return legacy.getAbsolutePath();
+        }
+        return localPath;
+    }
+
+    private boolean isPathReadable(String localPath) {
+        if (localPath == null || localPath.isEmpty()) return false;
+        if (localPath.startsWith("content://")) return true;
+        String path = localPath.startsWith("file://") ? localPath.replace("file://", "") : localPath;
+        File file = new File(path);
+        return file.exists();
     }
 
     private long computeBackoff(int attempts) {

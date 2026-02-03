@@ -160,7 +160,7 @@ public class GenerateAudioWorker extends Worker {
                 }
 
                 String processed = applyRules(content, rules);
-                byte[] mp3 = synthesizeMp3(processed, voiceId, speakingRate);
+                byte[] mp3 = synthesizeMp3WithProgress(processed, voiceId, speakingRate, jobId, progressJson);
                 String filePath = saveMp3ToFile(chapterId, mp3);
 
                 String uploadError = null;
@@ -191,6 +191,9 @@ public class GenerateAudioWorker extends Worker {
                 }
 
                 completed = i + 1;
+                progressJson.put("currentChunkIndex", 0);
+                progressJson.put("currentChunkTotal", 0);
+                progressJson.put("currentChapterProgress", 0);
                 progressJson.put("completed", completed);
                 progressJson.put("total", total);
                 if (uploadError != null) {
@@ -269,6 +272,14 @@ public class GenerateAudioWorker extends Worker {
             "textLength INTEGER," +
             "wordCount INTEGER," +
             "isFavorite INTEGER," +
+            "updatedAt INTEGER" +
+            ")"
+        );
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS chapter_audio_files (" +
+            "chapterId TEXT PRIMARY KEY," +
+            "localPath TEXT," +
+            "sizeBytes INTEGER," +
             "updatedAt INTEGER" +
             ")"
         );
@@ -615,15 +626,29 @@ public class GenerateAudioWorker extends Worker {
         return processed;
     }
 
-    private byte[] synthesizeMp3(String text, String voiceId, double speakingRate) throws Exception {
+    private byte[] synthesizeMp3WithProgress(String text, String voiceId, double speakingRate, String jobId, JSONObject progressJson) throws Exception {
         List<String> chunks = chunkTextByUtf8Bytes(text, MAX_TTS_BYTES);
+        int chunkTotal = Math.max(1, chunks.size());
+        progressJson.put("currentChunkTotal", chunkTotal);
+        progressJson.put("currentChunkIndex", 0);
+        progressJson.put("currentChapterProgress", 0);
+        updateJobProgress(jobId, "running", progressJson, null);
+        emitProgress(jobId, "running", progressJson);
+
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         boolean first = true;
-        for (String chunk : chunks) {
+        for (int i = 0; i < chunks.size(); i++) {
+            String chunk = chunks.get(i);
             byte[] bytes = postTts(chunk, voiceId, speakingRate);
             if (!first) bytes = stripId3(bytes);
             out.write(bytes);
             first = false;
+
+            double chapterProgress = (i + 1) / (double) chunkTotal;
+            progressJson.put("currentChunkIndex", i + 1);
+            progressJson.put("currentChapterProgress", chapterProgress);
+            updateJobProgress(jobId, "running", progressJson, null);
+            emitProgress(jobId, "running", progressJson);
         }
         return out.toByteArray();
     }
@@ -772,14 +797,27 @@ public class GenerateAudioWorker extends Worker {
     }
 
     private String saveMp3ToFile(String chapterId, byte[] mp3) throws Exception {
-        File dir = new File(getApplicationContext().getFilesDir(), "audio");
+        File dir = new File(getApplicationContext().getFilesDir(), "talevox/audio");
         if (!dir.exists()) dir.mkdirs();
         File out = new File(dir, chapterId + ".mp3");
         FileOutputStream fos = new FileOutputStream(out);
         fos.write(mp3);
         fos.flush();
         fos.close();
+        upsertChapterAudioPath(chapterId, out.getAbsolutePath(), mp3 != null ? mp3.length : 0);
         return out.getAbsolutePath();
+    }
+
+    private void upsertChapterAudioPath(String chapterId, String localPath, int sizeBytes) {
+        try {
+            SQLiteDatabase db = getDb();
+            ContentValues values = new ContentValues();
+            values.put("chapterId", chapterId);
+            values.put("localPath", localPath);
+            values.put("sizeBytes", sizeBytes);
+            values.put("updatedAt", System.currentTimeMillis());
+            db.insertWithOnConflict("chapter_audio_files", null, values, SQLiteDatabase.CONFLICT_REPLACE);
+        } catch (Exception ignored) {}
     }
 
     private String loadDriveAccessToken() {

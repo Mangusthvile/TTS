@@ -716,7 +716,7 @@ const Settings: React.FC<SettingsProps> = ({
                 <div>Notifications: {notifSummary}</div>
                 <div>Counts: {Object.entries(jobCounts).map(([k,v]) => `${k}:${v}`).join('  ') || 'none'}</div>
               </div>
-                <div className="mt-2 text-[10px] font-mono space-y-1 max-h-48 overflow-auto pr-1">
+                <div className="mt-2 text-[10px] font-mono space-y-1 max-h-48 overflow-auto pr-1 break-all">
                   {sortedJobs.map(job => {
                     const progress = (job as any).progressJson || {};
                     const total = Number(progress.total ?? 0);
@@ -746,7 +746,7 @@ const Settings: React.FC<SettingsProps> = ({
               <div className={`p-3 rounded-xl border ${isDark ? 'border-slate-800 bg-slate-950/40' : 'border-black/5 bg-white'}`}>
                 <div className="text-xs font-black mb-2">System Diagnostics</div>
                 {diag ? (
-                  <div className="text-[10px] font-mono space-y-1">
+                  <div className="text-[10px] font-mono space-y-1 break-all">
                     <div>SQLite: cached={String(diag.sqlite.cached)} open={String(diag.sqlite.isOpen)} pending={String(diag.sqlite.pending)} hasConn={String(diag.sqlite.hasConnection)}</div>
                     {diag.sqlite.error && <div>SQLite error: {diag.sqlite.error}</div>}
                     <div>Tables: {tableLine || 'n/a'}</div>
@@ -806,10 +806,25 @@ const Settings: React.FC<SettingsProps> = ({
                 const progress = (job as any).progressJson || {};
                 const total = Number(progress.total ?? 0);
                 const completed = Number(progress.completed ?? 0);
+                const currentChapterProgress = Number(progress.currentChapterProgress ?? 0);
+                const clampedChapterProgress = Math.max(0, Math.min(1, currentChapterProgress));
+                const effectiveCompleted = total > 0 ? Math.min(total, completed + clampedChapterProgress) : completed;
                 const currentChapterId = progress.currentChapterId ?? '';
                 const workRequestId = progress.workRequestId ?? '';
                 const correlationId = progress.correlationId ?? job.payloadJson?.correlationId ?? '';
-                const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
+                const percent = total > 0 ? Math.min(100, (effectiveCompleted / total) * 100) : 0;
+                const percentText = total > 0 ? percent.toFixed(1) : "0.0";
+                const completedText = total > 0 ? effectiveCompleted.toFixed(1) : String(completed);
+                const jobLabel =
+                  job.type === "fixIntegrity"
+                    ? "Fix Integrity"
+                    : job.type === "drive_upload_queue" || job.type === "uploadQueue"
+                      ? "Upload Audio"
+                      : "Generate Audio";
+                const errorMessage = typeof job.error === "string" ? job.error : "";
+                const showError = !!errorMessage && (job.status === "failed" || job.status === "canceled");
+                const showInfo = !!errorMessage && !showError && errorMessage !== "Uploads complete";
+                const detailError = showError || showInfo ? errorMessage : "";
                 const canCancel = job.status === "queued" || job.status === "running" || job.status === "paused";
                 const canRetry = job.status === "failed" || job.status === "canceled";
                 const canRemove = job.status !== "running" && job.status !== "paused";
@@ -818,7 +833,7 @@ const Settings: React.FC<SettingsProps> = ({
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <div className="text-xs font-black">
-                          {job.type === "fixIntegrity" ? "Fix Integrity" : "Generate Audio"}
+                          {jobLabel}
                         </div>
                         <div className="text-[10px] font-black uppercase tracking-widest opacity-60">
                           Status: {job.status}
@@ -840,13 +855,16 @@ const Settings: React.FC<SettingsProps> = ({
                       <div className={`h-2 rounded-full overflow-hidden ${isDark ? 'bg-slate-800' : 'bg-black/5'}`}>
                         <div className="h-full bg-indigo-600" style={{ width: `${percent}%` }} />
                       </div>
-                      <div className="mt-1 text-[10px] font-black opacity-60">{completed}/{total} ({percent}%)</div>
+                      <div className="mt-1 text-[10px] font-black opacity-60">{completedText}/{total} ({percentText}%)</div>
                       <div className="mt-1 text-[10px] font-mono opacity-50">
-                        updated: {job.updatedAt ? new Date(job.updatedAt).toLocaleTimeString() : 'n/a'} · work: {workRequestId || 'none'} · chapter: {currentChapterId || 'n/a'}{correlationId ? ` · corr:${correlationId}` : ''}{job.error ? ` · err:${job.error}` : ''}
+                        updated: {job.updatedAt ? new Date(job.updatedAt).toLocaleTimeString() : 'n/a'} · work: {workRequestId || 'none'} · chapter: {currentChapterId || 'n/a'}{correlationId ? ` · corr:${correlationId}` : ''}{detailError ? ` · err:${detailError}` : ''}
                       </div>
                     </div>
-                    {job.error && (
-                      <div className="mt-2 text-[10px] font-bold text-red-500 truncate">Error: {job.error}</div>
+                    {showError && (
+                      <div className="mt-2 text-[10px] font-bold text-red-500 truncate">Error: {errorMessage}</div>
+                    )}
+                    {showInfo && (
+                      <div className="mt-2 text-[10px] font-bold text-amber-400 truncate">{errorMessage}</div>
                     )}
                     <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-widest">
                       {onRefreshJob && <button onClick={() => onRefreshJob(job.jobId)} className={`px-2 py-1 rounded-lg ${isDark ? 'bg-white/10 text-slate-100' : 'bg-black/10 text-black'}`}>Refresh</button>}

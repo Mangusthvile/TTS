@@ -1,5 +1,6 @@
 import { Rule, RuleType, AudioChunkMetadata, PlaybackMetadata } from '../types';
 import { getDriveAudioObjectUrl, revokeObjectUrl } from "../services/driveService";
+import { persistChapterAudio, resolveChapterAudioLocalPath } from "./audioStorage";
 import { trace, traceError } from '../utils/trace';
 import { isMobileMode } from '../utils/platform';
 import { Capacitor } from '@capacitor/core';
@@ -91,7 +92,7 @@ class SpeechController {
   private isMobileOptimized: boolean = false;
 
   // Highlight buffer to account for synthesis pauses and speech pacing
-  private readonly HIGHLIGHT_DELAY_SEC = 0.5;
+  private readonly HIGHLIGHT_DELAY_SEC = 0;
   private readonly CUE_PREFIX = 'talevox_cuemap_';
 
   // Local progress commit guard (extra protection; commitProgressLocal also throttles)
@@ -211,8 +212,9 @@ class SpeechController {
     if (now - this.lastLocalCommitAt < 500) return;
     this.lastLocalCommitAt = now;
 
-    const t = (Number.isFinite(this.audio.currentTime) ? this.audio.currentTime : this.lastKnownTime) || 0;
-    const dur = Number.isFinite(this.audio.duration) ? this.audio.duration : undefined;
+    const { currentTime, duration } = this.getCurrentTimeAndDuration();
+    const t = (Number.isFinite(currentTime) ? currentTime : this.lastKnownTime) || 0;
+    const dur = Number.isFinite(duration) ? duration : undefined;
 
     void commitProgressLocal({
       chapterId,
@@ -569,19 +571,46 @@ class SpeechController {
     if (this.onFetchStateChange) this.onFetchStateChange(true);
 
     try {
-      let url = localUrl;
-      if (!url) {
+      const isNativeAdapter = !(this.adapter instanceof DesktopPlaybackAdapter);
+      const shouldFetchDrive = !!fileId && fileId !== 'LOCAL_ID';
+      let url = localUrl ?? null;
+      let blobUrlToRevoke: string | null = null;
+
+      if (isNativeAdapter && Capacitor.isNativePlatform()) {
+        if ((!url || url.startsWith("http")) && ctx?.chapterId) {
+          const localPath = await resolveChapterAudioLocalPath(ctx.chapterId);
+          if (localPath) url = localPath;
+        }
+        if (!url && shouldFetchDrive) {
+          const res = await getDriveAudioObjectUrl(fileId);
+          if (ctx?.chapterId) {
+            const persisted = await persistChapterAudio(ctx.chapterId, res.blob, "mobile");
+            if (persisted) url = persisted;
+          }
+          if (!url) {
+            url = res.url;
+            blobUrlToRevoke = res.url;
+          } else {
+            revokeObjectUrl(res.url);
+          }
+        }
+      } else if (!url && shouldFetchDrive) {
         const res = await getDriveAudioObjectUrl(fileId);
         url = res.url;
+        blobUrlToRevoke = res.url;
+      }
+
+      if (!url) {
+        throw new Error("Missing audio URL");
       }
 
       if (!isCurrentSession()) {
-        revokeObjectUrl(url);
+        revokeObjectUrl(blobUrlToRevoke);
         trace('audio:load:aborted', { reason: 'stale_session' });
         return;
       }
 
-      this.currentBlobUrl = url || null;
+      this.currentBlobUrl = blobUrlToRevoke;
       if (this.adapter instanceof DesktopPlaybackAdapter) {
         this.audio.src = url || '';
         this.audio.load();
@@ -909,14 +938,26 @@ class SpeechController {
   private bindAdapterListeners() {
     this.adapterUnsubscribers.forEach((unsub) => unsub());
     this.adapterUnsubscribers = [];
-    const onEnded = this.adapter.onEnded(() => {
-      if (this.onEndCallback) this.onEndCallback();
-    });
+    if (!(this.adapter instanceof DesktopPlaybackAdapter)) {
+      const onEnded = this.adapter.onEnded(() => {
+        const state = this.adapter.getState();
+        const duration = state.duration ?? 0;
+        if (duration > 0) this.lastKnownTime = duration;
+        this.renderedOffset = this.currentTextLength;
+        this.emitSyncTick(true);
+        this.commitLocalProgress(true, "ended");
+        this.stopSyncLoop();
+        if (this.onEndCallback) setTimeout(() => this.onEndCallback?.(), 0);
+      });
+      this.adapterUnsubscribers.push(onEnded);
+    }
     const onState = this.adapter.onState((state) => {
       this.lastKnownTime = state.currentTime;
+      this.updateTargetOffset(this.lastKnownTime);
+      this.renderedOffset = this.targetOffset;
       if (this.syncCallback) this.emitSyncTick();
     });
-    this.adapterUnsubscribers.push(onEnded, onState);
+    this.adapterUnsubscribers.push(onState);
   }
 }
 

@@ -39,6 +39,10 @@ export class MobileAudioStorage implements AudioStorage {
     return `${appConfig.paths.audioDir}/${chapterId}.mp3`;
   }
 
+  private buildLegacyPath(chapterId: string) {
+    return `audio/${chapterId}.mp3`;
+  }
+
   private async normalizeChunk(data: AudioChunk): Promise<{ base64: string; sizeBytes: number }> {
     if (typeof data === "string") {
       const cleaned = this.stripDataUrl(data);
@@ -115,22 +119,45 @@ export class MobileAudioStorage implements AudioStorage {
 
   async getAudioPath(chapterId: string): Promise<string | null> {
     const record = await getChapterAudioPath(chapterId);
-    if (!record) return null;
     const cached = MobileAudioStorage.statCache.get(chapterId);
     if (cached && Date.now() - cached.ts < MobileAudioStorage.STAT_TTL_MS) {
-      return cached.ok ? record.localPath : null;
+      return cached.ok ? record?.localPath ?? null : null;
     }
     try {
+      const primaryPath = this.buildPath(chapterId);
       await Filesystem.stat({
-        path: this.buildPath(chapterId),
+        path: primaryPath,
         directory: Directory.Data,
       });
-      MobileAudioStorage.statCache.set(chapterId, { ok: true, ts: Date.now() });
-      return record.localPath;
+      const uriRes = await Filesystem.getUri({ path: primaryPath, directory: Directory.Data });
+      if (uriRes?.uri) {
+        if (!record || record.localPath !== uriRes.uri) {
+          await setChapterAudioPath(chapterId, uriRes.uri, record?.sizeBytes ?? 0);
+        }
+        MobileAudioStorage.statCache.set(chapterId, { ok: true, ts: Date.now() });
+        return uriRes.uri;
+      }
     } catch {
-      MobileAudioStorage.statCache.set(chapterId, { ok: false, ts: Date.now() });
-      return null;
+      // continue to legacy fallback
     }
+
+    try {
+      const legacyPath = this.buildLegacyPath(chapterId);
+      const legacyStat = await Filesystem.stat({
+        path: legacyPath,
+        directory: Directory.Data,
+      });
+      const legacyUri = await Filesystem.getUri({ path: legacyPath, directory: Directory.Data });
+      if (legacyUri?.uri) {
+        await setChapterAudioPath(chapterId, legacyUri.uri, typeof legacyStat?.size === "number" ? legacyStat.size : 0);
+        MobileAudioStorage.statCache.set(chapterId, { ok: true, ts: Date.now() });
+        return legacyUri.uri;
+      }
+    } catch {
+      // ignore
+    }
+    MobileAudioStorage.statCache.set(chapterId, { ok: false, ts: Date.now() });
+    return null;
   }
 
   async deleteAudio(chapterId: string): Promise<void> {
@@ -166,4 +193,9 @@ export async function resolveChapterAudioUrl(chapterId: string, uiMode: UiMode):
   const localPath = await storage.getAudioPath(chapterId);
   if (!localPath) return null;
   return Capacitor.convertFileSrc(localPath);
+}
+
+export async function resolveChapterAudioLocalPath(chapterId: string): Promise<string | null> {
+  if (!Capacitor.isNativePlatform?.()) return null;
+  return mobileStorage.getAudioPath(chapterId);
 }

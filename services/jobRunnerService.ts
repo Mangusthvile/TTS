@@ -87,7 +87,11 @@ export async function enqueueGenerateAudio(
       jobLog.info("enqueueGenerateAudio", { ...res, correlationId: payload.correlationId });
       return res;
     } catch (e: any) {
-      jobLog.error("enqueueGenerateAudio failed", { err: String(e?.message ?? e), payload });
+      const errMsg = String(e?.message ?? e);
+      jobLog.error("enqueueGenerateAudio failed", { err: errMsg, payload });
+      if (errMsg.includes("notifications_not_granted")) {
+        throw new SyncError("notifications_not_granted", { operation: "enqueueGenerateAudio", payload }, e);
+      }
       throw new SyncError("Failed to enqueue job", { operation: "enqueueGenerateAudio", payload }, e);
     }
   }
