@@ -44,6 +44,7 @@ import java.util.regex.Matcher;
 
 public class FixIntegrityWorker extends Worker {
     private static final String DB_NAME = "talevox_db";
+    private static final String DB_FILE = DB_NAME + "SQLite.db";
     private static final String DEFAULT_ENDPOINT = "https://talevox-tts-762195576430.us-south1.run.app";
     private static final int MAX_TTS_BYTES = 4500;
     private static final int MAX_UPLOAD_RETRIES = 5;
@@ -292,7 +293,7 @@ public class FixIntegrityWorker extends Worker {
 
     private SQLiteDatabase getDb() {
         Context ctx = getApplicationContext();
-        SQLiteDatabase db = ctx.openOrCreateDatabase(DB_NAME, Context.MODE_PRIVATE, null);
+        SQLiteDatabase db = ctx.openOrCreateDatabase(DB_FILE, Context.MODE_PRIVATE, null);
         db.execSQL(
             "CREATE TABLE IF NOT EXISTS jobs (" +
             "jobId TEXT PRIMARY KEY," +

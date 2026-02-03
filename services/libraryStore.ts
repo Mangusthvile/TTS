@@ -5,6 +5,8 @@ import { Capacitor } from "@capacitor/core";
 import { HighlightMode } from "../types";
 import type { Book, Chapter, StorageBackend, AudioStatus, BookSettings, Rule, CueMap } from "../types";
 import { initStorage, getStorage } from "./storageSingleton";
+import { getSqliteDb } from "./sqliteConnectionManager";
+import { appConfig } from "../src/config/appConfig";
 import {
   listBooks as idbListBooks,
   upsertBook as idbUpsertBook,
@@ -22,6 +24,41 @@ import {
 import type { SQLiteDBConnection } from "@capacitor-community/sqlite";
 
 let initPromise: Promise<void> | null = null;
+const DB_NAME = appConfig.db.name;
+const DB_VERSION = appConfig.db.version;
+
+const CHAPTER_TEXT_CACHE_TTL_MS = appConfig.cache.chapterTextTtlMs;
+const CHAPTER_TEXT_NEGATIVE_TTL_MS = appConfig.cache.chapterTextNegativeTtlMs;
+const chapterTextCache = new Map<string, { value: string | null; ts: number }>();
+const chapterTextInFlight = new Map<string, Promise<string | null>>();
+
+function chapterTextKey(bookId: string, chapterId: string): string {
+  return `${bookId}:${chapterId}`;
+}
+
+function getCachedChapterText(key: string): string | null | undefined {
+  const entry = chapterTextCache.get(key);
+  if (!entry) return undefined;
+  const ttl = entry.value === null ? CHAPTER_TEXT_NEGATIVE_TTL_MS : CHAPTER_TEXT_CACHE_TTL_MS;
+  if (Date.now() - entry.ts > ttl) {
+    chapterTextCache.delete(key);
+    return undefined;
+  }
+  return entry.value;
+}
+
+function setCachedChapterText(key: string, value: string | null): void {
+  chapterTextCache.set(key, { value, ts: Date.now() });
+}
+
+function clearCachedChapterTextForBook(bookId: string): void {
+  const prefix = `${bookId}:`;
+  for (const key of chapterTextCache.keys()) {
+    if (key.startsWith(prefix)) {
+      chapterTextCache.delete(key);
+    }
+  }
+}
 
 function isNative(): boolean {
   try {
@@ -35,7 +72,10 @@ async function ensureInit(): Promise<void> {
   if (initPromise) return initPromise;
   initPromise = (async () => {
     await initStorage();
-  })();
+  })().catch((err) => {
+    initPromise = null;
+    throw err;
+  });
   return initPromise;
 }
 
@@ -68,12 +108,12 @@ function ensureBookDefaults(b: Partial<Book> & { id: string; title: string; back
   };
 }
 
-function mustSqliteDb(): SQLiteDBConnection {
+async function mustSqliteDb(): Promise<SQLiteDBConnection> {
   const driver = getStorage();
-  if ((driver as any).name !== "sqlite" || typeof (driver as any).getDb !== "function") {
+  if ((driver as any).name !== "sqlite") {
     throw new Error("SQLite driver not available on this platform.");
   }
-  return (driver as any).getDb() as SQLiteDBConnection;
+  return getSqliteDb(DB_NAME, DB_VERSION);
 }
 
 export async function listBooks(): Promise<Book[]> {
@@ -83,7 +123,7 @@ export async function listBooks(): Promise<Book[]> {
     return idbListBooks();
   }
 
-  const db = mustSqliteDb();
+  const db = await mustSqliteDb();
   const res = await db.query(
     `SELECT b.id, b.title, b.author, b.coverImage, b.backend, b.driveFolderId, b.driveFolderName, b.currentChapterId,
             b.settingsJson, b.rulesJson, b.updatedAt,
@@ -127,7 +167,7 @@ export async function upsertBook(book: Book): Promise<void> {
     return;
   }
 
-  const db = mustSqliteDb();
+  const db = await mustSqliteDb();
   const settingsJson = JSON.stringify(book.settings ?? { useBookSettings: false, highlightMode: HighlightMode.WORD });
   const rulesJson = JSON.stringify(book.rules ?? []);
   const updatedAt = book.updatedAt ?? Date.now();
@@ -167,13 +207,15 @@ export async function deleteBook(bookId: string): Promise<void> {
 
   if (!isNative()) {
     await idbDeleteBook(bookId);
+    clearCachedChapterTextForBook(bookId);
     return;
   }
 
-  const db = mustSqliteDb();
+  const db = await mustSqliteDb();
   await db.run(`DELETE FROM chapter_text WHERE bookId = ?`, [bookId]);
   await db.run(`DELETE FROM chapters WHERE bookId = ?`, [bookId]);
   await db.run(`DELETE FROM books WHERE id = ?`, [bookId]);
+  clearCachedChapterTextForBook(bookId);
 }
 
 export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promise<void> {
@@ -184,7 +226,7 @@ export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promi
     return;
   }
 
-  const db = mustSqliteDb();
+  const db = await mustSqliteDb();
   const updatedAt = chapter.updatedAt ?? Date.now();
 
   await db.run(
@@ -236,13 +278,15 @@ export async function deleteChapter(bookId: string, chapterId: string): Promise<
 
   if (!isNative()) {
     await idbDeleteChapter(bookId, chapterId);
+    chapterTextCache.delete(chapterTextKey(bookId, chapterId));
     return;
   }
 
-  const db = mustSqliteDb();
+  const db = await mustSqliteDb();
   await db.run(`DELETE FROM chapter_text WHERE chapterId = ?`, [chapterId]);
   await db.run(`DELETE FROM chapters WHERE id = ? AND bookId = ?`, [chapterId, bookId]);
   await db.run(`DELETE FROM chapter_cue_maps WHERE chapterId = ?`, [chapterId]);
+  chapterTextCache.delete(chapterTextKey(bookId, chapterId));
 }
 
 export async function saveChapterText(bookId: string, chapterId: string, content: string): Promise<void> {
@@ -250,10 +294,11 @@ export async function saveChapterText(bookId: string, chapterId: string, content
 
   if (!isNative()) {
     await idbSaveChapterText(bookId, chapterId, content);
+    setCachedChapterText(chapterTextKey(bookId, chapterId), content);
     return;
   }
 
-  const db = mustSqliteDb();
+  const db = await mustSqliteDb();
   await db.run(
     `INSERT INTO chapter_text (chapterId, bookId, content, updatedAt)
      VALUES (?, ?, ?, ?)
@@ -262,48 +307,73 @@ export async function saveChapterText(bookId: string, chapterId: string, content
        updatedAt=excluded.updatedAt`,
     [chapterId, bookId, content, Date.now()]
   );
+  setCachedChapterText(chapterTextKey(bookId, chapterId), content);
 }
 
 export async function loadChapterText(bookId: string, chapterId: string): Promise<string | null> {
-  await ensureInit();
+  const key = chapterTextKey(bookId, chapterId);
+  const cached = getCachedChapterText(key);
+  if (cached !== undefined) return cached;
 
-  if (!isNative()) {
-    return idbLoadChapterText(bookId, chapterId);
-  }
+  const inflight = chapterTextInFlight.get(key);
+  if (inflight) return inflight;
 
-  const db = mustSqliteDb();
+  const task = (async () => {
+    await ensureInit();
 
-  // First try the correct lookup
-  const res = await db.query(
-    `SELECT content FROM chapter_text WHERE chapterId = ? AND bookId = ?`,
-    [chapterId, bookId]
-  );
-  const row = (res.values?.[0] ?? null) as any;
-  if (row) return String(row.content ?? "");
+    if (!isNative()) {
+      const value = await idbLoadChapterText(bookId, chapterId);
+      setCachedChapterText(key, value);
+      return value;
+    }
 
-  // Fallback lookup by chapterId only.
-  // This repairs older rows that were saved under the wrong bookId.
-  const res2 = await db.query(
-    `SELECT bookId, content FROM chapter_text WHERE chapterId = ? LIMIT 1`,
-    [chapterId]
-  );
-  const row2 = (res2.values?.[0] ?? null) as any;
-  if (!row2) return null;
+    const db = await mustSqliteDb();
 
-  const content = String(row2.content ?? "");
+    // First try the correct lookup
+    const res = await db.query(
+      `SELECT content FROM chapter_text WHERE chapterId = ? AND bookId = ?`,
+      [chapterId, bookId]
+    );
+    const row = (res.values?.[0] ?? null) as any;
+    if (row) {
+      const value = String(row.content ?? "");
+      setCachedChapterText(key, value);
+      return value;
+    }
 
-  try {
-    await db.run(`UPDATE chapter_text SET bookId = ? WHERE chapterId = ?`, [bookId, chapterId]);
-  } catch {
-    // ignore repair failure
-  }
+    // Fallback lookup by chapterId only.
+    // This repairs older rows that were saved under the wrong bookId.
+    const res2 = await db.query(
+      `SELECT bookId, content FROM chapter_text WHERE chapterId = ? LIMIT 1`,
+      [chapterId]
+    );
+    const row2 = (res2.values?.[0] ?? null) as any;
+    if (!row2) {
+      setCachedChapterText(key, null);
+      return null;
+    }
 
-  return content;
+    const content = String(row2.content ?? "");
+
+    try {
+      await db.run(`UPDATE chapter_text SET bookId = ? WHERE chapterId = ?`, [bookId, chapterId]);
+    } catch {
+      // ignore repair failure
+    }
+
+    setCachedChapterText(key, content);
+    return content;
+  })().finally(() => {
+    chapterTextInFlight.delete(key);
+  });
+
+  chapterTextInFlight.set(key, task);
+  return task;
 }
 
 // Cue maps
 async function nativeSaveChapterCueMap(chapterId: string, cueMap: CueMap): Promise<void> {
-  const db = mustSqliteDb();
+  const db = await mustSqliteDb();
   await db.run(
     `INSERT INTO chapter_cue_maps (chapterId, cueJson, updatedAt)
      VALUES (?, ?, ?)
@@ -315,7 +385,7 @@ async function nativeSaveChapterCueMap(chapterId: string, cueMap: CueMap): Promi
 }
 
 async function nativeGetChapterCueMap(chapterId: string): Promise<CueMap | null> {
-  const db = mustSqliteDb();
+  const db = await mustSqliteDb();
   const res = await db.query(`SELECT cueJson FROM chapter_cue_maps WHERE chapterId = ?`, [chapterId]);
   const row = (res.values?.[0] ?? null) as any;
   if (!row) return null;
@@ -327,7 +397,7 @@ async function nativeGetChapterCueMap(chapterId: string): Promise<CueMap | null>
 }
 
 async function nativeDeleteChapterCueMap(chapterId: string): Promise<void> {
-  const db = mustSqliteDb();
+  const db = await mustSqliteDb();
   await db.run(`DELETE FROM chapter_cue_maps WHERE chapterId = ?`, [chapterId]);
 }
 
@@ -360,7 +430,7 @@ export async function listChaptersPage(
     return idbListChaptersPage(bookId, afterIndex, limit);
   }
 
-  const db = mustSqliteDb();
+  const db = await mustSqliteDb();
   const params: any[] = [bookId];
 
   let where = `WHERE bookId = ?`;
@@ -384,10 +454,19 @@ export async function listChaptersPage(
 
   const rows = (res.values ?? []) as any[];
 
-  const chapters: Chapter[] = rows.map((r) => ({
-    id: String(r.id),
-    index: Number(r.index ?? r.idx),
-    title: String(r.title),
+  const fallbackBase = typeof afterIndex === "number" ? afterIndex : 0;
+  const chapters: Chapter[] = rows.map((r, i) => {
+    const rawIndex = Number(r.index ?? r.idx);
+    const fallbackIndex = fallbackBase + i + 1;
+    const index = Number.isFinite(rawIndex) && rawIndex > 0 ? rawIndex : fallbackIndex;
+    const rawTitle = typeof r.title === "string" ? r.title.trim() : "";
+    const title = rawTitle && !rawTitle.toLowerCase().startsWith("imported")
+      ? rawTitle
+      : `Chapter ${index}`;
+    return {
+      id: String(r.id),
+      index,
+      title,
     filename: String(r.filename),
     sourceUrl: r.sourceUrl ?? undefined,
     content: undefined,
@@ -405,9 +484,10 @@ export async function listChaptersPage(
     cloudTextFileId: r.cloudTextFileId ?? undefined,
     cloudAudioFileId: r.cloudAudioFileId ?? undefined,
     audioDriveId: r.audioDriveId ?? undefined,
-    audioStatus: r.audioStatus ?? undefined,
-    audioSignature: r.audioSignature ?? undefined,
-  }));
+      audioStatus: r.audioStatus ?? undefined,
+      audioSignature: r.audioSignature ?? undefined,
+    };
+  });
 
   const nextAfterIndex = chapters.length ? chapters[chapters.length - 1].index : null;
   let totalCount: number | undefined;
@@ -441,6 +521,7 @@ export async function bulkUpsertChapters(
     await upsertChapterMeta(bookId, it.chapter);
     if (typeof it.content === "string" && it.content.length) {
       await saveChapterText(bookId, it.chapter.id, it.content);
+      setCachedChapterText(chapterTextKey(bookId, it.chapter.id), it.content);
     }
   }
 }

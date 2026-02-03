@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useMemo, useState } from 'react';
 import { Chapter, Rule, Theme, HighlightMode, ReaderSettings } from '../types';
 import { applyRules } from '../services/speechService';
 import { reflowLineBreaks } from '../services/textFormat';
-import { Bug, FolderOpen, Plus, ChevronLeft, ArrowDownCircle } from 'lucide-react';
+import { Bug, Plus, ChevronLeft, ArrowDownCircle, MoreVertical } from 'lucide-react';
 
 interface ReaderProps {
   chapter: Chapter | null;
@@ -59,6 +59,7 @@ const Reader: React.FC<ReaderProps> = ({
   const userScrollingRef = useRef<boolean>(false);
   const scrollTimeoutRef = useRef<number | null>(null);
   const [showResumeButton, setShowResumeButton] = useState(false);
+  const [showToolsMenu, setShowToolsMenu] = useState(false);
 
   const speakText = useMemo(() => {
     if (!chapter) return "";
@@ -189,9 +190,13 @@ const Reader: React.FC<ReaderProps> = ({
     'space-y-10';
 
   const fadeColor = theme === Theme.DARK ? 'from-slate-900' : theme === Theme.SEPIA ? 'from-[#efe6d5]' : 'from-white';
+  const handleBack = () => {
+    console.log('[TaleVox][Reader] back_to_collection');
+    if (onBackToCollection) onBackToCollection();
+  };
 
   return (
-    <div className={`relative flex-1 flex flex-col min-h-0 overflow-hidden touch-manipulation ${theme === Theme.DARK ? 'text-slate-100' : theme === Theme.SEPIA ? 'text-[#3c2f25]' : 'text-black'}`}>
+    <div className="relative flex-1 flex flex-col min-h-0 overflow-hidden touch-manipulation text-theme">
       <div className={`absolute top-0 left-0 right-0 h-16 lg:h-24 z-10 pointer-events-none bg-gradient-to-b ${fadeColor} to-transparent`} />
       
       {showResumeButton && isMobile && (
@@ -218,7 +223,10 @@ const Reader: React.FC<ReaderProps> = ({
         >
           <div className={`mb-10 border-b pb-6 flex justify-between items-end select-none ${theme === Theme.DARK ? 'border-white/10' : 'border-black/10'}`}>
              <div className="flex-1 min-w-0 pr-4">
-                <button onClick={onBackToCollection} className="flex items-center gap-1 text-[10px] font-black uppercase tracking-widest text-indigo-500 mb-4 hover:translate-x-[-2px] transition-transform">
+                <button
+                  onClick={handleBack}
+                  className="flex items-center gap-1 text-[10px] font-black uppercase tracking-widest text-indigo-500 mb-4 hover:translate-x-[-2px] transition-transform"
+                >
                   <ChevronLeft className="w-3 h-3" /> Back
                 </button>
                 <div className="text-[11px] font-black uppercase tracking-widest text-indigo-600 mb-1">Chapter {chapter?.index || 0}</div>
@@ -239,14 +247,32 @@ const Reader: React.FC<ReaderProps> = ({
                   </div>
                 )}
              </div>
-             <div className="flex items-center gap-1">
-                {onAddChapter && (
-                  <button onClick={onAddChapter} title="Quick Add Chapter" className={`p-3 rounded-xl transition-all ${theme === Theme.DARK ? 'bg-white/10 hover:bg-indigo-600 hover:text-white' : 'bg-black/5 hover:bg-indigo-600 hover:text-white'}`}><Plus className="w-5 h-5" /></button>
+             <div className="flex items-center gap-1 relative">
+                <button
+                  onClick={() => setShowToolsMenu((v) => !v)}
+                  title="Reader tools"
+                  className={`p-3 rounded-xl transition-all ${theme === Theme.DARK ? 'bg-white/10 hover:bg-white/20' : 'bg-black/5 hover:bg-black/10'}`}
+                >
+                  <MoreVertical className="w-5 h-5" />
+                </button>
+                {showToolsMenu && (
+                  <div className={`absolute right-0 top-12 z-20 min-w-[180px] rounded-2xl shadow-2xl p-2 ${theme === Theme.DARK ? 'bg-slate-900 border border-white/10' : theme === Theme.SEPIA ? 'bg-[#efe6d5] border border-black/10' : 'bg-white border border-black/10'}`}>
+                    {onAddChapter && (
+                      <button
+                        onClick={() => { setShowToolsMenu(false); onAddChapter(); }}
+                        className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors ${theme === Theme.DARK ? 'hover:bg-white/10 text-slate-100' : 'hover:bg-black/5 text-slate-900'}`}
+                      >
+                        <Plus className="w-4 h-4" /> Add Chapter
+                      </button>
+                    )}
+                    <button
+                      onClick={() => { setShowToolsMenu(false); onToggleDebug(); }}
+                      className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors ${theme === Theme.DARK ? 'hover:bg-white/10 text-slate-100' : 'hover:bg-black/5 text-slate-900'}`}
+                    >
+                      <Bug className="w-4 h-4" /> {debugMode ? 'Disable Debug' : 'Enable Debug'}
+                    </button>
+                  </div>
                 )}
-                {onBackToCollection && (
-                  <button onClick={onBackToCollection} title="Back to Collection" className={`p-3 rounded-xl transition-all ${theme === Theme.DARK ? 'bg-white/10 hover:bg-indigo-600 hover:text-white' : 'bg-black/5 hover:bg-indigo-600 hover:text-white'}`}><FolderOpen className="w-5 h-5" /></button>
-                )}
-                <button onClick={onToggleDebug} title="Debug Mode" className={`p-3 rounded-xl transition-all ${theme === Theme.DARK ? 'bg-white/10 hover:bg-white/20' : 'bg-black/5 hover:bg-black/10'}`}><Bug className="w-5 h-5" /></button>
              </div>
           </div>
           <div className={paragraphClass}>

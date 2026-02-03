@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { ReaderSettings, Theme, SyncDiagnostics, UiMode, JobRecord } from '../types';
+import type { DiagnosticsReport } from '../services/diagnosticsService';
 import { RefreshCw, Cloud, CloudOff, Loader2, LogOut, Save, LogIn, Check, Sun, Coffee, Moon, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer, ClipboardCopy, FileWarning, Bug, Smartphone, Type, Palette, Monitor, LayoutTemplate, Library, List, Bell } from 'lucide-react';
 import { getAuthSessionInfo, isTokenValid, getValidDriveToken } from '../services/driveAuth';
 import { authManager } from '../services/authManager';
 import { getTraceDump } from '../utils/trace';
+import { getLogBuffer } from '../utils/logger';
 import { Capacitor } from '@capacitor/core';
 
 interface SettingsProps {
@@ -42,6 +44,7 @@ interface SettingsProps {
   logJobs?: boolean;
   onToggleLogJobs?: (v: boolean) => void;
   notificationStatus?: { supported: boolean; granted: boolean; enabled: boolean } | null;
+  jobRunnerAvailable?: boolean;
   onRequestNotifications?: () => void;
   onOpenNotificationSettings?: () => void;
   onSendTestNotification?: () => void;
@@ -49,6 +52,9 @@ interface SettingsProps {
   onRefreshJob?: (jobId: string) => void;
   onForceStartJob?: (jobId: string) => void;
   onShowWorkInfo?: (jobId: string) => void;
+  diagnosticsReport?: DiagnosticsReport | null;
+  onRefreshDiagnostics?: () => void;
+  onSaveDiagnostics?: () => void;
 }
 
 const Settings: React.FC<SettingsProps> = ({ 
@@ -69,18 +75,31 @@ const Settings: React.FC<SettingsProps> = ({
   logJobs = false,
   onToggleLogJobs,
   notificationStatus = null,
+  jobRunnerAvailable = false,
   onRequestNotifications,
   onOpenNotificationSettings,
   onSendTestNotification,
   onRefreshNotificationStatus,
   onRefreshJob,
   onForceStartJob,
-  onShowWorkInfo
+  onShowWorkInfo,
+  diagnosticsReport = null,
+  onRefreshDiagnostics,
+  onSaveDiagnostics
 }) => {
   const [authState, setAuthState] = useState(authManager.getState());
   const [isDiagExpanded, setIsDiagExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<'general' | 'jobs'>('general');
   const [jobBusy, setJobBusy] = useState(false);
+  const [recentLogs, setRecentLogs] = useState(() => getLogBuffer(20));
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>({
+    appearance: true,
+    interface: true,
+    typography: true,
+    notifications: false,
+    library: false,
+    system: false,
+  });
   
   const lastFatalError = useMemo(() => {
     try {
@@ -94,11 +113,20 @@ const Settings: React.FC<SettingsProps> = ({
     return () => { unsubscribe(); };
   }, []);
 
+  useEffect(() => {
+    if (!isDiagExpanded) return;
+    const interval = setInterval(() => {
+      setRecentLogs(getLogBuffer(20));
+    }, 1500);
+    return () => clearInterval(interval);
+  }, [isDiagExpanded]);
+
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
   const cardBg = isDark ? 'bg-slate-900 border-slate-800' : isSepia ? 'bg-[#f4ecd8] border-[#d8ccb6]' : 'bg-white border-black/10';
-  const textClass = isDark ? 'text-slate-100' : isSepia ? 'text-[#3c2f25]' : 'text-black';
+  const textClass = 'text-theme';
   const labelClass = `text-[11px] font-black uppercase tracking-[0.2em] mb-4 block ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`;
+  const sectionLabelClass = `text-[11px] font-black uppercase tracking-[0.2em] ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`;
   
   const isAuthorized = authState.status === 'signed_in';
   const expiryMinutes = authState.expiresAt > 0 ? Math.max(0, Math.round((authState.expiresAt - Date.now()) / 60000)) : 0;
@@ -122,6 +150,7 @@ const Settings: React.FC<SettingsProps> = ({
       sync: syncDiagnostics,
       fatal: lastFatalError,
       auth: { status: authState.status, hasToken: !!authState.accessToken },
+      diagnostics: diagnosticsReport,
       version: window.__APP_VERSION__,
       userAgent: navigator.userAgent
     };
@@ -193,21 +222,61 @@ const Settings: React.FC<SettingsProps> = ({
   const notifSummary = notificationStatus
     ? `${notificationStatus.granted ? 'granted' : 'denied'} · enabled:${notificationStatus.enabled ? 'yes' : 'no'}${notificationStatus.supported ? '' : ' · unsupported'}`
     : 'unknown';
+  const nativeJobsAvailable = jobRunnerAvailable;
+  const diag = diagnosticsReport;
+  const workDiag: any = diag?.workManager ?? {};
+  const tableLine = diag ? Object.entries(diag.tables).map(([k, v]) => `${k}:${v ? "yes" : "no"}`).join("  ") : "";
+  const countLine = diag ? Object.entries(diag.counts).map(([k, v]) => `${k}:${v ?? "n/a"}`).join("  ") : "";
+  const showUpdateControls = !import.meta.env.PROD;
+
+  const toggleSection = (key: string) => {
+    setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const Section = ({
+    id,
+    title,
+    icon: Icon,
+    children,
+  }: {
+    id: string;
+    title: string;
+    icon: React.ComponentType<{ className?: string }>;
+    children: React.ReactNode;
+  }) => {
+    const open = openSections[id] ?? false;
+    return (
+      <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
+        <button
+          onClick={() => toggleSection(id)}
+          className="w-full flex items-center justify-between gap-4 text-left"
+        >
+          <span className={`${sectionLabelClass}`}>
+            <Icon className="w-3.5 h-3.5 inline mr-2" /> {title}
+          </span>
+          {open ? <ChevronUp className="w-4 h-4 opacity-60" /> : <ChevronDown className="w-4 h-4 opacity-60" />}
+        </button>
+        {open && <div className="mt-6">{children}</div>}
+      </div>
+    );
+  };
 
   return (
-    <div className={`p-4 sm:p-8 h-full overflow-y-auto transition-colors duration-500 ${isDark ? 'bg-slate-900' : isSepia ? 'bg-[#efe6d5]' : 'bg-slate-50'}`}>
+    <div className="p-4 sm:p-8 h-full overflow-y-auto transition-colors duration-500 bg-surface text-theme">
       <div className="max-w-2xl mx-auto space-y-8 sm:space-y-12 pb-32">
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
           <div>
             <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textClass}`}>Settings</h2>
             <p className={`text-xs sm:text-sm font-bold mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>VoxLib Engine v{window.__APP_VERSION__}</p>
           </div>
-          <button 
-            onClick={onCheckForUpdates} 
-            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase transition-all shadow-sm ${isDark ? 'bg-slate-800 text-slate-100 hover:bg-slate-700' : isSepia ? 'bg-[#e6d8b5] text-[#3c2f25] hover:bg-[#d9cab0]' : 'bg-white text-black hover:bg-slate-50'}`}
-          >
-            <RefreshCw className="w-3.5 h-3.5" /> Check Updates
-          </button>
+          {showUpdateControls && (
+            <button 
+              onClick={onCheckForUpdates} 
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase transition-all shadow-sm ${isDark ? 'bg-slate-800 text-slate-100 hover:bg-slate-700' : isSepia ? 'bg-[#e6d8b5] text-[#3c2f25] hover:bg-[#d9cab0]' : 'bg-white text-black hover:bg-slate-50'}`}
+            >
+              <RefreshCw className="w-3.5 h-3.5" /> Check Updates
+            </button>
+          )}
         </div>
 
         <div className={`flex items-center gap-2 p-1 rounded-2xl ${isDark ? 'bg-black/20' : 'bg-black/5'}`}>
@@ -226,9 +295,7 @@ const Settings: React.FC<SettingsProps> = ({
         </div>
 
         <div className={activeTab === 'general' ? 'space-y-8 sm:space-y-12' : 'hidden'}>
-        {/* --- APPEARANCE --- */}
-        <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
-          <label className={labelClass}><Palette className="w-3.5 h-3.5 inline mr-2" /> Appearance</label>
+        <Section id="appearance" title="Appearance" icon={Palette}>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             {themes.map(t => (
               <button 
@@ -244,11 +311,9 @@ const Settings: React.FC<SettingsProps> = ({
               </button>
             ))}
           </div>
-        </div>
+        </Section>
 
-        {/* --- UI MODE --- */}
-        <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
-          <label className={labelClass}><LayoutTemplate className="w-3.5 h-3.5 inline mr-2" /> Interface Mode</label>
+        <Section id="interface" title="Interface Mode" icon={LayoutTemplate}>
           <div className={`flex p-1 rounded-xl gap-1 ${isDark ? 'bg-black/20' : 'bg-black/5'}`}>
             {[
               { id: 'auto' as const, label: 'Auto', icon: Smartphone },
@@ -268,14 +333,12 @@ const Settings: React.FC<SettingsProps> = ({
               );
             })}
           </div>
-          <p className="text-[10px] opacity-50 mt-3 px-1">
-            <b>Auto:</b> Detects device capabilities. <b>Mobile:</b> Enables touch gestures and battery-saving sync. <b>Desktop:</b> Enables precision sync and mouse interactions.
+          <p className="text-[10px] opacity-60 mt-3 px-1">
+            <b>Auto:</b> Picks the best UI for your device. <b>Mobile:</b> Touch‑optimized + background jobs. <b>Desktop:</b> Mouse‑friendly + precision tools.
           </p>
-        </div>
+        </Section>
 
-        {/* --- TYPOGRAPHY --- */}
-        <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
-          <label className={labelClass}><Type className="w-3.5 h-3.5 inline mr-2" /> Typography & Reading</label>
+        <Section id="typography" title="Typography & Reading" icon={Type}>
           <div className="space-y-6">
              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                <div className="space-y-2">
@@ -377,26 +440,27 @@ const Settings: React.FC<SettingsProps> = ({
                </div>
              </label>
           </div>
-        </div>
+        </Section>
 
-        {/* --- CLOUD SYNC --- */}
-        <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
-           <div className="flex justify-between items-center mb-4">
-             <label className={`${labelClass} mb-0`}><Cloud className="w-3.5 h-3.5 inline mr-2" /> Google Drive Sync</label>
-             {isAuthorized && <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 text-[9px] font-black uppercase">Active</span>}
-           </div>
+        <Section id="library" title="Library Tools" icon={Library}>
+          <div className="space-y-6">
+            <div>
+              <div className="flex justify-between items-center mb-4">
+                <label className={`${labelClass} mb-0`}><Cloud className="w-3.5 h-3.5 inline mr-2" /> Google Drive Sync</label>
+                {isAuthorized && <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 text-[9px] font-black uppercase">Active</span>}
+              </div>
 
-           {!isAuthorized ? (
-             <div className="text-center py-8">
-               <p className="text-sm font-bold opacity-60 mb-6">Connect Google Drive to sync books and progress across devices.</p>
-               <button onClick={() => authManager.signIn()} className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-black uppercase text-xs tracking-widest shadow-xl hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 mx-auto">
-                 <LogIn className="w-4 h-4" /> Connect Drive
-               </button>
-               {authState.status === 'signing_in' && <div className="mt-4 text-xs font-bold text-indigo-500 animate-pulse">Check popup window...</div>}
-               {authState.lastError && <div className="mt-4 text-xs font-bold text-red-500">{authState.lastError}</div>}
-             </div>
-           ) : (
-             <div className="space-y-6">
+            {!isAuthorized ? (
+              <div className="text-center py-8">
+                <p className="text-sm font-bold opacity-60 mb-6">Connect Google Drive to sync books and progress across devices.</p>
+                <button onClick={() => authManager.signIn()} className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-black uppercase text-xs tracking-widest shadow-xl hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 mx-auto">
+                  <LogIn className="w-4 h-4" /> Connect Drive
+                </button>
+                {authState.status === 'signing_in' && <div className="mt-4 text-xs font-bold text-indigo-500 animate-pulse">Check popup window...</div>}
+                {authState.lastError && <div className="mt-4 text-xs font-bold text-red-500">{authState.lastError}</div>}
+              </div>
+            ) : (
+              <div className="space-y-6">
                 <div className={`p-4 rounded-xl border flex flex-col gap-2 ${isDark ? 'bg-slate-950/50 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
                    <div className="flex justify-between items-center">
                      <span className="text-[10px] font-black uppercase opacity-50">Sync Status</span>
@@ -455,15 +519,10 @@ const Settings: React.FC<SettingsProps> = ({
                    <button onClick={handleForceReauth} className="w-full text-center text-[10px] font-black uppercase tracking-widest opacity-40 hover:opacity-100 hover:text-indigo-600">Re-check Connection</button>
                    <button onClick={onClearAuth} className="w-full text-center text-red-500 text-[10px] font-black uppercase tracking-widest opacity-60 hover:opacity-100">Sign Out / Unlink</button>
                 </div>
-             </div>
-           )}
-        </div>
-
-        {/* --- LIBRARY TOOLS --- */}
-        <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
-           <label className={labelClass}><Library className="w-3.5 h-3.5 inline mr-2" /> Library Tools</label>
-           
-           <div className="space-y-4">
+              </div>
+            )}
+            </div>
+            <div className="space-y-4 pt-4 border-t border-black/5">
               {onRecalculateProgress && (
                 <button onClick={onRecalculateProgress} className="w-full py-3 rounded-xl bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20 text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 transition-all">
                   <RefreshCw className="w-4 h-4" /> Reconcile Progress From Saves
@@ -472,36 +531,40 @@ const Settings: React.FC<SettingsProps> = ({
               <p className="text-[10px] opacity-50 px-1">
                 Fix inconsistent progress bars or "Done" status without resetting your actual reading position.
               </p>
-           </div>
-        </div>
+            </div>
+          </div>
+        </Section>
 
-        {/* --- BACKGROUND NOTIFICATIONS --- */}
-        <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
-          <label className={labelClass}><Bell className="w-3.5 h-3.5 inline mr-2" /> Background Notifications</label>
+        <Section id="notifications" title="Notifications" icon={Bell}>
+          {!jobRunnerAvailable && (
+            <div className="text-[10px] font-bold text-amber-500 mb-2">
+              Background notifications require the native Android plugin.
+            </div>
+          )}
           <div className="flex flex-wrap gap-2">
             <button
-              disabled={!onRequestNotifications}
+              disabled={!onRequestNotifications || !jobRunnerAvailable}
               onClick={onRequestNotifications}
               className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-indigo-600 text-white disabled:opacity-50"
             >
               Enable job notifications
             </button>
             <button
-              disabled={!onOpenNotificationSettings}
+              disabled={!onOpenNotificationSettings || !jobRunnerAvailable}
               onClick={onOpenNotificationSettings}
               className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest disabled:opacity-50 ${isDark ? 'bg-white/10 text-slate-100' : 'bg-black/10 text-black'}`}
             >
               Open notification settings
             </button>
             <button
-              disabled={!onSendTestNotification}
+              disabled={!onSendTestNotification || !jobRunnerAvailable}
               onClick={() => onSendTestNotification && onSendTestNotification()}
               className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-white text-indigo-600 border border-indigo-600/20 disabled:opacity-50"
             >
               Send test notification
             </button>
             <button
-              disabled={!onRefreshNotificationStatus}
+              disabled={!onRefreshNotificationStatus || !jobRunnerAvailable}
               onClick={onRefreshNotificationStatus}
               className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest disabled:opacity-50 ${isDark ? 'bg-white/10 text-slate-100' : 'bg-black/5 text-black'}`}
             >
@@ -511,12 +574,9 @@ const Settings: React.FC<SettingsProps> = ({
           <div className="mt-3 text-[10px] font-mono opacity-60">
             Status: {notifSummary}
           </div>
-        </div>
+        </Section>
 
-        {/* --- SYSTEM --- */}
-        <div className={`p-6 sm:p-8 rounded-[2rem] border shadow-sm ${cardBg}`}>
-           <label className={labelClass}><Terminal className="w-3.5 h-3.5 inline mr-2" /> System</label>
-           
+        <Section id="system" title="System" icon={Terminal}>
            <div className="space-y-4">
               <label className="flex items-center justify-between cursor-pointer">
                  <div className="flex items-center gap-3">
@@ -570,11 +630,23 @@ const Settings: React.FC<SettingsProps> = ({
                           <button onClick={handleCopyDiagnostics} className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg text-[10px] font-black uppercase flex items-center justify-center gap-2 hover:bg-indigo-600/20"><ClipboardCopy className="w-3 h-3" /> Copy Diag</button>
                           <button onClick={handleCopyTrace} className="p-2 bg-emerald-600/10 text-emerald-600 rounded-lg text-[10px] font-black uppercase flex items-center justify-center gap-2 hover:bg-emerald-600/20"><FileWarning className="w-3 h-3" /> Copy Trace</button>
                        </div>
+                       <div className="pt-3 border-t border-white/10">
+                         <div className="text-[9px] font-black uppercase opacity-40 mb-1">Recent Logs</div>
+                         <div className="text-[9px] font-mono space-y-1 max-h-40 overflow-auto">
+                           {recentLogs.length === 0 && <div className="opacity-50">No logs yet.</div>}
+                           {recentLogs.map((entry, idx) => (
+                             <div key={`${entry.ts}-${idx}`} className="opacity-70">
+                               [{new Date(entry.ts).toLocaleTimeString()}] {entry.level.toUpperCase()} {entry.tag}: {entry.message}
+                               {entry.context ? ` ${JSON.stringify(entry.context)}` : ""}
+                             </div>
+                           ))}
+                         </div>
+                       </div>
                     </div>
                  )}
               </div>
            </div>
-        </div>
+        </Section>
 
         </div>
 
@@ -650,15 +722,81 @@ const Settings: React.FC<SettingsProps> = ({
                     const total = Number(progress.total ?? 0);
                     const completed = Number(progress.completed ?? 0);
                     const currentChapterId = progress.currentChapterId ?? '';
+                    const correlationId = progress.correlationId ?? job.payloadJson?.correlationId ?? '';
                     const updatedAt = job.updatedAt ? new Date(job.updatedAt).toLocaleTimeString() : '';
+                    const diagParts = [
+                      job.type,
+                      job.status,
+                      `${completed}/${total}`,
+                      currentChapterId || "none",
+                      updatedAt,
+                    ];
+                    if (correlationId) diagParts.push(`corr:${correlationId}`);
+                    const diagLine = diagParts.join(" · ");
                     return (
                       <div key={`diag-${job.jobId}`} className="border-t border-white/10 pt-1">
                         <div>{job.jobId}</div>
-                        <div>{job.type} · {job.status} · {completed}/{total} · {currentChapterId || 'none'} · {updatedAt}</div>
+                        <div>{diagLine}</div>
                       </div>
                     );
                   })}
                   {sortedJobs.length === 0 && <div>No jobs</div>}
+                </div>
+              </div>
+              <div className={`p-3 rounded-xl border ${isDark ? 'border-slate-800 bg-slate-950/40' : 'border-black/5 bg-white'}`}>
+                <div className="text-xs font-black mb-2">System Diagnostics</div>
+                {diag ? (
+                  <div className="text-[10px] font-mono space-y-1">
+                    <div>SQLite: cached={String(diag.sqlite.cached)} open={String(diag.sqlite.isOpen)} pending={String(diag.sqlite.pending)} hasConn={String(diag.sqlite.hasConnection)}</div>
+                    {diag.sqlite.error && <div>SQLite error: {diag.sqlite.error}</div>}
+                    <div>Tables: {tableLine || 'n/a'}</div>
+                    <div>Counts: {countLine || 'n/a'}</div>
+                    <div>Text files: {diag.fileCache.textFiles} · missing refs: {diag.fileCache.missingTextFiles.length}</div>
+                    <div>Audio files: {diag.fileCache.audioFiles} · missing refs: {diag.fileCache.missingAudioFiles.length}</div>
+                    <div>WorkMgr: perm={workDiag.permission ?? 'n/a'} · channel={workDiag.channelExists ? 'yes' : 'no'} · fgRecent={String(workDiag.foregroundRecent ?? 'n/a')}</div>
+                    {workDiag.dbFileExists !== undefined && (
+                      <div>Native DB: file={workDiag.dbFileExists ? 'yes' : 'no'}{workDiag.dbPath ? ` · ${workDiag.dbPath}` : ''}</div>
+                    )}
+                    {diag.fileCache.missingTextFiles.length > 0 && (
+                      <div>Missing text sample: {diag.fileCache.missingTextFiles.slice(0, 5).join(", ")}</div>
+                    )}
+                    {diag.fileCache.missingAudioFiles.length > 0 && (
+                      <div>Missing audio sample: {diag.fileCache.missingAudioFiles.slice(0, 5).join(", ")}</div>
+                    )}
+                    {diag.config && (
+                      <div className="pt-2">
+                        <div className="text-[10px] font-black uppercase tracking-widest opacity-70">Config</div>
+                        <pre className="text-[9px] font-mono opacity-70 whitespace-pre-wrap">
+                          {JSON.stringify(diag.config, null, 2)}
+                        </pre>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-[10px] font-mono opacity-60">No diagnostics yet.</div>
+                )}
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button
+                    disabled={!onRefreshDiagnostics}
+                    onClick={() => onRefreshDiagnostics && onRefreshDiagnostics()}
+                    className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20"
+                  >
+                    Refresh Diagnostics
+                  </button>
+                  <button
+                    onClick={handleCopyDiagnostics}
+                    className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20"
+                  >
+                    Copy Diagnostics
+                  </button>
+                  {onSaveDiagnostics && (
+                    <button
+                      onClick={onSaveDiagnostics}
+                      className={`px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${isDark ? 'bg-white/10 text-slate-100' : 'bg-black/5 text-black'}`}
+                    >
+                      Save Diagnostics
+                    </button>
+                  )}
                 </div>
               </div>
               {sortedJobs.length === 0 && (
@@ -670,6 +808,7 @@ const Settings: React.FC<SettingsProps> = ({
                 const completed = Number(progress.completed ?? 0);
                 const currentChapterId = progress.currentChapterId ?? '';
                 const workRequestId = progress.workRequestId ?? '';
+                const correlationId = progress.correlationId ?? job.payloadJson?.correlationId ?? '';
                 const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
                 const canCancel = job.status === "queued" || job.status === "running" || job.status === "paused";
                 const canRetry = job.status === "failed" || job.status === "canceled";
@@ -703,7 +842,7 @@ const Settings: React.FC<SettingsProps> = ({
                       </div>
                       <div className="mt-1 text-[10px] font-black opacity-60">{completed}/{total} ({percent}%)</div>
                       <div className="mt-1 text-[10px] font-mono opacity-50">
-                        updated: {job.updatedAt ? new Date(job.updatedAt).toLocaleTimeString() : 'n/a'} · work: {workRequestId || 'none'} · chapter: {currentChapterId || 'n/a'} {job.error ? ` · err:${job.error}` : ''}
+                        updated: {job.updatedAt ? new Date(job.updatedAt).toLocaleTimeString() : 'n/a'} · work: {workRequestId || 'none'} · chapter: {currentChapterId || 'n/a'}{correlationId ? ` · corr:${correlationId}` : ''}{job.error ? ` · err:${job.error}` : ''}
                       </div>
                     </div>
                     {job.error && (
@@ -711,14 +850,30 @@ const Settings: React.FC<SettingsProps> = ({
                     )}
                     <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-widest">
                       {onRefreshJob && <button onClick={() => onRefreshJob(job.jobId)} className={`px-2 py-1 rounded-lg ${isDark ? 'bg-white/10 text-slate-100' : 'bg-black/10 text-black'}`}>Refresh</button>}
-                      {onForceStartJob && <button onClick={() => onForceStartJob(job.jobId)} className="px-2 py-1 rounded-lg bg-amber-500/20 text-amber-600">Force Start</button>}
+                      {onForceStartJob && (
+                        <button
+                          disabled={!nativeJobsAvailable}
+                          onClick={() => nativeJobsAvailable && onForceStartJob(job.jobId)}
+                          className="px-2 py-1 rounded-lg bg-amber-500/20 text-amber-600 disabled:opacity-50"
+                        >
+                          Force Start
+                        </button>
+                      )}
                       {canCancel && onCancelJob && (
                           <button onClick={() => onCancelJob(job.jobId)} className="px-2 py-1 rounded-lg bg-red-500/10 text-red-600">Cancel</button>
                       )}
                       {canRetry && onRetryJob && (
                           <button onClick={() => onRetryJob(job.jobId)} className="px-2 py-1 rounded-lg bg-indigo-500/10 text-indigo-600">Retry</button>
                       )}
-                      {onShowWorkInfo && <button onClick={() => onShowWorkInfo(job.jobId)} className="px-2 py-1 rounded-lg bg-slate-700/20 text-slate-200">Show work info</button>}
+                      {onShowWorkInfo && (
+                        <button
+                          disabled={!nativeJobsAvailable}
+                          onClick={() => nativeJobsAvailable && onShowWorkInfo(job.jobId)}
+                          className="px-2 py-1 rounded-lg bg-slate-700/20 text-slate-200 disabled:opacity-50"
+                        >
+                          Show work info
+                        </button>
+                      )}
                       {canRemove && onDeleteJob && (
                           <button onClick={() => onDeleteJob(job.jobId)} className={`px-2 py-1 rounded-lg ${isDark ? 'bg-white/10 text-slate-100' : 'bg-black/10 text-black'}`}>Remove</button>
                       )}

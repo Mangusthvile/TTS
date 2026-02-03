@@ -2,6 +2,7 @@ import { Capacitor } from "@capacitor/core";
 import { UiMode } from "../types";
 import { computeMobileMode } from "../utils/platform";
 import { Filesystem, Directory } from "@capacitor/filesystem";
+import { appConfig } from "../src/config/appConfig";
 import {
   setChapterAudioPath,
   getChapterAudioPath,
@@ -31,8 +32,11 @@ export class DesktopAudioStorage implements AudioStorage {
 }
 
 export class MobileAudioStorage implements AudioStorage {
+  private static STAT_TTL_MS = appConfig.cache.chapterAudioPathTtlMs;
+  private static statCache = new Map<string, { ok: boolean; ts: number }>();
+
   private buildPath(chapterId: string) {
-    return `talevox/audio/${chapterId}.mp3`;
+    return `${appConfig.paths.audioDir}/${chapterId}.mp3`;
   }
 
   private async normalizeChunk(data: AudioChunk): Promise<{ base64: string; sizeBytes: number }> {
@@ -105,19 +109,26 @@ export class MobileAudioStorage implements AudioStorage {
       recursive: true,
     });
     await setChapterAudioPath(chapterId, res.uri, sizeBytes);
+    MobileAudioStorage.statCache.set(chapterId, { ok: true, ts: Date.now() });
     return res.uri;
   }
 
   async getAudioPath(chapterId: string): Promise<string | null> {
     const record = await getChapterAudioPath(chapterId);
     if (!record) return null;
+    const cached = MobileAudioStorage.statCache.get(chapterId);
+    if (cached && Date.now() - cached.ts < MobileAudioStorage.STAT_TTL_MS) {
+      return cached.ok ? record.localPath : null;
+    }
     try {
       await Filesystem.stat({
         path: this.buildPath(chapterId),
         directory: Directory.Data,
       });
+      MobileAudioStorage.statCache.set(chapterId, { ok: true, ts: Date.now() });
       return record.localPath;
     } catch {
+      MobileAudioStorage.statCache.set(chapterId, { ok: false, ts: Date.now() });
       return null;
     }
   }
@@ -132,6 +143,7 @@ export class MobileAudioStorage implements AudioStorage {
       // ignore missing file
     }
     await deleteChapterAudioPath(chapterId);
+    MobileAudioStorage.statCache.delete(chapterId);
   }
 }
 

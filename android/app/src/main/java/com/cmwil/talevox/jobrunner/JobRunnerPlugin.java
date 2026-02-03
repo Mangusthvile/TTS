@@ -41,6 +41,7 @@ import org.json.JSONObject;
 
 import java.util.UUID;
 import java.util.List;
+import java.io.File;
 import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -61,6 +62,7 @@ import com.cmwil.talevox.notifications.JobNotificationHelper;
 )
 public class JobRunnerPlugin extends Plugin {
     private static final String DB_NAME = "talevox_db";
+    private static final String DB_FILE = DB_NAME + "SQLite.db";
     private static JobRunnerPlugin instance;
     private static volatile long lastForegroundAt = 0;
 
@@ -90,7 +92,7 @@ public class JobRunnerPlugin extends Plugin {
 
     private SQLiteDatabase getDb() {
         Context ctx = getContext();
-        SQLiteDatabase db = ctx.openOrCreateDatabase(DB_NAME, Context.MODE_PRIVATE, null);
+        SQLiteDatabase db = ctx.openOrCreateDatabase(DB_FILE, Context.MODE_PRIVATE, null);
         db.execSQL(
             "CREATE TABLE IF NOT EXISTS jobs (" +
             "jobId TEXT PRIMARY KEY," +
@@ -134,6 +136,10 @@ public class JobRunnerPlugin extends Plugin {
         JSObject payload = call.getObject("payload");
         String jobId = UUID.randomUUID().toString();
         long now = System.currentTimeMillis();
+        String correlationId = null;
+        if (payload != null) {
+            try { correlationId = payload.optString("correlationId", null); } catch (Exception ignored) {}
+        }
 
         int total = 0;
         if (payload != null) {
@@ -147,6 +153,9 @@ public class JobRunnerPlugin extends Plugin {
         try {
             progressJson.put("total", total);
             progressJson.put("completed", 0);
+            if (correlationId != null && !correlationId.isEmpty()) {
+                progressJson.put("correlationId", correlationId);
+            }
         } catch (JSONException ignored) {}
 
         String payloadStr = payload != null ? payload.toString() : null;
@@ -178,6 +187,8 @@ public class JobRunnerPlugin extends Plugin {
             update.put("updatedAt", System.currentTimeMillis());
             db.update("jobs", update, "jobId = ?", new String[]{jobId});
         } catch (JSONException ignored) {}
+
+        Log.i("JobRunner", "enqueueGenerateAudio jobId=" + jobId + " workId=" + request.getId() + " correlationId=" + (correlationId != null ? correlationId : "none"));
 
         JSObject ret = new JSObject();
         ret.put("jobId", jobId);
@@ -279,6 +290,8 @@ public class JobRunnerPlugin extends Plugin {
             db.update("jobs", update, "jobId = ?", new String[]{jobId});
         } catch (JSONException ignored) {}
 
+        Log.i("JobRunner", "enqueueFixIntegrity jobId=" + jobId + " workId=" + request.getId());
+
         JSObject ret = new JSObject();
         ret.put("jobId", jobId);
         call.resolve(ret);
@@ -330,6 +343,8 @@ public class JobRunnerPlugin extends Plugin {
             update.put("updatedAt", System.currentTimeMillis());
             db.update("jobs", update, "jobId = ?", new String[]{jobId});
         } catch (JSONException ignored) {}
+
+        Log.i("JobRunner", "enqueueUploadJob jobId=" + jobId + " workId=" + request.getId());
 
         JSObject ret = new JSObject();
         ret.put("jobId", jobId);
@@ -406,6 +421,7 @@ public class JobRunnerPlugin extends Plugin {
         } catch (JSONException ignored) {}
 
         updateJobProgress(jobId, "queued", progressJson, null);
+        Log.i("JobRunner", "retryJob jobId=" + jobId + " workId=" + request.getId());
         JSObject ret = new JSObject();
         ret.put("jobId", jobId);
         call.resolve(ret);
@@ -457,6 +473,7 @@ public class JobRunnerPlugin extends Plugin {
         } catch (JSONException ignored) {}
 
         updateJobProgress(jobId, "queued", progressJson, null);
+        Log.i("JobRunner", "forceStartJob jobId=" + jobId + " workId=" + request.getId());
         call.resolve();
     }
 
@@ -617,7 +634,64 @@ public class JobRunnerPlugin extends Plugin {
 
     @PluginMethod
     public void getDiagnostics(PluginCall call) {
-        getNotificationDiagnostics(call);
+        JSObject out = new JSObject();
+        try {
+            Context ctx = getContext();
+            int perm = ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS);
+            String permStr = "prompt";
+            if (android.os.Build.VERSION.SDK_INT < 33) {
+                permStr = "granted";
+            } else if (perm == PackageManager.PERMISSION_GRANTED) {
+                permStr = "granted";
+            } else {
+                PermissionState state = getPermissionState("notifications");
+                if (state == PermissionState.DENIED) permStr = "denied";
+            }
+            out.put("permission", permStr);
+
+            NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+            boolean channelExists = false;
+            if (nm != null) {
+                NotificationChannel ch = nm.getNotificationChannel(JobNotificationChannels.CHANNEL_JOBS_ID);
+                channelExists = (ch != null);
+            }
+            out.put("channelExists", channelExists);
+            JSArray chans = new JSArray();
+            chans.put(JobNotificationChannels.CHANNEL_JOBS_ID);
+            out.put("channels", chans);
+            out.put("hasPlugin", true);
+            out.put("plugin", "JobRunner");
+
+            long ageMs = System.currentTimeMillis() - lastForegroundAt;
+            out.put("foregroundRecent", lastForegroundAt > 0 && ageMs < 30000);
+            out.put("foregroundAgeMs", ageMs);
+
+            JSObject tables = new JSObject();
+            SQLiteDatabase db = getDb();
+            Cursor c = db.rawQuery(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('books','chapters','chapter_text','jobs')",
+                null
+            );
+            while (c.moveToNext()) {
+                String name = c.getString(0);
+                tables.put(name, true);
+            }
+            c.close();
+            if (!tables.has("books")) tables.put("books", false);
+            if (!tables.has("chapters")) tables.put("chapters", false);
+            if (!tables.has("chapter_text")) tables.put("chapter_text", false);
+            if (!tables.has("jobs")) tables.put("jobs", false);
+            out.put("tables", tables);
+
+            try {
+                File dbFile = ctx.getDatabasePath(DB_FILE);
+                out.put("dbFileExists", dbFile != null && dbFile.exists());
+                out.put("dbPath", dbFile != null ? dbFile.getAbsolutePath() : "");
+            } catch (Exception ignored) {}
+        } catch (Exception e) {
+            out.put("error", e.getMessage());
+        }
+        call.resolve(out);
     }
 
     @PluginMethod

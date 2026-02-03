@@ -1,37 +1,41 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo, Suspense } from 'react';
 import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, PlaybackPhase, UiMode, ReaderSettings, JobRecord, CueMap } from './types';
-import Library from './components/Library';
-import Reader from './components/Reader';
-import Player from './components/Player';
-import RuleManager from './components/RuleManager';
-import Settings from './components/Settings';
-import Extractor from './components/Extractor';
-import ChapterFolderView from './components/ChapterFolderView';
-import ChapterSidebar from './components/ChapterSidebar';
+import Library from './src/features/library/Library';
+import Reader from './src/features/reader/Reader';
+import Player from './src/features/reader/Player';
+import ChapterSidebar from './src/features/library/ChapterSidebar';
 import { speechController, applyRules, PROGRESS_STORE_V4 } from './services/speechService';
 import type { PlaybackItem } from './services/playbackAdapter';
 import { reflowLineBreaks } from './services/textFormat';
-import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, openFolderPicker, listFilesSortedByModified, resolveFolderIdByName, listSaveFileCandidates, createDriveFolder, listFoldersInFolder, findTaleVoxRoots } from './services/driveService';
+import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, moveFileToTrash, openFolderPicker, listFilesSortedByModified, resolveFolderIdByName, listSaveFileCandidates, createDriveFolder, listFoldersInFolder, findTaleVoxRoots } from './services/driveService';
+import type { InventoryManifest } from "./services/bookManifests";
 import { initDriveAuth, getValidDriveToken, clearStoredToken, isTokenValid, ensureValidToken } from './services/driveAuth';
 import { authManager, AuthState } from './services/authManager';
 import { saveChapterToFile } from './services/fileService';
 import { synthesizeChunk } from './services/cloudTtsService';
 import { extractChapterWithAI } from './services/geminiService';
 import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
-import { persistChapterAudio, resolveChapterAudioUrl } from './services/audioStorage';
+import { persistChapterAudio, resolveChapterAudioUrl, getAudioStorage } from './services/audioStorage';
 import { idbSet } from './services/storageService';
-import { listBooks as libraryListBooks, upsertBook as libraryUpsertBook, deleteBook as libraryDeleteBook, listChaptersPage as libraryListChaptersPage, upsertChapterMeta as libraryUpsertChapterMeta, deleteChapter as libraryDeleteChapter, saveChapterText as librarySaveChapterText, loadChapterText as libraryLoadChapterText } from './services/libraryStore';
-import { migrateLegacyLocalStorageIfNeeded } from './services/libraryMigration';
+import { listBooks as libraryListBooks, upsertBook as libraryUpsertBook, deleteBook as libraryDeleteBook, listChaptersPage as libraryListChaptersPage, upsertChapterMeta as libraryUpsertChapterMeta, deleteChapter as libraryDeleteChapter, saveChapterText as librarySaveChapterText, loadChapterText as libraryLoadChapterText, bulkUpsertChapters as libraryBulkUpsertChapters } from './services/libraryStore';
+import { bootstrapCore } from './src/app/bootstrap';
 import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud, Terminal, List, FolderSync, CheckCircle2, Plus } from 'lucide-react';
 import { trace, traceError } from './utils/trace';
 import { computeMobileMode } from './utils/platform';
+import { getLogger, setLogEnabled, createCorrelationId } from './utils/logger';
+import { MissingTextError, toUserMessage } from "./utils/errors";
+import { yieldToUi } from './utils/async';
 import { JobRunner } from './src/plugins/jobRunner';
-import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService, deleteJob as deleteJobService, clearJobs as clearJobsService, enqueueGenerateAudio, enqueueUploadJob, getWorkInfo, forceStartJob as forceStartJobService, getJobById, jobRunnerHealthCheck } from './services/jobRunnerService';
+import { appConfig } from "./src/config/appConfig";
+import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService, deleteJob as deleteJobService, clearJobs as clearJobsService, enqueueGenerateAudio, enqueueUploadJob, getWorkInfo, forceStartJob as forceStartJobService, getJobById, jobRunnerHealthCheck, getJobRunnerCapability } from './services/jobRunnerService';
+import { getNativeChapterTextCount, ensureNativeBook, ensureNativeChapter, ensureNativeChapterText, hasNativeBook } from "./services/nativeLibraryBridge";
 import { countQueuedUploads, listQueuedUploads, enqueueChapterUpload, removeQueuedUpload, type DriveUploadQueuedItem } from './services/driveUploadQueueService';
 import { getChapterAudioPath } from './services/chapterAudioStore';
-import { Filesystem, Directory } from '@capacitor/filesystem';
+import { Filesystem, Directory, Encoding } from "@capacitor/filesystem";
+import { createDriveFolderAdapter } from "./services/driveFolderAdapter";
 import { cueMapFromChunkMap, cueMapFallback, findCueIndex } from './services/cueMaps';
 import { saveChapterCueMap, getChapterCueMap, deleteChapterCueMap } from './services/libraryStore';
+import { collectDiagnostics, saveDiagnosticsToFile, type DiagnosticsReport } from "./services/diagnosticsService";
 
 type DownloadedChapterInfo = {
   id: string;
@@ -48,6 +52,11 @@ const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
 const BACKUP_KEY = "talevox_sync_backup";
 const UI_MODE_KEY = "talevox_ui_mode";
 const PREFS_KEY = 'talevox_prefs_v3';
+const jobLog = getLogger("Jobs");
+const LazyExtractor = React.lazy(() => import('./src/features/library/Extractor'));
+const LazyChapterFolderView = React.lazy(() => import('./src/features/library/ChapterFolderView'));
+const LazyRuleManager = React.lazy(() => import('./src/features/rules/RuleManager'));
+const LazySettings = React.lazy(() => import('./src/features/settings/Settings'));
 
 // --- Safe Storage Helper ---
 const safeSetLocalStorage = (key: string, value: string) => {
@@ -90,6 +99,13 @@ const normalizeChapterProgress = (c: Chapter): Chapter => {
 const App: React.FC = () => {
   const [isDirty, setIsDirty] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isOnline, setIsOnline] = useState(() => {
+    if (typeof navigator === "undefined") return true;
+    return navigator.onLine;
+  });
+  const [savePulse, setSavePulse] = useState(0);
+  const syncRunRef = useRef(0);
+  const nativeSyncRunRef = useRef(0);
   const [isScanningRules, setIsScanningRules] = useState(false);
   const [scanProgress, setScanProgress] = useState('');
   const [isLinkModalOpen, setIsLinkModalOpen] = useState(false);
@@ -104,6 +120,7 @@ const App: React.FC = () => {
   const lastSnapshotRef = useRef(0);
   
   const chapterSessionRef = useRef(0);
+  const chapterTextInFlightRef = useRef<Map<string, Promise<string | null>>>(new Map());
   const isInIntroRef = useRef(false);
   const lastProgressCommitTime = useRef(0);
   const isScrubbingRef = useRef(false);
@@ -241,36 +258,10 @@ const App: React.FC = () => {
     else if (state.theme === Theme.SEPIA) document.body.classList.add('sepia-theme');
   }, [state.theme]);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    (async () => {
-      try {
-        await migrateLegacyLocalStorageIfNeeded();
-        const books = await libraryListBooks();
-        if (cancelled) return;
-
-        let nextActiveBookId: string | undefined;
-
-        setState((p) => {
-          const desired = p.activeBookId;
-          const valid = desired && books.some((b) => b.id === desired);
-          nextActiveBookId = valid ? desired : (books[0]?.id ?? undefined);
-          return { ...p, books, activeBookId: nextActiveBookId };
-        });
-
-        console.log("[TaleVox][Library] Loaded books:", books.length);
-
-        if (nextActiveBookId) {
-          void loadMoreChapters(nextActiveBookId, true);
-        }
-      } catch (e: any) {
-        console.error("Library bootstrap failed", e);
-      }
-    })();
-
-    return () => { cancelled = true; };
-  }, []);
+  const bootstrapPromiseRef = useRef<Promise<void> | null>(null);
+  const bootstrapRunRef = useRef(0);
+  const [bootstrapStatus, setBootstrapStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
 
   const [effectiveMobileMode, setEffectiveMobileMode] = useState(computeMobileMode(state.readerSettings.uiMode));
 
@@ -294,17 +285,48 @@ const App: React.FC = () => {
   const chapterPagingRef = useRef<Record<string, { afterIndex: number; hasMore: boolean; loading: boolean }>>({});
   const [logJobs, setLogJobs] = useState<boolean>(() => localStorage.getItem(LOG_JOBS_KEY) === 'true');
   const [notificationStatus, setNotificationStatus] = useState<{ supported: boolean; granted: boolean; enabled: boolean } | null>(null);
+  const [jobRunnerCap, setJobRunnerCap] = useState<{ available: boolean; platform: string; reason?: string } | null>(null);
+  const [diagnosticsReport, setDiagnosticsReport] = useState<DiagnosticsReport | null>(null);
   useEffect(() => { localStorage.setItem(LOG_JOBS_KEY, logJobs ? 'true' : 'false'); }, [logJobs]);
+  useEffect(() => { setLogEnabled("Jobs", logJobs); }, [logJobs]);
+
+  const refreshDiagnostics = useCallback(async () => {
+    try {
+      const report = await collectDiagnostics();
+      setDiagnosticsReport(report);
+      return report;
+    } catch (e: any) {
+      jobLog.error("diagnostics.refreshFailed", e);
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    getJobRunnerCapability().then((cap) => {
+      if (mounted) {
+        setJobRunnerCap({ available: cap.available, platform: cap.platform, reason: cap.reason });
+        jobLog.info("capability", cap);
+      }
+    });
+    return () => { mounted = false; };
+  }, []);
+
+  const jobRunnerAvailable = jobRunnerCap?.available ?? false;
 
   const refreshNotificationStatus = useCallback(async () => {
     try {
+      if (!jobRunnerAvailable) {
+        setNotificationStatus({ supported: false, granted: false, enabled: false });
+        return;
+      }
       const res = await JobRunner.checkNotificationPermission();
       setNotificationStatus(res);
-      if (logJobs) console.log("[Jobs][notifications][status]", res);
+      jobLog.info("notifications.status", res);
     } catch {
       setNotificationStatus(null);
     }
-  }, [logJobs]);
+  }, [logJobs, jobRunnerAvailable]);
 
   useEffect(() => {
     refreshNotificationStatus();
@@ -339,15 +361,38 @@ const App: React.FC = () => {
         const books = p.books.map((b) => {
           if (b.id !== bookId) return b;
           const existing = reset ? [] : b.chapters;
-          const combined = [...existing, ...page.chapters];
+          const byId = new Map<string, Chapter>();
 
-          const seen = new Set<string>();
-          const deduped = combined.filter((c) => {
-            if (seen.has(c.id)) return false;
-            seen.add(c.id);
-            return true;
-          });
+          const isPlaceholderTitle = (title?: string) => {
+            if (!title) return true;
+            const t = title.trim().toLowerCase();
+            return t.length === 0 || t.startsWith("imported");
+          };
 
+          for (const c of existing) {
+            byId.set(c.id, c);
+          }
+          for (const c of page.chapters) {
+            const prev = byId.get(c.id);
+            if (!prev) {
+              byId.set(c.id, c);
+              continue;
+            }
+            const merged: Chapter = { ...prev, ...c };
+            if (typeof c.index === "number" && c.index > 0) {
+              merged.index = c.index;
+            } else if (typeof prev.index === "number" && prev.index > 0) {
+              merged.index = prev.index;
+            }
+            if (!isPlaceholderTitle(c.title)) {
+              merged.title = c.title;
+            } else if (!isPlaceholderTitle(prev.title)) {
+              merged.title = prev.title;
+            }
+            byId.set(c.id, merged);
+          }
+
+          const deduped = Array.from(byId.values());
           deduped.sort((a, b2) => a.index - b2.index);
           return {
             ...b,
@@ -394,6 +439,46 @@ const App: React.FC = () => {
   const [downloadedChapters, setDownloadedChapters] = useState<DownloadedChapterInfo[]>([]);
   const [showDownloadedChapters, setShowDownloadedChapters] = useState(false);
   const [showUploadQueue, setShowUploadQueue] = useState(false);
+
+  const pendingChangeCount = useMemo(() => {
+    let count = 0;
+    if (isDirty) count += 1;
+    if (uploadQueueCount > 0) count += uploadQueueCount;
+    return count;
+  }, [isDirty, uploadQueueCount]);
+
+  const statusInfo = useMemo(() => {
+    if (isSyncing) {
+      return { label: "Syncing with Drive…", tone: "text-indigo-300", icon: "sync" as const };
+    }
+    if (savePulse) {
+      return { label: "Saving…", tone: "text-amber-300", icon: "saving" as const };
+    }
+    if (!isOnline && pendingChangeCount > 0) {
+      const plural = pendingChangeCount === 1 ? "" : "s";
+      return {
+        label: `Offline: ${pendingChangeCount} change${plural} pending`,
+        tone: "text-amber-300",
+        icon: "offline" as const,
+      };
+    }
+    if (pendingChangeCount > 0) {
+      const plural = pendingChangeCount === 1 ? "" : "s";
+      return {
+        label: `${pendingChangeCount} change${plural} pending sync`,
+        tone: "text-amber-200",
+        icon: "pending" as const,
+      };
+    }
+    return { label: "All changes saved", tone: "text-emerald-300", icon: "ok" as const };
+  }, [isSyncing, savePulse, isOnline, pendingChangeCount]);
+
+  const showSyncNow =
+    !!state.driveRootFolderId &&
+    isAuthorized &&
+    !isSyncing &&
+    isOnline &&
+    pendingChangeCount > 0;
   const [activeCueRange, setActiveCueRange] = useState<{ start: number; end: number } | null>(null);
   const [activeCueIndex, setActiveCueIndex] = useState<number | null>(null);
   const [activeCueMap, setActiveCueMap] = useState<CueMap | null>(null);
@@ -428,7 +513,14 @@ const App: React.FC = () => {
     try {
       const all = await listAllJobs(state.readerSettings.uiMode);
       setJobs(all);
-      if (logJobs) console.log('[Jobs][refresh]', all);
+      jobLog.info("refresh", {
+        count: all.length,
+        jobs: all.map((j) => ({
+          jobId: j.jobId,
+          status: j.status,
+          workRequestId: (j as any).progressJson?.workRequestId ?? null,
+        })),
+      });
       await refreshUploadQueueCount();
       // Lightweight plugin health check to surface missing native registration
       await jobRunnerHealthCheck(state.readerSettings.uiMode);
@@ -437,14 +529,57 @@ const App: React.FC = () => {
     }
   }, [state.readerSettings.uiMode, refreshUploadQueueCount, logJobs]);
 
+  const runBootstrap = useCallback(async () => {
+    if (bootstrapPromiseRef.current) return bootstrapPromiseRef.current;
+    const runId = ++bootstrapRunRef.current;
+    setBootstrapStatus("running");
+    setBootstrapError(null);
+    bootstrapPromiseRef.current = (async () => {
+      await bootstrapCore(stateRef.current.googleClientId);
+      if (bootstrapRunRef.current !== runId) return;
+
+      const books = await libraryListBooks();
+      if (bootstrapRunRef.current !== runId) return;
+
+      let nextActiveBookId: string | undefined;
+      setState((p) => {
+        const desired = p.activeBookId;
+        const valid = desired && books.some((b) => b.id === desired);
+        nextActiveBookId = valid ? desired : (books[0]?.id ?? undefined);
+        return { ...p, books, activeBookId: nextActiveBookId };
+      });
+
+      console.log("[TaleVox][Library] Loaded books:", books.length);
+
+      if (nextActiveBookId) {
+        await loadMoreChapters(nextActiveBookId, true);
+      }
+      if (bootstrapRunRef.current !== runId) return;
+      await refreshJobs();
+      setBootstrapStatus("done");
+    })().catch((e: any) => {
+      console.error("App bootstrap failed", e);
+      setBootstrapStatus("error");
+      setBootstrapError(String(e?.message ?? e));
+      bootstrapPromiseRef.current = null;
+    });
+    return bootstrapPromiseRef.current;
+  }, [loadMoreChapters, refreshJobs]);
+
+  useEffect(() => {
+    void runBootstrap();
+  }, [runBootstrap]);
+
   useEffect(() => {
     const unsubscribe = authManager.subscribe(setAuthState);
     return () => { unsubscribe(); };
   }, []);
 
   useEffect(() => {
-    refreshJobs();
-  }, [refreshJobs, refreshUploadQueueCount]);
+    if (activeTab === "settings") {
+      refreshDiagnostics();
+    }
+  }, [activeTab, refreshDiagnostics]);
 
   useEffect(() => {
     let isMounted = true;
@@ -460,7 +595,14 @@ const App: React.FC = () => {
           progress = undefined;
         }
       }
-      if (logJobs) console.log('[Jobs][event]', event);
+      jobLog.info("event", {
+        jobId: event.jobId,
+        status: event.status,
+        completed: progress?.completed,
+        total: progress?.total,
+        currentChapterId: progress?.currentChapterId,
+        workRequestId: progress?.workRequestId,
+      });
       setJobs((prev) => {
         const idx = prev.findIndex((j) => j.jobId === event.jobId);
         if (idx === -1) {
@@ -484,18 +626,20 @@ const App: React.FC = () => {
       refreshUploadQueueCount();
     };
 
-    JobRunner.addListener("jobProgress", applyJobEvent)
-      .then((h) => handles.push(h))
-      .catch(() => {});
-    JobRunner.addListener("jobFinished", applyJobEvent)
-      .then((h) => handles.push(h))
-      .catch(() => {});
+    if (jobRunnerAvailable) {
+      JobRunner.addListener("jobProgress", applyJobEvent)
+        .then((h) => handles.push(h))
+        .catch(() => {});
+      JobRunner.addListener("jobFinished", applyJobEvent)
+        .then((h) => handles.push(h))
+        .catch(() => {});
+    }
 
     return () => {
       isMounted = false;
       handles.forEach((h) => h.remove());
     };
-  }, [refreshJobs, refreshUploadQueueCount]);
+  }, [refreshJobs, refreshUploadQueueCount, jobRunnerAvailable]);
 
   useEffect(() => {
     refreshUploadQueueCount();
@@ -524,25 +668,23 @@ const App: React.FC = () => {
     }
     const loadDownloads = async () => {
       const entries: DownloadedChapterInfo[] = [];
+      const storage = getAudioStorage(state.readerSettings.uiMode);
+      let counter = 0;
       for (const chapter of book.chapters) {
-        const record = await getChapterAudioPath(chapter.id);
-        if (!record?.localPath) continue;
-        try {
-          await Filesystem.stat({
-            path: `talevox/audio/${chapter.id}.mp3`,
-            directory: Directory.Data,
-          });
-        } catch {
-          continue;
-        }
+        const localPath = await storage.getAudioPath(chapter.id);
+        if (!localPath) continue;
         if (!mounted) return;
         entries.push({
           id: chapter.id,
           title: chapter.title,
           index: chapter.index,
-          localPath: record.localPath,
+          localPath,
           hasDriveAudio: !!(chapter.cloudAudioFileId || chapter.audioDriveId),
         });
+        counter += 1;
+        if (counter % 40 === 0) {
+          await yieldToUi();
+        }
       }
       if (mounted) {
         setDownloadedChapters(entries);
@@ -552,13 +694,7 @@ const App: React.FC = () => {
     return () => {
       mounted = false;
     };
-  }, [state.activeBookId, state.books]);
-
-  useEffect(() => {
-    if (state.googleClientId) {
-      authManager.init(state.googleClientId);
-    }
-  }, [state.googleClientId]);
+  }, [state.activeBookId, state.books, state.readerSettings.uiMode]);
 
   useEffect(() => {
     if (authState.status === 'error') {
@@ -593,8 +729,36 @@ const App: React.FC = () => {
     };
   }, []);
 
+  useEffect(() => {
+    if (bootstrapStatus === "error" && bootstrapError) {
+      pushNotice({ message: `Startup failed: ${bootstrapError}`, type: "error", ms: 6000 });
+    }
+  }, [bootstrapStatus, bootstrapError, pushNotice]);
+
+  const handleSaveDiagnostics = useCallback(async () => {
+    const report = diagnosticsReport ?? (await refreshDiagnostics());
+    if (!report) {
+      pushNotice({ message: "Diagnostics unavailable", type: "error" });
+      return;
+    }
+    try {
+      const path = await saveDiagnosticsToFile(report);
+      if (path) {
+        pushNotice({ message: `Diagnostics saved: ${path}`, type: "success" });
+      } else {
+        pushNotice({ message: "Diagnostics file save not supported on web", type: "error" });
+      }
+    } catch (e: any) {
+      pushNotice({ message: `Diagnostics save failed: ${String(e?.message ?? e)}`, type: "error" });
+    }
+  }, [diagnosticsReport, refreshDiagnostics, pushNotice]);
+
   const handleRequestNotifications = useCallback(async () => {
     try {
+      if (!jobRunnerAvailable) {
+        pushNotice({ type: "error", message: "Notifications are only supported on Android." });
+        return;
+      }
       const res = await JobRunner.requestNotificationPermission();
       if (!res.granted) {
         pushNotice({ type: "error", message: "Notifications are required for background jobs. Permission denied." });
@@ -603,23 +767,31 @@ const App: React.FC = () => {
     } catch (e: any) {
       pushNotice({ type: "error", message: `Notification request failed: ${String(e?.message ?? e)}` });
     }
-  }, [refreshNotificationStatus, pushNotice]);
+  }, [refreshNotificationStatus, pushNotice, jobRunnerAvailable]);
 
   const handleOpenNotificationSettings = useCallback(async () => {
     try {
+      if (!jobRunnerAvailable) {
+        pushNotice({ type: "error", message: "Notification settings are only available on Android." });
+        return;
+      }
       await JobRunner.openNotificationSettings();
     } catch (e) {
       console.warn("openNotificationSettings failed", e);
     }
-  }, []);
+  }, [jobRunnerAvailable, pushNotice]);
 
   const handleSendTestNotification = useCallback(async () => {
     try {
+      if (!jobRunnerAvailable) {
+        pushNotice({ type: "error", message: "Test notifications are only available on Android." });
+        return;
+      }
       await JobRunner.sendTestNotification();
     } catch (e) {
       console.warn("sendTestNotification failed", e);
     }
-  }, []);
+  }, [jobRunnerAvailable, pushNotice]);
 
   const updatePhase = useCallback((p: PlaybackPhase) => {
     const validPhases: PlaybackPhase[] = ['IDLE', 'LOADING_TEXT', 'READY', 'LOADING_AUDIO', 'SEEKING', 'SCRUBBING', 'PLAYING_INTRO', 'PLAYING_BODY', 'ENDING_SETTLE', 'TRANSITIONING', 'ERROR'];
@@ -638,10 +810,32 @@ const App: React.FC = () => {
     });
   }, []);
 
+  const triggerSavePulse = useCallback(() => {
+    setSavePulse(Date.now());
+  }, []);
+
+  useEffect(() => {
+    const update = () => setIsOnline(typeof navigator !== "undefined" ? navigator.onLine : true);
+    update();
+    window.addEventListener("online", update);
+    window.addEventListener("offline", update);
+    return () => {
+      window.removeEventListener("online", update);
+      window.removeEventListener("offline", update);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!savePulse) return;
+    const timer = window.setTimeout(() => setSavePulse(0), 1400);
+    return () => window.clearTimeout(timer);
+  }, [savePulse]);
+
   const markDirty = useCallback(() => {
     setIsDirty(true);
+    triggerSavePulse();
     updateDiagnostics({ isDirty: true, dirtySince: Date.now() });
-  }, [updateDiagnostics]);
+  }, [updateDiagnostics, triggerSavePulse]);
 
   const commitProgressUpdate = useCallback((
     bookId: string, 
@@ -881,64 +1075,30 @@ const App: React.FC = () => {
 
   const ensureChapterContentLoaded = useCallback(
     async (bookId: string, chapterId: string, session: number): Promise<string | null> => {
-      const s = stateRef.current;
-      const book = s.books.find(b => b.id === bookId);
-      const chapter = book?.chapters.find(c => c.id === chapterId);
-      if (!book || !chapter) return null;
+      const key = `${bookId}:${chapterId}`;
+      const inFlight = chapterTextInFlightRef.current.get(key);
+      if (inFlight) return inFlight;
 
-      // If we already have content in memory, accept it even if short.
-      if (typeof chapter.content === "string") {
-        try {
-          await librarySaveChapterText(bookId, chapterId, chapter.content);
-        } catch {}
-        return chapter.content;
-      }
+      const task = (async () => {
+        const s = stateRef.current;
+        const book = s.books.find(b => b.id === bookId);
+        const chapter = book?.chapters.find(c => c.id === chapterId);
+        if (!book || !chapter) return null;
 
-      // Local cache first. Only null means missing. Short strings are valid.
-      try {
-        const cached = await libraryLoadChapterText(bookId, chapterId);
-
-        if (cached !== null) {
-          if (chapterSessionRef.current !== session) return null;
-
-          setState(p => ({
-            ...p,
-            books: p.books.map(b =>
-              b.id === bookId
-                ? {
-                    ...b,
-                    chapters: b.chapters.map(c =>
-                      c.id === chapterId
-                        ? { ...c, content: cached, textLength: cached.length, updatedAt: Date.now() }
-                        : c
-                    ),
-                  }
-                : b
-            ),
-          }));
-
-          trace("text:cache:hit", { chapterId, len: cached.length });
-          return cached;
+        // If we already have content in memory, accept it even if short.
+        if (typeof chapter.content === "string") {
+          try {
+            await librarySaveChapterText(bookId, chapterId, chapter.content);
+          } catch {}
+          return chapter.content;
         }
 
-        trace("text:cache:miss", { chapterId });
-      } catch (e: any) {
-        traceError("text:cache:error", e);
-        // ignore and fall back to Drive below
-      }
-
-      // Drive fallback only if authorized
-      if (chapter.cloudTextFileId && isAuthorized) {
-        trace("text:drive:load:start", { chapterId, fileId: chapter.cloudTextFileId, session });
-
+        // Local cache first. Only null means missing. Short strings are valid.
         try {
-          const text = await fetchDriveFile(chapter.cloudTextFileId);
+          const cached = await libraryLoadChapterText(bookId, chapterId);
 
-          if (typeof text === "string") {
-            if (chapterSessionRef.current !== session) {
-              trace("text:drive:load:aborted", { reason: "stale_session" });
-              return null;
-            }
+          if (cached !== null) {
+            if (chapterSessionRef.current !== session) return null;
 
             setState(p => ({
               ...p,
@@ -948,7 +1108,7 @@ const App: React.FC = () => {
                       ...b,
                       chapters: b.chapters.map(c =>
                         c.id === chapterId
-                          ? { ...c, content: text, textLength: text.length, updatedAt: Date.now() }
+                          ? { ...c, content: cached, textLength: cached.length, updatedAt: Date.now() }
                           : c
                       ),
                     }
@@ -956,20 +1116,67 @@ const App: React.FC = () => {
               ),
             }));
 
-            try {
-              await librarySaveChapterText(bookId, chapterId, text);
-            } catch {}
-
-            trace("text:drive:load:success", { chapterId, len: text.length });
-            return text;
+            trace("text:cache:hit", { chapterId, len: cached.length });
+            return cached;
           }
-        } catch (e: any) {
-          traceError("text:drive:load:failed", e);
-          pushNotice({ message: "Failed to load text: " + (e?.message ?? String(e)), type: "error" });
-        }
-      }
 
-      return null;
+          trace("text:cache:miss", { chapterId });
+        } catch (e: any) {
+          traceError("text:cache:error", e);
+          // ignore and fall back to Drive below
+        }
+
+        // Drive fallback only if authorized
+        if (chapter.cloudTextFileId && isAuthorized) {
+          trace("text:drive:load:start", { chapterId, fileId: chapter.cloudTextFileId, session });
+
+          try {
+            const text = await fetchDriveFile(chapter.cloudTextFileId);
+
+            if (typeof text === "string") {
+              if (chapterSessionRef.current !== session) {
+                trace("text:drive:load:aborted", { reason: "stale_session" });
+                return null;
+              }
+
+              setState(p => ({
+                ...p,
+                books: p.books.map(b =>
+                  b.id === bookId
+                    ? {
+                        ...b,
+                        chapters: b.chapters.map(c =>
+                          c.id === chapterId
+                            ? { ...c, content: text, textLength: text.length, updatedAt: Date.now() }
+                            : c
+                        ),
+                      }
+                    : b
+                ),
+              }));
+
+              try {
+                await librarySaveChapterText(bookId, chapterId, text);
+              } catch {}
+
+              trace("text:drive:load:success", { chapterId, len: text.length });
+              return text;
+            }
+          } catch (e: any) {
+            traceError("text:drive:load:failed", e);
+            pushNotice({ message: "Failed to load text: " + (e?.message ?? String(e)), type: "error" });
+          }
+        }
+
+        return null;
+      })();
+
+      chapterTextInFlightRef.current.set(key, task);
+      try {
+        return await task;
+      } finally {
+        chapterTextInFlightRef.current.delete(key);
+      }
     },
     [isAuthorized, pushNotice]
   );
@@ -1318,6 +1525,98 @@ const App: React.FC = () => {
     markDirty();
   }, [markDirty]);
 
+  const handleUpdateChapterTitle = useCallback(async (chapterId: string, title: string) => {
+    const s = stateRef.current;
+    const book = s.books.find((b) => b.id === s.activeBookId);
+    if (!book) return;
+    const chapter = book.chapters.find((c) => c.id === chapterId);
+    if (!chapter) return;
+
+    const updated: Chapter = { ...chapter, title, updatedAt: Date.now() };
+    setState((p) => ({
+      ...p,
+      books: p.books.map((b) =>
+        b.id === book.id
+          ? { ...b, chapters: b.chapters.map((c) => (c.id === chapterId ? updated : c)) }
+          : b
+      ),
+    }));
+    markDirty();
+
+    try {
+      await libraryUpsertChapterMeta(book.id, { ...updated, content: undefined });
+    } catch (e: any) {
+      console.warn("[TaleVox][Library] chapter title update failed", e);
+    }
+
+    if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
+      void syncBookInventoryToDrive(book);
+    }
+  }, [markDirty, isAuthorized]);
+
+  const handleUpdateChapter = useCallback(async (chapter: Chapter) => {
+    const s = stateRef.current;
+    const book = s.books.find((b) => b.id === s.activeBookId);
+    if (!book) return;
+    setState((prev) => ({
+      ...prev,
+      books: prev.books.map((b) =>
+        b.id === book.id ? { ...b, chapters: b.chapters.map((c) => (c.id === chapter.id ? chapter : c)) } : b
+      ),
+    }));
+    markDirty();
+    try {
+      await libraryUpsertChapterMeta(book.id, { ...chapter, content: undefined });
+    } catch (e: any) {
+      console.warn("[TaleVox][Library] chapter update failed", e);
+    }
+  }, [markDirty]);
+
+  const handleDeleteChapter = useCallback(async (chapterId: string) => {
+    const s = stateRef.current;
+    const book = s.books.find((b) => b.id === s.activeBookId);
+    if (!book) return;
+    const chapter = book.chapters.find((c) => c.id === chapterId);
+    if (!chapter) return;
+
+    setState((p) => ({
+      ...p,
+      books: p.books.map((b) => {
+        if (b.id !== book.id) return b;
+        const nextChapters = b.chapters.filter((c) => c.id !== chapterId);
+        const nextCount =
+          typeof b.chapterCount === "number" ? Math.max(0, b.chapterCount - 1) : nextChapters.length;
+        return { ...b, chapters: nextChapters, chapterCount: nextCount };
+      }),
+    }));
+    markDirty();
+
+    try {
+      await libraryDeleteChapter(book.id, chapterId);
+    } catch (e: any) {
+      console.warn("[TaleVox][Library] delete chapter failed", e);
+    }
+
+    try {
+      await deleteChapterCueMap(chapterId);
+    } catch {}
+
+    if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
+      const ids = new Set<string>();
+      if (chapter.cloudTextFileId) ids.add(chapter.cloudTextFileId);
+      if (chapter.cloudAudioFileId) ids.add(chapter.cloudAudioFileId);
+      if (chapter.audioDriveId) ids.add(chapter.audioDriveId);
+      for (const id of ids) {
+        try {
+          await moveFileToTrash(id);
+        } catch (e) {
+          console.warn("Drive delete failed", e);
+        }
+      }
+      void syncBookInventoryToDrive(book);
+    }
+  }, [markDirty, isAuthorized]);
+
   const handleDeleteBookMeta = useCallback(async (id: string) => {
     try {
       await libraryDeleteBook(id);
@@ -1452,6 +1751,14 @@ const App: React.FC = () => {
     return new Blob([byteArray], { type: mimeType });
   };
 
+  const blobToDataUrl = (blob: Blob): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ""));
+      reader.onerror = () => reject(new Error("Failed to read blob"));
+      reader.readAsDataURL(blob);
+    });
+
   const readLocalAudioBlob = useCallback(async (chapterId: string) => {
     const record = await getChapterAudioPath(chapterId);
     if (!record?.localPath) return null;
@@ -1461,7 +1768,7 @@ const App: React.FC = () => {
       return base64ToBlob(res.data, 'audio/mpeg');
     } catch {
       try {
-        const res = await Filesystem.readFile({ path: `talevox/audio/${chapterId}.mp3`, directory: Directory.Data });
+        const res = await Filesystem.readFile({ path: `${appConfig.paths.audioDir}/${chapterId}.mp3`, directory: Directory.Data });
         if (res.data instanceof Blob) return res.data;
         return base64ToBlob(res.data, 'audio/mpeg');
       } catch {
@@ -1481,8 +1788,8 @@ const App: React.FC = () => {
 
   const kickUploadQueue = useCallback(async () => {
     try {
-      if (JobRunner && (JobRunner as any).kickUploadQueue) {
-        await (JobRunner as any).kickUploadQueue();
+      if (jobRunnerAvailable) {
+        await JobRunner.kickUploadQueue();
       }
     } catch {
       // ignore
@@ -1600,6 +1907,152 @@ const App: React.FC = () => {
   const handleToggleDownloadedChapters = useCallback(() => {
     setShowDownloadedChapters((prev) => !prev);
   }, []);
+
+  const handleSyncLibraryToNativeDb = useCallback(async (opts?: { bookId?: string; chapterIds?: string[] }) => {
+    const runId = ++nativeSyncRunRef.current;
+    const isCancelled = () => nativeSyncRunRef.current !== runId;
+    const s = stateRef.current;
+    const chapterFilter = opts?.chapterIds && opts.chapterIds.length ? new Set(opts.chapterIds) : null;
+    let books = 0;
+    let chapters = 0;
+    let texts = 0;
+    let failures = 0;
+    const missingFiles: string[] = [];
+    const baseDir = appConfig.paths.textDir;
+
+    const targetBooks = opts?.bookId
+      ? s.books.filter((b) => b.id === opts.bookId)
+      : s.books;
+
+    if (computeMobileMode(s.readerSettings.uiMode)) {
+      try {
+        await Filesystem.mkdir({ path: baseDir, directory: Directory.Data, recursive: true });
+      } catch {
+        // ignore if exists
+      }
+    }
+
+    const syncedChapterIds: string[] = [];
+
+    for (const book of targetBooks) {
+      if (isCancelled()) return { books, chapters, texts, failures, chapterTextRows: 0, missingFiles: missingFiles.length };
+      try {
+        await ensureNativeBook({
+          id: book.id,
+          title: book.title,
+          author: book.author,
+          coverImage: book.coverImage,
+          backend: book.backend,
+          driveFolderId: (book as any).driveFolderId,
+          driveFolderName: (book as any).driveFolderName,
+          currentChapterId: book.currentChapterId,
+          settings: book.settings,
+          rules: book.rules,
+        });
+        books += 1;
+      } catch {
+        failures += 1;
+      }
+
+      let chapterCounter = 0;
+      for (const chapter of book.chapters) {
+        if (isCancelled()) return { books, chapters, texts, failures, chapterTextRows: 0, missingFiles: missingFiles.length };
+        if (chapterFilter && !chapterFilter.has(chapter.id)) continue;
+        try {
+          await ensureNativeChapter(book.id, {
+            id: chapter.id,
+            title: chapter.title ?? chapter.id,
+            idx: chapter.index,
+            filename: chapter.filename,
+            sourceUrl: chapter.sourceUrl,
+            cloudTextFileId: chapter.cloudTextFileId,
+            cloudAudioFileId: chapter.cloudAudioFileId,
+            audioDriveId: chapter.audioDriveId,
+            audioStatus: chapter.audioStatus,
+            audioSignature: chapter.audioSignature,
+            durationSec: chapter.durationSec,
+            textLength: chapter.textLength,
+            wordCount: chapter.wordCount,
+            isFavorite: chapter.isFavorite,
+            updatedAt: chapter.updatedAt,
+          });
+          chapters += 1;
+        } catch {
+          failures += 1;
+        }
+
+        try {
+          chapterCounter += 1;
+          if (chapterCounter % 25 === 0) {
+            await yieldToUi();
+          }
+          const content = await ensureChapterContentLoaded(
+            book.id,
+            chapter.id,
+            chapterSessionRef.current
+          );
+          if (content == null) {
+            failures += 1;
+            continue;
+          }
+          let relPath: string | null = null;
+          if (computeMobileMode(s.readerSettings.uiMode)) {
+            relPath = `${baseDir}/${chapter.id}.txt`;
+            let needsWrite = true;
+            try {
+              const stat = await Filesystem.stat({ path: relPath, directory: Directory.Data });
+              if (stat && typeof stat.size === "number" && stat.size > 0) {
+                needsWrite = false;
+              }
+            } catch {
+              needsWrite = true;
+            }
+            if (needsWrite) {
+              try {
+                await Filesystem.writeFile({
+                  path: relPath,
+                  directory: Directory.Data,
+                  data: content,
+                  encoding: Encoding.UTF8,
+                });
+              } catch {
+                missingFiles.push(chapter.id);
+              }
+            }
+          }
+          await ensureNativeChapterText(book.id, chapter.id, content, relPath);
+          texts += 1;
+          syncedChapterIds.push(chapter.id);
+        } catch {
+          failures += 1;
+        }
+      }
+    }
+
+    let chapterTextRows = 0;
+    let bookPresent = false;
+    try {
+      chapterTextRows = await getNativeChapterTextCount(syncedChapterIds);
+      if (opts?.bookId) {
+        const book = targetBooks[0];
+        bookPresent = await hasNativeBook(opts.bookId, book?.driveFolderId);
+      }
+    } catch {
+      chapterTextRows = 0;
+    }
+    console.log("[TaleVox][NativeSync]", {
+      bookId: opts?.bookId,
+      bookPresent,
+      books,
+      chapters,
+      texts,
+      failures,
+      chapterTextRows,
+      missingFiles,
+    });
+
+    return { books, chapters, texts, failures, chapterTextRows, missingFiles: missingFiles.length };
+  }, [ensureChapterContentLoaded]);
 
   const handleToggleUploadQueue = useCallback(() => {
     setShowUploadQueue((prev) => !prev);
@@ -1732,16 +2185,30 @@ const App: React.FC = () => {
       const book = s.books.find(b => b.id === s.activeBookId);
       if (!book) return;
       const chapterId = crypto.randomUUID();
+      const nextIndex = Math.max(0, ...book.chapters.map((c) => (typeof c.index === "number" ? c.index : 0))) + 1;
+      const safeIndex = typeof data.index === "number" && data.index > 0 ? data.index : nextIndex;
+      const safeTitle = typeof data.title === "string" && data.title.trim().length ? data.title.trim() : `Chapter ${safeIndex}`;
       const newChapter: Chapter = {
-          id: chapterId, index: data.index, title: data.title, content: data.content, wordCount: 0, textLength: data.content.length, filename: buildTextName(book.id, chapterId), progress: 0, progressChars: 0, audioStatus: AudioStatus.PENDING, updatedAt: Date.now()
+          id: chapterId, index: safeIndex, title: safeTitle, content: data.content, wordCount: 0, textLength: data.content.length, filename: buildTextName(book.id, chapterId), progress: 0, progressChars: 0, audioStatus: AudioStatus.PENDING, updatedAt: Date.now()
       };
       if (book.driveFolderId && isAuthorized) {
           try { newChapter.cloudTextFileId = await uploadToDrive(book.driveFolderId, newChapter.filename, data.content); newChapter.hasTextOnDrive = true; } catch {}
       }
       await libraryUpsertChapterMeta(book.id, { ...newChapter, content: undefined });
       await librarySaveChapterText(book.id, newChapter.id, data.content);
-      setState(p => ({ ...p, books: p.books.map(b => b.id === book.id ? { ...b, chapters: [...b.chapters, newChapter].sort((a,b)=>a.index-b.index) } : b) }));
+      setState(p => ({
+        ...p,
+        books: p.books.map(b => {
+          if (b.id !== book.id) return b;
+          const nextChapters = [...b.chapters, newChapter].sort((a, b) => a.index - b.index);
+          const nextCount = typeof b.chapterCount === "number" ? b.chapterCount + 1 : nextChapters.length;
+          return { ...b, chapters: nextChapters, chapterCount: nextCount };
+        })
+      }));
       markDirty();
+      if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
+        void syncBookInventoryToDrive(book);
+      }
       if (!data.keepOpen) setIsAddChapterOpen(false); else pushNotice({ message: "Added", type: 'success', ms: 1000 });
   };
 
@@ -1761,8 +2228,38 @@ const App: React.FC = () => {
     return all;
   };
 
+  const syncBookInventoryToDrive = async (book: Book): Promise<void> => {
+    if (book.backend !== StorageBackend.DRIVE) return;
+    if (!book.driveFolderId) return;
+    if (!isAuthorized) return;
+    try {
+      const adapter = createDriveFolderAdapter();
+      const root = { backend: "drive" as const, id: book.driveFolderId, name: book.driveFolderName ?? book.title };
+      const metaFolder = await adapter.ensureFolder(root, "meta");
+      const existingInventory = await adapter.findByName(metaFolder, "inventory.json");
+      const chapters = await listAllChapterMeta(book.id);
+      const inventory: InventoryManifest = {
+        schemaVersion: "3.0",
+        bookId: book.id,
+        expectedTotal: chapters.length,
+        chapters: chapters.map((c) => ({
+          chapterId: c.id,
+          idx: typeof c.index === "number" ? c.index : 0,
+          title: typeof c.title === "string" ? c.title : "Imported Chapter",
+          textName: buildTextName(book.id, c.id),
+          audioName: buildMp3Name(book.id, c.id),
+        })),
+      };
+      await adapter.writeText(metaFolder, "inventory.json", JSON.stringify(inventory, null, 2), existingInventory);
+    } catch (e) {
+      console.warn("Drive inventory sync failed", e);
+    }
+  };
+
   const performFullDriveSync = async (manual = false) => {
       if(!isAuthorized || !stateRef.current.driveRootFolderId) return;
+      const runId = ++syncRunRef.current;
+      const isCancelled = () => syncRunRef.current !== runId;
       setIsSyncing(true);
       if(manual) pushNotice({ message: "Scanning Drive...", type: 'info', ms: 0 });
       
@@ -1773,10 +2270,85 @@ const App: React.FC = () => {
          
          const updatedBooks = [...s.books];
          
+         let bookCounter = 0;
          for (const db of driveBooks) {
+             if (isCancelled()) return;
              const files = await listFilesInFolder(db.id);
-             const chaptersMap = new Map<string, Partial<Chapter>>();
              const existingBookIdx = updatedBooks.findIndex(b => b.driveFolderId === db.id);
+             let driveCoverImage: string | undefined;
+             const existingCover =
+               existingBookIdx !== -1 ? updatedBooks[existingBookIdx].coverImage : undefined;
+             if (!existingCover) {
+               const coverFile = files.find((f) => f.name === "cover.jpg");
+               if (coverFile) {
+                 try {
+                   const blob = await fetchDriveBinary(coverFile.id);
+                   driveCoverImage = await blobToDataUrl(blob);
+                 } catch (e) {
+                   console.warn("Drive cover fetch failed", e);
+                 }
+               }
+             }
+             await yieldToUi();
+             let inventoryById = new Map<string, { idx?: number | null; title?: string | null }>();
+             let metaFolderId: string | null = null;
+             let inventoryFileId: string | null = null;
+             let inventoryLoaded = false;
+             try {
+               const metaFolder = files.find(
+                 (f) => f.mimeType === "application/vnd.google-apps.folder" && f.name === "meta"
+               );
+               if (metaFolder) {
+                 metaFolderId = metaFolder.id;
+                 const metaFiles = await listFilesInFolder(metaFolder.id);
+                 const invFile = metaFiles.find((f) => f.name === "inventory.json");
+                 inventoryFileId = invFile?.id ?? null;
+                 if (invFile) {
+                   const rawInv = await fetchDriveFile(invFile.id);
+                   const inventory = JSON.parse(rawInv) as InventoryManifest;
+                   if (Array.isArray(inventory?.chapters)) {
+                     inventoryById = new Map(
+                       inventory.chapters
+                         .map((c: any) => {
+                           const chapterId =
+                             c.chapterId ?? c.id ?? c.chapterID ?? c.chapter_id ?? null;
+                           if (!chapterId) return null;
+                           const rawIdx =
+                             c.idx ??
+                             c.index ??
+                             c.chapterIndex ??
+                             c.chapter_idx ??
+                             c.legacy?.legacyIdx ??
+                             c.legacyIdx ??
+                             null;
+                           const parsedIdx =
+                             typeof rawIdx === "string" ? parseInt(rawIdx, 10) : rawIdx;
+                           const idx =
+                             Number.isFinite(parsedIdx) && parsedIdx > 0 ? Number(parsedIdx) : null;
+                           const rawTitle =
+                             c.title ??
+                             c.name ??
+                             c.chapterTitle ??
+                             c.legacy?.title ??
+                             null;
+                           const title =
+                             typeof rawTitle === "string" && rawTitle.trim().length
+                               ? rawTitle.trim()
+                               : null;
+                           return [chapterId, { idx, title }] as const;
+                         })
+                         .filter(Boolean) as Array<[string, { idx?: number | null; title?: string | null }]>
+                     );
+                     inventoryLoaded = inventoryById.size > 0;
+                   }
+                 }
+               }
+             } catch (e) {
+               console.warn("Drive inventory load failed", e);
+             }
+             const chaptersMap = new Map<string, Partial<Chapter>>();
+             const fallbackOrder = new Map<string, number>();
+             let fallbackCounter = 1;
              let existingMetaById = new Map<string, Chapter>();
 
              if (existingBookIdx !== -1) {
@@ -1790,20 +2362,76 @@ const App: React.FC = () => {
                  existingMetaById = new Map(existingBook.chapters.map((c) => [c.id, c]));
                }
              }
+
+             if (!inventoryLoaded && inventoryById.size === 0 && existingMetaById.size > 0) {
+               inventoryById = new Map(
+                 Array.from(existingMetaById.values()).map((c) => [
+                   c.id,
+                   {
+                     idx: typeof c.index === "number" && c.index > 0 ? c.index : null,
+                     title: typeof c.title === "string" && c.title.trim().length ? c.title.trim() : null,
+                   },
+                 ])
+               );
+               if (manual && metaFolderId) {
+                 try {
+                   const bookIdForInv = existingBookIdx !== -1 ? updatedBooks[existingBookIdx].id : db.id;
+                   const inventory: InventoryManifest = {
+                     schemaVersion: "3.0",
+                     bookId: bookIdForInv,
+                     expectedTotal: existingMetaById.size,
+                     chapters: Array.from(existingMetaById.values()).map((c) => ({
+                       chapterId: c.id,
+                       idx: typeof c.index === "number" ? c.index : 0,
+                       title: typeof c.title === "string" ? c.title : "Imported Chapter",
+                       textName: buildTextName(bookIdForInv, c.id),
+                       audioName: buildMp3Name(bookIdForInv, c.id),
+                     })),
+                   };
+                   await uploadToDrive(
+                     metaFolderId,
+                     "inventory.json",
+                     JSON.stringify(inventory, null, 2),
+                     inventoryFileId || undefined,
+                     "application/json"
+                   );
+                 } catch (e) {
+                   console.warn("Drive inventory rebuild failed", e);
+                 }
+               }
+             }
              
+             let fileCounter = 0;
              for (const f of files) {
+                 if (isCancelled()) return;
+                 if (fileCounter % 40 === 0) {
+                   await yieldToUi();
+                 }
+                 fileCounter += 1;
                  // Support new c_<id> format
                  const match = f.name.match(/^c_(.*?)\.(txt|mp3)$/i);
                  if (match) {
                      const id = match[1];
                      const ext = match[2].toLowerCase();
+                     if (!fallbackOrder.has(id)) {
+                       fallbackOrder.set(id, fallbackCounter++);
+                     }
                      
                      if (!chaptersMap.has(id)) {
                          const existing = existingMetaById.get(id);
+                         const invMeta = inventoryById.get(id);
+                         const invIdx = invMeta?.idx != null && invMeta.idx > 0 ? invMeta.idx : null;
+                         const existingIdx = existing?.index != null && existing.index > 0 ? existing.index : null;
+                         const fallbackIdx = fallbackOrder.get(id) ?? 0;
+                         const invTitle =
+                           invMeta?.title && invMeta.title !== "Imported Chapter"
+                             ? invMeta.title
+                             : null;
+                         const title = invTitle ?? existing?.title ?? invMeta?.title ?? "Imported Chapter";
                          chaptersMap.set(id, {
                            id,
-                           index: existing?.index ?? 0,
-                           title: existing?.title ?? 'Imported Chapter',
+                           index: invIdx ?? existingIdx ?? fallbackIdx,
+                           title,
                            filename: existing?.filename ?? '',
                            content: existing?.content ?? '',
                            wordCount: existing?.wordCount ?? 0,
@@ -1840,17 +2468,16 @@ const App: React.FC = () => {
                          ec.id === dc.id || ec.cloudTextFileId === dc.cloudTextFileId
                      );
                      
-                      if (existingChIdx !== -1) {
+                     if (existingChIdx !== -1) {
                           const existing = mergedChapters[existingChIdx];
-                          const isPlaceholder =
-                            (dc.title === 'Imported Chapter' || !dc.title) &&
-                            (dc.index === 0 || dc.index == null);
+                          const isPlaceholderTitle = !dc.title || dc.title === 'Imported Chapter';
+                          const isPlaceholderIndex = !(typeof dc.index === 'number' && dc.index > 0);
                           mergedChapters[existingChIdx] = {
                               ...existing,
                               ...dc,
-                              title: isPlaceholder ? existing.title : dc.title,
-                              index: isPlaceholder ? existing.index : dc.index,
-                              filename: isPlaceholder && existing.filename ? existing.filename : dc.filename,
+                              title: isPlaceholderTitle ? existing.title : dc.title,
+                              index: isPlaceholderIndex ? existing.index : dc.index,
+                              filename: isPlaceholderTitle && existing.filename ? existing.filename : dc.filename,
                               progress: existing.progress,
                               progressSec: existing.progressSec,
                               isCompleted: existing.isCompleted
@@ -1858,8 +2485,12 @@ const App: React.FC = () => {
                       } else {
                           mergedChapters.push(dc);
                       }
-                  }
-                 updatedBooks[existingBookIdx] = { ...existingBook, chapters: mergedChapters.sort((a,b) => a.index - b.index) };
+                 }
+                 updatedBooks[existingBookIdx] = {
+                   ...existingBook,
+                   coverImage: existingBook.coverImage ?? driveCoverImage,
+                   chapters: mergedChapters.sort((a, b) => a.index - b.index),
+                 };
              } else {
                  updatedBooks.push({
                      id: db.id,
@@ -1867,21 +2498,51 @@ const App: React.FC = () => {
                      backend: StorageBackend.DRIVE,
                      driveFolderId: db.id,
                      driveFolderName: db.name,
+                     coverImage: driveCoverImage,
                      chapters: driveChapters.sort((a,b) => a.index - b.index),
                      rules: [],
                      settings: { useBookSettings: false, highlightMode: HighlightMode.WORD },
                      updatedAt: Date.now()
                  });
              }
+             // Persist Drive metadata so paging and restart keep correct titles/indices.
+             try {
+               const persistedBook =
+                 existingBookIdx !== -1
+                   ? updatedBooks[existingBookIdx]
+                   : updatedBooks[updatedBooks.length - 1];
+               if (persistedBook) {
+                 await libraryUpsertBook({
+                   ...persistedBook,
+                   chapters: [],
+                 });
+                 if (driveChapters.length) {
+                   const items = driveChapters.map((c) => ({
+                     chapter: { ...c, content: undefined },
+                     content: undefined,
+                   }));
+                   await libraryBulkUpsertChapters(persistedBook.id, items);
+                 }
+               }
+             } catch (e) {
+               console.warn("Drive sync persist failed", e);
+             }
+             bookCounter += 1;
+             if (bookCounter % 4 === 0) {
+               await yieldToUi();
+             }
          }
-         
+         if (isCancelled()) return;
          setState(p => ({ ...p, books: updatedBooks, driveSubfolders: { booksId, savesId, trashId } }));
          markDirty();
-         setIsSyncing(false);
          if(manual) pushNotice({ message: "Sync Complete", type: 'success' });
       } catch (e: any) {
-         setIsSyncing(false);
          pushNotice({ message: "Sync Failed: " + e.message, type: 'error', ms: 0 });
+         return;
+      } finally {
+         if (syncRunRef.current === runId) {
+           setIsSyncing(false);
+         }
       }
   };
 
@@ -2038,7 +2699,7 @@ const App: React.FC = () => {
 
   return (
     <>
-      <div className={`flex flex-col h-screen overflow-hidden font-sans transition-colors duration-500 ${state.theme === Theme.DARK ? 'bg-slate-950 text-slate-100' : state.theme === Theme.SEPIA ? 'bg-[#f4ecd8] text-[#3c2f25]' : 'bg-white text-black'}`}>
+      <div className="flex flex-col h-screen overflow-hidden font-sans transition-colors duration-500 bg-theme text-theme">
       
       {isLinkModalOpen && <LinkCloudModal />}
 
@@ -2091,6 +2752,42 @@ const App: React.FC = () => {
         </div>
       </header>
 
+      <div
+        className={`h-10 border-b flex items-center px-4 lg:px-8 sticky top-16 z-[9] transition-colors ${
+          state.theme === Theme.DARK
+            ? "border-slate-800 bg-slate-900/70 backdrop-blur-md"
+            : state.theme === Theme.SEPIA
+            ? "border-[#d8ccb6] bg-[#efe6d5]/80 backdrop-blur-md"
+            : "border-black/5 bg-white/80 backdrop-blur-md"
+        }`}
+      >
+        <div className="flex items-center justify-between w-full">
+          <div className={`flex items-center gap-2 text-[10px] font-black uppercase tracking-widest ${statusInfo.tone}`}>
+            {statusInfo.icon === "ok" && <CheckCircle2 className="w-3.5 h-3.5" />}
+            {statusInfo.icon === "sync" && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+            {statusInfo.icon === "saving" && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+            {statusInfo.icon === "offline" && <AlertCircle className="w-3.5 h-3.5" />}
+            {statusInfo.icon === "pending" && <Cloud className="w-3.5 h-3.5" />}
+            <span>{statusInfo.label}</span>
+          </div>
+          <div className="flex items-center gap-3">
+            {uploadQueueCount > 0 && (
+              <div className="text-[9px] font-black uppercase tracking-widest text-indigo-300">
+                Uploads queued: {uploadQueueCount}
+              </div>
+            )}
+            {showSyncNow && (
+              <button
+                onClick={() => handleSync(true)}
+                className="px-3 py-1.5 rounded-full bg-indigo-600 text-white text-[9px] font-black uppercase tracking-widest shadow hover:bg-indigo-700 transition-all"
+              >
+                Sync now
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
       <div className="flex-1 overflow-y-auto relative flex">
         {(isLoadingChapter || playbackPhase === 'LOADING_TEXT' || playbackPhase === 'LOADING_AUDIO') && (
             <div className="absolute inset-0 flex items-center justify-center bg-inherit z-[70]">
@@ -2114,14 +2811,16 @@ const App: React.FC = () => {
           <div className="absolute inset-0 z-[60] overflow-y-auto p-4 lg:p-12 backdrop-blur-md bg-black/10">
             <div className="max-w-4xl mx-auto relative">
               <button onClick={() => setIsAddChapterOpen(false)} className="absolute -top-4 -right-4 p-3 bg-white text-black shadow-2xl rounded-full hover:scale-110 active:scale-95 transition-transform z-10"><X className="w-6 h-6" /></button>
-              <Extractor 
-                onChapterExtracted={handleChapterExtracted} 
-                suggestedIndex={activeBook?.chapters.length ? Math.max(...activeBook.chapters.map(c => c.index)) + 1 : 1} 
-                theme={state.theme} 
-                uiMode={state.readerSettings.uiMode}
-                defaultVoiceId={activeBook?.settings.defaultVoiceId} 
-                existingChapters={activeBook?.chapters || []}
-              />
+              <Suspense fallback={<div className="p-6 text-xs font-black uppercase tracking-widest opacity-60 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading import tools...</div>}>
+                <LazyExtractor 
+                  onChapterExtracted={handleChapterExtracted} 
+                  suggestedIndex={activeBook?.chapters.length ? Math.max(...activeBook.chapters.map(c => c.index)) + 1 : 1} 
+                  theme={state.theme} 
+                  uiMode={state.readerSettings.uiMode}
+                  defaultVoiceId={activeBook?.settings.defaultVoiceId} 
+                  existingChapters={activeBook?.chapters || []}
+                />
+              </Suspense>
             </div>
           </div>
         )}
@@ -2174,105 +2873,288 @@ const App: React.FC = () => {
           )}
           
           {activeTab === 'collection' && activeBook && (
-            <ChapterFolderView 
-              book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)}
-              onOpenChapter={handleSmartOpenChapter}
-              onToggleFavorite={() => {}} onUpdateChapterTitle={(id, t) => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(c => c.id === id ? { ...c, title: t } : c) } : b) })); markDirty(); }}
-              onDeleteChapter={id => { setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.filter(c => c.id !== id) } : b) })); markDirty(); }}
-              onUpdateChapter={c => { setState(prev => ({ ...prev, books: prev.books.map(b => b.id === activeBook.id ? { ...b, chapters: b.chapters.map(ch => ch.id === c.id ? c : ch) } : b) })); markDirty(); }}
-              onUpdateBook={handleUpdateBookMeta}
-              onDeleteBook={(id) => { handleDeleteBookMeta(id); setActiveTab('library'); }}
-              onUpdateBookSettings={s => {
-                const updatedBook = { ...activeBook, settings: { ...activeBook.settings, ...s } };
-                setState(p => {
-                  const next = { ...p, books: p.books.map(b => b.id === activeBook.id ? updatedBook : b) };
-                  if (s.defaultVoiceId) {
-                    next.selectedVoiceName = s.defaultVoiceId;
-                  }
-                  return next;
-                });
-                void libraryUpsertBook(updatedBook);
-                markDirty();
-              }}
-              onBackToLibrary={() => setActiveTab('library')}
-              onResetChapterProgress={handleResetChapterProgress}
-              playbackSnapshot={playbackSnapshot}
-              onLoadMoreChapters={() => void loadMoreChapters(activeBook.id, false)}
-              hasMoreChapters={chapterPagingByBook[activeBook.id]?.hasMore ?? true}
-              isLoadingMoreChapters={chapterPagingByBook[activeBook.id]?.loading ?? false}
-              globalRules={state.globalRules}
-              reflowLineBreaksEnabled={state.readerSettings.reflowLineBreaks}
-              jobs={jobs}
-              uiMode={state.readerSettings.uiMode}
-              onCancelJob={handleCancelJob}
-              onRetryJob={handleRetryJob}
-              onRefreshJobs={refreshJobs}
-              onQueueGenerateJob={async (chapterIds: string[], voiceId?: string) => {
+            <Suspense fallback={<div className="p-6 text-xs font-black uppercase tracking-widest opacity-60 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading chapters...</div>}>
+              <LazyChapterFolderView 
+                book={activeBook} theme={state.theme} onAddChapter={() => setIsAddChapterOpen(true)}
+                onOpenChapter={handleSmartOpenChapter}
+                onToggleFavorite={() => {}}
+                onUpdateChapterTitle={handleUpdateChapterTitle}
+                onDeleteChapter={handleDeleteChapter}
+                onUpdateChapter={handleUpdateChapter}
+                onUpdateBook={handleUpdateBookMeta}
+                onDeleteBook={(id) => { handleDeleteBookMeta(id); setActiveTab('library'); }}
+                onUpdateBookSettings={s => {
+                  const updatedBook = { ...activeBook, settings: { ...activeBook.settings, ...s } };
+                  setState(p => {
+                    const next = { ...p, books: p.books.map(b => b.id === activeBook.id ? updatedBook : b) };
+                    if (s.defaultVoiceId) {
+                      next.selectedVoiceName = s.defaultVoiceId;
+                    }
+                    return next;
+                  });
+                  void libraryUpsertBook(updatedBook);
+                  markDirty();
+                }}
+                onBackToLibrary={() => setActiveTab('library')}
+                onResetChapterProgress={handleResetChapterProgress}
+                playbackSnapshot={playbackSnapshot}
+                onLoadMoreChapters={() => void loadMoreChapters(activeBook.id, false)}
+                hasMoreChapters={chapterPagingByBook[activeBook.id]?.hasMore ?? true}
+                isLoadingMoreChapters={chapterPagingByBook[activeBook.id]?.loading ?? false}
+                globalRules={state.globalRules}
+                reflowLineBreaksEnabled={state.readerSettings.reflowLineBreaks}
+                jobs={jobs}
+                uiMode={state.readerSettings.uiMode}
+                onCancelJob={handleCancelJob}
+                onRetryJob={handleRetryJob}
+                onRefreshJobs={refreshJobs}
+                isDirty={isDirty}
+                lastSavedAt={state.lastSavedAt}
+                onQueueGenerateJob={async (chapterIds: string[], voiceId?: string) => {
                 if (!computeMobileMode(state.readerSettings.uiMode)) return false;
+                const activeJobChapterIds = new Set<string>();
+                for (const job of jobs) {
+                  if (job.type !== "generateAudio") continue;
+                  if (!["queued", "running", "paused"].includes(job.status)) continue;
+                  const ids = (job as any)?.payloadJson?.chapterIds ?? [];
+                  for (const id of ids) activeJobChapterIds.add(String(id));
+                }
+                const pendingChapterIds = chapterIds.filter((id) => !activeJobChapterIds.has(id));
+                if (pendingChapterIds.length !== chapterIds.length) {
+                  const skipped = chapterIds.length - pendingChapterIds.length;
+                  pushNotice({ message: `Skipping ${skipped} already queued chapter(s).`, type: "info" });
+                }
+                if (!pendingChapterIds.length) return false;
                 const voice =
                   voiceId ||
                   activeBook.settings.defaultVoiceId ||
                   activeBook.settings.selectedVoiceName ||
                   "en-US-Standard-C";
-                for (const chapterId of chapterIds) {
-                  const loaded = await ensureChapterContentLoaded(
+                const selectedChapters: Array<{
+                  id: string;
+                  title: string;
+                  index?: number;
+                  filename?: string;
+                  sourceUrl?: string;
+                  cloudTextFileId?: string;
+                  cloudAudioFileId?: string;
+                  audioDriveId?: string;
+                  audioStatus?: string;
+                  audioSignature?: string;
+                  durationSec?: number;
+                  textLength?: number;
+                  wordCount?: number;
+                  isFavorite?: boolean;
+                  updatedAt?: number;
+                  content?: string | null;
+                  localPath?: string | null;
+                }> = [];
+                const chapterTextPaths: Record<string, string> = {};
+                const chapterTextLocalPaths: Record<string, string> = {};
+                const preparedChapterIds: string[] = [];
+                const missingChapterIds: string[] = [];
+                try {
+                  await Filesystem.mkdir({
+                    path: appConfig.paths.textDir,
+                    directory: Directory.Data,
+                    recursive: true,
+                  });
+                } catch {}
+                for (const chapterId of pendingChapterIds) {
+                  const chapter = activeBook.chapters.find((c) => c.id === chapterId);
+                  if (!chapter) {
+                    missingChapterIds.push(chapterId);
+                    continue;
+                  }
+                  const content = await ensureChapterContentLoaded(
                     activeBook.id,
                     chapterId,
                     chapterSessionRef.current
                   );
-                  if (loaded == null) {
-                    const chapterTitle =
-                      activeBook.chapters.find((c) => c.id === chapterId)?.title ?? chapterId;
-                    pushNotice({
-                      message: `Missing chapter text for "${chapterTitle}". Open the chapter to sync text first.`,
-                      type: "error",
-                    });
-                    return false;
+                    if (content == null) {
+                      const chapterTitle = chapter.title ?? chapterId;
+                      const err = new MissingTextError(chapterId, activeBook.id, {
+                        operation: "enqueueGenerateAudio",
+                        chapterTitle,
+                      });
+                      jobLog.error("missing text", { chapterId, bookId: activeBook.id, title: chapterTitle });
+                      pushNotice({
+                        message: `Missing chapter text for "${chapterTitle}". Run Fix Integrity or re-import.`,
+                        type: "error",
+                      });
+                      return false;
+                    }
+                  const relativePath = `${appConfig.paths.textDir}/${chapter.id}.txt`;
+                  let needsWrite = false;
+                  try {
+                    const stat = await Filesystem.stat({ path: relativePath, directory: Directory.Data });
+                    const size = typeof (stat as any)?.size === "number" ? (stat as any).size : 0;
+                    if (!size || size < 4) needsWrite = true;
+                  } catch {
+                    needsWrite = true;
                   }
+                  if (needsWrite) {
+                    await Filesystem.writeFile({
+                      path: relativePath,
+                      directory: Directory.Data,
+                      data: content,
+                      encoding: Encoding.UTF8,
+                    });
+                  }
+                  chapterTextLocalPaths[chapter.id] = relativePath;
+                  // Keep a relative path so the worker can resolve it via getFilesDir().
+                  chapterTextPaths[chapter.id] = relativePath;
+                  preparedChapterIds.push(chapter.id);
+                  selectedChapters.push({
+                    id: chapter.id,
+                    title: chapter.title ?? chapter.id,
+                    index: chapter.index,
+                    filename: chapter.filename,
+                    sourceUrl: chapter.sourceUrl,
+                    cloudTextFileId: chapter.cloudTextFileId,
+                    cloudAudioFileId: chapter.cloudAudioFileId,
+                    audioDriveId: chapter.audioDriveId,
+                    audioStatus: chapter.audioStatus,
+                    audioSignature: chapter.audioSignature,
+                    durationSec: chapter.durationSec,
+                    textLength: chapter.textLength,
+                    wordCount: chapter.wordCount,
+                    isFavorite: chapter.isFavorite,
+                    updatedAt: chapter.updatedAt,
+                    content,
+                    localPath: relativePath,
+                  });
                 }
+                if (missingChapterIds.length) {
+                  pushNotice({
+                    message: `Missing chapters in current book: ${missingChapterIds.length}`,
+                    type: "error",
+                  });
+                  return false;
+                }
+                if (!preparedChapterIds.length) {
+                  pushNotice({ message: "No chapters ready to generate.", type: "error" });
+                  return false;
+                }
+                const correlationId = createCorrelationId("gen");
                 const payload = {
                   bookId: activeBook.id,
-                  chapterIds,
+                  chapterIds: preparedChapterIds,
                   voice: { id: voice },
                   settings: {
                     playbackSpeed: activeBook.settings.useBookSettings
                       ? activeBook.settings.playbackSpeed ?? 1.0
                       : 1.0,
                   },
+                  driveFolderId: (activeBook as any).driveFolderId,
+                  chapterTextPaths,
+                  correlationId,
                 };
                 try {
-                  if (logJobs) console.log('[Jobs][enqueueGenerateAudio]', payload);
+                  jobLog.info("enqueueGenerateAudio", {
+                    correlationId,
+                    bookId: activeBook.id,
+                    chapters: preparedChapterIds.length,
+                  });
+                  const runPreflight = async () => {
+                    const missingFiles: string[] = [];
+                    for (const id of preparedChapterIds) {
+                      const relPath = chapterTextLocalPaths[id] || `${appConfig.paths.textDir}/${id}.txt`;
+                      try {
+                        const stat = await Filesystem.stat({ path: relPath, directory: Directory.Data });
+                        const size = typeof (stat as any)?.size === "number" ? (stat as any).size : 0;
+                        if (!size || size < 4) missingFiles.push(id);
+                      } catch {
+                        missingFiles.push(id);
+                      }
+                    }
+                    return { missingFiles };
+                  };
+                  let preflight = await runPreflight();
+                    if (preflight.missingFiles.length) {
+                      jobLog.warn("preflight.missingFiles", preflight);
+                      for (const id of preflight.missingFiles) {
+                        const ch = selectedChapters.find((c) => c.id === id);
+                        if (!ch || typeof ch.content !== "string" || !ch.content.length) continue;
+                      const relPath = chapterTextLocalPaths[id] || ch.localPath || `${appConfig.paths.textDir}/${id}.txt`;
+                      try {
+                        await Filesystem.writeFile({
+                          path: relPath,
+                          directory: Directory.Data,
+                          data: ch.content,
+                          encoding: Encoding.UTF8,
+                        });
+                      } catch (e) {
+                        jobLog.warn("preflight.writeFailed", { id, err: String((e as any)?.message ?? e) });
+                      }
+                    }
+                    preflight = await runPreflight();
+                  }
+                  if (preflight.missingFiles.length) {
+                    const details = `${preflight.missingFiles.length} text files missing`;
+                    jobLog.warn("preflight.failed", preflight);
+                    pushNotice({
+                      message: `Cannot start job: ${details}`,
+                      type: "error",
+                    });
+                    return false;
+                  }
                   await enqueueGenerateAudio(payload, state.readerSettings.uiMode);
                   await refreshJobs();
                   pushNotice({ message: "Background job queued.", type: "success" });
                   return true;
-                } catch (e: any) {
-                  const msg = String(e?.message ?? e);
-                  if (msg.includes("notifications_not_granted")) {
-                    pushNotice({ message: "Enable notifications to run background jobs.", type: "error" });
-                    setActiveTab('settings');
-                    await refreshNotificationStatus();
-                  } else {
+                  } catch (e: any) {
+                    const msg = toUserMessage(e);
+                    if (msg.includes("notifications_not_granted")) {
+                      pushNotice({ message: "Enable notifications to run background jobs.", type: "error" });
+                      setActiveTab('settings');
+                      await refreshNotificationStatus();
+                    } else {
                     pushNotice({ message: `Failed to queue job: ${msg}`, type: "error" });
                   }
                   return false;
                 }
               }}
-              onAppendChapters={(newChapters) => {
+                onSyncNativeLibrary={handleSyncLibraryToNativeDb}
+                onAppendChapters={(newChapters) => {
                 setState((prev) => ({
                   ...prev,
                   books: prev.books.map((b) => {
                     if (b.id !== activeBook.id) return b;
 
-                    const combined = [...(b.chapters || []), ...newChapters];
+                    const merged = new Map<string, Chapter>();
+                    for (const existing of b.chapters || []) {
+                      merged.set(existing.id, existing);
+                    }
+                    for (const incoming of newChapters) {
+                      const existing = merged.get(incoming.id);
+                      if (!existing) {
+                        merged.set(incoming.id, incoming);
+                        continue;
+                      }
+                      const incomingTitle =
+                        typeof incoming.title === "string" && incoming.title.trim().length
+                          ? incoming.title.trim()
+                          : "";
+                      const existingTitle =
+                        typeof existing.title === "string" && existing.title.trim().length
+                          ? existing.title.trim()
+                          : "";
+                      const preferIncomingTitle =
+                        incomingTitle.length > 0 && !incomingTitle.toLowerCase().startsWith("imported");
+                      const incomingIndex =
+                        typeof incoming.index === "number" && incoming.index > 0 ? incoming.index : null;
+                      const existingIndex =
+                        typeof existing.index === "number" && existing.index > 0 ? existing.index : null;
+                      merged.set(incoming.id, {
+                        ...existing,
+                        ...incoming,
+                        title: preferIncomingTitle ? incomingTitle : existingTitle || incomingTitle,
+                        index: incomingIndex ?? existingIndex ?? incoming.index ?? existing.index,
+                      });
+                    }
 
-                    // Deduplicate by chapter id
-                    const seen = new Set<string>();
-                    const deduped = combined.filter((c) => {
-                      if (seen.has(c.id)) return false;
-                      seen.add(c.id);
-                      return true;
-                    });
+                    const deduped = Array.from(merged.values());
 
                     // Keep list ordered by chapter index
                     deduped.sort((a, c) => a.index - c.index);
@@ -2296,7 +3178,8 @@ const App: React.FC = () => {
               onQueueChapterUpload={handleQueueChapterUpload}
               uploadedChapterCount={uploadedChapterCount}
               isUploadingAll={isUploadingAll}
-            />
+              />
+            </Suspense>
           )}
 
           {activeTab === 'reader' && activeBook && activeChapterMetadata && (
@@ -2314,84 +3197,92 @@ const App: React.FC = () => {
           )}
 
           {activeTab === 'rules' && (
-            <RuleManager 
-              rules={activeBook?.rules || []} globalRules={state.globalRules} theme={state.theme} 
-              onAddRule={r => { 
-                if (r.global) {
-                  setState(p => ({ ...p, globalRules: [...p.globalRules, r] }));
-                } else if (activeBook) {
-                  setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, rules: [...b.rules, r] } : b) })); 
-                }
-                markDirty(); 
-              }}
-              onUpdateRule={() => {}} 
-              onDeleteRule={(id, isGlobal) => { 
-                if (isGlobal) {
-                  setState(p => ({ ...p, globalRules: p.globalRules.filter(r => r.id !== id) }));
-                } else if (activeBook) {
-                  setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, rules: b.rules.filter(r => r.id !== id) } : b) })); 
-                }
-                markDirty(); 
-              }}
-              onImportRules={rules => {
-                 if (activeBook) {
-                    setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, rules: [...b.rules, ...rules] } : b) })); 
-                    markDirty();
-                 }
-              }}
-              selectedVoice={activeBook?.settings.defaultVoiceId || 'en-US-Standard-C'}
-              playbackSpeed={activeBook?.settings.useBookSettings && activeBook.settings.playbackSpeed ? activeBook.settings.playbackSpeed : state.playbackSpeed}
-              onScanAndRebuild={handleScanAndRebuild}
-              isScanning={isScanningRules}
-              scanProgress={scanProgress}
-            />
+            <Suspense fallback={<div className="p-6 text-xs font-black uppercase tracking-widest opacity-60 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading rules...</div>}>
+              <LazyRuleManager 
+                rules={activeBook?.rules || []} globalRules={state.globalRules} theme={state.theme} 
+                onAddRule={r => { 
+                  if (r.global) {
+                    setState(p => ({ ...p, globalRules: [...p.globalRules, r] }));
+                  } else if (activeBook) {
+                    setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, rules: [...b.rules, r] } : b) })); 
+                  }
+                  markDirty(); 
+                }}
+                onUpdateRule={() => {}} 
+                onDeleteRule={(id, isGlobal) => { 
+                  if (isGlobal) {
+                    setState(p => ({ ...p, globalRules: p.globalRules.filter(r => r.id !== id) }));
+                  } else if (activeBook) {
+                    setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, rules: b.rules.filter(r => r.id !== id) } : b) })); 
+                  }
+                  markDirty(); 
+                }}
+                onImportRules={rules => {
+                   if (activeBook) {
+                      setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, rules: [...b.rules, ...rules] } : b) })); 
+                      markDirty();
+                   }
+                }}
+                selectedVoice={activeBook?.settings.defaultVoiceId || 'en-US-Standard-C'}
+                playbackSpeed={activeBook?.settings.useBookSettings && activeBook.settings.playbackSpeed ? activeBook.settings.playbackSpeed : state.playbackSpeed}
+                onScanAndRebuild={handleScanAndRebuild}
+                isScanning={isScanningRules}
+                scanProgress={scanProgress}
+              />
+            </Suspense>
           )}
 
           {activeTab === 'settings' && (
-            <Settings 
-              settings={state.readerSettings} 
-              onUpdate={s => setState(p => ({ ...p, readerSettings: { ...p.readerSettings, ...s } }))}
-              theme={state.theme} 
-              onSetTheme={t => setState(p => ({ ...p, theme: t }))}
-              keepAwake={state.keepAwake}
-              onSetKeepAwake={k => setState(p => ({ ...p, keepAwake: k }))}
-              onCheckForUpdates={() => window.location.reload()}
-              isCloudLinked={!!state.driveRootFolderId}
-              onLinkCloud={handleSelectRoot}
-              onSyncNow={() => handleSync(true)}
-              isSyncing={isSyncing}
-              googleClientId={state.googleClientId}
-              onUpdateGoogleClientId={id => setState(p => ({ ...p, googleClientId: id }))}
-              onClearAuth={() => { authManager.signOut(); setState(p => ({ ...p, driveRootFolderId: undefined })); }}
-              onSaveState={() => handleSaveState(true, false)}
-              lastSavedAt={state.lastSavedAt}
-              driveRootName={state.driveRootFolderName}
-              onSelectRoot={handleSelectRoot}
-              onRunMigration={handleSaveState}
-              syncDiagnostics={state.syncDiagnostics}
-              autoSaveInterval={state.autoSaveInterval}
-              onSetAutoSaveInterval={v => setState(p => ({ ...p, autoSaveInterval: v }))}
-              isDirty={isDirty}
-              showDiagnostics={state.showDiagnostics}
-              onSetShowDiagnostics={v => setState(p => ({ ...p, showDiagnostics: v }))}
-              onRecalculateProgress={handleReconcileProgress}
-              jobs={jobs}
-              onRefreshJobs={refreshJobs}
-              onCancelJob={handleCancelJob}
-              onRetryJob={handleRetryJob}
-              onDeleteJob={handleDeleteJob}
-              onClearJobs={handleClearJobs}
-              logJobs={logJobs}
-              onToggleLogJobs={setLogJobs}
-              notificationStatus={notificationStatus}
-              onRequestNotifications={handleRequestNotifications}
-              onOpenNotificationSettings={handleOpenNotificationSettings}
-              onSendTestNotification={handleSendTestNotification}
-              onRefreshNotificationStatus={refreshNotificationStatus}
-              onRefreshJob={handleRefreshSingleJob}
-              onForceStartJob={handleForceStartJob}
-              onShowWorkInfo={handleShowWorkInfo}
-            />
+            <Suspense fallback={<div className="p-6 text-xs font-black uppercase tracking-widest opacity-60 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading settings...</div>}>
+              <LazySettings 
+                settings={state.readerSettings} 
+                onUpdate={s => setState(p => ({ ...p, readerSettings: { ...p.readerSettings, ...s } }))}
+                theme={state.theme} 
+                onSetTheme={t => setState(p => ({ ...p, theme: t }))}
+                keepAwake={state.keepAwake}
+                onSetKeepAwake={k => setState(p => ({ ...p, keepAwake: k }))}
+                onCheckForUpdates={() => window.location.reload()}
+                isCloudLinked={!!state.driveRootFolderId}
+                onLinkCloud={handleSelectRoot}
+                onSyncNow={() => handleSync(true)}
+                isSyncing={isSyncing}
+                googleClientId={state.googleClientId}
+                onUpdateGoogleClientId={id => { setState(p => ({ ...p, googleClientId: id })); authManager.init(id); }}
+                onClearAuth={() => { authManager.signOut(); setState(p => ({ ...p, driveRootFolderId: undefined })); }}
+                onSaveState={() => handleSaveState(true, false)}
+                lastSavedAt={state.lastSavedAt}
+                driveRootName={state.driveRootFolderName}
+                onSelectRoot={handleSelectRoot}
+                onRunMigration={handleSaveState}
+                syncDiagnostics={state.syncDiagnostics}
+                autoSaveInterval={state.autoSaveInterval}
+                onSetAutoSaveInterval={v => setState(p => ({ ...p, autoSaveInterval: v }))}
+                isDirty={isDirty}
+                showDiagnostics={state.showDiagnostics}
+                onSetShowDiagnostics={v => setState(p => ({ ...p, showDiagnostics: v }))}
+                onRecalculateProgress={handleReconcileProgress}
+                jobs={jobs}
+                onRefreshJobs={refreshJobs}
+                onCancelJob={handleCancelJob}
+                onRetryJob={handleRetryJob}
+                onDeleteJob={handleDeleteJob}
+                onClearJobs={handleClearJobs}
+                logJobs={logJobs}
+                onToggleLogJobs={setLogJobs}
+                notificationStatus={notificationStatus}
+                jobRunnerAvailable={jobRunnerAvailable}
+                onRequestNotifications={handleRequestNotifications}
+                onOpenNotificationSettings={handleOpenNotificationSettings}
+                onSendTestNotification={handleSendTestNotification}
+                onRefreshNotificationStatus={refreshNotificationStatus}
+                onRefreshJob={handleRefreshSingleJob}
+                onForceStartJob={handleForceStartJob}
+                onShowWorkInfo={handleShowWorkInfo}
+                diagnosticsReport={diagnosticsReport}
+                onRefreshDiagnostics={refreshDiagnostics}
+                onSaveDiagnostics={handleSaveDiagnostics}
+              />
+            </Suspense>
           )}
         </div>
       </div>

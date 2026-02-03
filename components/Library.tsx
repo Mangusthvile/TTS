@@ -35,8 +35,8 @@ const Library: React.FC<Props> = ({
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
 
-  const textPrimary = isDark ? "text-white" : isSepia ? "text-[#3c2f25]" : "text-black";
-  const textMuted = isDark ? "text-white/60" : isSepia ? "text-[#3c2f25]/70" : "text-black/55";
+  const textPrimary = "text-theme";
+  const textMuted = "text-muted";
 
   const headerIconColor = isDark ? "text-indigo-400" : "text-indigo-600";
 

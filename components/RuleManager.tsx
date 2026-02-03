@@ -95,12 +95,12 @@ const RuleManager: React.FC<RuleManagerProps> = ({
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
   const cardBg = isDark ? 'bg-slate-800 border-slate-700' : isSepia ? 'bg-[#f4ecd8] border-[#d8ccb6]' : 'bg-white border-black/10';
-  const textClass = isDark ? 'text-slate-100' : isSepia ? 'text-[#3c2f25]' : 'text-black';
+  const textClass = 'text-theme';
   const labelColor = isDark ? 'text-indigo-400' : 'text-indigo-600';
   const inputBg = isDark ? 'bg-slate-900 border-slate-700 text-white' : 'bg-slate-50 border-slate-200 text-black';
 
   return (
-    <div className={`p-4 sm:p-8 h-full overflow-y-auto transition-colors duration-500 ${isDark ? 'bg-slate-900' : isSepia ? 'bg-[#efe6d5]' : 'bg-slate-50'}`}>
+    <div className="p-4 sm:p-8 h-full overflow-y-auto transition-colors duration-500 bg-surface text-theme">
       <div className="max-w-5xl mx-auto space-y-8 sm:space-y-12 pb-32">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
           <div>

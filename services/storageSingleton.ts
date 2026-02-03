@@ -17,7 +17,22 @@ export async function initStorage(): Promise<StorageDriver> {
 
   initPromise = (async () => {
     const d = createStorageDriver();
-    const res = await d.init();
+    let res;
+    try {
+      res = await d.init();
+    } catch (err: any) {
+      const msg = String(err?.message ?? err).toLowerCase();
+      if (msg.includes("connection") || msg.includes("not opened") || msg.includes("does not exist")) {
+        try {
+          await d.close();
+        } catch {
+          // ignore
+        }
+        res = await d.init();
+      } else {
+        throw err;
+      }
+    }
     driver = d;
 
     // Expose for debugging in Chrome inspect:
@@ -28,7 +43,10 @@ export async function initStorage(): Promise<StorageDriver> {
     }
 
     return d;
-  })();
+  })().catch((err) => {
+    initPromise = null;
+    throw err;
+  });
 
   return initPromise;
 }

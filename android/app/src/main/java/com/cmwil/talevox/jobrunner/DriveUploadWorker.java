@@ -32,6 +32,7 @@ import java.nio.charset.StandardCharsets;
 
 public class DriveUploadWorker extends Worker {
     private static final String DB_NAME = "talevox_db";
+    private static final String DB_FILE = DB_NAME + "SQLite.db";
     private static final int MAX_UPLOAD_RETRIES = 5;
     private static final String CHANNEL_ID = JobNotificationChannels.CHANNEL_JOBS_ID;
 
@@ -179,7 +180,7 @@ public class DriveUploadWorker extends Worker {
 
     private SQLiteDatabase getDb() {
         Context ctx = getApplicationContext();
-        SQLiteDatabase db = ctx.openOrCreateDatabase(DB_NAME, Context.MODE_PRIVATE, null);
+        SQLiteDatabase db = ctx.openOrCreateDatabase(DB_FILE, Context.MODE_PRIVATE, null);
         db.execSQL(
             "CREATE TABLE IF NOT EXISTS kv (" +
             "key TEXT PRIMARY KEY," +

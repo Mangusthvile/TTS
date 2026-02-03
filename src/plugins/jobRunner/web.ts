@@ -74,7 +74,7 @@ export class JobRunnerWeb extends WebPlugin implements JobRunnerPlugin {
   }
 
   async getDiagnostics(): Promise<any> {
-    return { hasPlugin: false, permission: "unknown", channels: [] };
+    return { hasPlugin: false, permission: "unknown", channels: [], tables: {} };
   }
 
   async getNotificationDiagnostics(): Promise<any> {

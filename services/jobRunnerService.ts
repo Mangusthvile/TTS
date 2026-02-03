@@ -1,11 +1,56 @@
 import type { UiMode } from "../types";
 import type { JobRecord } from "../types";
 import { computeMobileMode } from "../utils/platform";
+import { Capacitor } from "@capacitor/core";
 import { JobRunner } from "../src/plugins/jobRunner";
 import type { JobRunnerPayload } from "../src/plugins/jobRunner";
 import { createJob, updateJob, getJob, listJobs, deleteJob as deleteJobLocal, clearJobs as clearJobsLocal } from "./jobStore";
+import { getLogger } from "../utils/logger";
+import { SyncError } from "../utils/errors";
 
 type InterfaceMode = "mobile" | "desktop";
+export type JobRunnerCapability = {
+  available: boolean;
+  platform: string;
+  reason?: string;
+  diagnostics?: any;
+};
+
+let capabilityPromise: Promise<JobRunnerCapability> | null = null;
+const jobLog = getLogger("Jobs");
+
+export async function getJobRunnerCapability(): Promise<JobRunnerCapability> {
+  if (capabilityPromise) return capabilityPromise;
+  capabilityPromise = (async () => {
+    const platform = Capacitor.getPlatform?.() ?? "web";
+    const isNative = Capacitor.isNativePlatform?.() ?? false;
+    if (!isNative) {
+      return { available: false, platform, reason: "not-native" };
+    }
+    try {
+      let diag: any = null;
+      try {
+        diag = await JobRunner.getDiagnostics();
+      } catch (e) {
+        if (JobRunner.getNotificationDiagnostics) {
+          diag = await JobRunner.getNotificationDiagnostics();
+        } else {
+          throw e;
+        }
+      }
+      const hasPlugin = diag?.hasPlugin;
+      if (hasPlugin === false) {
+        return { available: false, platform, reason: "plugin-not-registered", diagnostics: diag };
+      }
+      return { available: true, platform, diagnostics: diag };
+    } catch (e: any) {
+      return { available: false, platform, reason: "probe-failed", diagnostics: String(e?.message ?? e) };
+    }
+  })().finally(() => {
+    // keep cached
+  });
+  return capabilityPromise;
+}
 
 function getInterfaceMode(uiMode: UiMode): InterfaceMode {
   return computeMobileMode(uiMode) ? "mobile" : "desktop";
@@ -14,10 +59,10 @@ function getInterfaceMode(uiMode: UiMode): InterfaceMode {
 export async function jobRunnerHealthCheck(uiMode: UiMode): Promise<void> {
   if (!computeMobileMode(uiMode)) return;
   try {
-    const res = (await JobRunner.getDiagnostics?.()) ?? (await JobRunner.getNotificationDiagnostics?.());
-    console.log("[JobRunner][native] health check", res);
+    const cap = await getJobRunnerCapability();
+    jobLog.info("capability", cap);
   } catch (e) {
-    console.warn("[JobRunner][native] health check failed", e);
+    jobLog.warn("health check failed", { err: String((e as any)?.message ?? e) });
   }
 }
 
@@ -32,15 +77,18 @@ export async function enqueueGenerateAudio(
   payload: JobRunnerPayload,
   uiMode: UiMode
 ): Promise<{ jobId: string }> {
+  if (!payload?.bookId || !Array.isArray(payload.chapterIds) || payload.chapterIds.length === 0) {
+    throw new SyncError("Invalid job payload", { operation: "enqueueGenerateAudio", payload });
+  }
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
     try {
       const res = await JobRunner.enqueueGenerateAudio({ payload });
-      console.log("[JobRunner][native] enqueueGenerateAudio", res);
+      jobLog.info("enqueueGenerateAudio", { ...res, correlationId: payload.correlationId });
       return res;
     } catch (e: any) {
-      console.error("[JobRunner][native] enqueueGenerateAudio failed", e);
-      throw e;
+      jobLog.error("enqueueGenerateAudio failed", { err: String(e?.message ?? e), payload });
+      throw new SyncError("Failed to enqueue job", { operation: "enqueueGenerateAudio", payload }, e);
     }
   }
 
@@ -69,7 +117,7 @@ export async function enqueueFixIntegrity(
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
     const res = await JobRunner.enqueueFixIntegrity({ payload });
-    console.log("[JobRunner][native] enqueueFixIntegrity", res);
+    jobLog.info("enqueueFixIntegrity", res);
     return res;
   }
 
@@ -92,7 +140,7 @@ export async function cancelJob(jobId: string, uiMode: UiMode): Promise<void> {
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
     const res = await JobRunner.cancelJob({ jobId });
-    console.log("[JobRunner][native] cancelJob", res);
+    jobLog.info("cancelJob", { jobId });
     await updateJob(jobId, { status: "canceled", updatedAt: Date.now() });
     return;
   }
@@ -103,7 +151,7 @@ export async function retryJob(jobId: string, uiMode: UiMode): Promise<{ jobId: 
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
     const res = await JobRunner.retryJob({ jobId });
-    console.log("[JobRunner][native] retryJob", res);
+    jobLog.info("retryJob", res);
     return res;
   }
   await updateJob(jobId, { status: "queued", error: undefined, updatedAt: Date.now() });
@@ -114,7 +162,7 @@ export async function getJobById(jobId: string, uiMode: UiMode): Promise<JobReco
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
     const res = await JobRunner.getJob({ jobId });
-    console.log("[JobRunner][native] getJob", res);
+    jobLog.info("getJob", res);
     return res.job;
   }
   return getJob(jobId);
@@ -124,7 +172,7 @@ export async function listAllJobs(uiMode: UiMode): Promise<JobRecord[]> {
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
     const res = await JobRunner.listJobs();
-    console.log("[JobRunner][native] listJobs", res);
+    jobLog.info("listJobs", { count: res.jobs?.length ?? 0 });
     return res.jobs ?? [];
   }
   return listJobs();
@@ -134,7 +182,7 @@ export async function forceStartJob(jobId: string, uiMode: UiMode): Promise<void
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
     const res = await JobRunner.forceStartJob({ jobId });
-    console.log("[JobRunner][native] forceStartJob", res);
+    jobLog.info("forceStartJob", { jobId });
     return;
   }
 }
@@ -143,7 +191,7 @@ export async function enqueueUploadJob(uiMode: UiMode): Promise<{ jobId: string 
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
     const res = await JobRunner.enqueueUploadJob({});
-    console.log("[JobRunner][native] enqueueUploadJob", res);
+    jobLog.info("enqueueUploadJob", res);
     return res;
   }
   const jobId = createJobId();
@@ -165,7 +213,7 @@ export async function deleteJob(jobId: string, uiMode: UiMode): Promise<void> {
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
     const res = await JobRunner.deleteJob({ jobId });
-    console.log("[JobRunner][native] deleteJob", res);
+    jobLog.info("deleteJob", { jobId });
     return;
   }
   await deleteJobLocal(jobId);
@@ -175,7 +223,7 @@ export async function clearJobs(statuses: string[], uiMode: UiMode): Promise<voi
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
     const res = await JobRunner.clearJobs({ statuses });
-    console.log("[JobRunner][native] clearJobs", res);
+    jobLog.info("clearJobs", { statuses });
     return;
   }
   await clearJobsLocal(statuses);
@@ -186,10 +234,10 @@ export async function getWorkInfo(jobId: string, uiMode: UiMode): Promise<{ stat
   if (interfaceMode === "mobile") {
     try {
       const res = await JobRunner.getWorkInfo({ jobId });
-      console.log("[JobRunner][native] getWorkInfo", res);
+      jobLog.info("getWorkInfo", res);
       return res.workInfo ?? null;
     } catch (e: any) {
-      console.error("[JobRunner][native] getWorkInfo failed", e);
+      jobLog.error("getWorkInfo failed", e);
       throw e;
     }
   }
@@ -200,7 +248,7 @@ export async function ensureUploadQueueJob(uiMode: UiMode): Promise<{ jobId: str
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
     const res = await JobRunner.ensureUploadQueueJob();
-    console.log("[JobRunner][native] ensureUploadQueueJob", res);
+    jobLog.info("ensureUploadQueueJob", res);
     return res;
   }
   return { jobId: null };

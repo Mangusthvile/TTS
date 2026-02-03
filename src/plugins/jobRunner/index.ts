@@ -16,6 +16,9 @@ export type JobRunnerPayload = {
   chapterIds: string[];
   voice: JobRunnerVoice;
   settings: JobRunnerSettings;
+  driveFolderId?: string;
+  chapterTextPaths?: Record<string, string>;
+  correlationId?: string;
 };
 
 export interface JobRunnerPlugin {
@@ -36,11 +39,22 @@ export interface JobRunnerPlugin {
   getJob: (options: { jobId: string }) => Promise<{ job: JobRecord | null }>;
   listJobs: () => Promise<{ jobs: JobRecord[] }>;
   kickUploadQueue: () => Promise<void>;
-  getDiagnostics?: () => Promise<{
+  getDiagnostics: () => Promise<{
     hasPlugin?: boolean;
     plugin?: string;
     permission?: "granted" | "denied" | "prompt" | "unknown";
     channels?: string[];
+    channelExists?: boolean;
+    foregroundRecent?: boolean;
+    foregroundAgeMs?: number;
+    dbFileExists?: boolean;
+    dbPath?: string;
+    tables?: {
+      books?: boolean;
+      chapters?: boolean;
+      chapter_text?: boolean;
+      jobs?: boolean;
+    };
     interfaceMode?: string;
     platform?: string;
     androidBuild?: number;

@@ -9,6 +9,7 @@ import org.json.JSONObject;
 
 public class JobsDb {
     private static final String DB_NAME = "talevox_db";
+    private static final String DB_FILE = DB_NAME + "SQLite.db";
     private final Context context;
 
     public JobsDb(Context ctx) {
@@ -16,7 +17,7 @@ public class JobsDb {
     }
 
     private SQLiteDatabase db() {
-        return context.openOrCreateDatabase(DB_NAME, Context.MODE_PRIVATE, null);
+        return context.openOrCreateDatabase(DB_FILE, Context.MODE_PRIVATE, null);
     }
 
     public JobRow getJobRow(String jobId) {

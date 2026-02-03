@@ -2,6 +2,64 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer base {
+  :root {
+    --tvx-bg: #ffffff;
+    --tvx-surface: #f8fafc;
+    --tvx-surface-2: #ffffff;
+    --tvx-text: #0f172a;
+    --tvx-text-muted: #475569;
+    --tvx-border: rgba(15, 23, 42, 0.1);
+    --tvx-card: #ffffff;
+    --tvx-card-border: rgba(15, 23, 42, 0.08);
+    --tvx-input-bg: #f8fafc;
+    --tvx-input-text: #0f172a;
+  }
+
+  body.dark-theme {
+    --tvx-bg: #0b1220;
+    --tvx-surface: #0f172a;
+    --tvx-surface-2: #111827;
+    --tvx-text: #e2e8f0;
+    --tvx-text-muted: #94a3b8;
+    --tvx-border: rgba(255, 255, 255, 0.08);
+    --tvx-card: #0f172a;
+    --tvx-card-border: rgba(255, 255, 255, 0.08);
+    --tvx-input-bg: #0b1220;
+    --tvx-input-text: #e2e8f0;
+  }
+
+  body.sepia-theme {
+    --tvx-bg: #f4ecd8;
+    --tvx-surface: #efe6d5;
+    --tvx-surface-2: #f4ecd8;
+    --tvx-text: #3c2f25;
+    --tvx-text-muted: rgba(60, 47, 37, 0.7);
+    --tvx-border: rgba(60, 47, 37, 0.15);
+    --tvx-card: #efe6d5;
+    --tvx-card-border: rgba(60, 47, 37, 0.15);
+    --tvx-input-bg: #efe6d5;
+    --tvx-input-text: #3c2f25;
+  }
+
+  body {
+    background-color: var(--tvx-bg);
+    color: var(--tvx-text);
+  }
+}
+
+@layer components {
+  .bg-theme { background-color: var(--tvx-bg); }
+  .bg-surface { background-color: var(--tvx-surface); }
+  .bg-surface-2 { background-color: var(--tvx-surface-2); }
+  .bg-card { background-color: var(--tvx-card); }
+  .text-theme { color: var(--tvx-text); }
+  .text-muted { color: var(--tvx-text-muted); }
+  .border-theme { border-color: var(--tvx-border); }
+  .border-card { border-color: var(--tvx-card-border); }
+  .input-theme { background-color: var(--tvx-input-bg); color: var(--tvx-input-text); }
+}
+
 /* Minimal animation utilities to replace tailwindcss-animate plugin usage. */
 .animate-in {
   animation-duration: 150ms;

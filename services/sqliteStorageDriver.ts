@@ -2,11 +2,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { Capacitor } from "@capacitor/core";
-import {
-  CapacitorSQLite,
-  SQLiteConnection,
-  SQLiteDBConnection,
-} from "@capacitor-community/sqlite";
+import type { SQLiteDBConnection } from "@capacitor-community/sqlite";
+import { getSqliteDb, closeSqliteDb } from "./sqliteConnectionManager";
+import { appConfig } from "../src/config/appConfig";
 
 import type {
   AppState,
@@ -37,8 +35,8 @@ import type { JobRecord, JobType } from "../types";
  * - Next step will hook it into App boot + progress commits.
  */
 
-const DB_NAME = "talevox_db";
-const DB_VERSION = 1;
+const DB_NAME = appConfig.db.name;
+const DB_VERSION = appConfig.db.version;
 
 // KV keys
 const KEY_APP_STATE = "app_state";
@@ -87,6 +85,7 @@ const LIBRARY_SCHEMA_SQL = `
     chapterId TEXT PRIMARY KEY,
     bookId TEXT NOT NULL,
     content TEXT NOT NULL,
+    localPath TEXT,
     updatedAt INTEGER NOT NULL
   );
 
@@ -113,27 +112,50 @@ function fromBoolInt(v: any): boolean {
 export class SqliteStorageDriver implements StorageDriver {
   name = "sqlite";
 
-  private sqlite = new SQLiteConnection(CapacitorSQLite);
   private db: SQLiteDBConnection | null = null;
+  private initInFlight: Promise<StorageInitResult> | null = null;
 
   async init(): Promise<StorageInitResult> {
+    if (this.initInFlight) return this.initInFlight;
+    this.initInFlight = this.initInternal().catch((err) => {
+      this.initInFlight = null;
+      throw err;
+    });
+    return this.initInFlight;
+  }
+
+  private async initInternal(): Promise<StorageInitResult> {
     if (!Capacitor.isNativePlatform()) {
       // Safety: this driver is only meant for native (Android).
       return { driverName: this.name, mode: "unknown" };
     }
 
-    // Create/open connection
-    const db = await this.sqlite.createConnection(
-      DB_NAME,
-      false,
-      "no-encryption",
-      DB_VERSION,
-      false
-    );
-    await db.open();
-    this.db = db;
+    if (this.db) {
+      return { driverName: this.name, mode: "sqlite" };
+    }
 
-    await this.ensureSchema();
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        this.db = await getSqliteDb(DB_NAME, DB_VERSION);
+        await this.ensureSchema();
+        lastErr = null;
+        break;
+      } catch (e: any) {
+        lastErr = e;
+        const msg = String(e?.message ?? e).toLowerCase();
+        if (msg.includes("does not exist") || msg.includes("not opened")) {
+          await closeSqliteDb(DB_NAME);
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          continue;
+        }
+        throw e;
+      }
+    }
+    if (lastErr) {
+      this.db = null;
+      throw lastErr;
+    }
 
     return { driverName: this.name, mode: "sqlite" };
   }
@@ -141,11 +163,11 @@ export class SqliteStorageDriver implements StorageDriver {
   async close(): Promise<void> {
     try {
       if (this.db) {
-        await this.db.close();
-        await this.sqlite.closeConnection(DB_NAME, false);
+        await closeSqliteDb(DB_NAME);
       }
     } finally {
       this.db = null;
+      this.initInFlight = null;
     }
   }
 
@@ -207,7 +229,7 @@ export class SqliteStorageDriver implements StorageDriver {
   async loadChapterProgress(
     chapterId: string
   ): Promise<LoadResult<ChapterProgress | null>> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
 
     try {
       const res = await db.query(
@@ -236,7 +258,7 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async saveChapterProgress(progress: ChapterProgress): Promise<SaveResult> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
 
     const updatedAt = progress.updatedAt || nowMs();
     const durationSec =
@@ -302,7 +324,7 @@ export class SqliteStorageDriver implements StorageDriver {
   // -----------------------
 
   async createJob(job: JobRecord): Promise<SaveResult> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
     try {
       await db.run(
         `INSERT INTO jobs (jobId, type, status, payloadJson, progressJson, error, createdAt, updatedAt)
@@ -336,7 +358,7 @@ export class SqliteStorageDriver implements StorageDriver {
       updatedAt: patch.updatedAt ?? nowMs(),
     };
 
-    const db = this.mustDb();
+    const db = await this.dbConn();
     try {
       await db.run(
         `UPDATE jobs
@@ -359,7 +381,7 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async getJob(jobId: string): Promise<LoadResult<JobRecord | null>> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
     try {
       const res = await db.query(
         `SELECT jobId, type, status, payloadJson, progressJson, error, createdAt, updatedAt
@@ -389,7 +411,7 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async listJobs(type?: JobType): Promise<LoadResult<JobRecord[]>> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
     try {
       const res = await db.query(
         `SELECT jobId, type, status, payloadJson, progressJson, error, createdAt, updatedAt
@@ -418,7 +440,7 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async setChapterAudioPath(chapterId: string, localPath: string, sizeBytes: number): Promise<SaveResult> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
     try {
       await db.run(
         `INSERT INTO chapter_audio_files (chapterId, localPath, sizeBytes, updatedAt)
@@ -436,7 +458,7 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async getChapterAudioPath(chapterId: string): Promise<LoadResult<{ localPath: string; sizeBytes: number; updatedAt: number } | null>> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
     try {
       const res = await db.query(
         `SELECT localPath, sizeBytes, updatedAt FROM chapter_audio_files WHERE chapterId = ?`,
@@ -459,7 +481,7 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async deleteChapterAudioPath(chapterId: string): Promise<SaveResult> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
     try {
       await db.run(`DELETE FROM chapter_audio_files WHERE chapterId = ?`, [chapterId]);
       return { ok: true, where: "sqlite" };
@@ -469,7 +491,7 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async enqueueUpload(item: DriveUploadQueuedItem): Promise<SaveResult> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
     try {
       await db.run(
         `INSERT INTO drive_upload_queue (id, chapterId, bookId, localPath, status, attempts, nextAttemptAt, lastError, createdAt, updatedAt)
@@ -499,7 +521,7 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async getNextReadyUpload(now: number): Promise<LoadResult<DriveUploadQueuedItem | null>> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
     try {
       const res = await db.query(
         `SELECT * FROM drive_upload_queue
@@ -532,7 +554,7 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async markUploadUploading(id: string, nextAttemptAt: number): Promise<SaveResult> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
     try {
       await db.run(
         `UPDATE drive_upload_queue
@@ -550,7 +572,7 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async markUploadDone(id: string): Promise<SaveResult> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
     try {
       await db.run(`DELETE FROM drive_upload_queue WHERE id = ?`, [id]);
       return { ok: true, where: "sqlite" };
@@ -560,7 +582,7 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async markUploadFailed(id: string, error: string, nextAttemptAt: number): Promise<SaveResult> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
     try {
       await db.run(
         `UPDATE drive_upload_queue
@@ -579,7 +601,7 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async countQueuedUploads(): Promise<LoadResult<number>> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
     try {
       const res = await db.query(
         `SELECT COUNT(*) AS cnt FROM drive_upload_queue WHERE status IN ('queued', 'failed')`
@@ -592,7 +614,7 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async listQueuedUploads(limit?: number): Promise<LoadResult<DriveUploadQueuedItem[]>> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
     try {
       const res = await db.query(
         `SELECT id, chapterId, bookId, localPath, status, attempts, nextAttemptAt, lastError, createdAt, updatedAt
@@ -621,7 +643,7 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async deleteJob(jobId: string): Promise<SaveResult> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
     try {
       await db.run(`DELETE FROM jobs WHERE jobId = ?`, [jobId]);
       return { ok: true, where: "sqlite" };
@@ -631,7 +653,7 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async clearJobs(statuses: string[]): Promise<SaveResult> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
     if (!statuses.length) return { ok: true, where: "sqlite" };
     const placeholders = statuses.map(() => "?").join(",");
     try {
@@ -646,13 +668,18 @@ export class SqliteStorageDriver implements StorageDriver {
   // Internals
   // -----------------------
 
-  private mustDb(): SQLiteDBConnection {
-    if (!this.db) throw new Error("SQLite driver not initialized: call init()");
+  private async dbConn(): Promise<SQLiteDBConnection> {
+    this.db = await getSqliteDb(DB_NAME, DB_VERSION);
+    try {
+      await (this.db as any).open?.();
+    } catch {
+      // open is idempotent; ignore errors like "already open"
+    }
     return this.db;
   }
 
   private async ensureSchema(): Promise<void> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
 
     // Keep schema small & clear. We can expand later (offline_cache, books, chapters tables).
     await db.execute(`
@@ -704,10 +731,15 @@ export class SqliteStorageDriver implements StorageDriver {
     `);
 
     await this.db!.execute(LIBRARY_SCHEMA_SQL);
+    try {
+      await this.db!.execute(`ALTER TABLE chapter_text ADD COLUMN localPath TEXT`);
+    } catch {
+      // Column already exists
+    }
   }
 
   private async loadKvJson<T>(key: string): Promise<LoadResult<T>> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
 
     try {
       const res = await db.query(
@@ -726,7 +758,7 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   private async saveKvJson(key: string, value: any): Promise<SaveResult> {
-    const db = this.mustDb();
+    const db = await this.dbConn();
 
     try {
       const raw = JSON.stringify(value);

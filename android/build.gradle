@@ -36,6 +36,23 @@ subprojects {
             force "androidx.browser:browser:1.9.0"
         }
     }
+    afterEvaluate { proj ->
+        if (proj.plugins.hasPlugin("com.android.application") || proj.plugins.hasPlugin("com.android.library")) {
+            def androidExt = proj.extensions.findByName("android")
+            if (androidExt != null) {
+                try {
+                    if (androidExt.compileSdk == null) {
+                        androidExt.compileSdk = rootProject.ext.compileSdkVersion
+                    }
+                } catch (Exception ignored) {}
+                try {
+                    if (androidExt.compileSdkVersion == null) {
+                        androidExt.compileSdkVersion rootProject.ext.compileSdkVersion
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+    }
 }
 
 task clean(type: Delete) {

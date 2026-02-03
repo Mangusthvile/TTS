@@ -4,9 +4,7 @@ import App from "./App";
 import "./styles.css";
 import { AlertTriangle, RefreshCw, ClipboardCopy, Loader2 } from "lucide-react";
 import { installGlobalTraceHandlers } from "./utils/trace";
-import { initStorage } from "./services/storageSingleton";
-import { SocialLogin } from "@capgo/capacitor-social-login";
-import { Capacitor } from "@capacitor/core";
+import { ensureDbReady, ensureAuthReady } from "./src/app/bootstrap";
 
 // Help TypeScript recognize Vite's injected global
 declare const __APP_VERSION__: string;
@@ -28,50 +26,18 @@ declare global {
 
 // Prefer Vite-injected version; fallback only if somehow missing.
 window.__APP_VERSION__ =
-  (typeof __APP_VERSION__ !== "undefined" && __APP_VERSION__) || "2.9.25";
+  (typeof __APP_VERSION__ !== "undefined" && __APP_VERSION__) || "2.9.26";
 
 // Install global trace listeners immediately
 installGlobalTraceHandlers();
 
-// Initialize durable storage early (SQLite on native, safe fallback on web)
-// Do NOT block render; just log results for debugging.
-initStorage().catch((e) => {
+// Initialize storage + native auth as early as possible, but do not block render.
+ensureDbReady().catch((e) => {
   console.error("[TaleVox][Storage] init failed:", e);
 });
-
-// Initialize SocialLogin early (native only). Do NOT block render.
-const initSocialLogin = async () => {
-  try {
-    if (!Capacitor.isNativePlatform()) {
-      console.log("[TaleVox][Auth] SocialLogin init skipped (web)");
-      return;
-    }
-
-    // Prefer env var so you don't hardcode secrets in code
-    const webClientId = (import.meta as any).env?.VITE_GOOGLE_WEB_CLIENT_ID || "";
-
-    if (!webClientId) {
-      console.warn(
-        "[TaleVox][Auth] Missing VITE_GOOGLE_WEB_CLIENT_ID (Google login will fail)"
-      );
-      return;
-    }
-
-    await SocialLogin.initialize({
-      google: {
-        webClientId,
-        mode: "online",
-      },
-    });
-
-    console.log("[TaleVox][Auth] SocialLogin initialized");
-  } catch (e) {
-    console.error("[TaleVox][Auth] SocialLogin init failed:", e);
-  }
-};
-
-// Kick off init now (and store promise so sign-in can await it)
-window.__TALEVOX_SOCIALLOGIN_READY__ = initSocialLogin();
+ensureAuthReady().catch((e) => {
+  console.error("[TaleVox][Auth] SocialLogin init failed:", e);
+});
 
 // ---------------------------
 // Type Safety Helpers

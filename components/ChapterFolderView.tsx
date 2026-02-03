@@ -1,6 +1,6 @@
-import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
+import React, { useMemo, useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
 import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile, Rule, HighlightMode, UiMode, JobRecord } from '../types';
-import { LayoutGrid, List, AlignJustify, Eye, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon, Sparkles } from 'lucide-react';
+import { LayoutGrid, List, AlignJustify, Eye, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, CloudOff, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon, Sparkles } from 'lucide-react';
 import { applyRules } from '../services/speechService';
 import { synthesizeChunk } from '../services/cloudTtsService';
 import { saveAudioToCache, generateAudioKey, getAudioFromCache, hasAudioInCache } from '../services/audioCache';
@@ -19,6 +19,7 @@ import {
 import { isTokenValid } from '../services/driveAuth';
 import { reflowLineBreaks } from '../services/textFormat';
 import { computeMobileMode } from '../utils/platform';
+import { yieldToUi } from '../utils/async';
 import { enqueueGenerateAudio, enqueueFixIntegrity } from '../services/jobRunnerService';
 import {
   loadChapterText as libraryLoadChapterText,
@@ -28,6 +29,7 @@ import {
 import { initBookFolderManifests } from "../services/bookFolderInit";
 import { createDriveFolderAdapter } from "../services/driveFolderAdapter";
 import type { InventoryManifest } from "../services/bookManifests";
+import { FixedSizeList as VirtualList, type ListChildComponentProps } from "react-window";
 
 type ViewMode = 'details' | 'list' | 'grid';
 
@@ -66,6 +68,8 @@ interface ChapterFolderViewProps {
   onBackToLibrary: () => void;
   onResetChapterProgress: (bookId: string, chapterId: string) => void;
   playbackSnapshot?: { chapterId: string, percent: number } | null;
+  isDirty?: boolean;
+  lastSavedAt?: number;
 
   // Phase One: paging support
   onLoadMoreChapters?: () => void;
@@ -75,6 +79,14 @@ interface ChapterFolderViewProps {
   // Optional UI refresh callback
   onAppendChapters?: (chapters: Chapter[]) => void;
   onQueueGenerateJob?: (chapterIds: string[], voiceId?: string) => Promise<boolean>;
+  onSyncNativeLibrary?: (opts?: { bookId?: string; chapterIds?: string[] }) => Promise<{
+    books: number;
+    chapters: number;
+    texts: number;
+    failures: number;
+    chapterTextRows?: number;
+    missingFiles?: number;
+  }>;
 }
 
 const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
@@ -105,11 +117,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   onBackToLibrary,
   onResetChapterProgress,
   playbackSnapshot,
+  isDirty,
+  lastSavedAt,
   onLoadMoreChapters,
   hasMoreChapters,
   isLoadingMoreChapters,
   onAppendChapters,
   onQueueGenerateJob,
+  onSyncNativeLibrary,
 }) => {
   const { driveFolderId } = book;
   const VIEW_MODE_KEY = `talevox:viewMode:${book.id}`;
@@ -119,6 +134,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   });
 
   useEffect(() => { localStorage.setItem(VIEW_MODE_KEY, viewMode); }, [viewMode, VIEW_MODE_KEY]);
+  useEffect(() => {
+    return () => {
+      scanRunRef.current += 1;
+    };
+  }, []);
 
   const [editingChapterId, setEditingChapterId] = useState<string | null>(null);
   const [tempTitle, setTempTitle] = useState('');
@@ -161,6 +181,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [fixProgress, setFixProgress] = useState({ current: 0, total: 0 });
   const [fixJobId, setFixJobId] = useState<string | null>(null);
   const abortFixRef = useRef(false);
+  const scanRunRef = useRef(0);
   const [previewOnly, setPreviewOnly] = useState(true);
   const lastFixStatusRef = useRef<string | null>(null);
 
@@ -170,9 +191,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [isHeaderExpanded, setIsHeaderExpanded] = useState(false);
   const [mobileMenuId, setMobileMenuId] = useState<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const [listViewport, setListViewport] = useState({ width: 0, height: 0 });
   const [bgGenProgress, setBgGenProgress] = useState<{ current: number; total: number } | null>(null);
   const [isRegeneratingAudio, setIsRegeneratingAudio] = useState(false);
   const [showBookSettings, setShowBookSettings] = useState(false);
+  const [showBookMoreActions, setShowBookMoreActions] = useState(false);
   const coverInputRef = useRef<HTMLInputElement | null>(null);
 
   const [fixOptions, setFixOptions] = useState({
@@ -180,6 +203,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     cleanupStrays: true,
     convertLegacy: true
   });
+  const [isSyncingNative, setIsSyncingNative] = useState(false);
+  const [syncSummary, setSyncSummary] = useState<{ books: number; chapters: number; texts: number; failures: number } | null>(null);
 
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
@@ -192,6 +217,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const chapters = useMemo(() => [...(book.chapters || [])].sort((a, b) => a.index - b.index), [book.chapters]);
   const isMobileInterface = computeMobileMode(uiMode);
+  const shouldVirtualize = chapters.length > 120 && viewMode !== "grid";
+  const useVirtualScroll = shouldVirtualize && viewMode === "details";
+  const detailRowHeight = isMobileInterface ? 96 : 78;
+  const listRowHeight = isMobileInterface ? 86 : 72;
+  const detailHeaderHeight = 44;
   // Allow background-capable flows (WorkManager / native plugin) when we're in mobile mode.
   const enableBackgroundJobs = isMobileInterface;
   const bookJobs = useMemo(() => {
@@ -208,6 +238,23 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   }, [bookJobs, fixJobId]);
 
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
+
+  useLayoutEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const update = () => {
+      setListViewport({ width: el.clientWidth, height: el.clientHeight });
+    };
+    update();
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(update);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    const handle = () => update();
+    window.addEventListener("resize", handle);
+    return () => window.removeEventListener("resize", handle);
+  }, []);
 
   useEffect(() => {
     if (!hasMoreChapters) return;
@@ -234,6 +281,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       }
     }
   }, [hasMoreChapters, isLoadingMoreChapters, onLoadMoreChapters]);
+
+  const handleItemsRendered = useCallback(({ visibleStopIndex }: { visibleStopIndex: number }) => {
+    if (!hasMoreChapters || isLoadingMoreChapters || !onLoadMoreChapters) return;
+    if (visibleStopIndex >= chapters.length - 5) {
+      onLoadMoreChapters();
+    }
+  }, [chapters.length, hasMoreChapters, isLoadingMoreChapters, onLoadMoreChapters]);
 
   useEffect(() => {
     if (!isMobileInterface || !activeFixJob) return;
@@ -329,6 +383,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       alert("Google Drive session expired. Please sign in again in Settings.");
       return null;
     }
+    const runId = ++scanRunRef.current;
+    const isCancelled = () => scanRunRef.current !== runId;
     setIsCheckingDrive(true);
     try {
       // 1. List root files
@@ -342,7 +398,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       let metaFiles: StrayFile[] = [];
 
       // 3. Scan subfolders and combine files
+      let folderCounter = 0;
       for (const folder of subfolders) {
+        if (isCancelled()) return null;
+        if (folderCounter % 4 === 0) {
+          await yieldToUi();
+        }
+        folderCounter += 1;
         if (targetSubfolders.includes(folder.name)) {
           try {
             const subFiles = await listFilesInFolder(folder.id);
@@ -380,12 +442,19 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       }
 
       setLastInventory(inventory);
+      if (isCancelled()) return null;
 
       // 4. Deduplicate by name, keeping newest. Collect extras as strays.
       // Invariant: duplicates (same name, different id) are ALWAYS stray — they never go through
       // classification and are excluded from driveFiles, so they cannot be legacy or unlinked.
       const filesByName = new Map<string, StrayFile[]>();
+      let fileCounter = 0;
       for (const f of allFiles) {
+        if (isCancelled()) return null;
+        if (fileCounter % 50 === 0) {
+          await yieldToUi();
+        }
+        fileCounter += 1;
         if (!f?.name) continue;
         const arr = filesByName.get(f.name) || [];
         arr.push(f);
@@ -395,7 +464,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       const driveFiles: StrayFile[] = []; // Unique files (newest)
       const duplicateStrays: StrayFile[] = [];
 
+      let dedupeCounter = 0;
       for (const [name, files] of filesByName) {
+          if (isCancelled()) return null;
+          if (dedupeCounter % 60 === 0) {
+            await yieldToUi();
+          }
+          dedupeCounter += 1;
           if (files.length === 1) {
               driveFiles.push(files[0]);
           } else {
@@ -416,9 +491,15 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       // Update title cache for UI from inventory
       const titleMap: Record<string, string> = {};
-      inventory.chapters.forEach((c) => {
+      let titleCounter = 0;
+      for (const c of inventory.chapters) {
+        if (isCancelled()) return null;
+        if (titleCounter % 60 === 0) {
+          await yieldToUi();
+        }
+        titleCounter += 1;
         if (c?.chapterId) titleMap[c.chapterId] = c.title ?? c.chapterId;
-      });
+      }
       setScanTitles(titleMap);
 
       // Expected file names from inventory
@@ -427,7 +508,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       const missingAudioIds: string[] = [];
       let accountedChaptersCount = 0;
 
+      let inventoryCounter = 0;
       for (const ch of inventory.chapters) {
+        if (isCancelled()) return null;
+        if (inventoryCounter % 60 === 0) {
+          await yieldToUi();
+        }
+        inventoryCounter += 1;
         const chapterId = ch.chapterId;
         if (!chapterId) continue;
         const txtName = `c_${chapterId}.txt`;
@@ -471,7 +558,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       const legacyMap = new Map<string, LegacyGroup>();
       const legacyFiles: Array<{ file: StrayFile; idx: number; slug: string; type: "text" | "audio" }> = [];
 
+      let driveFileCounter = 0;
       for (const f of driveFiles) {
+        if (isCancelled()) return null;
+        if (driveFileCounter % 60 === 0) {
+          await yieldToUi();
+        }
+        driveFileCounter += 1;
         // Ignore folders
         if (f.mimeType === "application/vnd.google-apps.folder") continue;
 
@@ -526,7 +619,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       const legacyByIdx = new Map<number, { text: StrayFile[]; audio: StrayFile[] }>();
       const legacyBySlug = new Map<string, { text: StrayFile[]; audio: StrayFile[] }>();
 
+      let legacyEntryCounter = 0;
       for (const entry of legacyFiles) {
+        if (isCancelled()) return null;
+        if (legacyEntryCounter % 60 === 0) {
+          await yieldToUi();
+        }
+        legacyEntryCounter += 1;
         const byIdx = legacyByIdx.get(entry.idx) ?? { text: [], audio: [] };
         byIdx[entry.type].push(entry.file);
         legacyByIdx.set(entry.idx, byIdx);
@@ -540,7 +639,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       const missingChapterIds = new Set<string>([...missingTextIds, ...missingAudioIds]);
       const legacyRecoveryCandidates: ScanResult["legacyRecoveryCandidates"] = {};
 
+      let missingCounter = 0;
       for (const chapterId of missingChapterIds) {
+        if (isCancelled()) return null;
+        if (missingCounter % 60 === 0) {
+          await yieldToUi();
+        }
+        missingCounter += 1;
         const inv = inventoryById.get(chapterId);
         const idx = inv?.idx;
         const titleSlug = inv?.title ? toSlug(inv.title) : "";
@@ -587,7 +692,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       }
 
       let safeToCleanup = true;
+      let cleanupCounter = 0;
       for (const ch of inventory.chapters) {
+        if (isCancelled()) return null;
+        if (cleanupCounter % 60 === 0) {
+          await yieldToUi();
+        }
+        cleanupCounter += 1;
         const chapterId = ch.chapterId;
         if (!chapterId) {
           safeToCleanup = false;
@@ -626,6 +737,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       (scan as any).legacyCount = legacyGroupsList.length;
       (scan as any).unlinkedNewFormatCount = unlinkedMatches.length;
 
+      if (isCancelled()) return null;
       setLastScan(scan);
       setMissingTextIds(scan.missingTextIds);
       setMissingAudioIds(scan.missingAudioIds);
@@ -644,8 +756,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const handleCheckLocalIntegrity = useCallback(async (): Promise<ScanResult | null> => {
     setIsCheckingDrive(true);
+    const runId = ++scanRunRef.current;
+    const isCancelled = () => scanRunRef.current !== runId;
     try {
       const allChapters = await fetchAllChapters();
+      if (isCancelled()) return null;
       
       // Update title cache
       const titleMap: Record<string, string> = {};
@@ -660,7 +775,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         totalChecked: allChapters.length
       };
 
+      let chapterCounter = 0;
       for (const chapter of allChapters) {
+        if (isCancelled()) return null;
+        if (chapterCounter % 40 === 0) {
+          await yieldToUi();
+        }
+        chapterCounter += 1;
         const text =
           (chapter.content && chapter.content.trim() ? chapter.content : null) ??
           (await libraryLoadChapterText(book.id, chapter.id)) ??
@@ -683,6 +804,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         });
       }
 
+      if (isCancelled()) return null;
       setLastScan(scan);
       setMissingTextIds(scan.missingTextIds);
       setMissingAudioIds(scan.missingAudioIds);
@@ -756,7 +878,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       let textToSpeak = applyRules(rawContent, allRules);
       if (reflowLineBreaksEnabled) textToSpeak = reflowLineBreaks(textToSpeak);
 
-      const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
+      const fallbackIdx = chapters.findIndex((c) => c.id === chapter.id) + 1;
+      const displayIndex = getDisplayIndex(chapter, fallbackIdx);
+      const displayTitle = getDisplayTitle(chapter, displayIndex);
+      const rawIntro = `Chapter ${displayIndex}. ${displayTitle}. `;
       const introText = applyRules(rawIntro, allRules);
 
       const fullText = introText + textToSpeak;
@@ -991,8 +1116,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         const targets = new Set<string>([...missingAudioIds]);
 
         if (fixOptions.genAudio && targets.size) {
+          let localCounter = 0;
           for (const chapterId of targets) {
             if (abortFixRef.current) break;
+            if (localCounter % 10 === 0) {
+              await yieldToUi();
+            }
+            localCounter += 1;
             const ch = allChapters.find(c => c.id === chapterId);
             if (!ch) continue;
 
@@ -1044,8 +1174,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       const chaptersById = new Map(allChapters.map((c) => [c.id, c]));
 
       // 1) Convert legacy candidates into expected files
+      let conversionCounter = 0;
       for (const conversion of plan.conversions) {
         if (abortFixRef.current) break;
+        if (conversionCounter % 10 === 0) {
+          await yieldToUi();
+        }
+        conversionCounter += 1;
         setFixLog(prev => [...prev, `Copy legacy ${conversion.type}: ${conversion.targetName}`]);
         try {
           const newId = await copyDriveFile(conversion.source.id, driveFolderId, conversion.targetName);
@@ -1064,8 +1199,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         bump();
       }
       // 2) Generate missing audio (when no legacy audio candidate)
+      let genCounter = 0;
       for (const chapterId of plan.generationIds) {
         if (abortFixRef.current) break;
+        if (genCounter % 10 === 0) {
+          await yieldToUi();
+        }
+        genCounter += 1;
         const ch = chaptersById.get(chapterId);
         if (!ch) { bump(); continue; }
         setFixLog(prev => [...prev, `Generating missing audio: ${ch.title}`]);
@@ -1082,8 +1222,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           setFixLog(p => [...p, "SKIPPING CLEANUP: Errors occurred during restoration."]);
           pushNotice("Cleanup skipped for safety due to errors.", "error");
         } else {
+          let cleanupCounter = 0;
           for (const stray of plan.cleanup) {
             if (abortFixRef.current) break;
+            if (cleanupCounter % 10 === 0) {
+              await yieldToUi();
+            }
+            cleanupCounter += 1;
             setFixLog(prev => [...prev, `Trashing stray file: ${stray.name}`]);
             try {
               await moveFileToTrash(stray.id);
@@ -1140,12 +1285,42 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         const url = String(reader.result ?? "");
         onUpdateBook({ ...book, coverImage: url, updatedAt: Date.now() });
         if (coverInputRef.current) coverInputRef.current.value = "";
+        void (async () => {
+          if (book.backend !== StorageBackend.DRIVE || !driveFolderId) return;
+          if (!isTokenValid()) return;
+          try {
+            const existingCoverId = await findFileSync("cover.jpg", driveFolderId);
+            await uploadToDrive(
+              driveFolderId,
+              "cover.jpg",
+              file,
+              existingCoverId || undefined,
+              file.type || "image/jpeg"
+            );
+          } catch (err: any) {
+            pushNotice(`Cover sync failed: ${String(err?.message ?? err)}`, "error");
+          }
+        })();
       };
       reader.readAsDataURL(file);
     } catch (err: any) {
       pushNotice(`Cover upload failed: ${String(err?.message ?? err)}`, "error");
     }
   };
+
+  const handleRemoveCover = useCallback(async () => {
+    onUpdateBook({ ...book, coverImage: undefined, updatedAt: Date.now() });
+    if (book.backend !== StorageBackend.DRIVE || !driveFolderId) return;
+    if (!isTokenValid()) return;
+    try {
+      const existingCoverId = await findFileSync("cover.jpg", driveFolderId);
+      if (existingCoverId) {
+        await moveFileToTrash(existingCoverId);
+      }
+    } catch (err: any) {
+      pushNotice(`Cover removal failed: ${String(err?.message ?? err)}`, "error");
+    }
+  }, [book, driveFolderId, onUpdateBook, pushNotice]);
 
   const renderAudioStatusIcon = (c: Chapter) => {
     if (c.cloudAudioFileId || (c as any).audioDriveId || c.audioStatus === AudioStatus.READY) {
@@ -1178,11 +1353,217 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         </span>
       );
     }
+    if (!c.cloudTextFileId) {
+      return (
+        <span title="Not synced to Drive" className="inline-flex items-center ml-2">
+          <CloudOff className="w-4 h-4 text-amber-500" />
+        </span>
+      );
+    }
     return null;
   };
 
+  const getDisplayIndex = (c: Chapter, fallback: number) => {
+    const idx = Number(c.index);
+    if (Number.isFinite(idx) && idx > 0) return idx;
+    return fallback > 0 ? fallback : 1;
+  };
+
+  const getDisplayTitle = (c: Chapter, idx: number) => {
+    const raw = typeof c.title === "string" ? c.title.trim().replace(/^[\uFEFF\u200B]+/, "") : "";
+    if (!raw || raw.toLowerCase().startsWith("imported")) {
+      return `Chapter ${idx}`;
+    }
+    return raw;
+  };
+
+  const renderDetailRow = useCallback(
+    ({ index, style }: ListChildComponentProps) => {
+      const c = chapters[index];
+      if (!c) return null;
+      const displayIndex = getDisplayIndex(c, index + 1);
+      const displayTitle = getDisplayTitle(c, displayIndex);
+      const isCompleted = c.isCompleted || false;
+      let percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
+      if (playbackSnapshot && playbackSnapshot.chapterId === c.id) {
+        percent = Math.floor(playbackSnapshot.percent * 100);
+      }
+      const isEditing = editingChapterId === c.id;
+
+      return (
+        <div
+          style={{ ...style, width: "100%" }}
+          onClick={() => !isEditing && onOpenChapter(c.id)}
+          className={`grid grid-cols-[40px_1fr_80px_60px] md:grid-cols-[40px_1fr_100px_180px] items-center px-6 py-4 cursor-pointer border-b last:border-0 transition-colors ${
+            isDark ? "hover:bg-white/5 border-slate-800" : "hover:bg-black/5 border-black/5"
+          } ${isCompleted ? "opacity-50" : ""}`}
+        >
+          <div className={`font-mono text-xs font-black ${textSecondary}`}>
+            {String(displayIndex).padStart(3, "0")}
+          </div>
+          <div className="flex flex-col gap-1 min-w-0 mr-4">
+            <div className="flex items-center gap-3">
+              {isEditing ? (
+                <div className="flex-1 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                  <input
+                    autoFocus
+                    type="text"
+                    value={tempTitle}
+                    onChange={(e) => setTempTitle(e.target.value)}
+                    onBlur={() => {
+                      onUpdateChapterTitle(c.id, tempTitle);
+                      setEditingChapterId(null);
+                    }}
+                    className="px-2 py-1 rounded border text-sm font-bold w-full bg-inherit"
+                  />
+                </div>
+              ) : (
+                <div className="font-black text-sm truncate flex items-center">
+                  {displayTitle}
+                  {renderTextStatusIcon(c)}
+                </div>
+              )}
+              <span className="inline">{renderAudioStatusIcon(c)}</span>
+            </div>
+            <div className={`h-1 w-full rounded-full overflow-hidden ${isDark ? "bg-slate-700" : "bg-black/5"}`}>
+              <div
+                className={`h-full transition-all duration-300 ${isCompleted ? "bg-emerald-500" : "bg-indigo-500"}`}
+                style={{ width: `${percent}%` }}
+              />
+            </div>
+          </div>
+          <div className="text-right px-4">
+            <span
+              className={`text-[10px] font-black px-2 py-0.5 rounded-full ${
+                isCompleted ? "bg-emerald-500/20 text-emerald-600" : "bg-indigo-500/15 text-indigo-500"
+              }`}
+            >
+              {isCompleted ? "Done" : `${percent}%`}
+            </span>
+          </div>
+          <div className="flex justify-end items-center gap-2">
+            <div className="hidden md:flex items-center gap-2">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setRememberAsDefault(true);
+                  setShowVoiceModal({ chapterId: c.id });
+                }}
+                className="p-2 opacity-40 hover:opacity-100"
+                title="Generate or regenerate audio"
+              >
+                <Headphones className="w-4 h-4" />
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onQueueChapterUpload(c.id);
+                }}
+                className="p-2 opacity-40 hover:opacity-100 hover:text-emerald-500"
+                title="Upload chapter"
+              >
+                <Cloud className="w-4 h-4" />
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setMobileMenuId(c.id);
+                }}
+                className="p-2 opacity-40 hover:opacity-100"
+                title="More actions"
+              >
+                <GearIcon className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="md:hidden flex items-center gap-2">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setMobileMenuId(c.id);
+                }}
+                className="p-1.5 opacity-40"
+              >
+                <GearIcon className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    },
+    [
+      chapters,
+      editingChapterId,
+      tempTitle,
+      isDark,
+      textSecondary,
+      playbackSnapshot,
+      onOpenChapter,
+      onQueueChapterUpload,
+      onUpdateChapterTitle,
+      renderAudioStatusIcon,
+      renderTextStatusIcon,
+    ]
+  );
+
+  const renderListRow = useCallback(
+    ({ index, style }: ListChildComponentProps) => {
+      const c = chapters[index];
+      if (!c) return null;
+      const displayIndex = getDisplayIndex(c, index + 1);
+      const displayTitle = getDisplayTitle(c, displayIndex);
+      let percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
+      if (playbackSnapshot && playbackSnapshot.chapterId === c.id) {
+        percent = Math.floor(playbackSnapshot.percent * 100);
+      }
+      const isCompleted = c.isCompleted || false;
+
+      return (
+        <div
+          style={{ ...style, width: "100%" }}
+          onClick={() => onOpenChapter(c.id)}
+          className={`flex flex-col gap-2 p-4 rounded-2xl border cursor-pointer transition-all hover:translate-x-1 ${cardBg}`}
+        >
+          <div className="flex items-center gap-4">
+            <div
+              className={`w-8 h-8 rounded-lg flex items-center justify-center font-mono text-[10px] font-black ${
+                isDark ? "bg-slate-950 text-indigo-400" : "bg-indigo-50 text-indigo-600"
+              }`}
+            >
+              {displayIndex}
+            </div>
+            <div className="flex-1 min-w-0 font-black text-sm truncate flex items-center">
+              {displayTitle}
+              {renderTextStatusIcon(c)}
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-[9px] font-black opacity-40 uppercase">{percent}%</span>
+              {renderAudioStatusIcon(c)}
+              <div className="flex md:hidden gap-1 items-center">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMobileMenuId(c.id);
+                  }}
+                  className="p-1.5 opacity-40"
+                >
+                  <GearIcon className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+          <div className={`h-0.5 w-full rounded-full overflow-hidden ${isDark ? "bg-slate-700" : "bg-black/5"}`}>
+            <div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${percent}%` }} />
+          </div>
+          {isCompleted ? null : null}
+        </div>
+      );
+    },
+    [chapters, playbackSnapshot, isDark, cardBg, onOpenChapter, renderAudioStatusIcon, renderTextStatusIcon]
+  );
+
   const MobileChapterMenu = ({ chapterId }: { chapterId: string }) => {
     const ch = chapters.find(c => c.id === chapterId);
+    const [showMoreActions, setShowMoreActions] = useState(false);
     if (!ch) return null;
     return (
       <div className="fixed inset-0 z-[110] flex items-end sm:items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setMobileMenuId(null)}>
@@ -1199,6 +1580,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                   setRememberAsDefault(true);
                   setShowVoiceModal({ chapterId: ch.id });
                 }}
+                title={ch.cloudAudioFileId || ch.hasCachedAudio ? "Regenerate audio" : "Generate audio"}
                 className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${
                   isDark ? 'bg-white/5 text-white hover:bg-white/10' : 'bg-black/5 text-black hover:bg-black/10'
                 } ${synthesizingId === ch.id ? 'opacity-60' : ''}`}
@@ -1214,6 +1596,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                   setMobileMenuId(null);
                   onQueueChapterUpload(ch.id);
                 }}
+                title="Upload this chapter"
                 className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'bg-white/5 text-white hover:bg-white/10' : 'bg-black/5 text-black hover:bg-black/10'}`}
               >
                 <div className="p-2 bg-emerald-600/10 text-emerald-500 rounded-lg">
@@ -1222,89 +1605,108 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                 Upload Chapter
               </button>
 
-              <button onClick={() => { setMobileMenuId(null); onResetChapterProgress(book.id, ch.id); }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}>
-                 <div className="p-2 bg-emerald-600/10 text-emerald-600 rounded-lg"><RefreshCw className="w-4 h-4" /></div>
-                 Reset Progress
+              <button
+                onClick={() => setShowMoreActions((v) => !v)}
+                className={`w-full flex items-center justify-between px-4 py-3 rounded-2xl border text-[10px] font-black uppercase tracking-widest ${isDark ? 'border-white/10 hover:bg-white/5' : 'border-black/10 hover:bg-black/5'}`}
+                title="More actions"
+              >
+                More Actions
+                {showMoreActions ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
               </button>
-              <button onClick={() => { setMobileMenuId(null); setEditingChapterId(ch.id); setTempTitle(ch.title); }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}>
-                 <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg"><Edit2 className="w-4 h-4" /></div>
-                 Edit Title
-              </button>
-              <button onClick={() => { if (confirm('Delete?')) { onDeleteChapter(ch.id); setMobileMenuId(null); } }} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm text-red-500 transition-all ${isDark ? 'hover:bg-red-500/10' : 'hover:bg-red-500/5'}`}>
-                 <div className="p-2 bg-red-500/10 text-red-500 rounded-lg"><Trash2 className="w-4 h-4" /></div>
-                 Delete Chapter
-              </button>
+
+              {showMoreActions && (
+                <div className="space-y-2">
+                  <button
+                    onClick={() => { setMobileMenuId(null); onResetChapterProgress(book.id, ch.id); }}
+                    title="Reset progress"
+                    className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}
+                  >
+                    <div className="p-2 bg-emerald-600/10 text-emerald-600 rounded-lg"><RefreshCw className="w-4 h-4" /></div>
+                    Reset Progress
+                  </button>
+                  <button
+                    onClick={() => { setMobileMenuId(null); setEditingChapterId(ch.id); setTempTitle(ch.title); }}
+                    title="Edit title"
+                    className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}
+                  >
+                    <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg"><Edit2 className="w-4 h-4" /></div>
+                    Edit Title
+                  </button>
+                  <div className="text-[10px] font-black uppercase tracking-widest opacity-60 pt-2">Danger Zone</div>
+                  <button
+                    onClick={() => { if (confirm('Delete?')) { onDeleteChapter(ch.id); setMobileMenuId(null); } }}
+                    title="Delete chapter"
+                    className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm text-red-500 transition-all ${isDark ? 'hover:bg-red-500/10' : 'hover:bg-red-500/5'}`}
+                  >
+                    <div className="p-2 bg-red-500/10 text-red-500 rounded-lg"><Trash2 className="w-4 h-4" /></div>
+                    Delete Chapter
+                  </button>
+                </div>
+              )}
            </div>
         </div>
       </div>
     );
   };
 
-  const renderDetailsView = () => (
-    <div className={`rounded-3xl border shadow-sm overflow-hidden ${cardBg}`}>
-      <div className={`grid grid-cols-[40px_1fr_80px_100px] md:grid-cols-[40px_1fr_100px_180px] px-6 py-3 text-[10px] font-black uppercase tracking-widest border-b ${isDark ? 'border-slate-800 bg-slate-950/40 text-indigo-400' : 'border-black/5 bg-black/5 text-indigo-600'}`}>
-        <div>Idx</div><div>Title</div><div className="text-right px-4">Progress</div><div className="text-right">Actions</div>
+  const renderDetailsView = () => {
+    const listHeight = Math.max(200, listViewport.height - detailHeaderHeight);
+    return (
+      <div className={`rounded-3xl border shadow-sm overflow-hidden ${cardBg}`}>
+        <div
+          className={`grid grid-cols-[40px_1fr_80px_100px] md:grid-cols-[40px_1fr_100px_180px] px-6 py-3 text-[10px] font-black uppercase tracking-widest border-b ${
+            isDark ? "border-slate-800 bg-slate-950/40 text-indigo-400" : "border-black/5 bg-black/5 text-indigo-600"
+          }`}
+        >
+          <div>Idx</div>
+          <div>Title</div>
+          <div className="text-right px-4">Progress</div>
+          <div className="text-right">Actions</div>
+        </div>
+        {shouldVirtualize && listViewport.height > detailHeaderHeight ? (
+          <VirtualList
+            height={listHeight}
+            itemCount={chapters.length}
+            itemSize={detailRowHeight}
+            width="100%"
+            onItemsRendered={handleItemsRendered}
+            itemKey={(index: number) => chapters[index]?.id ?? index}
+          >
+            {renderDetailRow}
+          </VirtualList>
+        ) : (
+          <div className="divide-y divide-black/5">
+            {chapters.map((_, idx) => (
+              <React.Fragment key={chapters[idx].id}>
+                {renderDetailRow({ index: idx, style: {} } as ListChildComponentProps)}
+              </React.Fragment>
+            ))}
+          </div>
+        )}
       </div>
-      <div className="divide-y divide-black/5">
-        {chapters.map(c => {
-          const isCompleted = c.isCompleted || false;
-          // Live progress logic: use snapshot if active chapter, else stored
-          let percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
-          if (playbackSnapshot && playbackSnapshot.chapterId === c.id) {
-             percent = Math.floor(playbackSnapshot.percent * 100);
-          }
-          
-          const isEditing = editingChapterId === c.id;
+    );
+  };
 
-          return (
-            <div key={c.id} onClick={() => !isEditing && onOpenChapter(c.id)} className={`grid grid-cols-[40px_1fr_80px_60px] md:grid-cols-[40px_1fr_100px_180px] items-center px-6 py-4 cursor-pointer border-b last:border-0 transition-colors ${isDark ? 'hover:bg-white/5 border-slate-800' : 'hover:bg-black/5 border-black/5'} ${isCompleted ? 'opacity-50' : ''}`}>
-              <div className={`font-mono text-xs font-black ${textSecondary}`}>{String(c.index).padStart(3, '0')}</div>
-              <div className="flex flex-col gap-1 min-w-0 mr-4">
-                <div className="flex items-center gap-3">
-                  {isEditing ? (
-                    <div className="flex-1 flex items-center gap-2" onClick={e => e.stopPropagation()}>
-                      <input autoFocus type="text" value={tempTitle} onChange={e => setTempTitle(e.target.value)} onBlur={() => { onUpdateChapterTitle(c.id, tempTitle); setEditingChapterId(null); }} className="px-2 py-1 rounded border text-sm font-bold w-full bg-inherit" />
-                    </div>
-                  ) : (
-                    <div className="font-black text-sm truncate flex items-center">{c.title}{renderTextStatusIcon(c)}</div>
-                  )}
-                  <span className="inline">{renderAudioStatusIcon(c)}</span>
-                </div>
-                <div className={`h-1 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-700' : 'bg-black/5'}`}>
-                   <div className={`h-full transition-all duration-300 ${isCompleted ? 'bg-emerald-500' : 'bg-indigo-500'}`} style={{ width: `${percent}%` }} />
-                </div>
-              </div>
-              <div className="text-right px-4">
-                <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${isCompleted ? 'bg-emerald-500/20 text-emerald-600' : 'bg-indigo-500/15 text-indigo-500'}`}>{isCompleted ? 'Done' : `${percent}%`}</span>
-              </div>
-              <div className="flex justify-end items-center gap-2">
-                <div className="hidden md:flex items-center gap-2">
-                  <button onClick={(e) => { e.stopPropagation(); onResetChapterProgress(book.id, c.id); }} className="p-2 opacity-40 hover:opacity-100 hover:text-indigo-500" title="Reset Progress">
-                      <RotateCcw className="w-4 h-4" />
-                  </button>
-                  <button onClick={(e) => { e.stopPropagation(); setRememberAsDefault(true); setShowVoiceModal({ chapterId: c.id }); }} className="p-2 opacity-40 hover:opacity-100" title="Regenerate Audio"><Headphones className="w-4 h-4" /></button>
-                  <button onClick={(e) => { e.stopPropagation(); onQueueChapterUpload(c.id); }} className="p-2 opacity-40 hover:opacity-100 hover:text-emerald-500" title="Upload Chapter">
-                    <Cloud className="w-4 h-4" />
-                  </button>
-                  <button onClick={(e) => { e.stopPropagation(); setEditingChapterId(c.id); setTempTitle(c.title); }} className="p-2 opacity-40 hover:opacity-100" title="Edit Title"><Edit2 className="w-4 h-4" /></button>
-                  <button onClick={(e) => { e.stopPropagation(); if (confirm('Delete?')) onDeleteChapter(c.id); }} className="p-2 opacity-40 hover:opacity-100 hover:text-red-500" title="Delete"><Trash2 className="w-4 h-4" /></button>
-                </div>
-                <div className="md:hidden flex items-center gap-2">
-                  <button onClick={(e) => { e.stopPropagation(); setMobileMenuId(c.id); }} className="p-1.5 opacity-40">
-                    <GearIcon className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-
-  const renderListView = () => (
-    <div className="space-y-2">
-      {chapters.map(c => {
+  const renderListView = () => {
+    if (shouldVirtualize && listViewport.height > 0) {
+      return (
+        <VirtualList
+          height={Math.max(200, listViewport.height)}
+          itemCount={chapters.length}
+          itemSize={listRowHeight}
+          width="100%"
+          onItemsRendered={handleItemsRendered}
+          itemKey={(index: number) => chapters[index]?.id ?? index}
+        >
+          {renderListRow}
+        </VirtualList>
+      );
+    }
+    return (
+      <div className="space-y-2">
+      {chapters.map((c, idx) => {
+        const displayIndex = getDisplayIndex(c, idx + 1);
+        const displayTitle = getDisplayTitle(c, displayIndex);
         let percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
         if (playbackSnapshot && playbackSnapshot.chapterId === c.id) {
              percent = Math.floor(playbackSnapshot.percent * 100);
@@ -1313,8 +1715,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         return (
           <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`flex flex-col gap-2 p-4 rounded-2xl border cursor-pointer transition-all hover:translate-x-1 ${cardBg}`}>
             <div className="flex items-center gap-4">
-              <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-mono text-[10px] font-black ${isDark ? 'bg-slate-950 text-indigo-400' : 'bg-indigo-50 text-indigo-600'}`}>{c.index}</div>
-              <div className="flex-1 min-w-0 font-black text-sm truncate flex items-center">{c.title}{renderTextStatusIcon(c)}</div>
+              <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-mono text-[10px] font-black ${isDark ? 'bg-slate-950 text-indigo-400' : 'bg-indigo-50 text-indigo-600'}`}>{displayIndex}</div>
+              <div className="flex-1 min-w-0 font-black text-sm truncate flex items-center">{displayTitle}{renderTextStatusIcon(c)}</div>
               <div className="flex items-center gap-3">
                 <span className="text-[9px] font-black opacity-40 uppercase">{percent}%</span>
                 {renderAudioStatusIcon(c)}
@@ -1338,10 +1740,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       )}
     </div>
   );
+  };
 
   const renderGridView = () => (
     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-      {chapters.map(c => {
+      {chapters.map((c, idx) => {
+        const displayIndex = getDisplayIndex(c, idx + 1);
+        const displayTitle = getDisplayTitle(c, displayIndex);
         let percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
         if (playbackSnapshot && playbackSnapshot.chapterId === c.id) {
              percent = Math.floor(playbackSnapshot.percent * 100);
@@ -1350,8 +1755,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         return (
           <div key={c.id} onClick={() => onOpenChapter(c.id)} className={`aspect-square p-4 rounded-3xl border flex flex-col items-center justify-center text-center gap-2 cursor-pointer transition-all hover:scale-105 group relative ${cardBg}`}>
             <div className="absolute top-3 right-3 flex gap-1">{renderTextStatusIcon(c)}{renderAudioStatusIcon(c)}</div>
-            <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-mono text-lg font-black mb-1 ${isDark ? 'bg-slate-950 text-indigo-400' : 'bg-indigo-50 text-indigo-600'}`}>{c.index}</div>
-            <div className="font-black text-xs line-clamp-2 leading-tight px-1">{c.title}</div>
+            <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-mono text-lg font-black mb-1 ${isDark ? 'bg-slate-950 text-indigo-400' : 'bg-indigo-50 text-indigo-600'}`}>{displayIndex}</div>
+            <div className="font-black text-xs line-clamp-2 leading-tight px-1">{displayTitle}</div>
             <div className="mt-2 w-full px-4">
                <div className={`h-1 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-700' : 'bg-black/5'}`}><div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${percent}%` }} /></div>
                <div className="text-[8px] font-black uppercase mt-1">{percent}%</div>
@@ -1418,80 +1823,128 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
             <div className="space-y-3">
               <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Cover</div>
-              <div className="flex items-center gap-3">
+              {book.coverImage ? (
+                <button
+                  onClick={() => coverInputRef.current?.click()}
+                  title="Change cover"
+                  className={`group flex items-center gap-4 p-2 rounded-2xl border transition-colors ${isDark ? 'border-white/10 hover:border-white/20' : 'border-black/10 hover:border-black/20'}`}
+                >
+                  <img src={book.coverImage} alt={`${book.title} cover`} className="w-16 h-20 object-cover rounded-xl shadow" />
+                  <div className="text-left">
+                    <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Cover</div>
+                    <div className="text-sm font-black">Tap to change</div>
+                  </div>
+                </button>
+              ) : (
                 <button
                   onClick={() => coverInputRef.current?.click()}
                   className={`${primaryActionClass}`}
+                  title="Add cover image"
                 >
-                  {book.coverImage ? "Change Cover" : "Add Cover"}
-                </button>
-                {book.coverImage && (
-                  <button
-                    onClick={() => onUpdateBook({ ...book, coverImage: undefined, updatedAt: Date.now() })}
-                    className={`${accentButtonClass}`}
-                  >
-                    Remove Cover
-                  </button>
-                )}
-              </div>
-            </div>
-
-          <div className="space-y-3">
-            <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Background Tools</div>
-            <div className="flex flex-wrap gap-2">
-              <button
-                onClick={handleRegenerateAudio}
-                disabled={isRegeneratingAudio}
-                className={`px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 transition-all ${isRegeneratingAudio ? 'cursor-not-allowed opacity-60' : 'hover:bg-indigo-50'}`}
-              >
-                {isRegeneratingAudio ? <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" /> : <RotateCcw className="w-4 h-4 text-indigo-600" />}
-                {isRegeneratingAudio ? 'Regenerating...' : 'Regenerate Audio'}
-              </button>
-              <button
-                onClick={handleInitManifests}
-                disabled={isInitManifests}
-                className={`px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 transition-all ${isInitManifests ? 'cursor-not-allowed opacity-60' : 'hover:bg-indigo-50'}`}
-              >
-                {isInitManifests ? <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" /> : <Cloud className="w-4 h-4 text-indigo-600" />}
-                {isInitManifests ? 'Initializing...' : 'Init Manifests'}
-              </button>
-              {isMobileInterface && (
-                <button
-                  onClick={() => {
-                    setShowBookSettings(false);
-                    setShowFixModal(true);
-                  }}
-                  className="px-4 py-2 rounded-xl bg-orange-500 text-white text-[10px] font-black uppercase tracking-widest flex items-center gap-2"
-                >
-                  {isFixing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wrench className="w-4 h-4" />}
-                  {isFixing ? "Fixing..." : isMobileInterface && enableBackgroundJobs ? "Fix Integrity (BG)" : "Fix Integrity"}
+                  Add Cover
                 </button>
               )}
             </div>
-          </div>
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] font-black uppercase tracking-widest opacity-60">Uploads</span>
-              <span className="text-[10px] font-black tracking-widest text-indigo-400">{uploadedChapterCount} uploaded · {uploadQueueCount} pending</span>
+
+            <div className="space-y-3">
+              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Primary Actions</div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => { setShowBookSettings(false); onAddChapter(); }}
+                  className={`${primaryActionClass}`}
+                  title="Add a new chapter"
+                >
+                  Add Chapter
+                </button>
+                <button
+                  onClick={() => { setShowBookSettings(false); onToggleUploadQueue(); }}
+                  className={`${accentButtonClass} px-3 flex items-center gap-2`}
+                  title="View offline uploads"
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  View uploads
+                </button>
+              </div>
             </div>
-            <div className="flex flex-wrap gap-2">
+
+            <div className="space-y-3">
               <button
-                onClick={onToggleUploadQueue}
-                className={`${accentButtonClass} px-3 flex items-center gap-2`}
+                onClick={() => setShowBookMoreActions((v) => !v)}
+                className={`w-full flex items-center justify-between px-4 py-3 rounded-2xl border text-[10px] font-black uppercase tracking-widest ${isDark ? 'border-white/10 hover:bg-white/5' : 'border-black/10 hover:bg-black/5'}`}
+                title="Show more actions"
               >
-                <Eye className="w-3.5 h-3.5" />
-                View uploads
+                More Actions
+                {showBookMoreActions ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
               </button>
-              <button
-                onClick={onUploadAllChapters}
-                disabled={isUploadingAll}
-                className={`px-4 py-2 rounded-xl font-black uppercase tracking-widest text-[10px] transition-all flex items-center gap-2 ${isUploadingAll ? 'bg-indigo-500/60 text-white cursor-not-allowed shadow-none' : isDark ? 'bg-indigo-500 text-white hover:bg-indigo-400 shadow-lg' : 'bg-indigo-600 text-white hover:bg-indigo-500 shadow-lg'}`}
-              >
-                {isUploadingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Cloud className="w-3.5 h-3.5" />}
-                {isUploadingAll ? 'Uploading...' : 'Upload all chapters'}
-              </button>
+              {showBookMoreActions && (
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Background Tools</div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={handleRegenerateAudio}
+                        disabled={isRegeneratingAudio}
+                        title="Regenerate audio for this book"
+                        className={`px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 transition-all ${isRegeneratingAudio ? 'cursor-not-allowed opacity-60' : 'hover:bg-indigo-50'}`}
+                      >
+                        {isRegeneratingAudio ? <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" /> : <RotateCcw className="w-4 h-4 text-indigo-600" />}
+                        {isRegeneratingAudio ? 'Regenerating...' : 'Regenerate Audio'}
+                      </button>
+                      <button
+                        onClick={handleInitManifests}
+                        disabled={isInitManifests}
+                        title="Initialize Drive manifests"
+                        className={`px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 transition-all ${isInitManifests ? 'cursor-not-allowed opacity-60' : 'hover:bg-indigo-50'}`}
+                      >
+                        {isInitManifests ? <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" /> : <Cloud className="w-4 h-4 text-indigo-600" />}
+                        {isInitManifests ? 'Initializing...' : 'Init Manifests'}
+                      </button>
+                      {isMobileInterface && (
+                        <button
+                          onClick={() => {
+                            setShowBookSettings(false);
+                            setShowFixModal(true);
+                          }}
+                          title="Fix missing files and integrity"
+                          className="px-4 py-2 rounded-xl bg-orange-500 text-white text-[10px] font-black uppercase tracking-widest flex items-center gap-2"
+                        >
+                          {isFixing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wrench className="w-4 h-4" />}
+                          {isFixing ? "Fixing..." : isMobileInterface && enableBackgroundJobs ? "Fix Integrity (BG)" : "Fix Integrity"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-black uppercase tracking-widest opacity-60">Uploads</span>
+                      <span className="text-[10px] font-black tracking-widest text-indigo-400">{uploadedChapterCount} uploaded - {uploadQueueCount} pending</span>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={onUploadAllChapters}
+                        disabled={isUploadingAll}
+                        title="Upload all chapters to Drive"
+                        className={`px-4 py-2 rounded-xl font-black uppercase tracking-widest text-[10px] transition-all flex items-center gap-2 ${isUploadingAll ? 'bg-indigo-500/60 text-white cursor-not-allowed shadow-none' : isDark ? 'bg-indigo-500 text-white hover:bg-indigo-400 shadow-lg' : 'bg-indigo-600 text-white hover:bg-indigo-500 shadow-lg'}`}
+                      >
+                        {isUploadingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Cloud className="w-3.5 h-3.5" />}
+                        {isUploadingAll ? 'Uploading...' : 'Upload all chapters'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {book.coverImage && (
+                    <button
+                      onClick={handleRemoveCover}
+                      className={`${accentButtonClass}`}
+                      title="Remove cover image"
+                    >
+                      Remove Cover
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
-          </div>
 
             <div className="space-y-3">
               <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Danger Zone</div>
@@ -1529,6 +1982,41 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                  <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.cleanupStrays} onChange={e => setFixOptions(o => ({...o, cleanupStrays: e.target.checked}))} /><div><div className="text-sm font-black">Cleanup Book Folder</div><p className="text-[10px] opacity-60 uppercase font-bold">Move unrecognized files to trash</p></div></label>
                </div>
              </div>
+             {isMobileInterface && onSyncNativeLibrary && (
+               <div className="border rounded-2xl p-4 bg-black/5 space-y-3">
+                 <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Native DB Sync</div>
+                 <button
+                   onClick={async () => {
+                     setIsSyncingNative(true);
+                     setSyncSummary(null);
+                     try {
+                       const res = await onSyncNativeLibrary({
+                         bookId: book.id,
+                         chapterIds: book.chapters.map((c) => c.id),
+                       });
+                       setSyncSummary(res);
+                       pushNotice("Library synced to native DB.", "success");
+                     } catch (e: any) {
+                       pushNotice(`Native DB sync failed: ${String(e?.message ?? e)}`, "error", 6000);
+                     } finally {
+                       setIsSyncingNative(false);
+                     }
+                   }}
+                   disabled={isSyncingNative}
+                   className={`w-full py-3 rounded-xl font-black uppercase text-[10px] tracking-widest ${
+                     isSyncingNative ? "bg-slate-400 cursor-not-allowed" : "bg-indigo-600 text-white hover:bg-indigo-500"
+                   }`}
+                 >
+                   {isSyncingNative ? "Syncing..." : "Sync Library to Native DB"}
+                 </button>
+                 {syncSummary && (
+                   <div className="text-[10px] font-black uppercase tracking-widest opacity-70">
+                     {syncSummary.books} books Â· {syncSummary.chapters} chapters Â· {syncSummary.texts} texts Â· {syncSummary.failures} failures
+                   </div>
+                 )}
+               </div>
+             )}
+
              <div className="border rounded-2xl p-4 bg-black/5 space-y-2">
                <span className="text-[10px] font-black uppercase opacity-40">Preview</span>
                <div className="text-xs font-bold flex items-center gap-2 text-purple-600"><Sparkles className="w-3 h-3" /> Will create {legacyTextCount} text files from legacy</div>
@@ -1600,9 +2088,19 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <h1 className={`font-black tracking-tight truncate transition-all duration-300 ${isHeaderExpanded ? 'text-xl sm:text-3xl' : 'text-sm sm:text-3xl'}`}>{book.title}</h1>
+                    {isDirty && book.backend === StorageBackend.DRIVE && (
+                      <span className={`px-2 py-1 rounded-full text-[9px] font-black uppercase tracking-widest ${isDark ? 'bg-amber-500/20 text-amber-300' : 'bg-amber-500/20 text-amber-700'}`}>
+                        Not synced
+                      </span>
+                    )}
                     <div className="md:hidden">{isHeaderExpanded ? <ChevronUp className="w-4 h-4 opacity-40" /> : <ChevronDown className="w-4 h-4 opacity-40" />}</div>
                   </div>
                   <p className={`font-bold opacity-60 uppercase tracking-widest transition-all duration-300 ${isHeaderExpanded ? 'text-[10px] sm:text-xs mt-1' : 'text-[8px] sm:text-xs'}`}>{book.chapterCount ?? book.chapters.length} Chapters {isHeaderExpanded && `• ${book.backend} backend`}</p>
+                  {book.backend === StorageBackend.DRIVE && lastSavedAt && (
+                    <div className="text-[8px] sm:text-[9px] font-black uppercase tracking-widest opacity-50 mt-1">
+                      Last saved {new Date(lastSavedAt).toLocaleTimeString()}
+                    </div>
+                  )}
                 </div>
               </div>
               <button onClick={() => setShowBookSettings(true)} className="p-2 rounded-lg bg-black/5 hover:bg-black/10">
@@ -1654,7 +2152,21 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         </div>
       )}
 
-      <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-4 sm:px-6 py-6 sm:py-8">{chapters.length === 0 ? (<div className="p-12 text-center text-xs font-black opacity-30 uppercase">No chapters found</div>) : (<>{viewMode === 'details' && renderDetailsView()}{viewMode === 'list' && renderListView()}{viewMode === 'grid' && renderGridView()}</>)}</div>
+      <div
+        ref={scrollContainerRef}
+        onScroll={useVirtualScroll ? undefined : handleScroll}
+        className={`flex-1 px-4 sm:px-6 py-6 sm:py-8 ${useVirtualScroll ? "overflow-hidden" : "overflow-y-auto"}`}
+      >
+        {chapters.length === 0 ? (
+          <div className="p-12 text-center text-xs font-black opacity-30 uppercase">No chapters found</div>
+        ) : (
+          <>
+            {viewMode === "details" && renderDetailsView()}
+            {viewMode === "list" && renderListView()}
+            {viewMode === "grid" && renderGridView()}
+          </>
+        )}
+      </div>
     </div>
   );
 };
