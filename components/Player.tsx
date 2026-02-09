@@ -277,8 +277,20 @@ const Player: React.FC<PlayerProps> = ({
               <div className="flex flex-col gap-1.5 items-center lg:items-start">
                 <span className="text-[10px] font-black uppercase tracking-widest opacity-60 ml-0.5">Highlight Mode</span>
                 <div className={`flex items-center p-1 rounded-xl gap-0.5 ${isDark ? 'bg-slate-950/40' : 'bg-black/5'}`}>
-                  {[{ m: HighlightMode.WORD, i: Type }, { m: HighlightMode.SENTENCE, i: AlignLeft }, { m: HighlightMode.KARAOKE, i: Sparkles }].map(({ m, i: Icon }) => (
-                    <button key={m} onClick={() => onSetHighlightMode(m)} className={`p-2.5 rounded-lg transition-all ${highlightMode === m ? accentBg + ' text-white shadow-lg' : 'opacity-40 hover:opacity-100'}`}><Icon className="w-4 h-4" /></button>
+                  {[
+                    { m: HighlightMode.WORD, i: Type, label: 'Individual Text' },
+                    { m: HighlightMode.SENTENCE, i: AlignLeft, label: 'Full Paragraph' },
+                    { m: HighlightMode.KARAOKE, i: Sparkles, label: 'Paragraph + Cue' }
+                  ].map(({ m, i: Icon, label }) => (
+                    <button
+                      key={m}
+                      onClick={() => onSetHighlightMode(m)}
+                      title={label}
+                      aria-label={label}
+                      className={`p-2.5 rounded-lg transition-all ${highlightMode === m ? accentBg + ' text-white shadow-lg' : 'opacity-40 hover:opacity-100'}`}
+                    >
+                      <Icon className="w-4 h-4" />
+                    </button>
                   ))}
                 </div>
               </div>

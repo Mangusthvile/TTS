@@ -141,6 +141,16 @@ export type CueMap = {
   generatedAt: number;
   method: "chunkmap" | "timepoints" | "fallback";
   introOffsetMs?: number;
+  durationMs?: number;
+};
+
+export type ParagraphRange = { pIndex: number; startChar: number; endChar: number };
+
+export type ParagraphMap = {
+  chapterId: string;
+  version: number;
+  generatedAt: number;
+  paragraphs: ParagraphRange[];
 };
 
 export interface Chapter {
@@ -191,6 +201,9 @@ export interface ReaderSettings {
   reflowLineBreaks: boolean;
   highlightColor: string;
   followHighlight: boolean;
+  highlightEnabled?: boolean;
+  highlightUpdateRateMs?: number;
+  highlightDebugOverlay?: boolean;
   uiMode: UiMode;
 }
 

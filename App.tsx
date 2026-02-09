@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo, Suspense } from 'react';
-import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, PlaybackPhase, UiMode, ReaderSettings, JobRecord, CueMap, AudioChunkMetadata } from './types';
+import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, SavedSnapshot, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, PlaybackPhase, UiMode, ReaderSettings, JobRecord, CueMap, AudioChunkMetadata, ParagraphMap } from './types';
 import Library from './src/features/library/Library';
 import Reader from './src/features/reader/Reader';
 import Player from './src/features/reader/Player';
 import ChapterSidebar from './src/features/library/ChapterSidebar';
 import { speechController, applyRules, PROGRESS_STORE_V4 } from './services/speechService';
-import type { PlaybackItem } from './services/playbackAdapter';
+import type { PlaybackAdapter, PlaybackItem } from './services/playbackAdapter';
 import { reflowLineBreaks } from './services/textFormat';
 import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, moveFileToTrash, openFolderPicker, listFilesSortedByModified, resolveFolderIdByName, listSaveFileCandidates, createDriveFolder, listFoldersInFolder, findTaleVoxRoots } from './services/driveService';
 import type { InventoryManifest } from "./services/bookManifests";
@@ -34,9 +34,10 @@ import { getChapterAudioPath } from './services/chapterAudioStore';
 import { Capacitor } from "@capacitor/core";
 import { Filesystem, Directory, Encoding } from "@capacitor/filesystem";
 import { createDriveFolderAdapter } from "./services/driveFolderAdapter";
-import { cueMapFromChunkMap, cueMapFallback, findCueIndex } from './services/cueMaps';
-import { saveChapterCueMap, getChapterCueMap, deleteChapterCueMap } from './services/libraryStore';
+import { cueMapFromChunkMap, generateFallbackCueMap, findCueIndex } from './services/cueMaps';
+import { getCueMap, saveCueMap, deleteCueMap, getParagraphMap, saveParagraphMap, deleteParagraphMap, buildParagraphMap } from './services/highlightMaps';
 import { collectDiagnostics, saveDiagnosticsToFile, type DiagnosticsReport } from "./services/diagnosticsService";
+import { useHighlightSync } from "./hooks/useHighlightSync";
 
 type DownloadedChapterInfo = {
   id: string;
@@ -294,6 +295,9 @@ const App: React.FC = () => {
       reflowLineBreaks: true,
       highlightColor: '#4f46e5',
       followHighlight: true,
+      highlightEnabled: true,
+      highlightUpdateRateMs: 250,
+      highlightDebugOverlay: false,
       uiMode: savedUiMode || 'auto',
     };
 
@@ -344,12 +348,17 @@ const App: React.FC = () => {
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
 
   const [effectiveMobileMode, setEffectiveMobileMode] = useState(computeMobileMode(state.readerSettings.uiMode));
+  const [playbackAdapter, setPlaybackAdapter] = useState<PlaybackAdapter | null>(() =>
+    speechController.getPlaybackAdapter()
+  );
 
   useEffect(() => {
     const recompute = () => {
-      const isMob = computeMobileMode(state.readerSettings.uiMode);
-      setEffectiveMobileMode(isMob);
-      speechController.setMobileMode(isMob);
+      const isUiMobile = computeMobileMode(state.readerSettings.uiMode);
+      const isNative = Capacitor.isNativePlatform?.() ?? false;
+      setEffectiveMobileMode(isUiMobile);
+      speechController.setMobileMode(isUiMobile || isNative);
+      setPlaybackAdapter(speechController.getPlaybackAdapter());
     };
     recompute();
     if (state.readerSettings.uiMode === 'auto') {
@@ -553,22 +562,28 @@ const App: React.FC = () => {
     return { label: "All changes saved", tone: "text-emerald-300", icon: "ok" as const };
   }, [isSyncing, savePulse, isOnline, pendingChangeCount]);
 
-  const showSyncNow =
-    !!state.driveRootFolderId &&
-    isAuthorized &&
-    !isSyncing &&
-    isOnline &&
-    pendingChangeCount > 0;
-  const [activeCueRange, setActiveCueRange] = useState<{ start: number; end: number } | null>(null);
-  const [activeCueIndex, setActiveCueIndex] = useState<number | null>(null);
   const [activeCueMap, setActiveCueMap] = useState<CueMap | null>(null);
+  const [activeParagraphMap, setActiveParagraphMap] = useState<ParagraphMap | null>(null);
   const [cueMeta, setCueMeta] = useState<{ method?: string; count?: number } | null>(null);
   const activeCueMapRef = useRef<CueMap | null>(null);
   const activeCueIndexRef = useRef<number | null>(null);
+  const activeParagraphMapRef = useRef<ParagraphMap | null>(null);
   const pendingCueFallbackRef = useRef<{ chapterId: string; text: string; prefixLen: number } | null>(null);
+  const activeSpeakTextRef = useRef<{ chapterId: string; text: string; prefixLen: number } | null>(null);
+  const cueIntegrityRef = useRef<{ chapterId: string; driftCount: number; lastRebuildAt: number; lastNoticeAt: number }>({
+    chapterId: "",
+    driftCount: 0,
+    lastRebuildAt: 0,
+    lastNoticeAt: 0,
+  });
+  const cueDurationRef = useRef<{ chapterId: string; lastDurationMs: number; lastRebuildAt: number }>({
+    chapterId: "",
+    lastDurationMs: 0,
+    lastRebuildAt: 0,
+  });
 
   useEffect(() => { activeCueMapRef.current = activeCueMap; }, [activeCueMap]);
-  useEffect(() => { activeCueIndexRef.current = activeCueIndex; }, [activeCueIndex]);
+  useEffect(() => { activeParagraphMapRef.current = activeParagraphMap; }, [activeParagraphMap]);
 
   const refreshUploadQueueCount = useCallback(async () => {
     try {
@@ -581,8 +596,9 @@ const App: React.FC = () => {
 
   const refreshUploadQueueList = useCallback(async () => {
     try {
-      const items = await listQueuedUploads(20);
+      const items = await listQueuedUploads();
       setUploadQueueItems(items);
+      setUploadQueueCount(items.length);
     } catch {
       // ignore
     }
@@ -725,6 +741,12 @@ const App: React.FC = () => {
     refreshUploadQueueCount();
   }, [refreshUploadQueueCount]);
 
+  useEffect(() => {
+    if (!showUploadQueue) return;
+    refreshUploadQueueCount();
+    refreshUploadQueueList();
+  }, [showUploadQueue, refreshUploadQueueCount, refreshUploadQueueList]);
+
   const hasActiveJobs = useMemo(() => {
     return jobs.some((j) => j.status === "queued" || j.status === "running" || j.status === "paused");
   }, [jobs]);
@@ -748,10 +770,10 @@ const App: React.FC = () => {
     }
     const loadDownloads = async () => {
       const entries: DownloadedChapterInfo[] = [];
-      const storage = getAudioStorage(state.readerSettings.uiMode);
       let counter = 0;
       for (const chapter of book.chapters) {
-        const localPath = await storage.getAudioPath(chapter.id);
+        const record = await getChapterAudioPath(chapter.id);
+        const localPath = record?.localPath ?? null;
         if (!localPath) continue;
         if (!mounted) return;
         entries.push({
@@ -794,6 +816,51 @@ const App: React.FC = () => {
       ? activeBook.settings.playbackSpeed
       : state.playbackSpeed;
   const activeChapterMetadata = useMemo(() => activeBook?.chapters.find(c => c.id === activeBook.currentChapterId), [activeBook]);
+  const activeChapterText = useMemo(() => activeChapterMetadata?.content ?? "", [activeChapterMetadata?.content]);
+
+  const handleHighlightOffsetChange = useCallback((offset: number) => {
+    if (stateRef.current.currentOffsetChars !== offset) {
+      setState(p => ({ ...p, currentOffsetChars: offset }));
+    }
+  }, []);
+
+  const highlightEnabled = state.readerSettings.highlightEnabled !== false;
+  const highlightSync = useHighlightSync({
+    chapterId: activeChapterMetadata?.id ?? null,
+    text: activeChapterText,
+    cueMap: activeCueMap,
+    paragraphMap: activeParagraphMap,
+    playbackAdapter,
+    enabled: highlightEnabled,
+    throttleMs: state.readerSettings.highlightUpdateRateMs ?? 250,
+    onOffsetChange: handleHighlightOffsetChange,
+  });
+  const activeCueIndex = highlightSync.activeCueIndex;
+  const activeCueRange = highlightSync.activeCueRange;
+  const activeParagraphIndex = highlightSync.activeParagraphIndex;
+  const isCueReady = highlightSync.isCueReady;
+  const highlightDebugData = useMemo(() => ({
+    positionMs: Math.floor(audioCurrentTime * 1000),
+    durationMs: Math.floor(audioDuration * 1000),
+    cueIndex: highlightEnabled ? activeCueIndex : null,
+    cueCount: activeCueMap?.cues?.length ?? 0,
+    paragraphIndex: highlightEnabled ? activeParagraphIndex : null,
+    paragraphCount: activeParagraphMap?.paragraphs?.length ?? 0,
+    mode: activeBook?.settings.highlightMode ?? HighlightMode.WORD,
+    isPlaying,
+  }), [
+    audioCurrentTime,
+    audioDuration,
+    highlightEnabled,
+    activeCueIndex,
+    activeParagraphIndex,
+    activeCueMap,
+    activeParagraphMap,
+    activeBook?.settings.highlightMode,
+    isPlaying,
+  ]);
+
+  useEffect(() => { activeCueIndexRef.current = activeCueIndex; }, [activeCueIndex]);
 
   const [toast, setToast] = useState<{ message: string; type: 'info' | 'success' | 'error' | 'reconnect' } | null>(null);
   const noticeTimerRef = useRef<number | null>(null);
@@ -836,6 +903,23 @@ const App: React.FC = () => {
       pushNotice({ message: `Diagnostics save failed: ${String(e?.message ?? e)}`, type: "error" });
     }
   }, [diagnosticsReport, refreshDiagnostics, pushNotice]);
+
+  const handleLogHighlightDiagnostics = useCallback(() => {
+    const s = stateRef.current;
+    const book = s.books.find(b => b.id === s.activeBookId);
+    const chapterId = book?.currentChapterId ?? null;
+    const cueCount = activeCueMapRef.current?.cues?.length ?? 0;
+    const paragraphCount = activeParagraphMapRef.current?.paragraphs?.length ?? 0;
+    const cueIndex = activeCueIndexRef.current ?? null;
+    const paragraphIndex = activeParagraphIndex ?? null;
+    console.log("[Highlight] diagnostics", {
+      chapterId,
+      cueCount,
+      paragraphCount,
+      activeCueIndex: cueIndex,
+      activeParagraphIndex: paragraphIndex,
+    });
+  }, [activeParagraphIndex]);
 
   const handleRequestNotifications = useCallback(async () => {
     try {
@@ -1028,14 +1112,16 @@ const App: React.FC = () => {
     setAudioCurrentTime(meta.currentTime);
     setAudioDuration(meta.duration);
 
+    const s = stateRef.current;
+    const b = s.books.find(bk => bk.id === s.activeBookId);
+    const activeChapterId = b?.currentChapterId ?? null;
+
     const pendingFallback = pendingCueFallbackRef.current;
     if (pendingFallback && meta.duration > 0) {
-        const s = stateRef.current;
-        const b = s.books.find(bk => bk.id === s.activeBookId);
-        if (b?.currentChapterId === pendingFallback.chapterId && !activeCueMapRef.current) {
+        if (activeChapterId === pendingFallback.chapterId && !activeCueMapRef.current) {
             pendingCueFallbackRef.current = null;
             void (async () => {
-                const chapter = b.chapters.find(c => c.id === pendingFallback.chapterId);
+                const chapter = b?.chapters.find(c => c.id === pendingFallback.chapterId);
                 const introMs = computeIntroMs({
                   audioIntroDurSec: chapter?.audioIntroDurSec,
                   audioPrefixLen: pendingFallback.prefixLen,
@@ -1045,15 +1131,21 @@ const App: React.FC = () => {
                 if (introMs > 0) {
                   setCurrentIntroDurSec(introMs / 1000);
                 }
-                const built = cueMapFallback(
-                  pendingFallback.text,
-                  Math.floor(meta.duration * 1000),
-                  pendingFallback.chapterId,
-                  introMs
-                );
-                await saveChapterCueMap(pendingFallback.chapterId, built);
-                setActiveCueMap(built);
-                setCueMeta({ method: built.method, count: built.cues.length });
+            const built = generateFallbackCueMap({
+              chapterId: pendingFallback.chapterId,
+              text: pendingFallback.text,
+              durationMs: Math.floor(meta.duration * 1000),
+              introOffsetMs: introMs,
+            });
+            await saveCueMap(pendingFallback.chapterId, built);
+            console.log("[Highlight] cue map generated", {
+              chapterId: pendingFallback.chapterId,
+              cueCount: built.cues.length,
+              method: built.method,
+              durationMs: Math.floor(meta.duration * 1000),
+            });
+            setActiveCueMap(built);
+            setCueMeta({ method: built.method, count: built.cues.length });
             })().catch((e) => {
                 console.warn("Cue map fallback build failed", e);
             });
@@ -1063,22 +1155,98 @@ const App: React.FC = () => {
     const cueMap = activeCueMapRef.current;
     if (cueMap && cueMap.cues.length > 0) {
         const positionMs = Math.floor(meta.currentTime * 1000);
-        const introMs = cueMap.introOffsetMs || 0;
-        if (introMs > 0 && positionMs < introMs) {
-            if (activeCueIndexRef.current !== null) {
-                setActiveCueIndex(null);
-                setActiveCueRange(null);
+        const idx = findCueIndex(cueMap.cues, positionMs);
+
+        const activeSpeak = activeSpeakTextRef.current;
+        if (
+          activeSpeak &&
+          activeChapterId === activeSpeak.chapterId &&
+          meta.duration > 5 &&
+          meta.currentTime > 2 &&
+          activeSpeak.text.length > 0
+        ) {
+          const durationMs = Math.floor(meta.duration * 1000);
+          if (durationMs > 0 && cueMap.durationMs) {
+            const durationState = cueDurationRef.current;
+            if (durationState.chapterId !== activeSpeak.chapterId) {
+              durationState.chapterId = activeSpeak.chapterId;
+              durationState.lastDurationMs = durationMs;
+              durationState.lastRebuildAt = 0;
             }
-        } else {
-            const idx = findCueIndex(cueMap.cues, positionMs);
-            if (idx !== activeCueIndexRef.current) {
-                const cue = cueMap.cues[idx];
-                setActiveCueIndex(idx);
-                setActiveCueRange({ start: cue.startChar, end: cue.endChar });
-                if (stateRef.current.currentOffsetChars !== cue.startChar) {
-                    setState(p => ({ ...p, currentOffsetChars: cue.startChar }));
-                }
+
+            const driftMs = Math.abs(cueMap.durationMs - durationMs);
+            const now = Date.now();
+            if (driftMs > 1500 && now - durationState.lastRebuildAt > 20000) {
+              durationState.lastRebuildAt = now;
+              void (async () => {
+                const introMsForRebuild = Math.max(0, Math.floor(currentIntroDurSec * 1000));
+                const built = generateFallbackCueMap({
+                  chapterId: activeSpeak.chapterId,
+                  text: activeSpeak.text,
+                  durationMs,
+                  introOffsetMs: introMsForRebuild,
+                });
+                await saveCueMap(activeSpeak.chapterId, built);
+                setActiveCueMap(built);
+                setCueMeta({ method: built.method, count: built.cues.length });
+                console.log("[Highlight] cue map regenerated (duration change)", {
+                  chapterId: activeSpeak.chapterId,
+                  cueCount: built.cues.length,
+                  method: built.method,
+                  durationMs,
+                  previousDurationMs: cueMap.durationMs,
+                });
+              })().catch((e) => {
+                console.warn("Cue map duration rebuild failed", e);
+              });
             }
+          }
+
+          const driftState = cueIntegrityRef.current;
+          if (driftState.chapterId !== activeSpeak.chapterId) {
+            driftState.chapterId = activeSpeak.chapterId;
+            driftState.driftCount = 0;
+            driftState.lastRebuildAt = 0;
+          }
+          const linearOffset = Math.floor((meta.currentTime / meta.duration) * activeSpeak.text.length);
+          const cueOffset = cueMap.cues[idx]?.startChar ?? 0;
+          const drift = Math.abs(cueOffset - linearOffset);
+          const threshold = Math.max(200, Math.floor(activeSpeak.text.length * 0.12));
+          if (drift > threshold) {
+            driftState.driftCount += 1;
+          } else {
+            driftState.driftCount = 0;
+          }
+
+          const now = Date.now();
+          if (driftState.driftCount >= 4 && now - driftState.lastRebuildAt > 30000) {
+            driftState.lastRebuildAt = now;
+            driftState.driftCount = 0;
+            void (async () => {
+              const introMsForRebuild = Math.max(0, Math.floor(currentIntroDurSec * 1000));
+              const built = generateFallbackCueMap({
+                chapterId: activeSpeak.chapterId,
+                text: activeSpeak.text,
+                durationMs: Math.floor(meta.duration * 1000),
+                introOffsetMs: introMsForRebuild,
+              });
+              await saveCueMap(activeSpeak.chapterId, built);
+              setActiveCueMap(built);
+              setCueMeta({ method: built.method, count: built.cues.length });
+              console.log("[Highlight] cue map rebuilt", {
+                chapterId: activeSpeak.chapterId,
+                cueCount: built.cues.length,
+                method: built.method,
+                durationMs: Math.floor(meta.duration * 1000),
+              });
+              if (now - driftState.lastNoticeAt > 45000) {
+                driftState.lastNoticeAt = now;
+                pushNotice({ message: "Rebuilt highlight map", type: 'info', ms: 1200 });
+              }
+            })().catch((e) => {
+              console.warn("Cue map rebuild failed", e);
+            });
+          }
         }
     } else {
         const nextOffset = Number.isFinite(meta.charOffset) ? meta.charOffset : stateRef.current.currentOffsetChars;
@@ -1087,8 +1255,8 @@ const App: React.FC = () => {
         }
     }
 
-    const s = stateRef.current;
-    if (s.activeBookId && s.books) {
+    const shouldCommitProgress = !!meta.completed || meta.duration > 0 || meta.currentTime > 0;
+    if (shouldCommitProgress && s.activeBookId && s.books) {
        const b = s.books.find(b => b.id === s.activeBookId);
        if (b && b.currentChapterId) {
           const now = Date.now();
@@ -1102,7 +1270,7 @@ const App: React.FC = () => {
        }
     }
 
-  }, [playbackPhase, currentIntroDurSec, updatePhase, commitProgressUpdate]);
+  }, [playbackPhase, currentIntroDurSec, updatePhase, commitProgressUpdate, pushNotice]);
 
   useEffect(() => {
     speechController.setSyncCallback(handleSyncUpdate);
@@ -1371,8 +1539,6 @@ const App: React.FC = () => {
         books: p.books.map(b => b.id === book.id ? { ...b, currentChapterId: targetChapterId } : b),
         currentOffsetChars: 0 
     }));
-    setActiveCueRange(null);
-    setActiveCueIndex(null);
     setActiveCueMap(null);
     setCueMeta(null);
     pendingCueFallbackRef.current = null;
@@ -1398,9 +1564,28 @@ const App: React.FC = () => {
     let textToSpeak = applyRules((content ?? chapter.content ?? ""), allRules);
     if (s.readerSettings?.reflowLineBreaks) textToSpeak = reflowLineBreaks(textToSpeak);
 
+    try {
+      let paragraphMap = await getParagraphMap(chapter.id);
+      if (!paragraphMap || !paragraphMap.paragraphs || paragraphMap.paragraphs.length === 0) {
+        paragraphMap = buildParagraphMap(textToSpeak, chapter.id);
+        await saveParagraphMap(chapter.id, paragraphMap);
+        console.log("[Highlight] paragraph map generated", {
+          chapterId: chapter.id,
+          paragraphCount: paragraphMap.paragraphs.length,
+        });
+      }
+      setActiveParagraphMap(paragraphMap);
+    } catch (e) {
+      console.warn("[Highlight] paragraph map generation failed", e);
+      setActiveParagraphMap(null);
+    }
+
     const rawIntro = `Chapter ${chapter.index}. ${chapter.title}. `;
     const introText = applyRules(rawIntro, allRules);
     const prefixLen = getEffectivePrefixLen(chapter, introText.length);
+    activeSpeakTextRef.current = { chapterId: chapter.id, text: textToSpeak, prefixLen };
+    cueIntegrityRef.current = { chapterId: chapter.id, driftCount: 0, lastRebuildAt: 0, lastNoticeAt: 0 };
+    cueDurationRef.current = { chapterId: chapter.id, lastDurationMs: 0, lastRebuildAt: 0 };
     const { chunkMap: normalizedChunkMap, introMsFromChunk } = normalizeChunkMapForChapter(
       chapter.audioChunkMap,
       textToSpeak.length,
@@ -1417,10 +1602,11 @@ const App: React.FC = () => {
     
     const cacheKey = generateAudioKey(introText + textToSpeak, voice, 1.0);
     let audioBlob = await getAudioFromCache(cacheKey);
-    
-    if (!audioBlob && chapter.cloudAudioFileId && isAuthorized) {
+    const driveAudioId = chapter.cloudAudioFileId || chapter.audioDriveId;
+
+    if (!audioBlob && driveAudioId && isAuthorized) {
         try { 
-            audioBlob = await fetchDriveBinary(chapter.cloudAudioFileId); 
+            audioBlob = await fetchDriveBinary(driveAudioId); 
             if (audioBlob) await saveAudioToCache(cacheKey, audioBlob); 
         } catch(e) {}
     }
@@ -1428,21 +1614,22 @@ const App: React.FC = () => {
     if (session !== chapterSessionRef.current) return;
 
     const isNativePlatform = Capacitor.isNativePlatform?.() ?? false;
+    const shouldUseLocalAudio = isNativePlatform || effectiveMobileMode;
     const effectiveSpeed = getEffectivePlaybackSpeed();
 
     let playbackUrl: string | null = null;
-    if (effectiveMobileMode && isNativePlatform) {
+    if (isNativePlatform) {
         playbackUrl = await resolveChapterAudioLocalPath(chapter.id);
         if (!playbackUrl && audioBlob && audioBlob.size > 0) {
             playbackUrl = (await persistChapterAudio(chapter.id, audioBlob, uiMode)) ?? null;
         }
     } else {
-        const localPlaybackUrl = effectiveMobileMode ? await resolveChapterAudioUrl(chapter.id, uiMode) : null;
+        const localPlaybackUrl = shouldUseLocalAudio ? await resolveChapterAudioUrl(chapter.id, uiMode) : null;
         playbackUrl = localPlaybackUrl ?? null;
         if (!playbackUrl && audioBlob && audioBlob.size > 0) {
             playbackUrl = URL.createObjectURL(audioBlob);
         }
-        if (effectiveMobileMode && audioBlob) {
+        if (shouldUseLocalAudio && audioBlob) {
             await persistChapterAudio(chapter.id, audioBlob, uiMode);
         }
     }
@@ -1459,7 +1646,7 @@ const App: React.FC = () => {
 
     // Load or build cue map
     try {
-      const existingCue = await getChapterCueMap(chapter.id);
+      const existingCue = await getCueMap(chapter.id);
       let cueToUse: CueMap | null = existingCue;
       const existingIntro = existingCue?.introOffsetMs ?? 0;
       const maxExistingEnd = existingCue?.cues?.length
@@ -1477,12 +1664,17 @@ const App: React.FC = () => {
         if (normalizedChunkMap.length > 0) {
           builtCue = cueMapFromChunkMap(chapter.id, normalizedChunkMap, introMs);
         } else if (textToSpeak.length > 0 && audioDuration > 0) {
-          builtCue = cueMapFallback(textToSpeak, Math.floor(audioDuration * 1000), chapter.id, introMs);
+          builtCue = generateFallbackCueMap({
+            chapterId: chapter.id,
+            text: textToSpeak,
+            durationMs: Math.floor(audioDuration * 1000),
+            introOffsetMs: introMs,
+          });
         } else if (textToSpeak.length > 0) {
           pendingCueFallbackRef.current = { chapterId: chapter.id, text: textToSpeak, prefixLen };
         }
         if (builtCue) {
-          await saveChapterCueMap(chapter.id, builtCue);
+          await saveCueMap(chapter.id, builtCue);
           cueToUse = builtCue;
           pendingCueFallbackRef.current = null;
         }
@@ -1493,22 +1685,34 @@ const App: React.FC = () => {
       if (cueToUse) {
         setActiveCueMap(cueToUse);
         setCueMeta({ method: cueToUse.method, count: cueToUse.cues.length });
+        console.log("[Highlight] cue map loaded", {
+          chapterId: chapter.id,
+          cueCount: cueToUse.cues.length,
+          method: cueToUse.method,
+          durationMs: audioDuration > 0 ? Math.floor(audioDuration * 1000) : undefined,
+        });
       }
     } catch (e) {
       console.warn("Cue map load/build failed", e);
     }
 
     let mobileQueue: PlaybackItem[] | undefined;
-    if (effectiveMobileMode) {
+    if (shouldUseLocalAudio) {
+        const mediaArtist = book.title || undefined;
+        const mediaAlbum = book.title || undefined;
+        const artworkUrl =
+          typeof book.coverImage === "string" && book.coverImage && !book.coverImage.startsWith("data:")
+            ? book.coverImage
+            : undefined;
         const sorted = [...book.chapters].sort((a, b) => a.index - b.index);
         const currentIdx = sorted.findIndex(c => c.id === chapter.id);
         const queueItems: PlaybackItem[] = [
-          { id: chapter.id, url: playbackUrl, title: chapter.title }
+          { id: chapter.id, url: playbackUrl, title: chapter.title, artist: mediaArtist, album: mediaAlbum, artworkUrl }
         ];
         const maxQueue = 5;
         for (let i = currentIdx + 1; i < sorted.length && queueItems.length < maxQueue; i++) {
           const next = sorted[i];
-          let nextUrl = effectiveMobileMode && isNativePlatform
+          let nextUrl = isNativePlatform
             ? await resolveChapterAudioLocalPath(next.id)
             : await resolveChapterAudioUrl(next.id, uiMode);
           if (!nextUrl) {
@@ -1516,24 +1720,27 @@ const App: React.FC = () => {
             if (next.audioSignature) {
               nextBlob = await getAudioFromCache(next.audioSignature);
             }
-            if (!nextBlob && next.cloudAudioFileId && isAuthorized) {
+            const nextDriveAudioId = next.cloudAudioFileId || next.audioDriveId;
+            if (!nextBlob && nextDriveAudioId && isAuthorized) {
               try {
-                nextBlob = await fetchDriveBinary(next.cloudAudioFileId);
+                nextBlob = await fetchDriveBinary(nextDriveAudioId);
               } catch (e) {
                 nextBlob = null;
               }
             }
             if (nextBlob && nextBlob.size > 0) {
-              if (effectiveMobileMode && isNativePlatform) {
+              if (isNativePlatform) {
                 nextUrl = (await persistChapterAudio(next.id, nextBlob, uiMode)) ?? null;
               } else {
                 nextUrl = URL.createObjectURL(nextBlob);
-                await persistChapterAudio(next.id, nextBlob, uiMode);
+                if (shouldUseLocalAudio) {
+                  await persistChapterAudio(next.id, nextBlob, uiMode);
+                }
               }
             }
           }
           if (nextUrl) {
-            queueItems.push({ id: next.id, url: nextUrl, title: next.title });
+            queueItems.push({ id: next.id, url: nextUrl, title: next.title, artist: mediaArtist, album: mediaAlbum, artworkUrl });
           }
         }
         mobileQueue = queueItems.length > 0 ? queueItems : undefined;
@@ -1550,36 +1757,49 @@ const App: React.FC = () => {
         
     if (!isFinite(startSec) || startSec < 0) startSec = 0;
         
-    await speechController.loadAndPlayDriveFile(
-        '', 'LOCAL_ID', textToSpeak.length, introSec, normalizedChunkMap, 
-        startSec, 
-        effectiveSpeed, 
-        () => {
-            if (session === chapterSessionRef.current) {
-                updatePhase('ENDING_SETTLE');
-                setTimeout(() => {
-                    if (session === chapterSessionRef.current) {
-                        handleNextChapterRef.current(true); 
-                    }
-                }, 300);
-            }
-        }, 
-        null, playbackUrl, 
-        () => {
-            if (session === chapterSessionRef.current) {
-                if (startSec > 1) {
-                   updatePhase('PLAYING_BODY');
-                   isInIntroRef.current = false;
-                } else {
-                   updatePhase('PLAYING_INTRO'); 
-                   isInIntroRef.current = true; 
+    try {
+        await speechController.loadAndPlayDriveFile(
+            '', 'LOCAL_ID', textToSpeak.length, introSec, normalizedChunkMap, 
+            startSec, 
+            effectiveSpeed, 
+            () => {
+                if (session === chapterSessionRef.current) {
+                    updatePhase('ENDING_SETTLE');
+                    setTimeout(() => {
+                        if (session === chapterSessionRef.current) {
+                            handleNextChapterRef.current(true); 
+                        }
+                    }, 300);
                 }
-            }
-        },
-        undefined,
-        mobileQueue,
-        0
-    );
+            }, 
+            null, playbackUrl, 
+            () => {
+                if (session === chapterSessionRef.current) {
+                    if (startSec > 1) {
+                       updatePhase('PLAYING_BODY');
+                       isInIntroRef.current = false;
+                    } else {
+                       updatePhase('PLAYING_INTRO'); 
+                       isInIntroRef.current = true; 
+                    }
+                }
+            },
+            undefined,
+            mobileQueue,
+            0
+        );
+    } catch (e: any) {
+        if (session !== chapterSessionRef.current) return;
+        console.warn("audio:load:failed", e);
+        setIsPlaying(false);
+        setAutoplayBlocked(false);
+        updatePhase('READY');
+        const msg = !isOnline
+          ? "Offline: audio could not load. Try again once you’re online."
+          : `Audio load failed${e?.message ? `: ${e.message}` : ''}`;
+        pushNotice({ message: msg, type: 'error', ms: 3500 });
+        return;
+    }
 
     if (session !== chapterSessionRef.current) return;
 
@@ -1611,7 +1831,7 @@ const App: React.FC = () => {
         updatePhase('READY');
     }
 
-  }, [isAuthorized, ensureChapterContentLoaded, pushNotice, updatePhase, effectiveMobileMode, getEffectivePlaybackSpeed]);
+  }, [isAuthorized, ensureChapterContentLoaded, pushNotice, updatePhase, effectiveMobileMode, getEffectivePlaybackSpeed, isOnline]);
 
   const handleSmartOpenChapter = (id: string) => {
     const s = stateRef.current;
@@ -1743,7 +1963,8 @@ const App: React.FC = () => {
     }
 
     try {
-      await deleteChapterCueMap(chapterId);
+      await deleteCueMap(chapterId);
+      await deleteParagraphMap(chapterId);
     } catch {}
 
     if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
@@ -1856,10 +2077,8 @@ const App: React.FC = () => {
     const chapter = book.chapters.find(c => c.id === book.currentChapterId);
     if (!chapter) return;
     try {
-      await deleteChapterCueMap(chapter.id);
+      await deleteCueMap(chapter.id);
       setActiveCueMap(null);
-      setActiveCueIndex(null);
-      setActiveCueRange(null);
       let built: CueMap | null = null;
       const rules = [...s.globalRules, ...book.rules];
       let textToSpeak = applyRules((chapter.content ?? ""), rules);
@@ -1883,15 +2102,18 @@ const App: React.FC = () => {
       if (normalizedChunkMap.length > 0) {
         built = cueMapFromChunkMap(chapter.id, normalizedChunkMap, introMs);
       } else if (textToSpeak.length > 0 && audioDuration > 0) {
-        built = cueMapFallback(textToSpeak, Math.floor(audioDuration * 1000), chapter.id, introMs);
+        built = generateFallbackCueMap({
+          chapterId: chapter.id,
+          text: textToSpeak,
+          durationMs: Math.floor(audioDuration * 1000),
+          introOffsetMs: introMs,
+        });
       } else if (textToSpeak.length > 0) {
         pendingCueFallbackRef.current = { chapterId: chapter.id, text: textToSpeak, prefixLen };
       }
       if (built) {
-        await saveChapterCueMap(chapter.id, built);
+        await saveCueMap(chapter.id, built);
         setActiveCueMap(built);
-        setActiveCueIndex(null);
-        setActiveCueRange(null);
         setCueMeta({ method: built.method, count: built.cues.length });
         pendingCueFallbackRef.current = null;
       }
@@ -2225,7 +2447,15 @@ const App: React.FC = () => {
     lastGestureAt.current = Date.now();
     const effectiveSpeed = getEffectivePlaybackSpeed();
     speechController.setPlaybackRate(effectiveSpeed);
-    
+
+    const s = stateRef.current;
+    const book = s.books.find(b => b.id === s.activeBookId);
+    const chapterId = book?.currentChapterId;
+    if (chapterId && !speechController.hasAudioSource) {
+        loadChapterSession(chapterId, 'user');
+        return;
+    }
+
     speechController.safePlay().then(res => {
         if (res === 'blocked') {
             setAutoplayBlocked(true);
@@ -2235,6 +2465,14 @@ const App: React.FC = () => {
             setIsPlaying(true);
             updatePhase('PLAYING_BODY');
         }
+    }).catch(() => {
+        if (chapterId) {
+            loadChapterSession(chapterId, 'user');
+            return;
+        }
+        setAutoplayBlocked(false);
+        setIsPlaying(false);
+        updatePhase('READY');
     });
   };
 
@@ -2939,20 +3177,12 @@ const App: React.FC = () => {
                 Uploads queued: {uploadQueueCount}
               </div>
             )}
-            {showSyncNow && (
-              <button
-                onClick={() => handleSync(true)}
-                className="px-3 py-1.5 rounded-full bg-indigo-600 text-white text-[9px] font-black uppercase tracking-widest shadow hover:bg-indigo-700 transition-all"
-              >
-                Sync now
-              </button>
-            )}
           </div>
         </div>
       </div>
 
       <div className="flex-1 overflow-y-auto relative flex">
-        {(isLoadingChapter || playbackPhase === 'LOADING_TEXT' || playbackPhase === 'LOADING_AUDIO') && (
+        {activeTab === 'reader' && (isLoadingChapter || playbackPhase === 'LOADING_TEXT' || playbackPhase === 'LOADING_AUDIO') && (
             <div className="absolute inset-0 flex items-center justify-center bg-inherit z-[70]">
                 <div className="flex flex-col items-center gap-3">
                     <Loader2 className="w-10 h-10 text-indigo-600 animate-spin" />
@@ -3356,9 +3586,14 @@ const App: React.FC = () => {
 
           {activeTab === 'reader' && activeBook && activeChapterMetadata && (
             <Reader 
-              chapter={activeChapterMetadata} rules={[...state.globalRules, ...activeBook.rules]} currentOffsetChars={state.currentOffsetChars} theme={state.theme}
-              activeHighlightRange={activeCueRange}
-              activeCueIndex={activeCueIndex}
+              chapter={activeChapterMetadata} rules={[...state.globalRules, ...activeBook.rules]} theme={state.theme}
+              activeHighlightRange={highlightEnabled ? activeCueRange : null}
+              activeCueIndex={highlightEnabled ? activeCueIndex : null}
+              activeParagraphIndex={highlightEnabled ? activeParagraphIndex : null}
+              paragraphMap={activeParagraphMap}
+              highlightReady={isCueReady}
+              highlightEnabled={highlightEnabled}
+              highlightDebugData={highlightDebugData}
               cueMeta={cueMeta || undefined}
               onRegenerateCueMap={handleRegenerateCueMap}
               debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset}
@@ -3409,6 +3644,16 @@ const App: React.FC = () => {
               <LazySettings 
                 settings={state.readerSettings} 
                 onUpdate={s => setState(p => ({ ...p, readerSettings: { ...p.readerSettings, ...s } }))}
+                highlightMode={activeBook?.settings.highlightMode ?? HighlightMode.WORD}
+                onSetHighlightMode={v => {
+                  if (!activeBook) return;
+                  setState(p => ({
+                    ...p,
+                    books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, highlightMode: v } } : b)
+                  }));
+                  markDirty();
+                }}
+                onRegenerateCueMap={handleRegenerateCueMap}
                 theme={state.theme} 
                 onSetTheme={t => setState(p => ({ ...p, theme: t }))}
                 keepAwake={state.keepAwake}
@@ -3453,6 +3698,8 @@ const App: React.FC = () => {
                 diagnosticsReport={diagnosticsReport}
                 onRefreshDiagnostics={refreshDiagnostics}
                 onSaveDiagnostics={handleSaveDiagnostics}
+                showHighlightDiagnostics={import.meta.env.DEV}
+                onLogHighlightDiagnostics={handleLogHighlightDiagnostics}
               />
             </Suspense>
           )}

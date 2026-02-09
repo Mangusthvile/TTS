@@ -19,12 +19,13 @@ import { HighlightMode } from "../types";
 import type { Book, Chapter, StorageBackend, AudioStatus, BookSettings, Rule } from "../types";
 
 const DB_NAME = "TalevoxLibrary";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 const STORE_BOOKS = "books";
 const STORE_CHAPTERS = "chapters";
 const STORE_CHAPTER_TEXT = "chapter_text";
 const STORE_CHAPTER_CUE_MAPS = "chapter_cue_maps";
+const STORE_CHAPTER_PARAGRAPH_MAPS = "chapter_paragraph_maps";
 
 export type ChapterPage = {
   chapters: Chapter[];
@@ -83,6 +84,12 @@ type ChapterCueMapRow = {
   updatedAt: number;
 };
 
+type ChapterParagraphMapRow = {
+  chapterId: string;
+  paragraphJson: string;
+  updatedAt: number;
+};
+
 let dbPromise: Promise<IDBDatabase> | null = null;
 
 function ensureIndexedDbAvailable(): void {
@@ -128,6 +135,10 @@ function openDb(): Promise<IDBDatabase> {
 
       if (!db.objectStoreNames.contains(STORE_CHAPTER_CUE_MAPS)) {
         db.createObjectStore(STORE_CHAPTER_CUE_MAPS, { keyPath: "chapterId" });
+      }
+
+      if (!db.objectStoreNames.contains(STORE_CHAPTER_PARAGRAPH_MAPS)) {
+        db.createObjectStore(STORE_CHAPTER_PARAGRAPH_MAPS, { keyPath: "chapterId" });
       }
     };
 
@@ -397,6 +408,44 @@ export async function deleteChapterCueMap(chapterId: string): Promise<void> {
 export const idbSaveChapterCueMap = saveChapterCueMap;
 export const idbGetChapterCueMap = getChapterCueMap;
 export const idbDeleteChapterCueMap = deleteChapterCueMap;
+
+export async function saveChapterParagraphMap(chapterId: string, paragraphMap: any): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_CHAPTER_PARAGRAPH_MAPS], "readwrite");
+  const store = tx.objectStore(STORE_CHAPTER_PARAGRAPH_MAPS);
+  const row: ChapterParagraphMapRow = {
+    chapterId,
+    paragraphJson: JSON.stringify(paragraphMap),
+    updatedAt: Date.now(),
+  };
+  store.put(row);
+  await txDone(tx);
+}
+
+export async function getChapterParagraphMap(chapterId: string): Promise<any | null> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_CHAPTER_PARAGRAPH_MAPS], "readonly");
+  const store = tx.objectStore(STORE_CHAPTER_PARAGRAPH_MAPS);
+  const row = (await reqToPromise(store.get(chapterId))) as ChapterParagraphMapRow | undefined;
+  await txDone(tx);
+  if (!row) return null;
+  try {
+    return JSON.parse(row.paragraphJson);
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteChapterParagraphMap(chapterId: string): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_CHAPTER_PARAGRAPH_MAPS], "readwrite");
+  tx.objectStore(STORE_CHAPTER_PARAGRAPH_MAPS).delete(chapterId);
+  await txDone(tx);
+}
+
+export const idbSaveChapterParagraphMap = saveChapterParagraphMap;
+export const idbGetChapterParagraphMap = getChapterParagraphMap;
+export const idbDeleteChapterParagraphMap = deleteChapterParagraphMap;
 
 export async function listChaptersPage(
   bookId: string,

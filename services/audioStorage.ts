@@ -177,18 +177,23 @@ export class MobileAudioStorage implements AudioStorage {
 const desktopStorage = new DesktopAudioStorage();
 const mobileStorage = new MobileAudioStorage();
 
+function shouldUseMobileStorage(uiMode: UiMode): boolean {
+  const isNative = Capacitor.isNativePlatform?.() ?? false;
+  return isNative || computeMobileMode(uiMode);
+}
+
 export function getAudioStorage(uiMode: UiMode): AudioStorage {
-  return computeMobileMode(uiMode) ? mobileStorage : desktopStorage;
+  return shouldUseMobileStorage(uiMode) ? mobileStorage : desktopStorage;
 }
 
 export async function persistChapterAudio(chapterId: string, data: AudioChunk, uiMode: UiMode): Promise<string | null> {
-  if (!computeMobileMode(uiMode)) return null;
+  if (!shouldUseMobileStorage(uiMode)) return null;
   const storage = getAudioStorage(uiMode);
   return storage.saveAudio(chapterId, data);
 }
 
 export async function resolveChapterAudioUrl(chapterId: string, uiMode: UiMode): Promise<string | null> {
-  if (!computeMobileMode(uiMode)) return null;
+  if (!shouldUseMobileStorage(uiMode)) return null;
   const storage = getAudioStorage(uiMode);
   const localPath = await storage.getAudioPath(chapterId);
   if (!localPath) return null;

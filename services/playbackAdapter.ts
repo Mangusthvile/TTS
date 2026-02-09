@@ -1,4 +1,12 @@
-export type PlaybackItem = { id: string; url: string; title?: string };
+
+export type PlaybackItem = {
+  id: string;
+  url: string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  artworkUrl?: string;
+};
 
 export type PlaybackState = {
   currentTime: number;

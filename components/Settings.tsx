@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { ReaderSettings, Theme, SyncDiagnostics, UiMode, JobRecord } from '../types';
+import { ReaderSettings, Theme, SyncDiagnostics, UiMode, JobRecord, HighlightMode } from '../types';
 import type { DiagnosticsReport } from '../services/diagnosticsService';
 import { RefreshCw, Cloud, CloudOff, Loader2, LogOut, Save, LogIn, Check, Sun, Coffee, Moon, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer, ClipboardCopy, FileWarning, Bug, Smartphone, Type, Palette, Monitor, LayoutTemplate, Library, List, Bell } from 'lucide-react';
 import { getAuthSessionInfo, isTokenValid, getValidDriveToken } from '../services/driveAuth';
@@ -55,6 +55,11 @@ interface SettingsProps {
   diagnosticsReport?: DiagnosticsReport | null;
   onRefreshDiagnostics?: () => void;
   onSaveDiagnostics?: () => void;
+  showHighlightDiagnostics?: boolean;
+  onLogHighlightDiagnostics?: () => void;
+  highlightMode?: HighlightMode;
+  onSetHighlightMode?: (mode: HighlightMode) => void;
+  onRegenerateCueMap?: () => void;
 }
 
 const Settings: React.FC<SettingsProps> = ({ 
@@ -85,7 +90,12 @@ const Settings: React.FC<SettingsProps> = ({
   onShowWorkInfo,
   diagnosticsReport = null,
   onRefreshDiagnostics,
-  onSaveDiagnostics
+  onSaveDiagnostics,
+  showHighlightDiagnostics = false,
+  onLogHighlightDiagnostics,
+  highlightMode,
+  onSetHighlightMode,
+  onRegenerateCueMap
 }) => {
   const [authState, setAuthState] = useState(authManager.getState());
   const [isDiagExpanded, setIsDiagExpanded] = useState(false);
@@ -412,7 +422,46 @@ const Settings: React.FC<SettingsProps> = ({
                </label>
              </div>
 
-             <div className="space-y-3">
+            <div className="space-y-3">
+              <label className="flex items-center gap-3 p-3 rounded-xl border border-dashed hover:bg-black/5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={settings.highlightEnabled !== false}
+                  onChange={e => onUpdate({ highlightEnabled: e.target.checked })}
+                  className="w-4 h-4 accent-indigo-600"
+                />
+                <div className="flex-1">
+                  <div className="text-xs font-black">Highlight Enabled</div>
+                  <div className="text-[10px] opacity-60">Turn cue-based highlighting on or off</div>
+                </div>
+              </label>
+
+              {highlightMode !== undefined && onSetHighlightMode && (
+                <div className="space-y-2">
+                  <span className="text-[10px] font-black uppercase opacity-50">Highlight Mode</span>
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      { m: HighlightMode.WORD, label: 'Individual Text' },
+                      { m: HighlightMode.SENTENCE, label: 'Full Paragraph' },
+                      { m: HighlightMode.KARAOKE, label: 'Paragraph + Cue' }
+                    ].map(({ m, label }) => (
+                      <button
+                        key={m}
+                        onClick={() => onSetHighlightMode(m)}
+                        className={`px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest border ${
+                          highlightMode === m
+                            ? 'bg-indigo-600 text-white border-indigo-600'
+                            : theme === Theme.DARK
+                              ? 'bg-white/5 border-white/10 text-white/70'
+                              : 'bg-black/5 border-black/10 text-black/70'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
                <span className="text-[10px] font-black uppercase opacity-50">Highlight Color</span>
                <div className="flex flex-wrap gap-2">
                  {presetColors.map(c => (
@@ -430,12 +479,41 @@ const Settings: React.FC<SettingsProps> = ({
                    className="w-8 h-8 rounded-full overflow-hidden border-0 p-0 cursor-pointer"
                  />
                </div>
-             </div>
-             
-             <label className="flex items-center gap-3 p-3 rounded-xl border border-dashed hover:bg-black/5 cursor-pointer">
-               <input type="checkbox" checked={settings.followHighlight} onChange={e => onUpdate({ followHighlight: e.target.checked })} className="w-4 h-4 accent-indigo-600" />
-               <div className="flex-1">
-                 <div className="text-xs font-black">Auto-Scroll</div>
+            </div>
+
+            <div className="space-y-2">
+              <span className="text-[10px] font-black uppercase opacity-50">Highlight Update Rate</span>
+              <select
+                value={settings.highlightUpdateRateMs ?? 250}
+                onChange={(e) => onUpdate({ highlightUpdateRateMs: parseInt(e.target.value) })}
+                className={`w-full px-3 py-2 rounded-xl font-black text-sm ${
+                  theme === Theme.DARK ? 'bg-white/5 border border-white/10' : 'bg-black/5 border border-black/10'
+                }`}
+              >
+                <option value={200}>200ms (fast)</option>
+                <option value={250}>250ms (default)</option>
+                <option value={300}>300ms</option>
+                <option value={500}>500ms (slow)</option>
+              </select>
+            </div>
+
+            <label className="flex items-center gap-3 p-3 rounded-xl border border-dashed hover:bg-black/5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={settings.highlightDebugOverlay === true}
+                onChange={e => onUpdate({ highlightDebugOverlay: e.target.checked })}
+                className="w-4 h-4 accent-indigo-600"
+              />
+              <div className="flex-1">
+                <div className="text-xs font-black">Highlight Debug Overlay</div>
+                <div className="text-[10px] opacity-60">Show cue/paragraph position stats</div>
+              </div>
+            </label>
+
+            <label className="flex items-center gap-3 p-3 rounded-xl border border-dashed hover:bg-black/5 cursor-pointer">
+              <input type="checkbox" checked={settings.followHighlight} onChange={e => onUpdate({ followHighlight: e.target.checked })} className="w-4 h-4 accent-indigo-600" />
+              <div className="flex-1">
+                <div className="text-xs font-black">Auto-Scroll</div>
                  <div className="text-[10px] opacity-60">Keep highlighted text in view</div>
                </div>
              </label>
@@ -789,6 +867,22 @@ const Settings: React.FC<SettingsProps> = ({
                   >
                     Copy Diagnostics
                   </button>
+                  {showHighlightDiagnostics && onLogHighlightDiagnostics && (
+                    <button
+                      onClick={onLogHighlightDiagnostics}
+                      className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20"
+                    >
+                      Highlight Diagnostics
+                    </button>
+                  )}
+                  {showHighlightDiagnostics && onRegenerateCueMap && (
+                    <button
+                      onClick={onRegenerateCueMap}
+                      className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20"
+                    >
+                      Regenerate Cues
+                    </button>
+                  )}
                   {onSaveDiagnostics && (
                     <button
                       onClick={onSaveDiagnostics}

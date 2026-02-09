@@ -96,6 +96,12 @@ const LIBRARY_SCHEMA_SQL = `
     cueJson TEXT NOT NULL,
     updatedAt INTEGER NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS chapter_paragraph_maps (
+    chapterId TEXT PRIMARY KEY,
+    paragraphJson TEXT NOT NULL,
+    updatedAt INTEGER NOT NULL
+  );
 `;
 
 function nowMs() {

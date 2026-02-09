@@ -97,6 +97,7 @@ class SpeechController {
 
   // Local progress commit guard (extra protection; commitProgressLocal also throttles)
   private lastLocalCommitAt = 0;
+  private lastLoadFailed = false;
 
   // Lifecycle listeners bound once
   private lifecycleBound = false;
@@ -117,6 +118,7 @@ class SpeechController {
     this.audio = desktopAdapter.getAudioElement();
     this.audio.volume = 1.0;
     this.isMobileOptimized = isMobileMode();
+    this.setMobileMode(this.isMobileOptimized);
 
     this.setupAudioListeners();
     this.bindLifecycleListeners();
@@ -137,13 +139,17 @@ class SpeechController {
 
   // Update sync strategy on the fly
   public setMobileMode(isMobile: boolean) {
-    if (this.isMobileOptimized === isMobile) return;
+    const wantsNative = isMobile && (Capacitor.isNativePlatform?.() ?? false);
+    const hasNativeAdapter = !(this.adapter instanceof DesktopPlaybackAdapter);
+    if (this.isMobileOptimized === isMobile && wantsNative === hasNativeAdapter) return;
     this.isMobileOptimized = isMobile;
     trace('speech:mode_changed', { isMobile });
 
-    if (isMobile && Capacitor.isNativePlatform()) {
-      this.setPlaybackAdapter(new MobilePlaybackAdapter(NativePlayer));
-    } else if (!(this.adapter instanceof DesktopPlaybackAdapter)) {
+    if (wantsNative) {
+      if (!hasNativeAdapter) {
+        this.setPlaybackAdapter(new MobilePlaybackAdapter(NativePlayer));
+      }
+    } else if (hasNativeAdapter) {
       this.setPlaybackAdapter(new DesktopPlaybackAdapter(this.audio));
     }
 
@@ -178,7 +184,14 @@ class SpeechController {
   }
 
   get currentContext() { return this.context; }
-  get hasAudioSource() { return !!this.audio.src && this.audio.src !== '' && this.audio.src !== window.location.href; }
+  get hasAudioSource() {
+    if (this.lastLoadFailed) return false;
+    if (this.adapter instanceof DesktopPlaybackAdapter) {
+      return !!this.audio.src && this.audio.src !== '' && this.audio.src !== window.location.href;
+    }
+    const state = this.adapter.getState();
+    return !!state.currentItemId;
+  }
 
   public getMetadata(): PlaybackMetadata {
     return {
@@ -530,6 +543,7 @@ class SpeechController {
     const session = this.sessionToken;
     const isCurrentSession = () => this.sessionToken === session;
 
+    this.lastLoadFailed = false;
     trace('audio:load:start', { fileId: fileId || localUrl, startTimeSec, session });
 
     this.requestedSpeed = playbackRate;
@@ -612,7 +626,15 @@ class SpeechController {
 
       this.currentBlobUrl = blobUrlToRevoke;
       if (this.adapter instanceof DesktopPlaybackAdapter) {
-        this.audio.src = url || '';
+        let desktopUrl = url || '';
+        if (
+          typeof desktopUrl === "string" &&
+          (desktopUrl.startsWith("file://") || desktopUrl.startsWith("content://")) &&
+          typeof (Capacitor as any).convertFileSrc === "function"
+        ) {
+          desktopUrl = (Capacitor as any).convertFileSrc(desktopUrl);
+        }
+        this.audio.src = desktopUrl;
         this.audio.load();
 
         await this.waitForEvent(this.audio, 'loadedmetadata', 8000, isCurrentSession);
@@ -704,6 +726,7 @@ class SpeechController {
         trace('audio:load:preempted');
         return;
       }
+      this.lastLoadFailed = true;
       traceError('audio:load:failed', err);
       this.audio.src = "";
       throw err;

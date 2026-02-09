@@ -10,7 +10,6 @@ describe("Reader component", () => {
       <Reader
         chapter={{ id: "c1", title: "Chapter 1", index: 1, content: "Hello", filename: "c1.txt", progress: 0 } as any}
         rules={[]}
-        currentOffsetChars={0}
         theme={Theme.DARK}
         debugMode={false}
         onToggleDebug={() => {}}

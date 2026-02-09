@@ -1,6 +1,13 @@
 import { registerPlugin } from '@capacitor/core';
 
-export type NativePlayerItem = { id: string; url: string; title?: string };
+export type NativePlayerItem = {
+  id: string;
+  url: string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  artworkUrl?: string;
+};
 
 export type NativePlayerState = {
   currentTime: number;

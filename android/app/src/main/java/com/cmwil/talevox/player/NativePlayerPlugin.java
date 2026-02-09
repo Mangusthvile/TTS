@@ -1,6 +1,7 @@
 package com.cmwil.talevox.player;
 
 import android.content.ComponentName;
+import android.net.Uri;
 
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
@@ -36,6 +37,9 @@ public class NativePlayerPlugin extends Plugin {
         String id;
         String url;
         String title;
+        String artist;
+        String album;
+        String artworkUrl;
     }
 
     private final List<QueueItem> queue = new ArrayList<>();
@@ -118,6 +122,9 @@ public class NativePlayerPlugin extends Plugin {
         if (match != null) {
             item.put("url", match.url);
             if (match.title != null) item.put("title", match.title);
+            if (match.artist != null) item.put("artist", match.artist);
+            if (match.album != null) item.put("album", match.album);
+            if (match.artworkUrl != null) item.put("artworkUrl", match.artworkUrl);
         }
         payload.put("item", item);
         notifyListeners("itemChanged", payload, true);
@@ -140,6 +147,13 @@ public class NativePlayerPlugin extends Plugin {
     private MediaItem buildItem(QueueItem item) {
         MediaMetadata.Builder meta = new MediaMetadata.Builder();
         if (item.title != null) meta.setTitle(item.title);
+        if (item.artist != null) meta.setArtist(item.artist);
+        if (item.album != null) meta.setAlbumTitle(item.album);
+        if (item.artworkUrl != null && !item.artworkUrl.startsWith("data:")) {
+            try {
+                meta.setArtworkUri(Uri.parse(item.artworkUrl));
+            } catch (Exception ignored) {}
+        }
         return new MediaItem.Builder()
             .setMediaId(item.id != null ? item.id : "")
             .setUri(item.url)
@@ -152,6 +166,9 @@ public class NativePlayerPlugin extends Plugin {
         item.id = obj.optString("id", "");
         item.url = obj.optString("url", "");
         item.title = obj.optString("title", null);
+        item.artist = obj.optString("artist", null);
+        item.album = obj.optString("album", null);
+        item.artworkUrl = obj.optString("artworkUrl", null);
         return item;
     }
 

@@ -3,7 +3,7 @@
 
 import { Capacitor } from "@capacitor/core";
 import { HighlightMode } from "../types";
-import type { Book, Chapter, StorageBackend, AudioStatus, BookSettings, Rule, CueMap } from "../types";
+import type { Book, Chapter, StorageBackend, AudioStatus, BookSettings, Rule, CueMap, ParagraphMap } from "../types";
 import { initStorage, getStorage } from "./storageSingleton";
 import { getSqliteDb } from "./sqliteConnectionManager";
 import { appConfig } from "../src/config/appConfig";
@@ -20,6 +20,9 @@ import {
   saveChapterCueMap as idbSaveChapterCueMap,
   getChapterCueMap as idbGetChapterCueMap,
   deleteChapterCueMap as idbDeleteChapterCueMap,
+  saveChapterParagraphMap as idbSaveChapterParagraphMap,
+  getChapterParagraphMap as idbGetChapterParagraphMap,
+  deleteChapterParagraphMap as idbDeleteChapterParagraphMap,
 } from "./libraryIdb";
 import type { SQLiteDBConnection } from "@capacitor-community/sqlite";
 
@@ -279,6 +282,8 @@ export async function deleteChapter(bookId: string, chapterId: string): Promise<
   if (!isNative()) {
     await idbDeleteChapter(bookId, chapterId);
     chapterTextCache.delete(chapterTextKey(bookId, chapterId));
+    await idbDeleteChapterCueMap(chapterId);
+    await idbDeleteChapterParagraphMap(chapterId);
     return;
   }
 
@@ -286,6 +291,7 @@ export async function deleteChapter(bookId: string, chapterId: string): Promise<
   await db.run(`DELETE FROM chapter_text WHERE chapterId = ?`, [chapterId]);
   await db.run(`DELETE FROM chapters WHERE id = ? AND bookId = ?`, [chapterId, bookId]);
   await db.run(`DELETE FROM chapter_cue_maps WHERE chapterId = ?`, [chapterId]);
+  await db.run(`DELETE FROM chapter_paragraph_maps WHERE chapterId = ?`, [chapterId]);
   chapterTextCache.delete(chapterTextKey(bookId, chapterId));
 }
 
@@ -295,6 +301,8 @@ export async function saveChapterText(bookId: string, chapterId: string, content
   if (!isNative()) {
     await idbSaveChapterText(bookId, chapterId, content);
     setCachedChapterText(chapterTextKey(bookId, chapterId), content);
+    await idbDeleteChapterCueMap(chapterId);
+    await idbDeleteChapterParagraphMap(chapterId);
     return;
   }
 
@@ -308,6 +316,8 @@ export async function saveChapterText(bookId: string, chapterId: string, content
     [chapterId, bookId, content, Date.now()]
   );
   setCachedChapterText(chapterTextKey(bookId, chapterId), content);
+  await db.run(`DELETE FROM chapter_cue_maps WHERE chapterId = ?`, [chapterId]);
+  await db.run(`DELETE FROM chapter_paragraph_maps WHERE chapterId = ?`, [chapterId]);
 }
 
 export async function loadChapterText(bookId: string, chapterId: string): Promise<string | null> {
@@ -401,6 +411,36 @@ async function nativeDeleteChapterCueMap(chapterId: string): Promise<void> {
   await db.run(`DELETE FROM chapter_cue_maps WHERE chapterId = ?`, [chapterId]);
 }
 
+// Paragraph maps
+async function nativeSaveChapterParagraphMap(chapterId: string, paragraphMap: ParagraphMap): Promise<void> {
+  const db = await mustSqliteDb();
+  await db.run(
+    `INSERT INTO chapter_paragraph_maps (chapterId, paragraphJson, updatedAt)
+     VALUES (?, ?, ?)
+     ON CONFLICT(chapterId) DO UPDATE SET
+       paragraphJson=excluded.paragraphJson,
+       updatedAt=excluded.updatedAt`,
+    [chapterId, JSON.stringify(paragraphMap), Date.now()]
+  );
+}
+
+async function nativeGetChapterParagraphMap(chapterId: string): Promise<ParagraphMap | null> {
+  const db = await mustSqliteDb();
+  const res = await db.query(`SELECT paragraphJson FROM chapter_paragraph_maps WHERE chapterId = ?`, [chapterId]);
+  const row = (res.values?.[0] ?? null) as any;
+  if (!row) return null;
+  try {
+    return JSON.parse(row.paragraphJson) as ParagraphMap;
+  } catch {
+    return null;
+  }
+}
+
+async function nativeDeleteChapterParagraphMap(chapterId: string): Promise<void> {
+  const db = await mustSqliteDb();
+  await db.run(`DELETE FROM chapter_paragraph_maps WHERE chapterId = ?`, [chapterId]);
+}
+
 export async function saveChapterCueMap(chapterId: string, cueMap: CueMap): Promise<void> {
   await ensureInit();
   if (!isNative()) return idbSaveChapterCueMap(chapterId, cueMap);
@@ -417,6 +457,24 @@ export async function deleteChapterCueMap(chapterId: string): Promise<void> {
   await ensureInit();
   if (!isNative()) return idbDeleteChapterCueMap(chapterId);
   return nativeDeleteChapterCueMap(chapterId);
+}
+
+export async function saveChapterParagraphMap(chapterId: string, paragraphMap: ParagraphMap): Promise<void> {
+  await ensureInit();
+  if (!isNative()) return idbSaveChapterParagraphMap(chapterId, paragraphMap);
+  return nativeSaveChapterParagraphMap(chapterId, paragraphMap);
+}
+
+export async function getChapterParagraphMap(chapterId: string): Promise<ParagraphMap | null> {
+  await ensureInit();
+  if (!isNative()) return idbGetChapterParagraphMap(chapterId);
+  return nativeGetChapterParagraphMap(chapterId);
+}
+
+export async function deleteChapterParagraphMap(chapterId: string): Promise<void> {
+  await ensureInit();
+  if (!isNative()) return idbDeleteChapterParagraphMap(chapterId);
+  return nativeDeleteChapterParagraphMap(chapterId);
 }
 
 export async function listChaptersPage(
