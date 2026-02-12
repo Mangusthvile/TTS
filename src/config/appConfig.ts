@@ -32,6 +32,7 @@ const NATIVE_DB_FILE = String(env.VITE_TALEVOX_DB_FILE ?? `${DB_NAME}SQLite.db`)
 const TEXT_DIR = String(env.VITE_TALEVOX_TEXT_DIR ?? "talevox/chapter_text");
 const AUDIO_DIR = String(env.VITE_TALEVOX_AUDIO_DIR ?? "talevox/audio");
 const DIAG_DIR = String(env.VITE_TALEVOX_DIAG_DIR ?? "talevox/diagnostics");
+const ATTACHMENTS_DIR = String(env.VITE_TALEVOX_ATTACHMENTS_DIR ?? "talevox/attachments");
 
 const CHAPTER_TEXT_CACHE_TTL_MS = toNumber(env.VITE_TALEVOX_TEXT_CACHE_TTL_MS, 5 * 60 * 1000);
 const CHAPTER_TEXT_NEGATIVE_TTL_MS = toNumber(env.VITE_TALEVOX_TEXT_NEG_TTL_MS, 45 * 1000);
@@ -59,6 +60,7 @@ export const appConfig = {
     textDir: TEXT_DIR,
     audioDir: AUDIO_DIR,
     diagnosticsDir: DIAG_DIR,
+    attachmentsDir: ATTACHMENTS_DIR,
   },
   cache: {
     chapterTextTtlMs: CHAPTER_TEXT_CACHE_TTL_MS,

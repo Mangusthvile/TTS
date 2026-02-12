@@ -97,10 +97,19 @@ export async function collectDiagnostics(): Promise<DiagnosticsReport> {
     try {
       const db = await getSqliteDb(DB_NAME, DB_VERSION);
       const tableRes = await db.query(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('books','chapters','chapter_text','jobs','chapter_audio_files','drive_upload_queue')"
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('books','chapters','chapter_text','chapter_tombstones','jobs','chapter_audio_files','drive_upload_queue','book_attachments')"
       );
       const names = new Set<string>((tableRes.values ?? []).map((row: any) => String(row.name)));
-      const known = ["books", "chapters", "chapter_text", "jobs", "chapter_audio_files", "drive_upload_queue"];
+      const known = [
+        "books",
+        "chapters",
+        "chapter_text",
+        "chapter_tombstones",
+        "jobs",
+        "chapter_audio_files",
+        "drive_upload_queue",
+        "book_attachments",
+      ];
       known.forEach((name) => {
         report.tables[name] = names.has(name);
       });

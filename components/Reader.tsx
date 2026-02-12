@@ -1,14 +1,21 @@
 import React, { useEffect, useRef, useMemo, useState } from 'react';
-import { Chapter, Rule, Theme, HighlightMode, ReaderSettings, ParagraphMap } from '../types';
+import { Chapter, Rule, Theme, ReaderSettings, ParagraphMap } from '../types';
 import { applyRules } from '../services/speechService';
 import { reflowLineBreaks } from '../services/textFormat';
-import { Bug, Plus, ChevronLeft, ArrowDownCircle, MoreVertical } from 'lucide-react';
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { Bug, Plus, ChevronLeft, ArrowDownCircle, MoreVertical, Paperclip } from 'lucide-react';
+import { markdownToPlainText } from "../utils/markdownToText";
+import { stripChapterTemplateHeader } from "../utils/stripChapterTemplateHeader";
+import ReaderList from "./ReaderList";
 
 interface ReaderProps {
   chapter: Chapter | null;
+  chapterText?: string;
+  speechText?: string;
   rules: Rule[];
-  activeHighlightRange?: { start: number; end: number } | null;
   activeCueIndex?: number | null;
+  activeCueRange?: { start: number; end: number } | null;
   activeParagraphIndex?: number | null;
   paragraphMap?: ParagraphMap | null;
   cueMeta?: { method?: string; count?: number };
@@ -22,7 +29,7 @@ interface ReaderProps {
     cueCount: number;
     paragraphIndex: number | null;
     paragraphCount: number;
-    mode: HighlightMode;
+    mode: string;
     isPlaying: boolean;
   };
   theme: Theme;
@@ -31,17 +38,14 @@ interface ReaderProps {
   onJumpToOffset: (offset: number) => void;
   onBackToCollection?: () => void;
   onAddChapter?: () => void;
-  highlightMode: HighlightMode;
+  onOpenAttachments?: () => void;
+  initialScrollTop?: number | null;
+  onScrollPositionChange?: (scrollTop: number) => void;
   readerSettings: ReaderSettings;
   isMobile: boolean;
+  isScrubbing?: boolean;
+  seekNudge?: number;
 }
-
-type ParagraphSlice = {
-  pIndex: number;
-  startChar: number;
-  endChar: number;
-  text: string;
-};
 
 function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
   const cleaned = hex.replace('#', '').trim();
@@ -75,9 +79,11 @@ function readableTextColor(hex: string): string {
 
 const Reader: React.FC<ReaderProps> = ({
   chapter,
+  chapterText,
+  speechText,
   rules,
-  activeHighlightRange,
   activeCueIndex,
+  activeCueRange,
   activeParagraphIndex,
   paragraphMap,
   cueMeta,
@@ -91,86 +97,56 @@ const Reader: React.FC<ReaderProps> = ({
   onJumpToOffset,
   onBackToCollection,
   onAddChapter,
-  highlightMode,
+  onOpenAttachments,
+  initialScrollTop,
+  onScrollPositionChange,
   readerSettings,
-  isMobile
+  isMobile,
+  isScrubbing = false,
+  seekNudge = 0
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const userScrollingRef = useRef<boolean>(false);
-  const scrollTimeoutRef = useRef<number | null>(null);
-  const highlightRef = useRef<HTMLSpanElement | null>(null);
-  const [showResumeButton, setShowResumeButton] = useState(false);
+  const lastRestoreKeyRef = useRef<string | null>(null);
+  const [cueTargetFound, setCueTargetFound] = useState<boolean | null>(null);
+  const [isUserScrolling, setIsUserScrolling] = useState(false);
+  const [resumeNudge, setResumeNudge] = useState(0);
   const [showToolsMenu, setShowToolsMenu] = useState(false);
-  const warnedRangeRef = useRef<string | null>(null);
-  const warnedParagraphRef = useRef<string | null>(null);
+  const [markdownView, setMarkdownView] = useState<"formatted" | "reading">("formatted");
 
   const speakText = useMemo(() => {
+    if (typeof speechText === "string") return speechText;
     if (!chapter) return "";
-    const ruled = applyRules((chapter.content ?? ""), rules);
+    const baseText =
+      typeof chapterText === "string" && chapterText.length > 0 ? chapterText : (chapter.content ?? "");
+    const normalized = stripChapterTemplateHeader(baseText);
+    const chapterFilename = chapter.filename ?? "";
+    const isMarkdown =
+      chapter.contentFormat === "markdown" ||
+      chapterFilename.toLowerCase().endsWith(".md");
+    const inputForSpeech = isMarkdown ? markdownToPlainText(normalized) : normalized;
+    const ruled = applyRules(inputForSpeech, rules);
     return readerSettings.reflowLineBreaks ? reflowLineBreaks(ruled) : ruled;
-  }, [chapter, rules, readerSettings.reflowLineBreaks]);
+  }, [speechText, chapter, chapterText, rules, readerSettings.reflowLineBreaks]);
 
-  const canUseParagraphs = !!paragraphMap && paragraphMap.paragraphs?.length > 0;
-  const effectiveMode = useMemo(() => {
-    if (!highlightEnabled) return HighlightMode.WORD;
-    if (!canUseParagraphs && (highlightMode === HighlightMode.SENTENCE || highlightMode === HighlightMode.KARAOKE)) {
-      return HighlightMode.WORD;
-    }
-    return highlightMode;
-  }, [highlightMode, canUseParagraphs, highlightEnabled]);
+  const isMarkdown =
+    chapter?.contentFormat === "markdown" ||
+    (chapter?.filename ?? "").toLowerCase().endsWith(".md");
+  const isMarkdownReadingView = isMarkdown && markdownView === "reading";
+  const effectiveHighlightEnabled = highlightEnabled && (!isMarkdown || isMarkdownReadingView);
+  const autoFollowEnabled = effectiveHighlightEnabled && readerSettings.followHighlight && highlightReady;
+  const showResumeButton = isMobile && autoFollowEnabled && isUserScrolling;
 
-  const paragraphs: ParagraphSlice[] = useMemo(() => {
-    if (!speakText) return [];
-    if (canUseParagraphs) {
-      return paragraphMap!.paragraphs.map((p) => {
-        const start = Math.max(0, Math.min(p.startChar, speakText.length));
-        const end = Math.max(start, Math.min(p.endChar, speakText.length));
-        if ((start !== p.startChar || end !== p.endChar) && chapter?.id) {
-          const key = `${chapter.id}-${speakText.length}`;
-          if (warnedParagraphRef.current !== key) {
-            warnedParagraphRef.current = key;
-            console.warn("[Highlight] paragraph range clamped", {
-              chapterId: chapter.id,
-              startChar: p.startChar,
-              endChar: p.endChar,
-              textLen: speakText.length,
-            });
-          }
-        }
-        return {
-          pIndex: p.pIndex,
-          startChar: start,
-          endChar: end,
-          text: speakText.slice(start, end),
-        };
-      });
-    }
-    return [{
-      pIndex: 0,
-      startChar: 0,
-      endChar: speakText.length,
-      text: speakText,
-    }];
-  }, [speakText, canUseParagraphs, paragraphMap]);
+  useEffect(() => {
+    if (!isMarkdown) return;
+    setMarkdownView("formatted");
+  }, [chapter?.id, isMarkdown]);
 
-  const safeHighlightRange = useMemo(() => {
-    if (!highlightEnabled || !activeHighlightRange || !speakText) return null;
-    const textLen = speakText.length;
-    const start = Math.max(0, Math.min(activeHighlightRange.start, textLen));
-    const end = Math.max(start, Math.min(activeHighlightRange.end, textLen));
-    if ((activeHighlightRange.start < 0 || activeHighlightRange.end > textLen) && chapter?.id) {
-      const key = `${chapter.id}-${textLen}`;
-      if (warnedRangeRef.current !== key) {
-        warnedRangeRef.current = key;
-        console.warn("[Highlight] range clamped", {
-          chapterId: chapter.id,
-          range: activeHighlightRange,
-          textLen,
-        });
-      }
+  useEffect(() => {
+    if (!isMarkdown) return;
+    if (activeCueRange && highlightReady) {
+      setMarkdownView("reading");
     }
-    return { start, end };
-  }, [activeHighlightRange, speakText, chapter?.id, highlightEnabled]);
+  }, [activeCueRange, highlightReady, isMarkdown]);
 
   const themeTokens = useMemo(() => {
     const strong = readerSettings.highlightColor || '#4f46e5';
@@ -189,6 +165,7 @@ const Reader: React.FC<ReaderProps> = ({
     fontFamily: readerSettings.fontFamily,
     fontSize: `clamp(18px, 4.5vw, ${readerSettings.fontSizePx}px)`,
     lineHeight: readerSettings.lineHeight,
+    color: themeTokens.text,
     ['--highlight-strong' as any]: themeTokens.highlightStrong,
     ['--highlight-weak' as any]: themeTokens.highlightWeak,
     ['--highlight-strong-text' as any]: themeTokens.highlightStrongText,
@@ -201,43 +178,51 @@ const Reader: React.FC<ReaderProps> = ({
     'space-y-10';
 
   const fadeColor = theme === Theme.DARK ? 'from-slate-900' : theme === Theme.SEPIA ? 'from-[#efe6d5]' : 'from-white';
-
-  const scrollToActive = () => {
-    const container = containerRef.current;
-    if (!container) return;
-    const target =
-      highlightRef.current ||
-      (container.querySelector('[data-active-paragraph="true"]') as HTMLElement | null);
-    if (!target) return;
-    const cRect = container.getBoundingClientRect();
-    const tRect = target.getBoundingClientRect();
-    const padding = 60;
-    if (tRect.top < cRect.top + padding || tRect.bottom > cRect.bottom - padding) {
-      target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }
-  };
-
-  // Follow highlight if enabled and not user scrolling
   useEffect(() => {
-    if (!highlightEnabled || !readerSettings.followHighlight || userScrollingRef.current) return;
-    scrollToActive();
-  }, [activeCueIndex, activeParagraphIndex, readerSettings.followHighlight, effectiveMode, highlightEnabled]);
+    if (!debugMode && !readerSettings.highlightDebugOverlay) return;
+    if (!highlightEnabled || !highlightReady) {
+      setCueTargetFound(null);
+      return;
+    }
+    let frame = 0;
+    frame = window.requestAnimationFrame(() => {
+      const container = containerRef.current;
+      if (!container) return;
+      const found = !!container.querySelector('[data-highlight-anchor="true"]');
+      setCueTargetFound(found);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    debugMode,
+    readerSettings.highlightDebugOverlay,
+    highlightEnabled,
+    highlightReady,
+    activeCueIndex,
+    activeCueRange,
+    activeParagraphIndex,
+  ]);
 
   const handleResumeAutoScroll = () => {
-    userScrollingRef.current = false;
-    setShowResumeButton(false);
-    scrollToActive();
+    setIsUserScrolling(false);
+    setResumeNudge((n) => n + 1);
   };
 
+  useEffect(() => {
+    if (!containerRef.current) return;
+    if (initialScrollTop == null) return;
+    const chapterId = chapter?.id ?? "none";
+    const key = `${chapterId}:${initialScrollTop}:${speakText.length}`;
+    if (lastRestoreKeyRef.current === key) return;
+    lastRestoreKeyRef.current = key;
+    const target = containerRef.current;
+    requestAnimationFrame(() => {
+      target.scrollTop = initialScrollTop;
+    });
+  }, [chapter?.id, initialScrollTop, speakText.length]);
+
   const handleScroll = () => {
-    userScrollingRef.current = true;
-    if (isMobile) setShowResumeButton(true);
-    if (scrollTimeoutRef.current) window.clearTimeout(scrollTimeoutRef.current);
-    if (!isMobile) {
-      const cooldown = 1500;
-      scrollTimeoutRef.current = window.setTimeout(() => {
-        userScrollingRef.current = false;
-      }, cooldown);
+    if (containerRef.current && onScrollPositionChange) {
+      onScrollPositionChange(containerRef.current.scrollTop);
     }
   };
 
@@ -247,7 +232,6 @@ const Reader: React.FC<ReaderProps> = ({
   };
 
   const triggerJump = () => {
-    if (isMobile) return;
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return;
     const range = selection.getRangeAt(0);
@@ -262,74 +246,74 @@ const Reader: React.FC<ReaderProps> = ({
     selection.removeAllRanges();
   };
 
-  const renderParagraph = (p: ParagraphSlice) => {
-    const isActiveParagraph = activeParagraphIndex === p.pIndex || !canUseParagraphs;
-    const highlightRange = safeHighlightRange;
-    const hasCue = !!highlightRange;
-
-    const paragraphClassName = `leading-relaxed rounded-md px-1 -mx-1 ${isActiveParagraph && (effectiveMode === HighlightMode.SENTENCE || effectiveMode === HighlightMode.KARAOKE) ? 'bg-[var(--highlight-weak)]' : ''}`;
-
-    if (effectiveMode === HighlightMode.SENTENCE) {
-      return (
-        <p key={p.pIndex} data-base={p.startChar} data-active-paragraph={isActiveParagraph ? 'true' : 'false'} className={paragraphClassName}>
-          <span data-base={p.startChar}>{p.text}</span>
-        </p>
-      );
-    }
-
-    if (effectiveMode === HighlightMode.KARAOKE && isActiveParagraph && hasCue) {
-      const localStart = Math.max(0, Math.min(highlightRange.start - p.startChar, p.text.length));
-      const localEnd = Math.max(localStart, Math.min(highlightRange.end - p.startChar, p.text.length));
-      const before = p.text.slice(0, localStart);
-      const mid = p.text.slice(localStart, localEnd);
-      const after = p.text.slice(localEnd);
-      return (
-        <p key={p.pIndex} data-base={p.startChar} data-active-paragraph="true" className={`${paragraphClassName}`}>
-          {before && <span data-base={p.startChar}>{before}</span>}
-          <span
-            ref={highlightRef}
-            data-base={p.startChar + localStart}
-            className="rounded px-0.5 shadow-sm"
-            style={{ backgroundColor: 'var(--highlight-strong)', color: 'var(--highlight-strong-text)' }}
-          >
-            {mid || " "}
-          </span>
-          {after && <span data-base={p.startChar + localEnd}>{after}</span>}
-        </p>
-      );
-    }
-
-    if (effectiveMode === HighlightMode.WORD && hasCue && isActiveParagraph) {
-      const localStart = Math.max(0, Math.min(highlightRange.start - p.startChar, p.text.length));
-      const localEnd = Math.max(localStart, Math.min(highlightRange.end - p.startChar, p.text.length));
-      const before = p.text.slice(0, localStart);
-      const mid = p.text.slice(localStart, localEnd);
-      const after = p.text.slice(localEnd);
-      return (
-        <p key={p.pIndex} data-base={p.startChar} data-active-paragraph={isActiveParagraph ? 'true' : 'false'} className="leading-relaxed">
-          {before && <span data-base={p.startChar}>{before}</span>}
-          <span
-            ref={highlightRef}
-            data-base={p.startChar + localStart}
-            className="rounded px-0.5 shadow-sm"
-            style={{ backgroundColor: 'var(--highlight-strong)', color: 'var(--highlight-strong-text)' }}
-          >
-            {mid || " "}
-          </span>
-          {after && <span data-base={p.startChar + localEnd}>{after}</span>}
-        </p>
-      );
-    }
-
-    return (
-      <p key={p.pIndex} data-base={p.startChar} data-active-paragraph={isActiveParagraph ? 'true' : 'false'} className="leading-relaxed">
-        <span data-base={p.startChar}>{p.text}</span>
-      </p>
-    );
-  };
-
   const showHighlightPending = highlightEnabled && !!chapter && !highlightReady;
   const showHighlightOverlay = !!readerSettings.highlightDebugOverlay && !!highlightDebugData;
+
+  const markdownComponents = useMemo(() => {
+    const tableChrome =
+      theme === Theme.DARK
+        ? "border-sky-400/30 bg-sky-500/10 text-slate-100"
+        : theme === Theme.SEPIA
+          ? "border-sky-700/20 bg-sky-600/10 text-[#3c2f25]"
+          : "border-sky-500/20 bg-sky-500/10 text-slate-900";
+
+    const cellBorder = theme === Theme.DARK ? "border-white/10" : "border-black/10";
+
+    return {
+      p: ({ children }: { children?: React.ReactNode }) => (
+        <p className="mb-5 leading-relaxed whitespace-pre-wrap">{children}</p>
+      ),
+      h1: ({ children }: { children?: React.ReactNode }) => (
+        <h1 className="mt-8 mb-4 text-2xl font-black tracking-tight">{children}</h1>
+      ),
+      h2: ({ children }: { children?: React.ReactNode }) => (
+        <h2 className="mt-7 mb-3 text-xl font-black tracking-tight">{children}</h2>
+      ),
+      h3: ({ children }: { children?: React.ReactNode }) => (
+        <h3 className="mt-6 mb-3 text-lg font-black tracking-tight">{children}</h3>
+      ),
+      ul: ({ children }: { children?: React.ReactNode }) => (
+        <ul className="my-4 list-disc pl-6 space-y-2">{children}</ul>
+      ),
+      ol: ({ children }: { children?: React.ReactNode }) => (
+        <ol className="my-4 list-decimal pl-6 space-y-2">{children}</ol>
+      ),
+      li: ({ children }: { children?: React.ReactNode }) => <li className="leading-relaxed">{children}</li>,
+      blockquote: ({ children }: { children?: React.ReactNode }) => (
+        <blockquote className={`my-6 border-l-4 pl-4 italic ${cellBorder}`}>{children}</blockquote>
+      ),
+      pre: ({ children }: { children?: React.ReactNode }) => (
+        <pre className={`my-6 overflow-x-auto rounded-xl p-4 text-xs ${theme === Theme.DARK ? "bg-slate-950/80" : "bg-black/5"}`}>
+          {children}
+        </pre>
+      ),
+      code: ({ children }: { children?: React.ReactNode }) => (
+        <code className={`rounded px-1.5 py-0.5 ${theme === Theme.DARK ? "bg-slate-800/80" : "bg-black/10"}`}>
+          {children}
+        </code>
+      ),
+      table: ({ children }: { children?: React.ReactNode }) => (
+        <div className={`my-6 overflow-x-auto rounded-2xl border ${tableChrome}`}>
+          <table className="min-w-full border-separate border-spacing-0 text-sm">{children}</table>
+        </div>
+      ),
+      thead: ({ children }: { children?: React.ReactNode }) => (
+        <thead className={`text-[10px] font-black uppercase tracking-widest opacity-80 border-b ${cellBorder}`}>
+          {children}
+        </thead>
+      ),
+      tbody: ({ children }: { children?: React.ReactNode }) => <tbody className="text-sm">{children}</tbody>,
+      tr: ({ children }: { children?: React.ReactNode }) => (
+        <tr className={`border-b last:border-0 ${cellBorder}`}>{children}</tr>
+      ),
+      th: ({ children }: { children?: React.ReactNode }) => (
+        <th className={`px-4 py-3 text-left whitespace-nowrap border-b ${cellBorder}`}>{children}</th>
+      ),
+      td: ({ children }: { children?: React.ReactNode }) => (
+        <td className={`px-4 py-3 align-top border-b ${cellBorder}`}>{children}</td>
+      ),
+    };
+  }, [theme]);
 
   return (
     <div className="relative flex-1 flex flex-col min-h-0 overflow-hidden touch-manipulation text-theme">
@@ -349,6 +333,9 @@ const Reader: React.FC<ReaderProps> = ({
           <div>para: {highlightDebugData.paragraphIndex ?? '--'} / {highlightDebugData.paragraphCount}</div>
           <div>mode: {highlightDebugData.mode}</div>
           <div>playing: {highlightDebugData.isPlaying ? 'yes' : 'no'}</div>
+          <div>follow: {readerSettings.followHighlight ? 'on' : 'off'}</div>
+          <div>autoLock: {isUserScrolling ? 'yes' : 'no'}</div>
+          <div>cueTarget: {cueTargetFound == null ? 'n/a' : cueTargetFound ? 'yes' : 'no'}</div>
         </div>
       )}
 
@@ -366,13 +353,12 @@ const Reader: React.FC<ReaderProps> = ({
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        onTouchStart={() => { userScrollingRef.current = true; if (isMobile) setShowResumeButton(true); }}
-        className="flex-1 overflow-y-auto px-4 lg:px-12 py-12 lg:py-24 scroll-smooth scrollbar-hide"
-        onDoubleClick={triggerJump}
+        className={`flex-1 overflow-y-auto px-4 lg:px-12 py-12 lg:py-24 scrollbar-hide ${readerSettings.followHighlight ? '' : 'scroll-smooth'}`}
+        onDoubleClick={isMarkdown && !isMarkdownReadingView ? undefined : triggerJump}
       >
         <div
           style={containerStyles}
-          className="max-w-[70ch] mx-auto pb-64 whitespace-pre-wrap select-text cursor-text font-medium leading-relaxed"
+          className="max-w-[70ch] mx-auto pb-64 select-text cursor-text font-medium leading-relaxed"
         >
           <div className={`mb-10 border-b pb-6 flex justify-between items-end select-none ${theme === Theme.DARK ? 'border-white/10' : 'border-black/10'}`}>
             <div className="flex-1 min-w-0 pr-4">
@@ -406,6 +392,30 @@ const Reader: React.FC<ReaderProps> = ({
               )}
             </div>
             <div className="flex items-center gap-1 relative">
+              {isMarkdown && (
+                <div
+                  className={`flex items-center rounded-xl p-1 mr-1 ${
+                    theme === Theme.DARK ? "bg-white/10" : "bg-black/5"
+                  }`}
+                >
+                  <button
+                    onClick={() => setMarkdownView("reading")}
+                    className={`px-2.5 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest ${
+                      markdownView === "reading" ? "bg-indigo-600 text-white" : "opacity-70 hover:opacity-100"
+                    }`}
+                  >
+                    Reading
+                  </button>
+                  <button
+                    onClick={() => setMarkdownView("formatted")}
+                    className={`px-2.5 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest ${
+                      markdownView === "formatted" ? "bg-indigo-600 text-white" : "opacity-70 hover:opacity-100"
+                    }`}
+                  >
+                    Formatted
+                  </button>
+                </div>
+              )}
               <button
                 onClick={() => setShowToolsMenu((v) => !v)}
                 title="Reader tools"
@@ -423,6 +433,14 @@ const Reader: React.FC<ReaderProps> = ({
                       <Plus className="w-4 h-4" /> Add Chapter
                     </button>
                   )}
+                  {onOpenAttachments && (
+                    <button
+                      onClick={() => { setShowToolsMenu(false); onOpenAttachments(); }}
+                      className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors ${theme === Theme.DARK ? 'hover:bg-white/10 text-slate-100' : 'hover:bg-black/5 text-slate-900'}`}
+                    >
+                      <Paperclip className="w-4 h-4" /> Attachments
+                    </button>
+                  )}
                   <button
                     onClick={() => { setShowToolsMenu(false); onToggleDebug(); }}
                     className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors ${theme === Theme.DARK ? 'hover:bg-white/10 text-slate-100' : 'hover:bg-black/5 text-slate-900'}`}
@@ -433,9 +451,38 @@ const Reader: React.FC<ReaderProps> = ({
               )}
             </div>
           </div>
-          <div className={paragraphClass}>
-            {paragraphs.map(renderParagraph)}
-          </div>
+          {isMarkdown && !isMarkdownReadingView ? (
+            <div className="whitespace-normal">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={markdownComponents as any}
+                className="space-y-2"
+              >
+                {stripChapterTemplateHeader(
+                  typeof chapterText === "string" && chapterText.length > 0 ? chapterText : (chapter?.content ?? "")
+                )}
+              </ReactMarkdown>
+            </div>
+          ) : (
+            <div className={`${paragraphClass}`}>
+              <ReaderList
+                text={speakText}
+                ttsCharIndex={
+                  effectiveHighlightEnabled && highlightReady
+                    ? (activeCueRange?.start ?? null)
+                    : null
+                }
+                activeCueRange={
+                  effectiveHighlightEnabled && highlightReady ? activeCueRange ?? null : null
+                }
+                autoFollow={autoFollowEnabled}
+                isScrubbing={isScrubbing}
+                followNudge={seekNudge + resumeNudge}
+                containerRef={containerRef}
+                onUserScrollingChange={setIsUserScrolling}
+              />
+            </div>
+          )}
         </div>
       </div>
       <div className={`absolute bottom-0 left-0 right-0 h-24 lg:h-32 z-10 pointer-events-none bg-gradient-to-t ${fadeColor} to-transparent`} />

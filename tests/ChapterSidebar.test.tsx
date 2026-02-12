@@ -23,7 +23,7 @@ describe("ChapterSidebar component", () => {
       />
     );
 
-    expect(screen.getByText("Chapter 1")).toBeInTheDocument();
-    expect(screen.getByText("Chapter 50")).toBeInTheDocument();
+    expect(screen.getAllByText("Chapter 1").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Chapter 50").length).toBeGreaterThan(0);
   });
 });

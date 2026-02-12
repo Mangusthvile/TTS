@@ -61,25 +61,36 @@ const LIBRARY_SCHEMA_SQL = `
   );
 
   CREATE TABLE IF NOT EXISTS chapters (
-    id TEXT PRIMARY KEY,
-    bookId TEXT NOT NULL,
-    idx INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    filename TEXT NOT NULL,
-    sourceUrl TEXT,
-    cloudTextFileId TEXT,
-    cloudAudioFileId TEXT,
-    audioDriveId TEXT,
-    audioStatus TEXT,
-    audioSignature TEXT,
-    durationSec REAL,
-    textLength INTEGER,
-    wordCount INTEGER,
-    isFavorite INTEGER,
-    updatedAt INTEGER NOT NULL
-  );
+     id TEXT PRIMARY KEY,
+     bookId TEXT NOT NULL,
+     idx INTEGER NOT NULL,
+     title TEXT NOT NULL,
+     filename TEXT NOT NULL,
+     sourceUrl TEXT,
+     volumeName TEXT,
+     volumeLocalChapter INTEGER,
+     cloudTextFileId TEXT,
+     cloudAudioFileId TEXT,
+     audioDriveId TEXT,
+     audioStatus TEXT,
+     audioSignature TEXT,
+     durationSec REAL,
+     textLength INTEGER,
+     wordCount INTEGER,
+     isFavorite INTEGER,
+     updatedAt INTEGER NOT NULL
+   );
 
   CREATE INDEX IF NOT EXISTS idx_chapters_book_idx ON chapters(bookId, idx);
+
+  CREATE TABLE IF NOT EXISTS chapter_tombstones (
+    bookId TEXT NOT NULL,
+    chapterId TEXT NOT NULL,
+    deletedAt INTEGER NOT NULL,
+    PRIMARY KEY (bookId, chapterId)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_chapter_tombstones_bookId ON chapter_tombstones(bookId);
 
   CREATE TABLE IF NOT EXISTS chapter_text (
     chapterId TEXT PRIMARY KEY,
@@ -102,6 +113,23 @@ const LIBRARY_SCHEMA_SQL = `
     paragraphJson TEXT NOT NULL,
     updatedAt INTEGER NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS book_attachments (
+    id TEXT PRIMARY KEY,
+    bookId TEXT NOT NULL,
+    driveFileId TEXT,
+    filename TEXT NOT NULL,
+    mimeType TEXT,
+    sizeBytes INTEGER,
+    localPath TEXT,
+    sha256 TEXT,
+    createdAt INTEGER NOT NULL,
+    updatedAt INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_book_attachments_bookId ON book_attachments(bookId);
+  CREATE INDEX IF NOT EXISTS idx_book_attachments_driveFileId ON book_attachments(driveFileId);
+
 `;
 
 function nowMs() {
@@ -739,6 +767,16 @@ export class SqliteStorageDriver implements StorageDriver {
     await this.db!.execute(LIBRARY_SCHEMA_SQL);
     try {
       await this.db!.execute(`ALTER TABLE chapter_text ADD COLUMN localPath TEXT`);
+    } catch {
+      // Column already exists
+    }
+    try {
+      await this.db!.execute(`ALTER TABLE chapters ADD COLUMN volumeName TEXT`);
+    } catch {
+      // Column already exists
+    }
+    try {
+      await this.db!.execute(`ALTER TABLE chapters ADD COLUMN volumeLocalChapter INTEGER`);
     } catch {
       // Column already exists
     }

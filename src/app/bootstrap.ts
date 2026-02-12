@@ -25,6 +25,7 @@ export function ensureAuthReady(clientId?: string): Promise<void> {
   if (authReady) return authReady;
   authReady = (async () => {
     if (!Capacitor.isNativePlatform()) {
+      if (__ANDROID_ONLY__) return;
       if (clientId) authManager.init(clientId);
       return;
     }

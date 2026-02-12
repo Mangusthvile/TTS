@@ -1,3 +1,5 @@
+import { parseTtsVoiceId } from "../utils/ttsVoice";
+
 export type SynthesizeResult = {
   mp3Bytes: Uint8Array;
   mime: string;
@@ -9,6 +11,9 @@ export interface CloudTtsResult {
 }
 
 const DEFAULT_ENDPOINT = "https://talevox-tts-762195576430.us-south1.run.app";
+const OPENAI_ENDPOINT = "https://api.openai.com/v1/audio/speech";
+const OPENAI_DEFAULT_MODEL = "gpt-4o-mini-tts-2025-12-15";
+const OPENAI_MAX_BYTES = 3000;
 
 /**
  * Google TTS enforces a 5000 BYTES limit (UTF-8).
@@ -258,8 +263,12 @@ export async function synthesizeChunk(
   speakingRate: number,
   languageCode = "en-US"
 ): Promise<SynthesizeResult> {
+  const parsedVoice = parseTtsVoiceId(voiceName);
+  if (parsedVoice.provider === "openai") {
+    return synthesizeOpenAiChunk(text, parsedVoice.id, speakingRate);
+  }
   const endpoint = (import.meta as any).env?.VITE_TTS_ENDPOINT || DEFAULT_ENDPOINT;
-  const cloudVoice = sanitizeVoiceForCloud(voiceName);
+  const cloudVoice = sanitizeVoiceForCloud(parsedVoice.id);
   const chunks = chunkTextByUtf8Bytes(text, MAX_TTS_BYTES);
   const audioParts: Uint8Array[] = [];
 
@@ -280,4 +289,64 @@ export async function synthesizeChunk(
   } catch (err) {
     throw err;
   }
+}
+
+function getOpenAiKey(): string {
+  return String((import.meta as any).env?.VITE_OPENAI_API_KEY ?? "").trim();
+}
+
+function getOpenAiModel(): string {
+  return String((import.meta as any).env?.VITE_OPENAI_TTS_MODEL ?? OPENAI_DEFAULT_MODEL).trim();
+}
+
+function clampOpenAiSpeed(value: number): number {
+  if (!Number.isFinite(value)) return 1.0;
+  return Math.min(2.0, Math.max(0.5, value));
+}
+
+async function postOpenAiTts(text: string, voiceId: string, speakingRate: number): Promise<U8> {
+  const apiKey = getOpenAiKey();
+  if (!apiKey) {
+    throw new Error("Missing VITE_OPENAI_API_KEY for OpenAI TTS.");
+  }
+  const response = await fetch(OPENAI_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: getOpenAiModel(),
+      voice: voiceId,
+      input: text,
+      response_format: "mp3",
+      speed: clampOpenAiSpeed(speakingRate),
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => "");
+    throw new Error(`OpenAI TTS Failed: ${response.status} ${errText}`);
+  }
+
+  const buf = await response.arrayBuffer();
+  return toU8(new Uint8Array(buf));
+}
+
+async function synthesizeOpenAiChunk(
+  text: string,
+  voiceId: string,
+  speakingRate: number
+): Promise<SynthesizeResult> {
+  const chunks = chunkTextByUtf8Bytes(text, OPENAI_MAX_BYTES);
+  const audioParts: Uint8Array[] = [];
+  let segmentIndex = 0;
+  for (const chunk of chunks) {
+    let bytes = await postOpenAiTts(chunk, voiceId, speakingRate);
+    if (segmentIndex > 0) bytes = stripId3(bytes);
+    audioParts.push(bytes);
+    segmentIndex += 1;
+  }
+  const mergedBytes = concatU8(audioParts);
+  return { mp3Bytes: mergedBytes, mime: "audio/mpeg" };
 }

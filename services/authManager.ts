@@ -104,6 +104,15 @@ class AuthManager {
       return;
     }
 
+    if (__ANDROID_ONLY__) {
+      trace('auth:init:web_skipped_android_only');
+      this.updateState({
+        status: 'signed_out',
+        lastError: 'Web sign-in disabled in Android-only build',
+      });
+      return;
+    }
+
     if (this.tokenClient) return;
 
     const tryInit = () => {
@@ -179,15 +188,25 @@ class AuthManager {
       throw new Error('AUTH_EXPIRED');
     }
 
+    if (__ANDROID_ONLY__) {
+      this.markExpired('Web sign-in disabled in Android-only build');
+      throw new Error('AUTH_DISABLED_ANDROID_ONLY_WEB');
+    }
+
     if (interactive) {
       this.signIn();
       return new Promise((resolve, reject) => {
-        const unsub = this.subscribe((state) => {
+        let unsub: (() => void) | null = null;
+        unsub = this.subscribe((state) => {
           if (state.status === 'signed_in' && state.accessToken) {
-            unsub();
+            const cleanup = unsub;
+            unsub = null;
+            cleanup?.();
             resolve(state.accessToken);
           } else if (state.status === 'expired' || state.status === 'error') {
-            unsub();
+            const cleanup = unsub;
+            unsub = null;
+            cleanup?.();
             this.markExpired(state.lastError || 'Reconnect required');
             reject(new Error(state.lastError || 'Reconnect required'));
           }
@@ -202,6 +221,14 @@ class AuthManager {
   public signIn() {
     if (Capacitor.isNativePlatform()) {
       void this.nativeSignIn({ interactive: true });
+      return;
+    }
+
+    if (__ANDROID_ONLY__) {
+      this.updateState({
+        status: 'error',
+        lastError: 'Web sign-in disabled in Android-only build',
+      });
       return;
     }
 

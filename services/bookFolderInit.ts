@@ -85,7 +85,11 @@ export async function initBookFolderManifests(args: {
         chapterId: c.id,
         idx: Number(c.index),
         title: String(c.title),
-        textName: buildTextName(book.id, c.id),
+        volumeName: (c as any).volumeName,
+        volumeLocalChapter: (c as any).volumeLocalChapter,
+        textName:
+          c.filename ||
+          buildTextName(book.id, c.id, c.contentFormat === "markdown" ? "markdown" : "text"),
         audioName: buildMp3Name(book.id, c.id)
       }))
     };

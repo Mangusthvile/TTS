@@ -23,6 +23,8 @@ export type InventoryChapter = {
   title: string;
   textName: string;
   audioName: string;
+  volumeName?: string;
+  volumeLocalChapter?: number;
 
   legacy?: {
     legacyIdx: number;

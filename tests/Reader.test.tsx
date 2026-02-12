@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import Reader from "../components/Reader";
-import { Theme, HighlightMode } from "../types";
+import { Theme } from "../types";
 
 describe("Reader component", () => {
   it("calls onBackToCollection when back is clicked", () => {
@@ -15,7 +15,6 @@ describe("Reader component", () => {
         onToggleDebug={() => {}}
         onJumpToOffset={() => {}}
         onBackToCollection={onBack}
-        highlightMode={HighlightMode.WORD}
         readerSettings={{
           fontFamily: "serif",
           fontSizePx: 18,

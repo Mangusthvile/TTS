@@ -4,13 +4,17 @@ import { Upload, Plus, AlertCircle, Trash2, Sparkles, FileText, Headphones, Chec
 import { Theme, CLOUD_VOICES, Chapter, UiMode } from '../types';
 import { getImportAdapter, PickedFile } from '../services/importAdapter';
 import { computeMobileMode } from '../utils/platform';
+import { detectVolumeMeta } from '../utils/volumeDetection';
 
 interface ImporterProps {
   onChapterExtracted: (data: { 
     title: string; 
     content: string; 
+    contentFormat?: "text" | "markdown";
     url: string; 
     index: number;
+    volumeName?: string;
+    volumeLocalChapter?: number;
     voiceId: string;
     setAsDefault: boolean;
     keepOpen?: boolean;
@@ -25,11 +29,21 @@ interface ImporterProps {
 interface SmartFile {
   id: string;
   fileName: string;
-  parsedIndex: number | null;
-  parsedTitle: string | null;
-  status: 'pending' | 'ready' | 'duplicate' | 'error' | 'uploaded';
-  content: string | null;
+  title: string;
+  status: 'ready' | 'error' | 'uploaded';
+  content: string;
+  contentFormat: "text" | "markdown";
+  volumeId: string;
+  detectedVolumeName: string | null;
+  volumeNumber: number | null; // detected for ordering
+  volumeLocalChapter: number | null;
 }
+
+type SmartVolume = {
+  id: string;
+  name: string;
+  number: number | null;
+};
 
 const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex, theme, defaultVoiceId, existingChapters, uiMode }) => {
   const [activeTab, setActiveTab] = useState<'manual' | 'smart'>('manual');
@@ -37,6 +51,7 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
   // Manual Tab State
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
+  const [manualContentFormat, setManualContentFormat] = useState<"text" | "markdown">("text");
   const [chapterNum, setChapterNum] = useState<number>(suggestedIndex);
   const [error, setError] = useState<string | null>(null);
   const [selectedVoiceId, setSelectedVoiceId] = useState(defaultVoiceId || 'en-US-Standard-C');
@@ -47,6 +62,8 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
   const [smartFiles, setSmartFiles] = useState<SmartFile[]>([]);
   const [isProcessingFiles, setIsProcessingFiles] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [smartStep, setSmartStep] = useState<"pick" | "preview">("pick");
+  const [smartVolumes, setSmartVolumes] = useState<SmartVolume[]>([]);
 
   const importAdapter = useMemo(() => getImportAdapter(uiMode), [uiMode]);
   const isMobile = computeMobileMode(uiMode);
@@ -60,6 +77,12 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
   }, [defaultVoiceId]);
 
   // -- Manual Logic --
+  const detectFormatFromName = (name: string | undefined): "text" | "markdown" => {
+    const lower = (name || "").toLowerCase();
+    if (lower.endsWith(".md")) return "markdown";
+    return "text";
+  };
+
   const cleanText = (text: string) => {
     let result = text;
     result = result.replace(/<[^>]*>?/gm, '');
@@ -79,7 +102,8 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
       const picked = picks[0];
       const text = await importAdapter.readText(picked);
       setContent(text);
-      const guessedTitle = picked.name.replace(/\.txt$/i, '').replace(/^\d+\s*/, '');
+      setManualContentFormat(detectFormatFromName(picked.name));
+      const guessedTitle = picked.name.replace(/\.(txt|md)$/i, '').replace(/^\d+\s*/, '');
       setTitle(prev => prev || guessedTitle);
       const match = picked.name.match(/^(\d+)/);
       if (match) setChapterNum(parseInt(match[1]));
@@ -97,6 +121,7 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
     onChapterExtracted({
       title: finalTitle,
       content: content,
+      contentFormat: manualContentFormat,
       url: 'text-import',
       index: chapterNum,
       voiceId: selectedVoiceId,
@@ -105,56 +130,69 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
     });
     setTitle('');
     setContent('');
+    setManualContentFormat("text");
     setError(null);
   };
 
   // -- Smart Bulk Logic --
-  const parseFile = async (picked: PickedFile): Promise<SmartFile> => {
+  const buildVolumeId = (volumeNumber: number | null): string => {
+    return volumeNumber ? `book-${volumeNumber}` : "ungrouped";
+  };
+
+  const upsertVolumesForFiles = (files: SmartFile[]) => {
+    setSmartVolumes((prev) => {
+      const map = new Map(prev.map((v) => [v.id, v] as const));
+      for (const f of files) {
+        if (map.has(f.volumeId)) continue;
+        map.set(f.volumeId, {
+          id: f.volumeId,
+          name: f.detectedVolumeName ?? "Ungrouped",
+          number: f.volumeNumber,
+        });
+      }
+      if (!map.has("ungrouped")) {
+        map.set("ungrouped", { id: "ungrouped", name: "Ungrouped", number: null });
+      }
+
+      const NONE = 1_000_000_000;
+      return Array.from(map.values()).sort((a, b) => {
+        const aN = a.number ?? NONE;
+        const bN = b.number ?? NONE;
+        if (aN !== bN) return aN - bN;
+        return a.name.localeCompare(b.name, undefined, { numeric: true });
+      });
+    });
+  };
+
+  const parseSmartFile = async (picked: PickedFile): Promise<SmartFile> => {
     const text = await importAdapter.readText(picked);
-    const fileName = picked.name || 'Untitled.txt';
+    const fileName = picked.name || "Untitled.txt";
     const lines = text.split(/\r?\n/);
-    const firstLine = lines.find(l => l.trim().length > 0) || '';
-    
-    let index: number | null = null;
-    let chTitle: string | null = null;
-    let finalContent = text;
+    const firstLine = lines.find((l) => l.trim().length > 0) || "";
 
-    // A) Try First Line Header Match
-    const headerMatch = firstLine.match(/^Chapter\s+(\d+)\s*(.*)$/i);
-    if (headerMatch) {
-      index = parseInt(headerMatch[1]);
-      chTitle = headerMatch[2].trim();
-      // Content is text after the header line
-      const headerIdx = text.indexOf(firstLine);
-      if (headerIdx !== -1) {
-        finalContent = text.substring(headerIdx + firstLine.length).trim();
-      }
-    } else {
-      // B) Try Filename Match
-      const fileMatch = fileName.match(/Chapter[_\s-]*(\d+)[_\s-]*(.*)\.txt/i);
-      if (fileMatch) {
-        index = parseInt(fileMatch[1]);
-        chTitle = fileMatch[2].trim().replace(/_/g, ' ') || `Chapter ${index}`;
-        finalContent = text;
-      }
-    }
+    const contentFormat = detectFormatFromName(fileName);
+    const meta = detectVolumeMeta(fileName, firstLine);
 
-    let status: SmartFile['status'] = (index !== null) ? 'ready' : 'error';
-    
-    // Duplicate Check
-    if (status === 'ready' && index !== null) {
-      if (existingChapters.some(c => c.index === index)) {
-        status = 'duplicate';
-      }
-    }
+    const volumeId = buildVolumeId(meta.volumeNumber);
+    const fallbackTitle = fileName
+      .replace(/\.(txt|md)$/i, "")
+      .replace(/^\d+\s*/, "")
+      .replace(/_/g, " ")
+      .trim();
+
+    const title = (meta.title || fallbackTitle || "Imported Chapter").trim();
 
     return {
       id: crypto.randomUUID(),
       fileName,
-      parsedIndex: index,
-      parsedTitle: chTitle,
-      status,
-      content: finalContent
+      title,
+      status: text && text.trim().length ? "ready" : "error",
+      content: text,
+      contentFormat,
+      volumeId,
+      detectedVolumeName: meta.volumeName,
+      volumeNumber: meta.volumeNumber,
+      volumeLocalChapter: meta.volumeLocalChapter,
     };
   };
 
@@ -166,12 +204,14 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
         setIsProcessingFiles(false);
         return;
       }
-      const filtered = picks.filter(p => (p.name || '').toLowerCase().match(/\.(txt|md|html|htm)$/));
+      const filtered = picks.filter(p => (p.name || '').toLowerCase().match(/\.(txt|md)$/));
       const newSmartFiles: SmartFile[] = [];
       for (const p of filtered) {
-        newSmartFiles.push(await parseFile(p));
+        newSmartFiles.push(await parseSmartFile(p));
       }
-      setSmartFiles(prev => [...prev, ...newSmartFiles]);
+      setSmartFiles((prev) => [...prev, ...newSmartFiles]);
+      upsertVolumesForFiles(newSmartFiles);
+      setSmartStep("preview");
     } catch (err: any) {
       setError(err?.message || 'Import failed');
     } finally {
@@ -190,12 +230,14 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
         size: f.size,
         file: f,
       }));
-      const filtered = picked.filter(p => (p.name || '').toLowerCase().match(/\.(txt|md|html|htm)$/));
+      const filtered = picked.filter(p => (p.name || '').toLowerCase().match(/\.(txt|md)$/));
       const newSmartFiles: SmartFile[] = [];
       for (const p of filtered) {
-        newSmartFiles.push(await parseFile(p));
+        newSmartFiles.push(await parseSmartFile(p));
       }
       setSmartFiles(prev => [...prev, ...newSmartFiles]);
+      upsertVolumesForFiles(newSmartFiles);
+      setSmartStep("preview");
     } catch (err: any) {
       setError(err?.message || 'Import failed');
     } finally {
@@ -203,34 +245,88 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
     }
   };
 
+  const orderedSmartFiles = useMemo<Array<SmartFile & { proposedIndex: number }>>(() => {
+    const volumesById = new Map(smartVolumes.map((v) => [v.id, v] as const));
+    const NONE = 1_000_000_000;
+
+    const sorted = [...smartFiles].sort((a, b) => {
+      const aVol = volumesById.get(a.volumeId)?.number ?? a.volumeNumber ?? NONE;
+      const bVol = volumesById.get(b.volumeId)?.number ?? b.volumeNumber ?? NONE;
+      if (aVol !== bVol) return aVol - bVol;
+
+      const aCh = a.volumeLocalChapter ?? NONE;
+      const bCh = b.volumeLocalChapter ?? NONE;
+      if (aCh !== bCh) return aCh - bCh;
+
+      return a.fileName.localeCompare(b.fileName, undefined, { numeric: true });
+    });
+
+    return sorted.map((f, i) => ({ ...f, proposedIndex: suggestedIndex + i }));
+  }, [smartFiles, smartVolumes, suggestedIndex]);
+
   const handleBulkImport = async () => {
-    const readyFiles = smartFiles.filter(f => f.status === 'ready');
+    const readyFiles = orderedSmartFiles.filter((f) => f.status === "ready");
     if (readyFiles.length === 0) return;
-    
+
     setIsImporting(true);
-    // Process sequentially to ensure order and avoid overwhelming
+    const volumesById = new Map(smartVolumes.map((v) => [v.id, v] as const));
+
     for (const f of readyFiles) {
-      if (f.parsedIndex !== null && f.parsedTitle !== null && f.content) {
-        onChapterExtracted({
-          title: f.parsedTitle,
-          content: f.content,
-          url: 'bulk-import',
-          index: f.parsedIndex,
-          voiceId: selectedVoiceId,
-          setAsDefault: false, // Don't override defaults during bulk
-          keepOpen: true
-        });
-        // Mark locally as uploaded
-        setSmartFiles(prev => prev.map(pf => pf.id === f.id ? { ...pf, status: 'uploaded' } : pf));
-        // Small delay to let app state update slightly
-        await new Promise(r => setTimeout(r, 100));
-      }
+      const vol = volumesById.get(f.volumeId);
+      const volumeName =
+        vol?.name && vol.name.trim().length && vol.name.trim().toLowerCase() !== "ungrouped"
+          ? vol.name.trim()
+          : undefined;
+
+      onChapterExtracted({
+        title: f.title.trim() || `Chapter ${f.proposedIndex}`,
+        content: f.content,
+        contentFormat: f.contentFormat,
+        url: "bulk-import",
+        index: f.proposedIndex,
+        volumeName,
+        volumeLocalChapter: f.volumeLocalChapter ?? undefined,
+        voiceId: selectedVoiceId,
+        setAsDefault: false,
+        keepOpen: true,
+      });
+
+      setSmartFiles((prev) => prev.map((pf) => (pf.id === f.id ? { ...pf, status: "uploaded" } : pf)));
+      await new Promise((r) => setTimeout(r, 75));
     }
+
     setIsImporting(false);
+  };
+
+  const volumesById = useMemo(() => new Map(smartVolumes.map((v) => [v.id, v] as const)), [smartVolumes]);
+
+  const setSmartFileTitle = (fileId: string, nextTitle: string) => {
+    setSmartFiles((prev) => prev.map((f) => (f.id === fileId ? { ...f, title: nextTitle } : f)));
+  };
+
+  const moveSmartFileToVolume = (fileId: string, nextVolumeId: string) => {
+    setSmartFiles((prev) => prev.map((f) => (f.id === fileId ? { ...f, volumeId: nextVolumeId } : f)));
+  };
+
+  const updateSmartVolumeName = (volumeId: string, nextName: string) => {
+    setSmartVolumes((prev) =>
+      prev.map((v) => {
+        if (v.id !== volumeId) return v;
+        const m = nextName.match(/^(book|volume)\s*(\d+)/i);
+        const nextNumber = m ? parseInt(m[2], 10) : v.number;
+        return { ...v, name: nextName, number: Number.isFinite(nextNumber) ? nextNumber : v.number };
+      })
+    );
   };
 
   const removeSmartFile = (id: string) => {
     setSmartFiles(prev => prev.filter(f => f.id !== id));
+  };
+
+  const clearSmart = () => {
+    setSmartFiles([]);
+    setSmartVolumes([]);
+    setSmartStep("pick");
   };
 
   // -- Theme helpers --
@@ -333,7 +429,7 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
                     <Trash2 className="w-4 h-4" />
                   </button>
                   <button onClick={handleManualPick} className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-[10px] font-black uppercase border transition-all ${isDark ? 'border-slate-700 hover:bg-white/5' : 'border-slate-200 hover:bg-black/5'}`}>
-                    <Upload className="w-3.5 h-3.5" /> Upload .TXT
+                    <Upload className="w-3.5 h-3.5" /> Upload .TXT/.MD
                   </button>
                   <button onClick={() => setContent(cleanText(content))} disabled={!content.trim()} className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[10px] font-black uppercase bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition-all shadow-md">
                     <Sparkles className="w-3.5 h-3.5" /> Quick Clean
@@ -371,7 +467,7 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
                   <Files className="w-8 h-8" />
                 </div>
                 <div>
-                  <h3 className="text-lg font-black tracking-tight">Drop .txt files here</h3>
+                  <h3 className="text-lg font-black tracking-tight">Drop .txt/.md files here</h3>
                   <p className="text-xs font-bold opacity-50 mt-1 uppercase tracking-widest">or click to select multiple files</p>
                 </div>
               </div>
@@ -383,57 +479,124 @@ const Extractor: React.FC<ImporterProps> = ({ onChapterExtracted, suggestedIndex
               </div>
             )}
 
-            <div className="flex-1 overflow-y-auto min-h-[200px] border rounded-2xl bg-black/5 p-1">
-              <table className="w-full text-left border-collapse">
-                <thead className="text-[10px] font-black uppercase tracking-widest opacity-50 border-b border-black/10">
-                  <tr>
-                    <th className="p-3">Status</th>
-                    <th className="p-3">File</th>
-                    <th className="p-3">Parsed As</th>
-                    <th className="p-3 text-right">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="text-xs font-bold">
-                  {smartFiles.map(f => (
-                    <tr key={f.id} className={`border-b border-black/5 last:border-0 ${f.status === 'uploaded' ? 'opacity-40' : ''}`}>
-                      <td className="p-3">
-                        {f.status === 'ready' && <span className="inline-flex items-center gap-1 text-emerald-600 bg-emerald-100 px-2 py-1 rounded-lg text-[10px] font-black uppercase"><Check className="w-3 h-3" /> Ready</span>}
-                        {f.status === 'duplicate' && <span className="inline-flex items-center gap-1 text-amber-600 bg-amber-100 px-2 py-1 rounded-lg text-[10px] font-black uppercase"><AlertCircle className="w-3 h-3" /> Duplicate</span>}
-                        {f.status === 'error' && <span className="inline-flex items-center gap-1 text-red-600 bg-red-100 px-2 py-1 rounded-lg text-[10px] font-black uppercase"><X className="w-3 h-3" /> Error</span>}
-                        {f.status === 'uploaded' && <span className="inline-flex items-center gap-1 text-indigo-600 bg-indigo-100 px-2 py-1 rounded-lg text-[10px] font-black uppercase"><Check className="w-3 h-3" /> Done</span>}
-                      </td>
-                      <td className="p-3 truncate max-w-[150px]" title={f.fileName}>{f.fileName}</td>
-                      <td className="p-3">
-                        {f.parsedIndex !== null ? (
-                          <div className="flex flex-col">
-                            <span className="text-indigo-600">CH {f.parsedIndex}</span>
-                            <span className="opacity-60 truncate max-w-[200px]">{f.parsedTitle}</span>
+            <div className="flex-1 overflow-y-auto min-h-[200px] border rounded-2xl bg-black/5 p-4">
+              {smartStep === "pick" && smartFiles.length === 0 && !isProcessingFiles && (
+                <div className="p-8 text-center opacity-50 text-xs font-bold italic">
+                  No files selected yet.
+                </div>
+              )}
+
+              {smartStep === "preview" && smartFiles.length > 0 && (
+                <div className="space-y-4">
+                  <div className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                    Preview & Edit (global indices will be assigned sequentially starting at {suggestedIndex})
+                  </div>
+
+                  {smartVolumes.map((vol) => {
+                    const filesInVol = orderedSmartFiles.filter((f) => f.volumeId === vol.id);
+                    const readyCount = filesInVol.filter((f) => f.status === "ready").length;
+
+                    return (
+                      <div
+                        key={vol.id}
+                        className={`rounded-2xl border p-4 ${isDark ? "border-slate-700 bg-slate-900/30" : "border-black/10 bg-white/40"}`}
+                        onDragOver={(e) => {
+                          if (!isMobile) e.preventDefault();
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          if (isMobile) return;
+                          const fileId = e.dataTransfer.getData("text/talevox-file-id");
+                          if (fileId) moveSmartFileToVolume(fileId, vol.id);
+                        }}
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <input
+                            value={vol.name}
+                            onChange={(e) => updateSmartVolumeName(vol.id, e.target.value)}
+                            className={`flex-1 px-3 py-2 rounded-xl border text-sm font-black outline-none ${inputBg}`}
+                          />
+                          <div className="text-[10px] font-black uppercase tracking-widest opacity-60 whitespace-nowrap">
+                            {readyCount}/{filesInVol.length} ready
                           </div>
-                        ) : <span className="opacity-40 italic">Unknown</span>}
-                      </td>
-                      <td className="p-3 text-right">
-                        <button onClick={() => removeSmartFile(f.id)} className="p-2 hover:bg-black/10 rounded-lg text-red-500"><Trash2 className="w-4 h-4" /></button>
-                      </td>
-                    </tr>
-                  ))}
-                  {smartFiles.length === 0 && !isProcessingFiles && (
-                    <tr>
-                      <td colSpan={4} className="p-8 text-center opacity-40 italic">No files selected</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+                        </div>
+
+                        <div className="mt-3 space-y-2">
+                          {filesInVol.map((f) => (
+                            <div
+                              key={f.id}
+                              draggable={!isMobile}
+                              onDragStart={(e) => {
+                                if (isMobile) return;
+                                e.dataTransfer.setData("text/talevox-file-id", f.id);
+                                e.dataTransfer.effectAllowed = "move";
+                              }}
+                              className={`flex items-center gap-3 p-3 rounded-xl border ${isDark ? "border-slate-800 bg-slate-950/40" : "border-black/10 bg-white/60"} ${f.status === "uploaded" ? "opacity-40" : ""}`}
+                            >
+                              <div className="w-20 shrink-0 font-mono text-[10px] font-black opacity-60">
+                                #{String(f.proposedIndex).padStart(3, "0")}
+                              </div>
+
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    value={f.title}
+                                    onChange={(e) => setSmartFileTitle(f.id, e.target.value)}
+                                    className={`w-full px-2 py-1 rounded-lg border text-xs font-black outline-none ${inputBg}`}
+                                  />
+                                </div>
+                                <div className="mt-1 text-[10px] font-bold opacity-50 truncate">
+                                  {vol.name}
+                                  {f.volumeLocalChapter ? ` · Ch ${f.volumeLocalChapter}` : ""}
+                                  {" · "}
+                                  {f.fileName}
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                <select
+                                  value={f.volumeId}
+                                  onChange={(e) => moveSmartFileToVolume(f.id, e.target.value)}
+                                  className={`px-2 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest ${inputBg}`}
+                                  title="Move to volume"
+                                >
+                                  {smartVolumes.map((v) => (
+                                    <option key={v.id} value={v.id}>
+                                      {v.name}
+                                    </option>
+                                  ))}
+                                </select>
+                                <button
+                                  onClick={() => removeSmartFile(f.id)}
+                                  className="p-2 hover:bg-black/10 rounded-lg text-red-500"
+                                  title="Remove"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+
+                          {filesInVol.length === 0 && (
+                            <div className="text-xs opacity-40 italic px-3 py-2">Drop chapters here</div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             <div className="flex justify-between items-center pt-2">
-              <button onClick={() => setSmartFiles([])} className="px-6 py-3 text-xs font-black uppercase tracking-widest opacity-60 hover:opacity-100">Clear List</button>
+              <button onClick={clearSmart} className="px-6 py-3 text-xs font-black uppercase tracking-widest opacity-60 hover:opacity-100">Clear List</button>
               <button 
                 onClick={handleBulkImport}
-                disabled={isImporting || smartFiles.filter(f => f.status === 'ready').length === 0}
+                disabled={isImporting || orderedSmartFiles.filter(f => f.status === 'ready').length === 0}
                 className="px-8 py-4 bg-indigo-600 text-white rounded-xl font-black uppercase tracking-widest shadow-xl hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2"
               >
                 {isImporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
-                Import {smartFiles.filter(f => f.status === 'ready').length} Ready Files
+                Import {orderedSmartFiles.filter(f => f.status === 'ready').length} Files
               </button>
             </div>
           </div>

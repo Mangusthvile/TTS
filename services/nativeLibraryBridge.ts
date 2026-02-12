@@ -58,6 +58,8 @@ async function ensureSchema(conn: SQLiteDBConnection): Promise<void> {
       title TEXT NOT NULL,
       filename TEXT NOT NULL,
       sourceUrl TEXT,
+      volumeName TEXT,
+      volumeLocalChapter INTEGER,
       cloudTextFileId TEXT,
       cloudAudioFileId TEXT,
       audioDriveId TEXT,
@@ -90,6 +92,16 @@ async function ensureSchema(conn: SQLiteDBConnection): Promise<void> {
   `);
   try {
     await conn.execute(`ALTER TABLE chapter_text ADD COLUMN localPath TEXT`);
+  } catch {
+    // Column already exists
+  }
+  try {
+    await conn.execute(`ALTER TABLE chapters ADD COLUMN volumeName TEXT`);
+  } catch {
+    // Column already exists
+  }
+  try {
+    await conn.execute(`ALTER TABLE chapters ADD COLUMN volumeLocalChapter INTEGER`);
   } catch {
     // Column already exists
   }
@@ -153,6 +165,8 @@ export async function ensureNativeChapter(
     idx?: number;
     filename?: string;
     sourceUrl?: string;
+    volumeName?: string;
+    volumeLocalChapter?: number;
     cloudTextFileId?: string;
     cloudAudioFileId?: string;
     audioDriveId?: string;
@@ -172,17 +186,20 @@ export async function ensureNativeChapter(
   await conn.run(
     `INSERT INTO chapters (
       id, bookId, idx, title, filename, sourceUrl,
+      volumeName, volumeLocalChapter,
       cloudTextFileId, cloudAudioFileId, audioDriveId,
       audioStatus, audioSignature, durationSec, textLength, wordCount,
       isFavorite, updatedAt
      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        bookId=excluded.bookId,
        idx=excluded.idx,
        title=excluded.title,
        filename=excluded.filename,
        sourceUrl=excluded.sourceUrl,
+       volumeName=excluded.volumeName,
+       volumeLocalChapter=excluded.volumeLocalChapter,
        cloudTextFileId=excluded.cloudTextFileId,
        cloudAudioFileId=excluded.cloudAudioFileId,
        audioDriveId=excluded.audioDriveId,
@@ -200,6 +217,8 @@ export async function ensureNativeChapter(
       chapter.title,
       filename,
       chapter.sourceUrl ?? null,
+      (chapter as any).volumeName ?? null,
+      (chapter as any).volumeLocalChapter ?? null,
       chapter.cloudTextFileId ?? null,
       chapter.cloudAudioFileId ?? null,
       chapter.audioDriveId ?? null,

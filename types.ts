@@ -86,6 +86,18 @@ export const CLOUD_VOICES = [
   { id: 'en-US-Wavenet-C', name: 'Premium Female (US)' },
   { id: 'en-GB-Wavenet-B', name: 'Premium Male (UK)' },
   { id: 'en-GB-Wavenet-A', name: 'Premium Female (UK)' },
+  { id: 'openai:cedar', name: 'OpenAI Cedar' },
+  { id: 'openai:marin', name: 'OpenAI Marin' },
+  { id: 'openai:alloy', name: 'OpenAI Alloy' },
+  { id: 'openai:echo', name: 'OpenAI Echo' },
+  { id: 'openai:fable', name: 'OpenAI Fable' },
+  { id: 'openai:nova', name: 'OpenAI Nova' },
+  { id: 'openai:onyx', name: 'OpenAI Onyx' },
+  { id: 'openai:shimmer', name: 'OpenAI Shimmer' },
+  { id: 'openai:ash', name: 'OpenAI Ash' },
+  { id: 'openai:coral', name: 'OpenAI Coral' },
+  { id: 'openai:sage', name: 'OpenAI Sage' },
+  { id: 'openai:ballad', name: 'OpenAI Ballad' },
 ];
 
 export interface PlaybackMetadata {
@@ -94,6 +106,7 @@ export interface PlaybackMetadata {
   charOffset: number;
   // Added field to support robust text tracking
   textLength?: number;
+  chapterId?: string | null;
 }
 
 export type PlaybackPhase =
@@ -160,6 +173,10 @@ export interface Chapter {
   sourceUrl?: string;
   filename: string;
   content?: string;
+  contentFormat?: "text" | "markdown";
+  // Optional grouping inside a book (e.g. "Book 1", "Book 2"). `index` stays globally increasing.
+  volumeName?: string;
+  volumeLocalChapter?: number;
   wordCount: number;
   progress: number; // progress as ratio 0..1
   progressChars: number; // actual character offset
@@ -191,7 +208,27 @@ export interface BookSettings {
   defaultVoiceId?: string; 
   useBookSettings: boolean;
   highlightMode: HighlightMode;
+  autoGenerateAudioOnAdd?: boolean;
 }
+
+export type BookAttachment = {
+  id: string;
+  bookId: string;
+  driveFileId?: string;
+  filename: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  localPath?: string;
+  sha256?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type ChapterTombstone = {
+  bookId: string;
+  chapterId: string;
+  deletedAt: number;
+};
 
 export interface ReaderSettings {
   fontFamily: string;
@@ -202,8 +239,10 @@ export interface ReaderSettings {
   highlightColor: string;
   followHighlight: boolean;
   highlightEnabled?: boolean;
+  highlightMode?: HighlightMode;
   highlightUpdateRateMs?: number;
   highlightDebugOverlay?: boolean;
+  speakChapterIntro?: boolean;
   uiMode: UiMode;
 }
 
@@ -289,6 +328,33 @@ export interface SavedSnapshot {
     autoSaveInterval?: number;
     globalRules?: Rule[];
     showDiagnostics?: boolean;
+  };
+}
+
+export interface SnapshotPointerV1 {
+  schemaVersion: 1;
+  latestFileName: string;
+  latestCreatedAt: number;
+}
+
+export interface FullSnapshotV1 {
+  schemaVersion: 1;
+  createdAt: number;
+  appVersion: string;
+  preferences: Record<string, unknown>;
+  readerProgress: Record<string, unknown>;
+  legacyProgressStore?: Record<string, unknown>;
+  globalRules: Rule[];
+  books: Book[];
+  chapters: Chapter[];
+  attachments: BookAttachment[];
+  jobs: JobRecord[];
+  uiState?: {
+    activeBookId?: string;
+    activeChapterId?: string;
+    activeTab?: "library" | "collection" | "reader" | "rules" | "settings";
+    lastOpenBookId?: string;
+    lastOpenChapterId?: string;
   };
 }
 

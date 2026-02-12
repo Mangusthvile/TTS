@@ -40,7 +40,13 @@ function isSpeechSpeaking(): boolean {
   return !!(ss && (ss as any).speaking);
 }
 
-export const PROGRESS_STORE_V4 = 'talevox_progress_v4';
+export const PROGRESS_STORE_KEY = 'talevox_progress_store';
+export const PROGRESS_STORE_LEGACY_KEYS = [
+  'talevox_progress_v4',
+  'talevox_progress_v3',
+  'talevox_progress_v2',
+  'talevox_progress_v1',
+];
 
 export function applyRules(text: string, rules: Rule[]): string {
   let processedText = text;
@@ -73,12 +79,14 @@ class SpeechController {
   private onEndCallback: (() => void) | null = null;
   private onPlayStartCallback: (() => void) | null = null;
   private syncCallback: ((meta: PlaybackMetadata & { completed?: boolean }) => void) | null = null;
+  private itemChangedCallback: ((nextId: string | null, prevId: string | null) => void) | null = null;
   private onFetchStateChange: ((isFetching: boolean) => void) | null = null;
 
   private sessionToken: number = 0;
   private context: { bookId: string; chapterId: string } | null = null;
   private audioEventsBound = false;
   private adapterUnsubscribers: Array<() => void> = [];
+  private lastItemId: string | null = null;
 
   // Seek coordination
   private seekNonce = 0;
@@ -163,6 +171,10 @@ class SpeechController {
     this.syncCallback = cb;
   }
 
+  public setItemChangedCallback(cb: ((nextId: string | null, prevId: string | null) => void) | null) {
+    this.itemChangedCallback = cb;
+  }
+
   public setFetchStateListener(cb: (isFetching: boolean) => void) { this.onFetchStateChange = cb; }
 
   public updateMetadata(textLen: number, introDurSec: number, chunkMap: AudioChunkMetadata[]) {
@@ -194,11 +206,13 @@ class SpeechController {
   }
 
   public getMetadata(): PlaybackMetadata {
+    const state = this.adapter.getState();
     return {
       currentTime: this.audio.currentTime,
       duration: this.audio.duration,
       charOffset: Math.floor(this.renderedOffset),
-      textLength: this.currentTextLength
+      textLength: this.currentTextLength,
+      chapterId: this.context?.chapterId ?? state.currentItemId ?? null
     };
   }
 
@@ -383,11 +397,13 @@ class SpeechController {
     const currentTime = (state.positionMs ?? state.currentTime * 1000) / 1000;
     const duration = (state.durationMs ?? state.duration * 1000) / 1000;
     const offset = Math.floor(this.renderedOffset);
+    const chapterId = this.context?.chapterId ?? state.currentItemId ?? null;
     this.syncCallback({
       currentTime,
       duration,
       charOffset: offset,
       textLength: this.currentTextLength,
+      chapterId,
       completed
     });
   }
@@ -812,12 +828,13 @@ class SpeechController {
     return this.adapter.getState().currentTime;
   }
 
-  public seekToOffset(offset: number) {
-    const duration = this.audio.duration;
-    if (!duration || this.currentTextLength <= 0) return;
+  public getTimeForOffset(offset: number): number | null {
+    const { duration } = this.getCurrentTimeAndDuration();
+    if (!duration || this.currentTextLength <= 0) return null;
 
     let targetTime = 0;
-    const effectiveIntroEnd = this.currentIntroDurSec > 0 ? (this.currentIntroDurSec + this.HIGHLIGHT_DELAY_SEC) : 0;
+    const effectiveIntroEnd =
+      this.currentIntroDurSec > 0 ? (this.currentIntroDurSec + this.HIGHLIGHT_DELAY_SEC) : 0;
 
     if (this.currentChunkMap && this.currentChunkMap.length > 0) {
       const mapTotalDur = this.currentChunkMap.reduce((acc, c) => acc + c.durSec, 0);
@@ -840,7 +857,13 @@ class SpeechController {
           Math.max(0.001, duration - effectiveIntroEnd));
     }
 
-    this.seekTo(targetTime).catch(e => traceError('seek:offset:failed', e));
+    return targetTime;
+  }
+
+  public async seekToOffset(offset: number): Promise<void> {
+    const targetTime = this.getTimeForOffset(offset);
+    if (targetTime == null) return;
+    await this.seekTo(targetTime);
   }
 
   speak(text: string, voiceName: string | undefined, rate: number, offset: number, onEnd: () => void, isIntro: boolean = false) {
@@ -974,6 +997,18 @@ class SpeechController {
       });
       this.adapterUnsubscribers.push(onEnded);
     }
+    const onItemChanged = this.adapter.onItemChanged((item) => {
+      const nextId = item?.id ?? null;
+      const prevId = this.lastItemId;
+      this.lastItemId = nextId;
+      if (nextId && this.context && this.context.chapterId !== nextId) {
+        this.context = { ...this.context, chapterId: nextId };
+      }
+      if (this.itemChangedCallback && nextId !== prevId) {
+        this.itemChangedCallback(nextId, prevId ?? null);
+      }
+    });
+    this.adapterUnsubscribers.push(onItemChanged);
     const onState = this.adapter.onState((state) => {
       this.lastKnownTime = state.currentTime;
       this.updateTargetOffset(this.lastKnownTime);

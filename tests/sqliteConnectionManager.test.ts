@@ -29,7 +29,8 @@ vi.mock("@capacitor-community/sqlite", () => {
 });
 
 describe("sqliteConnectionManager", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await vi.resetModules();
     isConnectionResult = false;
     createConnection.mockReset().mockResolvedValue(fakeDb);
     retrieveConnection.mockReset().mockResolvedValue(fakeDb);

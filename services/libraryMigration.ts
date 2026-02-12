@@ -62,7 +62,8 @@ export async function migrateLegacyLocalStorageIfNeeded(): Promise<{ migrated: b
       driveFolderId: b.driveFolderId ?? undefined,
       driveFolderName: b.driveFolderName ?? undefined,
       backend: b.backend ?? "local",
-      settings: b.settings ?? { useBookSettings: false, highlightMode: HighlightMode.WORD },
+      settings:
+        b.settings ?? { useBookSettings: false, highlightMode: HighlightMode.SENTENCE, autoGenerateAudioOnAdd: true },
       updatedAt: Number(b.updatedAt ?? Date.now()),
     } as any;
 

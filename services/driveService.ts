@@ -7,9 +7,14 @@ export function buildMp3Name(bookId: string, chapterIdOrIndex: string | number):
   return `c_${String(chapterIdOrIndex)}.mp3`;
 }
 
-export function buildTextName(bookId: string, chapterIdOrIndex: string | number): string {
+export function buildTextName(
+  bookId: string,
+  chapterIdOrIndex: string | number,
+  format: "text" | "markdown" = "text"
+): string {
   // New format: stable IDs (works even if chapter title changes)
-  return `c_${String(chapterIdOrIndex)}.txt`;
+  const ext = format === "markdown" ? "md" : "txt";
+  return `c_${String(chapterIdOrIndex)}.${ext}`;
 }
 
 export function u8ToArrayBuffer(u8: Uint8Array): ArrayBuffer {

@@ -1,4 +1,6 @@
 
+import { trace } from '../utils/trace';
+
 export type PlaybackItem = {
   id: string;
   url: string;
@@ -193,6 +195,8 @@ export class MobilePlaybackAdapter implements PlaybackAdapter {
   private nativeListenersBound = false;
   private pollTimer: any = null;
   private currentItemId: string | null = null;
+  private lastLoggedIsPlaying: boolean | null = null;
+  private lastLoggedItemId: string | null = null;
 
   constructor(private plugin: typeof import('./nativePlayer').NativePlayer) {
     void this.bindNativeListeners();
@@ -266,6 +270,25 @@ export class MobilePlaybackAdapter implements PlaybackAdapter {
   private emitState() {
     const state = this.getState();
     this.stateListeners.forEach((listener) => listener(state));
+    this.logStateTransition(state);
+  }
+
+  private logStateTransition(state: PlaybackState) {
+    const nextItemId = state.currentItemId ?? null;
+    const isPlayingChanged =
+      this.lastLoggedIsPlaying === null || this.lastLoggedIsPlaying !== state.isPlaying;
+    const itemChanged = this.lastLoggedItemId !== nextItemId;
+
+    if (isPlayingChanged || itemChanged) {
+      trace('playback:state', {
+        isPlaying: state.isPlaying,
+        positionMs: state.positionMs,
+        durationMs: state.durationMs,
+        currentItemId: state.currentItemId ?? null,
+      });
+      this.lastLoggedIsPlaying = state.isPlaying;
+      this.lastLoggedItemId = nextItemId;
+    }
   }
 
   private async bindNativeListeners() {
@@ -290,10 +313,12 @@ export class MobilePlaybackAdapter implements PlaybackAdapter {
       const item = event?.item ?? null;
       this.currentItemId = item?.id ?? null;
       this.itemListeners.forEach((listener) => listener(item));
+      trace('playback:item', { currentItemId: this.currentItemId });
     });
 
     await this.plugin.addListener('ended', () => {
       this.endedListeners.forEach((listener) => listener());
+      trace('playback:ended', { currentItemId: this.currentItemId });
     });
 
     await this.plugin.addListener('error', (event: any) => {

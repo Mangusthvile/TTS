@@ -92,6 +92,11 @@ public class NativePlayerPlugin extends Plugin {
             }
 
             @Override
+            public void onPositionDiscontinuity(Player.PositionInfo oldPosition, Player.PositionInfo newPosition, int reason) {
+                emitState();
+            }
+
+            @Override
             public void onMediaItemTransition(@Nullable MediaItem mediaItem, int reason) {
                 emitItemChanged(mediaItem);
                 emitState();

@@ -30,7 +30,8 @@ describe("Library component", () => {
     );
 
     expect(screen.getByText("Library")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("Book One"));
+    const bookLabels = screen.getAllByText("Book One");
+    fireEvent.click(bookLabels[0]);
     expect(onSelectBook).toHaveBeenCalledWith("b1");
   });
 });

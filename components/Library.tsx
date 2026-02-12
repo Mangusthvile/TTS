@@ -138,15 +138,17 @@ const Library: React.FC<Props> = ({
               />
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4">
-              <button
-                disabled={isProcessingAdd}
-                onClick={() => handleAdd(StorageBackend.MEMORY)}
-                className={`p-4 rounded-2xl flex flex-col items-center gap-2 text-[10px] font-black uppercase transition-all ${optionCard}`}
-              >
-                <Database className="w-5 h-5 text-emerald-500" />
-                Memory
-              </button>
+            <div className={`grid grid-cols-1 ${__ANDROID_ONLY__ ? "" : "sm:grid-cols-3"} gap-3 mt-4`}>
+              {!__ANDROID_ONLY__ && (
+                <button
+                  disabled={isProcessingAdd}
+                  onClick={() => handleAdd(StorageBackend.MEMORY)}
+                  className={`p-4 rounded-2xl flex flex-col items-center gap-2 text-[10px] font-black uppercase transition-all ${optionCard}`}
+                >
+                  <Database className="w-5 h-5 text-emerald-500" />
+                  Memory
+                </button>
+              )}
 
               <button
                 disabled={isProcessingAdd}
@@ -157,26 +159,28 @@ const Library: React.FC<Props> = ({
                 {isCloudLinked ? "Drive" : "Link Drive"}
               </button>
 
-              <button
-                disabled={isProcessingAdd}
-                onClick={async () => {
-                  try {
-                    const w: any = window as any;
-                    if (typeof w.showDirectoryPicker === "function") {
-                      const h = await w.showDirectoryPicker({ mode: "readwrite" });
-                      await handleAdd(StorageBackend.LOCAL, h);
-                    } else {
+              {!__ANDROID_ONLY__ && (
+                <button
+                  disabled={isProcessingAdd}
+                  onClick={async () => {
+                    try {
+                      const w: any = window as any;
+                      if (typeof w.showDirectoryPicker === "function") {
+                        const h = await w.showDirectoryPicker({ mode: "readwrite" });
+                        await handleAdd(StorageBackend.LOCAL, h);
+                      } else {
+                        await handleAdd(StorageBackend.LOCAL);
+                      }
+                    } catch {
                       await handleAdd(StorageBackend.LOCAL);
                     }
-                  } catch {
-                    await handleAdd(StorageBackend.LOCAL);
-                  }
-                }}
-                className={`p-4 rounded-2xl flex flex-col items-center gap-2 text-[10px] font-black uppercase transition-all ${optionCard}`}
-              >
-                <Monitor className={`w-5 h-5 ${isDark ? "text-slate-300" : isSepia ? "text-[#3c2f25]" : "text-slate-600"}`} />
-                Local
-              </button>
+                  }}
+                  className={`p-4 rounded-2xl flex flex-col items-center gap-2 text-[10px] font-black uppercase transition-all ${optionCard}`}
+                >
+                  <Monitor className={`w-5 h-5 ${isDark ? "text-slate-300" : isSepia ? "text-[#3c2f25]" : "text-slate-600"}`} />
+                  Local
+                </button>
+              )}
             </div>
 
             <button
@@ -194,15 +198,23 @@ const Library: React.FC<Props> = ({
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
           {sortedBooks.map((book) => {
             const chapterCount = book.chapterCount ?? book.chapters.length;
+            const localDisabled = __ANDROID_ONLY__ && book.backend === StorageBackend.LOCAL;
 
             return (
               <div key={book.id} className="flex flex-col gap-2 group">
                 <div
-                  onClick={() => onSelectBook(book.id)}
+                  onClick={() => {
+                    if (localDisabled) {
+                      alert("Local-folder books are disabled in this Android-only build.");
+                      return;
+                    }
+                    onSelectBook(book.id);
+                  }}
                   className={[
                     "aspect-[2/3] rounded-3xl overflow-hidden relative shadow-2xl cursor-pointer transition-all",
                     cardShell,
                     activeBookId === book.id ? ringActive : "",
+                    localDisabled ? "opacity-60 cursor-not-allowed" : "",
                   ].join(" ")}
                 >
                   {book.coverImage ? (
@@ -222,9 +234,20 @@ const Library: React.FC<Props> = ({
                       {Math.min(chapterCount, 9999)}
                     </div>
                   )}
+                  {localDisabled && (
+                    <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/60 text-white text-[10px] font-black rounded-xl shadow-lg">
+                      LOCAL DISABLED
+                    </div>
+                  )}
                 </div>
 
-                <div onClick={() => onSelectBook(book.id)} className="cursor-pointer">
+                <div
+                  onClick={() => {
+                    if (localDisabled) return;
+                    onSelectBook(book.id);
+                  }}
+                  className={localDisabled ? "cursor-not-allowed" : "cursor-pointer"}
+                >
                   <div className={`font-black text-xs sm:text-sm line-clamp-1 ${textPrimary}`}>{book.title}</div>
                   <div className={`text-[9px] font-bold uppercase tracking-tighter ${textMuted}`}>{chapterCount} chapters</div>
                 </div>

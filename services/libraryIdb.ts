@@ -16,16 +16,27 @@
  */
 
 import { HighlightMode } from "../types";
-import type { Book, Chapter, StorageBackend, AudioStatus, BookSettings, Rule } from "../types";
+import type {
+  Book,
+  Chapter,
+  StorageBackend,
+  AudioStatus,
+  BookSettings,
+  Rule,
+  BookAttachment,
+  ChapterTombstone,
+} from "../types";
 
 const DB_NAME = "TalevoxLibrary";
-const DB_VERSION = 4;
+const DB_VERSION = 6;
 
 const STORE_BOOKS = "books";
 const STORE_CHAPTERS = "chapters";
 const STORE_CHAPTER_TEXT = "chapter_text";
 const STORE_CHAPTER_CUE_MAPS = "chapter_cue_maps";
 const STORE_CHAPTER_PARAGRAPH_MAPS = "chapter_paragraph_maps";
+const STORE_BOOK_ATTACHMENTS = "book_attachments";
+const STORE_CHAPTER_TOMBSTONES = "chapter_tombstones";
 
 export type ChapterPage = {
   chapters: Chapter[];
@@ -55,6 +66,8 @@ type ChapterRow = {
   title: string;
   filename: string;
   sourceUrl?: string;
+  volumeName?: string;
+  volumeLocalChapter?: number;
 
   cloudTextFileId?: string;
   cloudAudioFileId?: string;
@@ -87,6 +100,25 @@ type ChapterCueMapRow = {
 type ChapterParagraphMapRow = {
   chapterId: string;
   paragraphJson: string;
+  updatedAt: number;
+};
+
+type ChapterTombstoneRow = {
+  bookId: string;
+  chapterId: string;
+  deletedAt: number;
+};
+
+type BookAttachmentRow = {
+  id: string;
+  bookId: string;
+  driveFileId?: string;
+  filename: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  localPath?: string;
+  sha256?: string;
+  createdAt: number;
   updatedAt: number;
 };
 
@@ -140,6 +172,18 @@ function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE_CHAPTER_PARAGRAPH_MAPS)) {
         db.createObjectStore(STORE_CHAPTER_PARAGRAPH_MAPS, { keyPath: "chapterId" });
       }
+
+      if (!db.objectStoreNames.contains(STORE_CHAPTER_TOMBSTONES)) {
+        const s = db.createObjectStore(STORE_CHAPTER_TOMBSTONES, { keyPath: ["bookId", "chapterId"] });
+        s.createIndex("byBookId", "bookId", { unique: false });
+        s.createIndex("byChapterId", "chapterId", { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains(STORE_BOOK_ATTACHMENTS)) {
+        const s = db.createObjectStore(STORE_BOOK_ATTACHMENTS, { keyPath: "id" });
+        s.createIndex("byBookId", "bookId", { unique: false });
+        s.createIndex("byDriveFileId", "driveFileId", { unique: false });
+      }
     };
 
     req.onsuccess = () => resolve(req.result);
@@ -174,7 +218,15 @@ function toBook(row: BookRow): Book {
     driveFolderId: row.driveFolderId,
     driveFolderName: row.driveFolderName,
     currentChapterId: row.currentChapterId,
-    settings: row.settings ?? { useBookSettings: false, highlightMode: HighlightMode.WORD },
+    settings: row.settings
+      ? {
+          ...row.settings,
+          autoGenerateAudioOnAdd:
+            typeof row.settings.autoGenerateAudioOnAdd === "boolean"
+              ? row.settings.autoGenerateAudioOnAdd
+              : true,
+        }
+      : { useBookSettings: false, highlightMode: HighlightMode.SENTENCE, autoGenerateAudioOnAdd: true },
     rules: row.rules ?? [],
     chapters: [],
     chapterCount: row.chapterCount ?? 0,
@@ -189,7 +241,8 @@ function toChapter(row: ChapterRow): Chapter {
     title: row.title,
     filename: row.filename,
     sourceUrl: row.sourceUrl,
-    content: undefined,
+    volumeName: row.volumeName,
+    volumeLocalChapter: row.volumeLocalChapter,
 
     wordCount: row.wordCount ?? 0,
     progress: 0,
@@ -238,7 +291,7 @@ export async function upsertBook(book: Book): Promise<void> {
     driveFolderId: book.driveFolderId,
     driveFolderName: book.driveFolderName,
     currentChapterId: book.currentChapterId,
-    settings: book.settings ?? { useBookSettings: false, highlightMode: HighlightMode.WORD },
+    settings: book.settings ?? { useBookSettings: false, highlightMode: HighlightMode.SENTENCE, autoGenerateAudioOnAdd: true },
     rules: book.rules ?? [],
     chapterCount: book.chapterCount ?? existing?.chapterCount ?? book.chapters?.length ?? 0,
     updatedAt: book.updatedAt ?? Date.now(),
@@ -286,6 +339,8 @@ export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promi
     title: chapter.title,
     filename: chapter.filename,
     sourceUrl: chapter.sourceUrl,
+    volumeName: (chapter as any).volumeName,
+    volumeLocalChapter: (chapter as any).volumeLocalChapter,
 
     cloudTextFileId: (chapter as any).cloudTextFileId,
     cloudAudioFileId: (chapter as any).cloudAudioFileId,
@@ -321,10 +376,17 @@ export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promi
 
 export async function deleteChapter(bookId: string, chapterId: string): Promise<void> {
   const db = await openDb();
-  const tx = db.transaction([STORE_CHAPTERS, STORE_CHAPTER_TEXT], "readwrite");
+  const tx = db.transaction([STORE_CHAPTERS, STORE_CHAPTER_TEXT, STORE_CHAPTER_TOMBSTONES], "readwrite");
 
   tx.objectStore(STORE_CHAPTERS).delete(chapterId);
   tx.objectStore(STORE_CHAPTER_TEXT).delete(chapterId);
+  const tombstones = tx.objectStore(STORE_CHAPTER_TOMBSTONES);
+  const tombstone: ChapterTombstoneRow = {
+    bookId,
+    chapterId,
+    deletedAt: Date.now(),
+  };
+  tombstones.put(tombstone);
 
   await txDone(tx);
 }
@@ -453,8 +515,12 @@ export async function listChaptersPage(
   limit: number
 ): Promise<ChapterPage> {
   const db = await openDb();
-  const tx = db.transaction([STORE_CHAPTERS], "readonly");
+  const tx = db.transaction([STORE_CHAPTERS, STORE_CHAPTER_TOMBSTONES], "readonly");
   const store = tx.objectStore(STORE_CHAPTERS);
+  const tombstonesStore = tx.objectStore(STORE_CHAPTER_TOMBSTONES);
+  const tombstoneIdx = tombstonesStore.index("byBookId");
+  const tombstoneRows = (await reqToPromise(tombstoneIdx.getAll(bookId))) as ChapterTombstoneRow[];
+  const tombstonedIds = new Set<string>((tombstoneRows ?? []).map((r) => r.chapterId));
 
   const idx =
     store.indexNames.contains("byBookIndex")
@@ -477,7 +543,9 @@ export async function listChaptersPage(
       if (chapters.length >= limit) return resolve();
 
       const row = cursor.value as ChapterRow;
-      chapters.push(toChapter(row));
+      if (!tombstonedIds.has(row.id)) {
+        chapters.push(toChapter(row));
+      }
 
       cursor.continue();
     };
@@ -485,7 +553,9 @@ export async function listChaptersPage(
 
   try {
     const countIdx = store.index("byBookId");
-    totalCount = Number(await reqToPromise(countIdx.count(IDBKeyRange.only(bookId))));
+    const rawCount = Number(await reqToPromise(countIdx.count(IDBKeyRange.only(bookId))));
+    const tombstoneCount = tombstonedIds.size;
+    totalCount = Math.max(0, rawCount - tombstoneCount);
   } catch {
     totalCount = undefined;
   }
@@ -498,6 +568,62 @@ export async function listChaptersPage(
     nextAfterIndex: chapters.length < limit ? null : nextAfterIndex,
     totalCount,
   };
+}
+
+export async function getChaptersByIds(bookId: string, chapterIds: string[]): Promise<Chapter[]> {
+  const ids = Array.from(new Set((chapterIds ?? []).map((id) => String(id)))).filter(Boolean);
+  if (ids.length === 0) return [];
+
+  const db = await openDb();
+  const tx = db.transaction([STORE_CHAPTERS], "readonly");
+  const store = tx.objectStore(STORE_CHAPTERS);
+
+  const out = new Map<string, Chapter>();
+  for (const id of ids) {
+    const row = (await reqToPromise(store.get(id) as any)) as ChapterRow | undefined;
+    if (!row) continue;
+    if (row.bookId !== bookId) continue;
+    out.set(id, toChapter(row));
+  }
+
+  await txDone(tx);
+
+  return ids.map((id) => out.get(id)).filter(Boolean) as Chapter[];
+}
+
+export const idbGetChaptersByIds = getChaptersByIds;
+
+export async function listChapterTombstones(bookId: string): Promise<ChapterTombstone[]> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_CHAPTER_TOMBSTONES], "readonly");
+  const store = tx.objectStore(STORE_CHAPTER_TOMBSTONES);
+  const idx = store.index("byBookId");
+  const rows = (await reqToPromise(idx.getAll(bookId))) as ChapterTombstoneRow[];
+  await txDone(tx);
+  return (rows ?? []).map((r) => ({
+    bookId: r.bookId,
+    chapterId: r.chapterId,
+    deletedAt: Number(r.deletedAt ?? Date.now()),
+  }));
+}
+
+export async function upsertChapterTombstone(
+  bookId: string,
+  chapterId: string,
+  deletedAt: number = Date.now()
+): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_CHAPTER_TOMBSTONES], "readwrite");
+  const store = tx.objectStore(STORE_CHAPTER_TOMBSTONES);
+  store.put({ bookId, chapterId, deletedAt } as ChapterTombstoneRow);
+  await txDone(tx);
+}
+
+export async function deleteChapterTombstone(bookId: string, chapterId: string): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_CHAPTER_TOMBSTONES], "readwrite");
+  tx.objectStore(STORE_CHAPTER_TOMBSTONES).delete([bookId, chapterId]);
+  await txDone(tx);
 }
 
 export async function bulkUpsertChapters(
@@ -570,6 +696,76 @@ export async function bulkUpsertChapters(
   await txDone(tx);
 }
 
+export async function listBookAttachments(bookId: string): Promise<BookAttachment[]> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_BOOK_ATTACHMENTS], "readonly");
+  const store = tx.objectStore(STORE_BOOK_ATTACHMENTS);
+  const idx = store.index("byBookId");
+  const rows = (await reqToPromise(idx.getAll(bookId))) as BookAttachmentRow[];
+  await txDone(tx);
+  return (rows || []).map((r) => ({
+    id: r.id,
+    bookId: r.bookId,
+    driveFileId: r.driveFileId ?? undefined,
+    filename: r.filename,
+    mimeType: r.mimeType ?? undefined,
+    sizeBytes: r.sizeBytes ?? undefined,
+    localPath: r.localPath ?? undefined,
+    sha256: r.sha256 ?? undefined,
+    createdAt: r.createdAt ?? Date.now(),
+    updatedAt: r.updatedAt ?? Date.now(),
+  }));
+}
+
+export async function upsertBookAttachment(attachment: BookAttachment): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_BOOK_ATTACHMENTS], "readwrite");
+  const store = tx.objectStore(STORE_BOOK_ATTACHMENTS);
+  const row: BookAttachmentRow = {
+    id: attachment.id,
+    bookId: attachment.bookId,
+    driveFileId: attachment.driveFileId,
+    filename: attachment.filename,
+    mimeType: attachment.mimeType,
+    sizeBytes: attachment.sizeBytes,
+    localPath: attachment.localPath,
+    sha256: attachment.sha256,
+    createdAt: attachment.createdAt ?? Date.now(),
+    updatedAt: attachment.updatedAt ?? Date.now(),
+  };
+  store.put(row);
+  await txDone(tx);
+}
+
+export async function bulkUpsertBookAttachments(bookId: string, items: BookAttachment[]): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_BOOK_ATTACHMENTS], "readwrite");
+  const store = tx.objectStore(STORE_BOOK_ATTACHMENTS);
+  for (const item of items) {
+    const row: BookAttachmentRow = {
+      id: item.id,
+      bookId,
+      driveFileId: item.driveFileId,
+      filename: item.filename,
+      mimeType: item.mimeType,
+      sizeBytes: item.sizeBytes,
+      localPath: item.localPath,
+      sha256: item.sha256,
+      createdAt: item.createdAt ?? Date.now(),
+      updatedAt: item.updatedAt ?? Date.now(),
+    };
+    store.put(row);
+  }
+  await txDone(tx);
+}
+
+export async function deleteBookAttachment(id: string): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_BOOK_ATTACHMENTS], "readwrite");
+  tx.objectStore(STORE_BOOK_ATTACHMENTS).delete(id);
+  await txDone(tx);
+}
+
 /**
  * Export aliases to prevent naming drift.
  * These match the earlier Phase One naming.
@@ -583,3 +779,10 @@ export const idbSaveChapterText = saveChapterText;
 export const idbLoadChapterText = loadChapterText;
 export const idbListChaptersPage = listChaptersPage;
 export const idbBulkUpsertChapters = bulkUpsertChapters;
+export const idbListChapterTombstones = listChapterTombstones;
+export const idbUpsertChapterTombstone = upsertChapterTombstone;
+export const idbDeleteChapterTombstone = deleteChapterTombstone;
+export const idbListBookAttachments = listBookAttachments;
+export const idbUpsertBookAttachment = upsertBookAttachment;
+export const idbBulkUpsertBookAttachments = bulkUpsertBookAttachments;
+export const idbDeleteBookAttachment = deleteBookAttachment;

@@ -115,7 +115,13 @@ export async function enqueueGenerateAudio(
 }
 
 export async function enqueueFixIntegrity(
-  payload: { bookId: string; driveFolderId?: string; options?: { genAudio?: boolean; cleanupStrays?: boolean; convertLegacy?: boolean } },
+  payload: {
+    bookId: string;
+    driveFolderId?: string;
+    options?: { genAudio?: boolean; cleanupStrays?: boolean; convertLegacy?: boolean };
+    voice?: { id: string; name?: string; provider?: string };
+    settings?: Record<string, any>;
+  },
   uiMode: UiMode
 ): Promise<{ jobId: string }> {
   const interfaceMode = getInterfaceMode(uiMode);

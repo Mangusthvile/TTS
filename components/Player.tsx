@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Play, Pause, SkipBack, SkipForward, FastForward, Rewind, Clock, Type, AlignLeft, Sparkles, Repeat, Loader2, ChevronUp, ChevronDown, X, Settings as SettingsIcon, AlertCircle, PlayCircle } from 'lucide-react';
-import { Theme, HighlightMode } from '../types';
+import { Play, Pause, SkipBack, SkipForward, FastForward, Rewind, Clock, Repeat, Loader2, ChevronUp, ChevronDown, X, Settings as SettingsIcon, AlertCircle, PlayCircle } from 'lucide-react';
+import { Theme, ReaderSettings } from '../types';
 
 interface PlayerProps {
   isPlaying: boolean;
@@ -17,6 +17,8 @@ interface PlayerProps {
   onVoiceChange: (voice: string) => void;
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
+  readerSettings: ReaderSettings;
+  onUpdateReaderSettings: (settings: Partial<ReaderSettings>) => void;
   progressChars: number; 
   totalLengthChars: number; 
   wordCount: number;
@@ -27,17 +29,17 @@ interface PlayerProps {
   onSetStopAfterChapter: (v: boolean) => void;
   useBookSettings: boolean;
   onSetUseBookSettings: (v: boolean) => void;
-  highlightMode: HighlightMode;
-  onSetHighlightMode: (v: HighlightMode) => void;
   playbackCurrentTime?: number;
   playbackDuration?: number;
   isFetching?: boolean;
-  onSeekToTime?: (seconds: number) => void;
+  onSeekToTime?: (targetMs: number) => void;
   autoplayBlocked?: boolean;
   onScrubStart?: () => void;
   onScrubMove?: (time: number) => void;
-  onScrubEnd?: (time: number) => void;
+  onScrubEnd?: (targetMs: number) => void;
+  onScrubEndOffset?: (offset: number) => void;
   isMobile: boolean;
+  debugMode?: boolean;
 }
 
 const formatTime = (seconds: number) => {
@@ -47,34 +49,47 @@ const formatTime = (seconds: number) => {
   return `${m}:${s.toString().padStart(2, '0')}`;
 };
 
+const highlightPresetColors = ['#4f46e5', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#8b5cf6'];
+
 const Player: React.FC<PlayerProps> = ({
   isPlaying, onPlay, onPause, speed, onSpeedChange, selectedVoice, onVoiceChange,
-  theme, progressChars, totalLengthChars, wordCount, onSeekToOffset,
+  theme, readerSettings, onUpdateReaderSettings, progressChars, totalLengthChars, wordCount, onSeekToOffset,
   sleepTimer, onSetSleepTimer, stopAfterChapter, onSetStopAfterChapter,
-  useBookSettings, onSetUseBookSettings, highlightMode, onSetHighlightMode,
+  useBookSettings, onSetUseBookSettings,
   onNext, onPrev, onSeek, playbackCurrentTime, playbackDuration, isFetching,
-  onSeekToTime, autoplayBlocked, onScrubStart, onScrubMove, onScrubEnd, isMobile
+  onSeekToTime, autoplayBlocked, onScrubStart, onScrubMove, onScrubEnd, onScrubEndOffset, isMobile, debugMode
 }) => {
   const [showSleepMenu, setShowSleepMenu] = useState(false);
   const [isExpandedMobile, setIsExpandedMobile] = useState(false);
   
   // Local state for scrubbing visualization
   const [isDragging, setIsDragging] = useState(false);
-  const [dragTime, setDragTime] = useState(0);
+  const [dragValue, setDragValue] = useState(0);
+  const progressTrackRef = useRef<HTMLDivElement | null>(null);
+
+  const canTimeScrub =
+    typeof playbackDuration === "number" &&
+    playbackDuration > 0 &&
+    (!!onScrubEnd || !!onSeekToTime);
+  const canOffsetScrub = totalLengthChars > 0 && (!!onScrubEndOffset || !!onSeekToOffset);
+  const scrubMode = canTimeScrub ? "time" : canOffsetScrub ? "offset" : "none";
 
   // When not dragging, sync local dragTime with actual prop
   useEffect(() => {
-    if (!isDragging && playbackCurrentTime !== undefined) {
-      setDragTime(playbackCurrentTime);
+    if (isDragging) return;
+    if (scrubMode === "time" && playbackCurrentTime !== undefined) {
+      setDragValue(playbackCurrentTime);
+    } else if (scrubMode === "offset") {
+      setDragValue(progressChars ?? 0);
     }
-  }, [playbackCurrentTime, isDragging]);
+  }, [isDragging, playbackCurrentTime, progressChars, scrubMode]);
 
   const displayTime = useMemo(() => {
     // Show drag time while dragging, else show prop
-    const t = isDragging ? dragTime : (playbackCurrentTime || 0);
+    const t = isDragging && scrubMode === "time" ? dragValue : (playbackCurrentTime || 0);
     if (t > 0) return formatTime(t / speed);
     return "0:00";
-  }, [playbackCurrentTime, dragTime, isDragging, speed]);
+  }, [playbackCurrentTime, dragValue, isDragging, scrubMode, speed]);
 
   const displayTotal = useMemo(() => {
     if (playbackDuration !== undefined && playbackDuration > 0) {
@@ -87,42 +102,94 @@ const Player: React.FC<PlayerProps> = ({
     onSpeedChange(newSpeed);
   };
 
+  const clamp = (value: number, min: number, max: number) => {
+    if (value < min) return min;
+    if (value > max) return max;
+    return value;
+  };
+
   const progressPercent = useMemo(() => {
+    if (scrubMode === "time") {
+      const t = isDragging ? clamp(dragValue, 0, playbackDuration || 0) : (playbackCurrentTime || 0);
+      return playbackDuration && playbackDuration > 0 ? (t / playbackDuration) * 100 : 0;
+    }
+    if (scrubMode === "offset") {
+      const o = isDragging
+        ? clamp(dragValue, 0, totalLengthChars)
+        : clamp(progressChars, 0, totalLengthChars);
+      return totalLengthChars > 0 ? (o / totalLengthChars) * 100 : 0;
+    }
     if (playbackDuration && playbackDuration > 0) {
-      const t = isDragging ? ZV(dragTime) : (playbackCurrentTime || 0);
+      const t = isDragging ? clamp(dragValue, 0, playbackDuration) : (playbackCurrentTime || 0);
       return (t / playbackDuration) * 100;
     }
     return totalLengthChars > 0 ? (progressChars / totalLengthChars) * 100 : 0;
-    
-    function ZV(v: number) { return v < 0 ? 0 : v; }
-  }, [playbackDuration, playbackCurrentTime, progressChars, totalLengthChars, isDragging, dragTime]);
+  }, [
+    scrubMode,
+    playbackDuration,
+    playbackCurrentTime,
+    progressChars,
+    totalLengthChars,
+    isDragging,
+    dragValue,
+  ]);
 
-  const calcTimeFromEvent = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!playbackDuration) return 0;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    return ratio * playbackDuration;
+  const calcValueFromEvent = (e: React.PointerEvent<HTMLDivElement>, logTag?: string) => {
+    const track = progressTrackRef.current ?? e.currentTarget;
+    const rect = track.getBoundingClientRect();
+    const width = rect.width;
+    if (width < 20) {
+      if (debugMode) {
+        console.debug("[Player][scrub] invalid track width", { width, logTag });
+      }
+      if (scrubMode === "time") return playbackCurrentTime ?? 0;
+      if (scrubMode === "offset") return progressChars ?? 0;
+      return 0;
+    }
+    const ratio = clamp((e.clientX - rect.left) / width, 0, 1);
+    if (debugMode && logTag) {
+      const targetSec = scrubMode === "time" ? ratio * (playbackDuration || 0) : undefined;
+      const targetOffset = scrubMode === "offset" ? Math.round(ratio * totalLengthChars) : undefined;
+      console.debug("[Player][scrub]", {
+        event: logTag,
+        mode: scrubMode,
+        clientX: e.clientX,
+        rectLeft: rect.left,
+        rectWidth: rect.width,
+        ratio,
+        durationSec: playbackDuration,
+        targetSec,
+        targetOffset,
+      });
+    }
+    if (scrubMode === "time") {
+      return ratio * (playbackDuration || 0);
+    }
+    if (scrubMode === "offset") {
+      return Math.round(ratio * totalLengthChars);
+    }
+    return 0;
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!playbackDuration) return;
+    if (scrubMode === "none") return;
     
     // Capture pointer to track movement even outside element
     e.currentTarget.setPointerCapture(e.pointerId);
     
     setIsDragging(true);
-    const t = calcTimeFromEvent(e);
-    setDragTime(t);
+    const value = calcValueFromEvent(e, "start");
+    setDragValue(value);
     
     if (onScrubStart) onScrubStart();
-    if (onScrubMove) onScrubMove(t);
+    if (scrubMode === "time" && onScrubMove) onScrubMove(value);
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (isDragging) {
-      const t = calcTimeFromEvent(e);
-      setDragTime(t);
-      if (onScrubMove) onScrubMove(t);
+      const value = calcValueFromEvent(e);
+      setDragValue(value);
+      if (scrubMode === "time" && onScrubMove) onScrubMove(value);
     }
   };
 
@@ -130,11 +197,17 @@ const Player: React.FC<PlayerProps> = ({
     if (isDragging) {
       setIsDragging(false);
       e.currentTarget.releasePointerCapture(e.pointerId);
-      const t = calcTimeFromEvent(e);
+      const value = calcValueFromEvent(e, "end");
       
       // Commit scrub
-      if (onScrubEnd) onScrubEnd(t);
-      else if (onSeekToTime) onSeekToTime(t);
+      if (scrubMode === "time") {
+        const targetMs = Math.round(value * 1000);
+        if (onScrubEnd) onScrubEnd(targetMs);
+        else if (onSeekToTime) onSeekToTime(targetMs);
+      } else if (scrubMode === "offset") {
+        if (onScrubEndOffset) onScrubEndOffset(value);
+        else if (onSeekToOffset) onSeekToOffset(value);
+      }
     }
   };
 
@@ -143,13 +216,15 @@ const Player: React.FC<PlayerProps> = ({
         setIsDragging(false);
         e.currentTarget.releasePointerCapture(e.pointerId);
         // Revert or commit? Commit is safer to avoid stuck state
-        if (onScrubEnd) onScrubEnd(dragTime);
+        if (scrubMode === "time" && onScrubEnd) onScrubEnd(Math.round(dragValue * 1000));
     }
   };
 
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
   const accentBg = isDark ? 'bg-indigo-500' : isSepia ? 'bg-[#9c6644]' : 'bg-indigo-600';
+  const highlightColor = readerSettings.highlightColor || '#4f46e5';
+  const followHighlight = readerSettings.followHighlight;
 
   return (
     <div className={`border-t transition-all duration-300 relative z-20 ${isDark ? 'bg-slate-900 border-slate-800 text-slate-100' : isSepia ? 'bg-[#efe6d5] border-[#d8ccb6] text-[#3c2f25]' : 'bg-white border-black/10 text-black'}`}>
@@ -176,6 +251,7 @@ const Player: React.FC<PlayerProps> = ({
         <div className="flex items-center gap-4 px-4 lg:px-8 pt-4 select-none">
           <span className="text-[11px] font-black font-mono opacity-60 min-w-[40px] text-left">{displayTime}</span>
           <div 
+            ref={progressTrackRef}
             className={`flex-1 h-4 sm:h-3 rounded-full cursor-pointer relative flex items-center touch-none ${isDark ? 'bg-slate-800' : 'bg-black/5'} ${isMobile ? 'touch-none' : ''}`}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
@@ -274,25 +350,36 @@ const Player: React.FC<PlayerProps> = ({
                 </div>
               </div>
 
-              <div className="flex flex-col gap-1.5 items-center lg:items-start">
-                <span className="text-[10px] font-black uppercase tracking-widest opacity-60 ml-0.5">Highlight Mode</span>
-                <div className={`flex items-center p-1 rounded-xl gap-0.5 ${isDark ? 'bg-slate-950/40' : 'bg-black/5'}`}>
-                  {[
-                    { m: HighlightMode.WORD, i: Type, label: 'Individual Text' },
-                    { m: HighlightMode.SENTENCE, i: AlignLeft, label: 'Full Paragraph' },
-                    { m: HighlightMode.KARAOKE, i: Sparkles, label: 'Paragraph + Cue' }
-                  ].map(({ m, i: Icon, label }) => (
-                    <button
-                      key={m}
-                      onClick={() => onSetHighlightMode(m)}
-                      title={label}
-                      aria-label={label}
-                      className={`p-2.5 rounded-lg transition-all ${highlightMode === m ? accentBg + ' text-white shadow-lg' : 'opacity-40 hover:opacity-100'}`}
-                    >
-                      <Icon className="w-4 h-4" />
-                    </button>
-                  ))}
-                </div>
+            </div>
+
+            <div className="flex flex-col gap-2 w-full lg:w-auto">
+              <span className="text-[10px] font-black uppercase tracking-widest opacity-60">Highlight</span>
+              <label className={`flex items-center justify-between gap-4 px-3 py-2 rounded-xl border ${isDark ? 'bg-white/5 border-white/10' : 'bg-black/5 border-black/10'}`}>
+                <span className="text-[10px] font-black uppercase tracking-widest">Auto-Scroll</span>
+                <input
+                  type="checkbox"
+                  checked={followHighlight}
+                  onChange={(e) => onUpdateReaderSettings({ followHighlight: e.target.checked })}
+                  className="w-4 h-4 accent-indigo-600"
+                />
+              </label>
+              <div className="flex flex-wrap gap-2 items-center">
+                {highlightPresetColors.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => onUpdateReaderSettings({ highlightColor: c })}
+                    className={`w-6 h-6 rounded-full border-2 transition-transform hover:scale-110 ${highlightColor === c ? 'border-white ring-2 ring-black/20' : 'border-transparent'}`}
+                    style={{ backgroundColor: c }}
+                    aria-label={`Set highlight color ${c}`}
+                  />
+                ))}
+                <input
+                  type="color"
+                  value={highlightColor}
+                  onChange={(e) => onUpdateReaderSettings({ highlightColor: e.target.value })}
+                  className="w-6 h-6 rounded-full overflow-hidden border-0 p-0 cursor-pointer"
+                  aria-label="Pick highlight color"
+                />
               </div>
             </div>
 

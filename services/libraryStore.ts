@@ -3,7 +3,18 @@
 
 import { Capacitor } from "@capacitor/core";
 import { HighlightMode } from "../types";
-import type { Book, Chapter, StorageBackend, AudioStatus, BookSettings, Rule, CueMap, ParagraphMap } from "../types";
+import type {
+  Book,
+  Chapter,
+  StorageBackend,
+  AudioStatus,
+  BookSettings,
+  Rule,
+  CueMap,
+  ParagraphMap,
+  BookAttachment,
+  ChapterTombstone,
+} from "../types";
 import { initStorage, getStorage } from "./storageSingleton";
 import { getSqliteDb } from "./sqliteConnectionManager";
 import { appConfig } from "../src/config/appConfig";
@@ -16,6 +27,7 @@ import {
   saveChapterText as idbSaveChapterText,
   loadChapterText as idbLoadChapterText,
   listChaptersPage as idbListChaptersPage,
+  getChaptersByIds as idbGetChaptersByIds,
   bulkUpsertChapters as idbBulkUpsertChapters,
   saveChapterCueMap as idbSaveChapterCueMap,
   getChapterCueMap as idbGetChapterCueMap,
@@ -23,6 +35,13 @@ import {
   saveChapterParagraphMap as idbSaveChapterParagraphMap,
   getChapterParagraphMap as idbGetChapterParagraphMap,
   deleteChapterParagraphMap as idbDeleteChapterParagraphMap,
+  listBookAttachments as idbListBookAttachments,
+  upsertBookAttachment as idbUpsertBookAttachment,
+  bulkUpsertBookAttachments as idbBulkUpsertBookAttachments,
+  deleteBookAttachment as idbDeleteBookAttachment,
+  listChapterTombstones as idbListChapterTombstones,
+  upsertChapterTombstone as idbUpsertChapterTombstone,
+  deleteChapterTombstone as idbDeleteChapterTombstone,
 } from "./libraryIdb";
 import type { SQLiteDBConnection } from "@capacitor-community/sqlite";
 
@@ -93,6 +112,7 @@ function safeParseJson<T>(jsonStr: any, fallback: T): T {
 }
 
 function ensureBookDefaults(b: Partial<Book> & { id: string; title: string; backend: StorageBackend }): Book {
+  const rawSettings = (b.settings ?? {}) as BookSettings;
   return {
     id: b.id,
     title: b.title,
@@ -102,7 +122,17 @@ function ensureBookDefaults(b: Partial<Book> & { id: string; title: string; back
     driveFolderId: b.driveFolderId,
     driveFolderName: b.driveFolderName,
     currentChapterId: b.currentChapterId,
-    settings: b.settings ?? { useBookSettings: false, highlightMode: HighlightMode.WORD },
+    settings: {
+      useBookSettings: rawSettings.useBookSettings ?? false,
+      highlightMode: rawSettings.highlightMode ?? HighlightMode.SENTENCE,
+      playbackSpeed: rawSettings.playbackSpeed,
+      selectedVoiceName: rawSettings.selectedVoiceName,
+      defaultVoiceId: rawSettings.defaultVoiceId,
+      autoGenerateAudioOnAdd:
+        typeof rawSettings.autoGenerateAudioOnAdd === "boolean"
+          ? rawSettings.autoGenerateAudioOnAdd
+          : true,
+    },
     rules: b.rules ?? [],
     chapters: b.chapters ?? [],
     chapterCount: (b as any).chapterCount ?? 0,
@@ -133,8 +163,11 @@ export async function listBooks(): Promise<Book[]> {
             IFNULL(cnt.chapterCount, 0) AS chapterCount
      FROM books b
      LEFT JOIN (
-       SELECT bookId, COUNT(*) AS chapterCount
-       FROM chapters
+       SELECT c.bookId, COUNT(*) AS chapterCount
+       FROM chapters c
+       WHERE NOT EXISTS (
+         SELECT 1 FROM chapter_tombstones t WHERE t.bookId = c.bookId AND t.chapterId = c.id
+       )
        GROUP BY bookId
      ) cnt ON cnt.bookId = b.id
      ORDER BY b.updatedAt DESC`,
@@ -153,7 +186,11 @@ export async function listBooks(): Promise<Book[]> {
       driveFolderId: r.driveFolderId ?? undefined,
       driveFolderName: r.driveFolderName ?? undefined,
       currentChapterId: r.currentChapterId ?? undefined,
-      settings: safeParseJson(r.settingsJson, { useBookSettings: false, highlightMode: HighlightMode.WORD }),
+      settings: safeParseJson(r.settingsJson, {
+        useBookSettings: false,
+        highlightMode: HighlightMode.SENTENCE,
+        autoGenerateAudioOnAdd: true,
+      }),
       rules: safeParseJson(r.rulesJson, []),
       chapters: [],
       chapterCount: Number(r.chapterCount ?? 0),
@@ -171,7 +208,13 @@ export async function upsertBook(book: Book): Promise<void> {
   }
 
   const db = await mustSqliteDb();
-  const settingsJson = JSON.stringify(book.settings ?? { useBookSettings: false, highlightMode: HighlightMode.WORD });
+  const settingsJson = JSON.stringify(
+    book.settings ?? {
+      useBookSettings: false,
+      highlightMode: HighlightMode.SENTENCE,
+      autoGenerateAudioOnAdd: true,
+    }
+  );
   const rulesJson = JSON.stringify(book.rules ?? []);
   const updatedAt = book.updatedAt ?? Date.now();
 
@@ -235,16 +278,19 @@ export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promi
   await db.run(
     `INSERT INTO chapters (
        id, bookId, idx, title, filename, sourceUrl,
+       volumeName, volumeLocalChapter,
        cloudTextFileId, cloudAudioFileId, audioDriveId,
        audioStatus, audioSignature, durationSec, textLength, wordCount, isFavorite, updatedAt
      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        bookId=excluded.bookId,
        idx=excluded.idx,
        title=excluded.title,
        filename=excluded.filename,
        sourceUrl=excluded.sourceUrl,
+       volumeName=excluded.volumeName,
+       volumeLocalChapter=excluded.volumeLocalChapter,
        cloudTextFileId=excluded.cloudTextFileId,
        cloudAudioFileId=excluded.cloudAudioFileId,
        audioDriveId=excluded.audioDriveId,
@@ -262,6 +308,8 @@ export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promi
       chapter.title,
       chapter.filename,
       chapter.sourceUrl ?? null,
+      (chapter as any).volumeName ?? null,
+      (chapter as any).volumeLocalChapter ?? null,
       chapter.cloudTextFileId ?? null,
       chapter.cloudAudioFileId ?? null,
       (chapter as any).audioDriveId ?? null,
@@ -281,6 +329,7 @@ export async function deleteChapter(bookId: string, chapterId: string): Promise<
 
   if (!isNative()) {
     await idbDeleteChapter(bookId, chapterId);
+    await idbUpsertChapterTombstone(bookId, chapterId, Date.now());
     chapterTextCache.delete(chapterTextKey(bookId, chapterId));
     await idbDeleteChapterCueMap(chapterId);
     await idbDeleteChapterParagraphMap(chapterId);
@@ -292,7 +341,69 @@ export async function deleteChapter(bookId: string, chapterId: string): Promise<
   await db.run(`DELETE FROM chapters WHERE id = ? AND bookId = ?`, [chapterId, bookId]);
   await db.run(`DELETE FROM chapter_cue_maps WHERE chapterId = ?`, [chapterId]);
   await db.run(`DELETE FROM chapter_paragraph_maps WHERE chapterId = ?`, [chapterId]);
+  await db.run(
+    `INSERT INTO chapter_tombstones (bookId, chapterId, deletedAt)
+     VALUES (?, ?, ?)
+     ON CONFLICT(bookId, chapterId) DO UPDATE SET deletedAt=excluded.deletedAt`,
+    [bookId, chapterId, Date.now()]
+  );
   chapterTextCache.delete(chapterTextKey(bookId, chapterId));
+}
+
+export async function listChapterTombstones(bookId: string): Promise<ChapterTombstone[]> {
+  await ensureInit();
+
+  if (!isNative()) {
+    return idbListChapterTombstones(bookId);
+  }
+
+  const db = await mustSqliteDb();
+  const res = await db.query(
+    `SELECT bookId, chapterId, deletedAt FROM chapter_tombstones WHERE bookId = ?`,
+    [bookId]
+  );
+  const rows = (res.values ?? []) as any[];
+  return rows.map((r) => ({
+    bookId: String(r.bookId),
+    chapterId: String(r.chapterId),
+    deletedAt: Number(r.deletedAt ?? Date.now()),
+  }));
+}
+
+export async function upsertChapterTombstone(
+  bookId: string,
+  chapterId: string,
+  deletedAt: number = Date.now()
+): Promise<void> {
+  await ensureInit();
+
+  if (!isNative()) {
+    await idbUpsertChapterTombstone(bookId, chapterId, deletedAt);
+    return;
+  }
+
+  const db = await mustSqliteDb();
+  await db.run(
+    `INSERT INTO chapter_tombstones (bookId, chapterId, deletedAt)
+     VALUES (?, ?, ?)
+     ON CONFLICT(bookId, chapterId) DO UPDATE SET deletedAt=excluded.deletedAt`,
+    [bookId, chapterId, deletedAt]
+  );
+}
+
+export async function deleteChapterTombstone(bookId: string, chapterId: string): Promise<void> {
+  await ensureInit();
+
+  if (!isNative()) {
+    await idbDeleteChapterTombstone(bookId, chapterId);
+    return;
+  }
+
+  const db = await mustSqliteDb();
+  await db.run(`DELETE FROM chapter_tombstones WHERE bookId = ? AND chapterId = ?`, [
+    bookId,
+    chapterId,
+  ]);
 }
 
 export async function saveChapterText(bookId: string, chapterId: string, content: string): Promise<void> {
@@ -489,9 +600,9 @@ export async function listChaptersPage(
   }
 
   const db = await mustSqliteDb();
-  const params: any[] = [bookId];
+  const params: any[] = [bookId, bookId];
 
-  let where = `WHERE bookId = ?`;
+  let where = `WHERE bookId = ? AND id NOT IN (SELECT chapterId FROM chapter_tombstones WHERE bookId = ?)`;
   if (afterIndex != null) {
     where += ` AND idx > ?`;
     params.push(afterIndex);
@@ -499,8 +610,8 @@ export async function listChaptersPage(
 
   params.push(limit);
 
-  const res = await db.query(
-    `SELECT id, idx as "index", title, filename, sourceUrl,
+   const res = await db.query(
+    `SELECT id, idx as "index", title, filename, sourceUrl, volumeName, volumeLocalChapter,
             cloudTextFileId, cloudAudioFileId, audioDriveId,
             audioStatus, audioSignature, durationSec, textLength, wordCount, isFavorite, updatedAt
      FROM chapters
@@ -527,7 +638,11 @@ export async function listChaptersPage(
       title,
     filename: String(r.filename),
     sourceUrl: r.sourceUrl ?? undefined,
-    content: undefined,
+    volumeName: r.volumeName ?? undefined,
+    volumeLocalChapter:
+      r.volumeLocalChapter != null && Number.isFinite(Number(r.volumeLocalChapter))
+        ? Number(r.volumeLocalChapter)
+        : undefined,
 
     wordCount: Number(r.wordCount ?? 0),
     progress: 0,
@@ -550,7 +665,13 @@ export async function listChaptersPage(
   const nextAfterIndex = chapters.length ? chapters[chapters.length - 1].index : null;
   let totalCount: number | undefined;
   try {
-    const countRes = await db.query(`SELECT COUNT(*) as total FROM chapters WHERE bookId = ?`, [bookId]);
+    const countRes = await db.query(
+      `SELECT COUNT(*) as total
+       FROM chapters
+       WHERE bookId = ?
+         AND id NOT IN (SELECT chapterId FROM chapter_tombstones WHERE bookId = ?)`,
+      [bookId, bookId]
+    );
     const countRow = (countRes.values?.[0] ?? null) as any;
     totalCount = countRow ? Number(countRow.total ?? 0) : 0;
   } catch {
@@ -562,6 +683,79 @@ export async function listChaptersPage(
     nextAfterIndex: chapters.length < limit ? null : nextAfterIndex,
     totalCount,
   };
+}
+
+export async function getChaptersByIds(bookId: string, chapterIds: string[]): Promise<Chapter[]> {
+  await ensureInit();
+
+  const ids = Array.from(new Set((chapterIds ?? []).map((id) => String(id)))).filter(Boolean);
+  if (ids.length === 0) return [];
+
+  if (!isNative()) {
+    return idbGetChaptersByIds(bookId, ids);
+  }
+
+  const db = await mustSqliteDb();
+  const rows: any[] = [];
+
+  // SQLite has parameter limits; stay well under 999.
+  const chunkSize = 450;
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+    const placeholders = chunk.map(() => "?").join(",");
+    const res = await db.query(
+      `SELECT id, idx as "index", title, filename, sourceUrl, volumeName, volumeLocalChapter,
+              cloudTextFileId, cloudAudioFileId, audioDriveId,
+              audioStatus, audioSignature, durationSec, textLength, wordCount, isFavorite, updatedAt
+       FROM chapters
+       WHERE bookId = ?
+         AND id IN (${placeholders})
+         AND id NOT IN (SELECT chapterId FROM chapter_tombstones WHERE bookId = ?)
+       ORDER BY idx ASC`,
+      [bookId, ...chunk, bookId]
+    );
+    rows.push(...((res.values ?? []) as any[]));
+  }
+
+  const byId = new Map<string, Chapter>();
+  for (const r of rows) {
+    const rawIndex = Number(r.index ?? r.idx);
+    const index = Number.isFinite(rawIndex) && rawIndex > 0 ? rawIndex : 1;
+    const rawTitle = typeof r.title === "string" ? r.title.trim() : "";
+    const title =
+      rawTitle && !rawTitle.toLowerCase().startsWith("imported") ? rawTitle : `Chapter ${index}`;
+
+    byId.set(String(r.id), {
+      id: String(r.id),
+      index,
+      title,
+      filename: String(r.filename),
+      sourceUrl: r.sourceUrl ?? undefined,
+      volumeName: r.volumeName ?? undefined,
+      volumeLocalChapter:
+        r.volumeLocalChapter != null && Number.isFinite(Number(r.volumeLocalChapter))
+          ? Number(r.volumeLocalChapter)
+          : undefined,
+
+      wordCount: Number(r.wordCount ?? 0),
+      progress: 0,
+      progressChars: 0,
+      progressSec: r.progressSec != null ? Number(r.progressSec) : undefined,
+      durationSec: r.durationSec != null ? Number(r.durationSec) : undefined,
+      textLength: r.textLength != null ? Number(r.textLength) : undefined,
+
+      isFavorite: r.isFavorite === 1 || r.isFavorite === true,
+      updatedAt: Number(r.updatedAt ?? Date.now()),
+
+      cloudTextFileId: r.cloudTextFileId ?? undefined,
+      cloudAudioFileId: r.cloudAudioFileId ?? undefined,
+      audioDriveId: r.audioDriveId ?? undefined,
+      audioStatus: r.audioStatus ?? undefined,
+      audioSignature: r.audioSignature ?? undefined,
+    } as any);
+  }
+
+  return ids.map((id) => byId.get(id)).filter(Boolean) as Chapter[];
 }
 
 export async function bulkUpsertChapters(
@@ -582,4 +776,127 @@ export async function bulkUpsertChapters(
       setCachedChapterText(chapterTextKey(bookId, it.chapter.id), it.content);
     }
   }
+}
+
+export async function listBookAttachments(bookId: string): Promise<BookAttachment[]> {
+  await ensureInit();
+
+  if (!isNative()) {
+    return idbListBookAttachments(bookId);
+  }
+
+  const db = await mustSqliteDb();
+  const res = await db.query(
+    `SELECT id, bookId, driveFileId, filename, mimeType, sizeBytes, localPath, sha256, createdAt, updatedAt
+     FROM book_attachments
+     WHERE bookId = ?
+     ORDER BY updatedAt DESC`,
+    [bookId]
+  );
+  const rows = (res.values ?? []) as any[];
+  return rows.map((r) => ({
+    id: String(r.id),
+    bookId: String(r.bookId),
+    driveFileId: r.driveFileId ?? undefined,
+    filename: String(r.filename),
+    mimeType: r.mimeType ?? undefined,
+    sizeBytes: r.sizeBytes != null ? Number(r.sizeBytes) : undefined,
+    localPath: r.localPath ?? undefined,
+    sha256: r.sha256 ?? undefined,
+    createdAt: Number(r.createdAt ?? Date.now()),
+    updatedAt: Number(r.updatedAt ?? Date.now()),
+  }));
+}
+
+export async function upsertBookAttachment(attachment: BookAttachment): Promise<void> {
+  await ensureInit();
+
+  if (!isNative()) {
+    await idbUpsertBookAttachment(attachment);
+    return;
+  }
+
+  const db = await mustSqliteDb();
+  await db.run(
+    `INSERT INTO book_attachments (id, bookId, driveFileId, filename, mimeType, sizeBytes, localPath, sha256, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       bookId=excluded.bookId,
+       driveFileId=excluded.driveFileId,
+       filename=excluded.filename,
+       mimeType=excluded.mimeType,
+       sizeBytes=excluded.sizeBytes,
+       localPath=excluded.localPath,
+       sha256=excluded.sha256,
+       updatedAt=excluded.updatedAt`,
+    [
+      attachment.id,
+      attachment.bookId,
+      attachment.driveFileId ?? null,
+      attachment.filename,
+      attachment.mimeType ?? null,
+      attachment.sizeBytes ?? null,
+      attachment.localPath ?? null,
+      attachment.sha256 ?? null,
+      attachment.createdAt ?? Date.now(),
+      attachment.updatedAt ?? Date.now(),
+    ]
+  );
+}
+
+export async function bulkUpsertBookAttachments(bookId: string, items: BookAttachment[]): Promise<void> {
+  await ensureInit();
+
+  if (!isNative()) {
+    await idbBulkUpsertBookAttachments(bookId, items);
+    return;
+  }
+
+  const db = await mustSqliteDb();
+  await db.run("BEGIN");
+  try {
+    for (const attachment of items) {
+      await db.run(
+        `INSERT INTO book_attachments (id, bookId, driveFileId, filename, mimeType, sizeBytes, localPath, sha256, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           bookId=excluded.bookId,
+           driveFileId=excluded.driveFileId,
+           filename=excluded.filename,
+           mimeType=excluded.mimeType,
+           sizeBytes=excluded.sizeBytes,
+           localPath=excluded.localPath,
+           sha256=excluded.sha256,
+           updatedAt=excluded.updatedAt`,
+        [
+          attachment.id,
+          bookId,
+          attachment.driveFileId ?? null,
+          attachment.filename,
+          attachment.mimeType ?? null,
+          attachment.sizeBytes ?? null,
+          attachment.localPath ?? null,
+          attachment.sha256 ?? null,
+          attachment.createdAt ?? Date.now(),
+          attachment.updatedAt ?? Date.now(),
+        ]
+      );
+    }
+    await db.run("COMMIT");
+  } catch (e) {
+    await db.run("ROLLBACK");
+    throw e;
+  }
+}
+
+export async function deleteBookAttachment(id: string): Promise<void> {
+  await ensureInit();
+
+  if (!isNative()) {
+    await idbDeleteBookAttachment(id);
+    return;
+  }
+
+  const db = await mustSqliteDb();
+  await db.run(`DELETE FROM book_attachments WHERE id = ?`, [id]);
 }

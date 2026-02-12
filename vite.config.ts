@@ -5,6 +5,7 @@ import { VitePWA } from "vite-plugin-pwa";
 export default defineConfig(({ mode }) => {
   // Use this mode specifically for Capacitor builds: `vite build --mode capacitor`
   const isCapacitor = mode === "capacitor";
+  const isAndroidOnly = isCapacitor || process.env.VITE_ANDROID_ONLY === "1";
 
   return {
     // ✅ Capacitor must use relative paths to avoid /TTS/assets/... 404 in WebView
@@ -51,7 +52,8 @@ export default defineConfig(({ mode }) => {
 
     define: {
       "process.env": {},
-      __APP_VERSION__: JSON.stringify("2.9.34"),
+      __APP_VERSION__: JSON.stringify("2.10.25"),
+      __ANDROID_ONLY__: JSON.stringify(isAndroidOnly),
     },
 
     server: {

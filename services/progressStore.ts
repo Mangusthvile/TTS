@@ -1,6 +1,7 @@
 // services/progressStore.ts
 import { getStorage, initStorage } from "./storageSingleton";
 import type { ChapterProgress } from "./storageDriver";
+import { clamp, computePercent } from "../utils/progress";
 
 type CommitInput = {
   chapterId: string;
@@ -13,23 +14,6 @@ type CommitInput = {
 
 const lastCommittedAtByChapter = new Map<string, number>();
 const lastCommittedTimeByChapter = new Map<string, number>();
-
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
-}
-
-function computePercent(timeSec: number, durationSec?: number): number | undefined {
-  if (!durationSec || durationSec <= 0) return undefined;
-  return clamp(timeSec / durationSec, 0, 1);
-}
-
-function computeIsComplete(percent?: number, timeSec?: number, durationSec?: number): boolean | undefined {
-  if (typeof percent === "number") return percent >= 0.995;
-  if (durationSec && durationSec > 0 && typeof timeSec === "number") {
-    return timeSec >= durationSec - 0.25; // within 250ms of end
-  }
-  return undefined;
-}
 
 export async function commitProgressLocal(input: CommitInput): Promise<void> {
   // Ensure storage is ready (safe to call repeatedly)
@@ -48,16 +32,22 @@ export async function commitProgressLocal(input: CommitInput): Promise<void> {
     return;
   }
 
-  const percent =
-    typeof input.percent === "number" ? clamp(input.percent, 0, 1) : computePercent(input.timeSec, input.durationSec);
+  const durationSec =
+    typeof input.durationSec === "number" && Number.isFinite(input.durationSec) ? input.durationSec : undefined;
+  let timeSec = Math.max(0, input.timeSec);
+  if (durationSec && timeSec > durationSec + 0.5) {
+    timeSec = durationSec;
+  }
 
-  const isComplete =
-    typeof input.isComplete === "boolean" ? input.isComplete : computeIsComplete(percent, input.timeSec, input.durationSec);
+  const percent =
+    typeof input.percent === "number" ? clamp(input.percent, 0, 1) : computePercent(timeSec, durationSec);
+
+  const isComplete = typeof input.isComplete === "boolean" ? input.isComplete : undefined;
 
   const progress: ChapterProgress = {
     chapterId: input.chapterId,
-    timeSec: Math.max(0, input.timeSec),
-    durationSec: typeof input.durationSec === "number" ? input.durationSec : undefined,
+    timeSec,
+    durationSec,
     percent,
     isComplete,
     updatedAt: now,

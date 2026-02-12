@@ -23,6 +23,7 @@ import android.app.NotificationManager;
 import com.getcapacitor.JSObject;
 import com.cmwil.talevox.notifications.JobNotificationChannels;
 import com.cmwil.talevox.notifications.JobNotificationHelper;
+import com.cmwil.talevox.BuildConfig;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -50,8 +51,42 @@ public class GenerateAudioWorker extends Worker {
     private static final String DB_FILE = DB_NAME + "SQLite.db";
     private static final String DEFAULT_ENDPOINT = "https://talevox-tts-762195576430.us-south1.run.app";
     private static final int MAX_TTS_BYTES = 4500;
+    private static final int MAX_OPENAI_BYTES = 3000;
+    private static final String OPENAI_ENDPOINT = "https://api.openai.com/v1/audio/speech";
+    private static final String OPENAI_MODEL = "gpt-4o-mini-tts-2025-12-15";
     private static final int MAX_UPLOAD_RETRIES = 5;
     private static final String CHANNEL_ID = JobNotificationChannels.CHANNEL_JOBS_ID;
+
+    private static class VoiceConfig {
+        String provider;
+        String id;
+        VoiceConfig(String provider, String id) {
+            this.provider = provider;
+            this.id = id;
+        }
+    }
+
+    private VoiceConfig resolveVoice(JSONObject voice) {
+        String provider = null;
+        String voiceId = "en-US-Standard-C";
+        if (voice != null) {
+            String v = voice.optString("id", null);
+            if (v != null && !v.isEmpty()) voiceId = v;
+            String p = voice.optString("provider", null);
+            if (p != null && !p.isEmpty()) provider = p;
+        }
+        if (provider == null || provider.isEmpty()) {
+            if (voiceId.toLowerCase().startsWith("openai:")) {
+                provider = "openai";
+                voiceId = voiceId.substring("openai:".length());
+            } else {
+                provider = "google";
+            }
+        } else if ("openai".equalsIgnoreCase(provider) && voiceId.toLowerCase().startsWith("openai:")) {
+            voiceId = voiceId.substring("openai:".length());
+        }
+        return new VoiceConfig(provider.toLowerCase(), voiceId);
+    }
 
     public GenerateAudioWorker(@NonNull Context context, @NonNull WorkerParameters params) {
         super(context, params);
@@ -89,12 +124,7 @@ public class GenerateAudioWorker extends Worker {
             }
             String effectiveBookId = (resolvedBookId != null && !resolvedBookId.isEmpty()) ? resolvedBookId : bookId;
 
-            String voiceId = "en-US-Standard-C";
-            JSONObject voice = payload.optJSONObject("voice");
-            if (voice != null) {
-                String v = voice.optString("id", null);
-                if (v != null && !v.isEmpty()) voiceId = v;
-            }
+            VoiceConfig voiceConfig = resolveVoice(payload.optJSONObject("voice"));
 
             double speakingRate = 1.0;
             JSONObject settings = payload.optJSONObject("settings");
@@ -159,8 +189,13 @@ public class GenerateAudioWorker extends Worker {
                     return failJob(jobId, "Missing chapter text. Ensure chapter text file exists or re-import text. chapterId=" + chapterId + " path=" + expected, progressJson);
                 }
 
-                String processed = applyRules(content, rules);
-                byte[] mp3 = synthesizeMp3WithProgress(processed, voiceId, speakingRate, jobId, progressJson);
+                boolean isMarkdown = isMarkdownChapter(effectiveBookId, chapterId, payloadPath);
+                String speechInput = isMarkdown ? MarkdownSpeechSanitizer.sanitize(content) : content;
+                if (isDebuggable() && isMarkdown) {
+                    Log.d("GenerateAudioWorker", "markdown_sanitize chapterId=" + chapterId + " origLen=" + content.length() + " speechLen=" + speechInput.length());
+                }
+                String processed = applyRules(speechInput, rules);
+                byte[] mp3 = synthesizeMp3WithProgress(processed, voiceConfig, speakingRate, jobId, progressJson);
                 String filePath = saveMp3ToFile(chapterId, mp3);
 
                 String uploadError = null;
@@ -475,6 +510,58 @@ public class GenerateAudioWorker extends Worker {
         return null;
     }
 
+    private boolean isMarkdownChapter(String bookId, String chapterId, String payloadPath) {
+        if (payloadPath != null && payloadPath.toLowerCase().endsWith(".md")) return true;
+        String filename = loadChapterFilename(bookId, chapterId);
+        return filename != null && filename.toLowerCase().endsWith(".md");
+    }
+
+    private boolean isDebuggable() {
+        return (getApplicationContext().getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+    }
+
+    private String loadChapterFilename(String bookId, String chapterId) {
+        SQLiteDatabase db = getDb();
+
+        if (bookId != null && !bookId.isEmpty()) {
+            Cursor cursor = db.query(
+                "chapters",
+                new String[]{"filename"},
+                "id = ? AND bookId = ?",
+                new String[]{chapterId, bookId},
+                null,
+                null,
+                null
+            );
+            try {
+                if (cursor.moveToFirst()) {
+                    return cursor.getString(cursor.getColumnIndexOrThrow("filename"));
+                }
+            } finally {
+                cursor.close();
+            }
+        }
+
+        Cursor cursor = db.query(
+            "chapters",
+            new String[]{"filename"},
+            "id = ?",
+            new String[]{chapterId},
+            null,
+            null,
+            null
+        );
+        try {
+            if (cursor.moveToFirst()) {
+                return cursor.getString(cursor.getColumnIndexOrThrow("filename"));
+            }
+        } finally {
+            cursor.close();
+        }
+
+        return null;
+    }
+
     private String readTextFromPath(String path) {
         if (path == null || path.isEmpty()) return null;
         try {
@@ -626,8 +713,9 @@ public class GenerateAudioWorker extends Worker {
         return processed;
     }
 
-    private byte[] synthesizeMp3WithProgress(String text, String voiceId, double speakingRate, String jobId, JSONObject progressJson) throws Exception {
-        List<String> chunks = chunkTextByUtf8Bytes(text, MAX_TTS_BYTES);
+    private byte[] synthesizeMp3WithProgress(String text, VoiceConfig voiceConfig, double speakingRate, String jobId, JSONObject progressJson) throws Exception {
+        int maxBytes = "openai".equals(voiceConfig.provider) ? MAX_OPENAI_BYTES : MAX_TTS_BYTES;
+        List<String> chunks = chunkTextByUtf8Bytes(text, maxBytes);
         int chunkTotal = Math.max(1, chunks.size());
         progressJson.put("currentChunkTotal", chunkTotal);
         progressJson.put("currentChunkIndex", 0);
@@ -639,7 +727,9 @@ public class GenerateAudioWorker extends Worker {
         boolean first = true;
         for (int i = 0; i < chunks.size(); i++) {
             String chunk = chunks.get(i);
-            byte[] bytes = postTts(chunk, voiceId, speakingRate);
+            byte[] bytes = "openai".equals(voiceConfig.provider)
+                ? postOpenAiTts(chunk, voiceConfig.id, speakingRate)
+                : postTts(chunk, voiceConfig.id, speakingRate);
             if (!first) bytes = stripId3(bytes);
             out.write(bytes);
             first = false;
@@ -696,6 +786,45 @@ public class GenerateAudioWorker extends Worker {
             throw new Exception("TTS response missing base64 audio");
         }
         return Base64.decode(b64, Base64.DEFAULT);
+    }
+
+    private byte[] postOpenAiTts(String text, String voiceId, double speakingRate) throws Exception {
+        String apiKey = BuildConfig.OPENAI_API_KEY;
+        if (apiKey == null || apiKey.isEmpty()) {
+            throw new Exception("Missing OpenAI API key");
+        }
+        URL url = new URL(OPENAI_ENDPOINT);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setConnectTimeout(20000);
+        conn.setReadTimeout(60000);
+        conn.setDoOutput(true);
+        conn.setRequestProperty("Content-Type", "application/json");
+        conn.setRequestProperty("Authorization", "Bearer " + apiKey);
+
+        double speed = Math.max(0.5, Math.min(2.0, speakingRate));
+
+        JSONObject payload = new JSONObject();
+        payload.put("model", OPENAI_MODEL);
+        payload.put("voice", voiceId);
+        payload.put("input", text);
+        payload.put("response_format", "mp3");
+        payload.put("speed", speed);
+
+        byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
+        OutputStream os = conn.getOutputStream();
+        os.write(body);
+        os.flush();
+        os.close();
+
+        int code = conn.getResponseCode();
+        InputStream stream = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
+        byte[] bytes = readAllBytes(stream);
+        if (code < 200 || code >= 300) {
+            String errText = new String(bytes, StandardCharsets.UTF_8);
+            throw new Exception("OpenAI TTS Failed: " + code + " " + errText);
+        }
+        return bytes;
     }
 
     private byte[] stripId3(byte[] bytes) {

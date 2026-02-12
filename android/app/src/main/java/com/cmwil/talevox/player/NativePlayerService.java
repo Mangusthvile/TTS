@@ -13,6 +13,7 @@ import androidx.media3.session.MediaSessionService;
 public class NativePlayerService extends MediaSessionService {
     private MediaSession mediaSession;
     private ExoPlayer player;
+    private static final long SEEK_INCREMENT_MS = 10_000;
 
     @Override
     public void onCreate() {
@@ -25,8 +26,11 @@ public class NativePlayerService extends MediaSessionService {
                     .build(),
                 true
             )
+            .setSeekBackIncrementMs(SEEK_INCREMENT_MS)
+            .setSeekForwardIncrementMs(SEEK_INCREMENT_MS)
             .build();
         player.setHandleAudioBecomingNoisy(true);
+        player.setWakeMode(C.WAKE_MODE_LOCAL);
 
         mediaSession = new MediaSession.Builder(this, player).build();
         setMediaNotificationProvider(new DefaultMediaNotificationProvider(this));
@@ -53,9 +57,7 @@ public class NativePlayerService extends MediaSessionService {
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        if (player != null) {
-            player.pause();
-        }
+        // Keep playback running when the app task is removed from recents.
         super.onTaskRemoved(rootIntent);
     }
 }
