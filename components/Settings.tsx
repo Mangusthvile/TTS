@@ -171,7 +171,11 @@ const Settings: React.FC<SettingsProps> = ({
     scrollTopRef.current = 0;
     if (!el) return;
     restoringRef.current = true;
-    el.scrollTo({ top: 0, behavior: "auto" });
+    if (typeof el.scrollTo === "function") {
+      el.scrollTo({ top: 0, behavior: "auto" });
+    } else {
+      el.scrollTop = 0;
+    }
     restoringRef.current = false;
   }, [activeTab]);
 

@@ -43,7 +43,7 @@ describe("chapterOrderingService", () => {
     expect(ordered.map((item) => item.id)).toEqual(["b", "a", "c"]);
   });
 
-  it("derives contiguous display indices", () => {
+  it("preserves existing indices when deriving display order", () => {
     const display = deriveDisplayIndices([
       chapter({ id: "z", sortOrder: 10, index: 10 }),
       chapter({ id: "a", sortOrder: 1, index: 999 }),
@@ -51,8 +51,20 @@ describe("chapterOrderingService", () => {
     ]);
 
     expect(display.map((item) => item.id)).toEqual(["a", "m", "z"]);
-    expect(display.map((item) => item.index)).toEqual([1, 2, 3]);
+    expect(display.map((item) => item.index)).toEqual([999, 4, 10]);
     expect(display.map((item) => item.sortOrder)).toEqual([1, 4, 10]);
+  });
+
+  it("fills missing indices from sortOrder or fallback", () => {
+    const display = deriveDisplayIndices([
+      chapter({ id: "a", sortOrder: 2, index: 0 }),
+      chapter({ id: "b", sortOrder: 5, index: 0 }),
+      chapter({ id: "c", sortOrder: 0, index: 0 }),
+    ]);
+
+    expect(display.map((item) => item.id)).toEqual(["a", "b", "c"]);
+    expect(display.map((item) => item.index)).toEqual([2, 5, 3]);
+    expect(display.map((item) => item.sortOrder)).toEqual([2, 5, 3]);
   });
 
   it("computes next sort order from current max", () => {

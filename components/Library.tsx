@@ -38,37 +38,20 @@ const Library: React.FC<Props> = ({
   const textPrimary = "text-theme";
   const textMuted = "text-muted";
 
-  const headerIconColor = isDark ? "text-indigo-400" : "text-indigo-600";
+  const headerIconColor = isDark ? "text-indigo-300" : "text-indigo-600";
 
   const chromeButton =
-    isDark
-      ? "bg-white/5 hover:bg-white/10 border border-white/10 text-white"
-      : isSepia
-        ? "bg-[#3c2f25]/10 hover:bg-[#3c2f25]/15 border border-[#3c2f25]/15 text-[#3c2f25]"
-        : "bg-indigo-600 hover:bg-indigo-700 border border-indigo-700 text-white";
+    "btn-primary";
 
-  const panel =
-    isDark
-      ? "bg-white/5 border border-white/10"
-      : isSepia
-        ? "bg-[#efe6d5] border border-[#3c2f25]/15"
-        : "bg-white border border-slate-200";
+  const panel = "card-cinematic";
 
   const optionCard =
-    isDark
-      ? "bg-slate-900 border border-white/10 hover:bg-slate-800"
-      : isSepia
-        ? "bg-[#efe6d5] border border-[#3c2f25]/15 hover:bg-[#e6dcc8]"
-        : "bg-white border border-slate-200 hover:bg-slate-50";
+    "card-cinematic";
 
   const cardShell =
-    isDark
-      ? "bg-white/5 border border-white/10"
-      : isSepia
-        ? "bg-[#efe6d5] border border-[#3c2f25]/15"
-        : "bg-white border border-slate-200";
+    "card-cinematic";
 
-  const ringActive = "ring-2 ring-indigo-500 shadow-indigo-500/20";
+  const ringActive = "ring-2 ring-[color:var(--tvx-accent)] shadow-[0_0_24px_rgba(99,102,241,0.35)]";
 
   const sortedBooks = useMemo(() => {
     return [...books].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
@@ -100,15 +83,15 @@ const Library: React.FC<Props> = ({
   return (
     <div className="h-full w-full flex flex-col min-w-0 bg-transparent">
       {/* Header matches desktop look */}
-      <div className="px-6 sm:px-10 pt-8 sm:pt-10 flex items-center justify-between flex-shrink-0">
+      <div className="px-6 sm:px-10 pt-10 sm:pt-12 flex items-center justify-between flex-shrink-0">
         <div className="flex items-center gap-3">
           <BookOpen className={`w-7 h-7 sm:w-8 sm:h-8 ${headerIconColor}`} />
-          <h2 className={`text-2xl sm:text-3xl font-black tracking-tight ${textPrimary}`}>Library</h2>
+          <h2 className={`text-3xl sm:text-4xl font-black tracking-tight heading-font ${textPrimary}`}>Library</h2>
         </div>
 
         <button
           onClick={() => setIsAdding(true)}
-          className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-xl transition-all active:scale-95 ${chromeButton}`}
+          className={`w-12 h-12 rounded-full flex items-center justify-center shadow-xl transition-all active:scale-95 ${chromeButton}`}
           aria-label="Add Book"
         >
           <Plus className="w-6 h-6" />
@@ -128,13 +111,7 @@ const Library: React.FC<Props> = ({
                 value={newTitle}
                 onChange={(e) => setNewTitle(e.target.value)}
                 placeholder="e.g. The Mech Touch"
-                className={`w-full px-4 py-4 rounded-xl outline-none text-sm font-bold ${
-                  isDark
-                    ? "bg-slate-900 border border-white/10 text-white"
-                    : isSepia
-                      ? "bg-[#efe6d5] border border-[#3c2f25]/15 text-[#3c2f25]"
-                      : "bg-white border border-slate-200 text-black"
-                }`}
+                className="w-full px-4 py-4 rounded-xl outline-none text-sm font-bold input-theme border border-card"
               />
             </div>
 
@@ -143,11 +120,11 @@ const Library: React.FC<Props> = ({
                 <button
                   disabled={isProcessingAdd}
                   onClick={() => handleAdd(StorageBackend.MEMORY)}
-                  className={`p-4 rounded-2xl flex flex-col items-center gap-2 text-[10px] font-black uppercase transition-all ${optionCard}`}
-                >
-                  <Database className="w-5 h-5 text-emerald-500" />
-                  Memory
-                </button>
+                className={`p-4 rounded-2xl flex flex-col items-center gap-2 text-[10px] font-black uppercase transition-all ${optionCard}`}
+              >
+                <Database className="w-5 h-5 text-emerald-500" />
+                Memory
+              </button>
               )}
 
               <button
@@ -194,7 +171,7 @@ const Library: React.FC<Props> = ({
       )}
 
       {/* Books grid: matches desktop spacing and left alignment */}
-      <div className="flex-1 min-w-0 overflow-y-auto px-6 sm:px-10 pt-8 pb-16">
+      <div className="flex-1 min-w-0 overflow-y-auto px-6 sm:px-10 pt-10 pb-20">
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
           {sortedBooks.map((book) => {
             const chapterCount = book.chapterCount ?? book.chapters.length;
@@ -211,7 +188,7 @@ const Library: React.FC<Props> = ({
                     onSelectBook(book.id);
                   }}
                   className={[
-                    "aspect-[2/3] rounded-3xl overflow-hidden relative shadow-2xl cursor-pointer transition-all",
+                    "aspect-[2/3] rounded-[2.5rem] overflow-hidden relative shadow-2xl cursor-pointer transition-all",
                     cardShell,
                     activeBookId === book.id ? ringActive : "",
                     localDisabled ? "opacity-60 cursor-not-allowed" : "",
@@ -230,12 +207,12 @@ const Library: React.FC<Props> = ({
 
                   {/* Top-right badge like desktop screenshot */}
                   {chapterCount > 0 && (
-                    <div className="absolute top-2 right-2 px-2 py-1 bg-indigo-600 text-white text-[10px] font-black rounded-xl shadow-lg">
+                    <div className="absolute top-3 right-3 px-2.5 py-1 bg-[color:var(--tvx-accent)] text-white text-[10px] font-black rounded-full shadow-lg">
                       {Math.min(chapterCount, 9999)}
                     </div>
                   )}
                   {localDisabled && (
-                    <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/60 text-white text-[10px] font-black rounded-xl shadow-lg">
+                    <div className="absolute bottom-3 left-3 px-2 py-1 bg-black/60 text-white text-[10px] font-black rounded-full shadow-lg">
                       LOCAL DISABLED
                     </div>
                   )}
@@ -248,7 +225,7 @@ const Library: React.FC<Props> = ({
                   }}
                   className={localDisabled ? "cursor-not-allowed" : "cursor-pointer"}
                 >
-                  <div className={`font-black text-xs sm:text-sm line-clamp-1 ${textPrimary}`}>{book.title}</div>
+                  <div className={`font-black text-xs sm:text-sm line-clamp-1 heading-font ${textPrimary}`}>{book.title}</div>
                   <div className={`text-[9px] font-bold uppercase tracking-tighter ${textMuted}`}>{chapterCount} chapters</div>
                 </div>
               </div>

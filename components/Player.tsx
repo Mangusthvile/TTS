@@ -222,12 +222,12 @@ const Player: React.FC<PlayerProps> = ({
 
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
-  const accentBg = isDark ? 'bg-indigo-500' : isSepia ? 'bg-[#9c6644]' : 'bg-indigo-600';
+  const accentBg = 'bg-[linear-gradient(135deg,var(--tvx-accent),var(--tvx-accent-2))]';
   const highlightColor = readerSettings.highlightColor || '#4f46e5';
   const followHighlight = readerSettings.followHighlight;
 
   return (
-    <div className={`border-t transition-all duration-300 relative z-20 ${isDark ? 'bg-slate-900 border-slate-800 text-slate-100' : isSepia ? 'bg-[#efe6d5] border-[#d8ccb6] text-[#3c2f25]' : 'bg-white border-black/10 text-black'}`}>
+    <div className={`border-t transition-all duration-300 relative z-20 bg-surface text-theme border-theme ui-font`}>
       
       {/* Mobile Autoplay Blocker Overlay */}
       {autoplayBlocked && (
@@ -248,11 +248,11 @@ const Player: React.FC<PlayerProps> = ({
       
       <div className="max-w-5xl mx-auto">
         {/* Progress Bar & Time */}
-        <div className="flex items-center gap-4 px-4 lg:px-8 pt-4 select-none">
+        <div className="flex items-center gap-4 px-4 lg:px-8 pt-5 select-none">
           <span className="text-[11px] font-black font-mono opacity-60 min-w-[40px] text-left">{displayTime}</span>
           <div 
             ref={progressTrackRef}
-            className={`flex-1 h-4 sm:h-3 rounded-full cursor-pointer relative flex items-center touch-none ${isDark ? 'bg-slate-800' : 'bg-black/5'} ${isMobile ? 'touch-none' : ''}`}
+            className={`flex-1 h-4 sm:h-3 rounded-full cursor-pointer relative flex items-center touch-none bg-surface-2 ${isMobile ? 'touch-none' : ''}`}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
@@ -264,7 +264,7 @@ const Player: React.FC<PlayerProps> = ({
             {/* Visual thumb - larger on mobile */}
             {isDragging && (
                 <div 
-                    className={`absolute rounded-full shadow-lg border border-black/10 transform -translate-x-1/2 pointer-events-none bg-white ${isMobile ? 'h-6 w-6' : 'h-5 w-5'}`} 
+                    className={`absolute rounded-full shadow-lg border border-theme transform -translate-x-1/2 pointer-events-none bg-surface ${isMobile ? 'h-6 w-6' : 'h-5 w-5'}`} 
                     style={{ left: `${progressPercent}%` }} 
                 />
             )}
@@ -277,10 +277,10 @@ const Player: React.FC<PlayerProps> = ({
           <div className="flex items-center justify-between w-full">
             <button 
               onClick={() => setIsExpandedMobile(!isExpandedMobile)}
-              className="lg:hidden p-3 hover:bg-black/5 rounded-xl transition-all"
+              className="lg:hidden p-3 btn-glass transition-all"
               aria-label="Advanced Controls"
             >
-              <SettingsIcon className={`w-6 h-6 ${isExpandedMobile ? 'text-indigo-600' : ''}`} />
+              <SettingsIcon className={`w-6 h-6 ${isExpandedMobile ? 'text-[color:var(--tvx-accent)]' : ''}`} />
             </button>
 
             {/* Centered Controls */}
@@ -297,9 +297,10 @@ const Player: React.FC<PlayerProps> = ({
               </button>
               
               <button 
-                disabled={isFetching}
+                aria-disabled={isFetching}
+                title={isFetching ? "Loading… tap to retry" : undefined}
                 onClick={isPlaying ? onPause : onPlay} 
-                className={`w-16 h-16 lg:w-20 lg:h-20 text-white rounded-full flex items-center justify-center shadow-2xl ${accentBg} transition-all active:scale-90 hover:scale-105 disabled:opacity-50`}
+                className={`w-16 h-16 lg:w-20 lg:h-20 text-white rounded-full flex items-center justify-center shadow-2xl ${accentBg} transition-all active:scale-90 hover:scale-105 ${isFetching ? 'opacity-70' : ''}`}
               >
                 {isFetching ? (
                   <Loader2 className="w-8 h-8 animate-spin" />
@@ -325,12 +326,12 @@ const Player: React.FC<PlayerProps> = ({
 
             {/* Desktop Sleep Timer (Standalone) */}
             <div className="hidden lg:flex items-center gap-4 relative">
-              <button onClick={() => setShowSleepMenu(!showSleepMenu)} className={`flex items-center gap-2 px-5 py-3 rounded-xl border text-xs font-black shadow-sm transition-all ${sleepTimer || stopAfterChapter ? 'bg-indigo-600 text-white' : 'opacity-60'}`}><Clock className="w-4 h-4" /> {sleepTimer ? formatTime(sleepTimer / speed) : 'Sleep'}</button>
+              <button onClick={() => setShowSleepMenu(!showSleepMenu)} className={`flex items-center gap-2 px-5 py-3 rounded-full border border-theme text-xs font-black shadow-sm transition-all ${sleepTimer || stopAfterChapter ? 'bg-[color:var(--tvx-accent)] text-white' : 'opacity-60'}`}><Clock className="w-4 h-4" /> {sleepTimer ? formatTime(sleepTimer / speed) : 'Sleep'}</button>
               {showSleepMenu && (
-                <div className={`absolute bottom-full mb-3 right-0 w-56 rounded-2xl border shadow-2xl p-2 z-[60] ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-black/10'}`}>
-                  {[15, 30, 60].map(m => <button key={m} onClick={() => { onSetSleepTimer(m * 60); setShowSleepMenu(false); }} className={`w-full text-left px-3 py-3 text-[13px] font-bold rounded-xl ${isDark ? 'hover:bg-slate-700' : 'hover:bg-black/5'}`}>{m} Minutes</button>)}
-                  <div className={`h-px my-1 ${isDark ? 'bg-slate-700' : 'bg-black/5'}`} />
-                  <button onClick={() => { onSetStopAfterChapter(!stopAfterChapter); setShowSleepMenu(false); }} className={`w-full text-left px-3 py-3 text-[13px] font-black rounded-xl flex items-center justify-between ${stopAfterChapter ? 'text-indigo-500' : ''}`}>Stop after Chapter <Repeat className="w-3.5 h-3.5" /></button>
+                <div className="absolute bottom-full mb-3 right-0 w-56 rounded-2xl border border-theme shadow-2xl p-2 z-[60] bg-surface">
+                  {[15, 30, 60].map(m => <button key={m} onClick={() => { onSetSleepTimer(m * 60); setShowSleepMenu(false); }} className="w-full text-left px-3 py-3 text-[13px] font-bold rounded-xl hover:bg-black/5">{m} Minutes</button>)}
+                  <div className="h-px my-1 bg-black/5" />
+                  <button onClick={() => { onSetStopAfterChapter(!stopAfterChapter); setShowSleepMenu(false); }} className={`w-full text-left px-3 py-3 text-[13px] font-black rounded-xl flex items-center justify-between ${stopAfterChapter ? 'text-[color:var(--tvx-accent)]' : ''}`}>Stop after Chapter <Repeat className="w-3.5 h-3.5" /></button>
                 </div>
               )}
             </div>
@@ -340,7 +341,7 @@ const Player: React.FC<PlayerProps> = ({
           </div>
 
           {/* Advanced Controls: Always expanded on Desktop, Toggled on Mobile */}
-          <div className={`${isExpandedMobile ? 'flex' : 'hidden'} lg:flex flex-col lg:flex-row items-center justify-center gap-6 lg:gap-12 py-4 lg:py-2 border-t lg:border-t-0 mt-2 lg:mt-0 animate-in slide-in-from-bottom-2`}>
+          <div className={`${isExpandedMobile ? 'flex' : 'hidden'} lg:flex flex-col lg:flex-row items-center justify-center gap-6 lg:gap-12 py-4 lg:py-2 border-t border-theme lg:border-t-0 mt-2 lg:mt-0 animate-in slide-in-from-bottom-2`}>
             <div className="flex flex-col lg:flex-row items-center gap-6 lg:gap-12">
               <div className="flex flex-col gap-1.5 items-center lg:items-start">
                 <span className="text-[10px] font-black uppercase tracking-widest opacity-60 ml-0.5">Playback Speed</span>
@@ -352,9 +353,9 @@ const Player: React.FC<PlayerProps> = ({
 
             </div>
 
-            <div className="flex flex-col gap-2 w-full lg:w-auto">
-              <span className="text-[10px] font-black uppercase tracking-widest opacity-60">Highlight</span>
-              <label className={`flex items-center justify-between gap-4 px-3 py-2 rounded-xl border ${isDark ? 'bg-white/5 border-white/10' : 'bg-black/5 border-black/10'}`}>
+              <div className="flex flex-col gap-2 w-full lg:w-auto">
+                <span className="text-[10px] font-black uppercase tracking-widest opacity-60">Highlight</span>
+              <label className="flex items-center justify-between gap-4 px-3 py-2 rounded-xl border border-theme bg-surface-2">
                 <span className="text-[10px] font-black uppercase tracking-widest">Auto-Scroll</span>
                 <input
                   type="checkbox"

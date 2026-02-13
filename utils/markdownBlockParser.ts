@@ -1,5 +1,5 @@
 import { Rule } from "../types";
-import { applyRules } from "../services/speechService";
+import { applyRules } from "../services/speechRules";
 import { reflowLineBreaks } from "../services/textFormat";
 import { stripChapterTemplateHeader } from "./stripChapterTemplateHeader";
 

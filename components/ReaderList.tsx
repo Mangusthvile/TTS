@@ -75,6 +75,7 @@ const ReaderList: React.FC<Props> = ({
 
   const userScrollingRef = useRef(false);
   const lockoutTimerRef = useRef<number | null>(null);
+  const lastUserScrollRef = useRef(0);
 
   const isAutoScrollingRef = useRef(false);
   const autoScrollTimerRef = useRef<number | null>(null);
@@ -96,6 +97,11 @@ const ReaderList: React.FC<Props> = ({
     [onUserScrollingChange]
   );
 
+  const isUserScrolling = useCallback(() => {
+    if (!userScrollingRef.current) return false;
+    return Date.now() - lastUserScrollRef.current < 800;
+  }, []);
+
   useEffect(() => {
     lastFollowedBlockRef.current = null;
     setUserScrolling(false);
@@ -111,6 +117,7 @@ const ReaderList: React.FC<Props> = ({
 
     const onScroll = () => {
       if (isAutoScrollingRef.current) return;
+      lastUserScrollRef.current = Date.now();
       if (!userScrollingRef.current) setUserScrolling(true);
       if (lockoutTimerRef.current) window.clearTimeout(lockoutTimerRef.current);
       lockoutTimerRef.current = window.setTimeout(clearLockout, 350);
@@ -139,7 +146,7 @@ const ReaderList: React.FC<Props> = ({
       if (!container) return false;
       const item = blockRefs.current[index];
       if (!item) return false;
-      if (!force && userScrollingRef.current) return false;
+      if (!force && isUserScrolling()) return false;
 
       const anchor =
         item.querySelector<HTMLElement>("[data-highlight-anchor='true']") ?? item;
@@ -165,14 +172,14 @@ const ReaderList: React.FC<Props> = ({
 
       return true;
     },
-    [containerRef]
+    [containerRef, isUserScrolling]
   );
 
   useEffect(() => {
     if (!autoFollow) return;
     if (isScrubbing) return;
     if (activeBlockIndex == null) return;
-    if (userScrollingRef.current) return;
+    if (isUserScrolling()) return;
     if (lastFollowedBlockRef.current === activeBlockIndex) return;
 
     const prev = lastFollowedBlockRef.current;
@@ -184,13 +191,13 @@ const ReaderList: React.FC<Props> = ({
       if (didScroll) lastFollowedBlockRef.current = activeBlockIndex;
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [activeBlockIndex, autoFollow, isScrubbing, scrollToBlock]);
+  }, [activeBlockIndex, autoFollow, isScrubbing, scrollToBlock, isUserScrolling]);
 
   useEffect(() => {
     if (!autoFollow) return;
     if (isScrubbing) return;
     if (activeBlockIndex == null) return;
-    if (userScrollingRef.current) return;
+    if (isUserScrolling()) return;
 
     if (followRafRef.current) {
       window.cancelAnimationFrame(followRafRef.current);
@@ -233,6 +240,7 @@ const ReaderList: React.FC<Props> = ({
     containerRef,
     isScrubbing,
     scrollToBlock,
+    isUserScrolling,
   ]);
 
   useEffect(() => {
@@ -247,7 +255,7 @@ const ReaderList: React.FC<Props> = ({
       if (didScroll) lastFollowedBlockRef.current = activeBlockIndex;
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [followNudge, autoFollow, isScrubbing, activeBlockIndex, scrollToBlock, setUserScrolling]);
+  }, [followNudge, autoFollow, isScrubbing, activeBlockIndex, scrollToBlock, setUserScrolling, isUserScrolling]);
 
   const dimOthers = activeBlockIndex != null;
 

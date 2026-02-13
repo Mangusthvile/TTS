@@ -1,5 +1,17 @@
 # TaleVox TTS Changelog
 
+## 2.10.36
+- Mobile-first Book screen spacing with simplified hero and top bar.
+- Selection UX parity across list and grid with long-press gestures.
+- Book Settings modal now scrolls properly on mobile.
+- Audio-ready cloud icon now turns green whenever local audio exists.
+- Removed table header row and kept only list/grid layouts.
+
+## 2.10.35
+- Preserve original chapter indices during normalization and snapshot merges.
+- Stop drag-reorder from overwriting chapter indices.
+- Auto-repair overwritten indices using stored sortOrder (restores large chapter numbers).
+
 ## 2.10.34
 - Restored scroll-driven cover compression/expansion and removed the cover/title bubble card.
 - Increased the expanded cover size on the book header.

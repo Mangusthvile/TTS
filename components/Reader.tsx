@@ -155,7 +155,7 @@ const Reader: React.FC<ReaderProps> = ({
     readerSettings.paragraphSpacing === 2 ? 'h-6' :
     'h-10';
 
-  const fadeColor = theme === Theme.DARK ? 'from-slate-900' : theme === Theme.SEPIA ? 'from-[#efe6d5]' : 'from-white';
+  const fadeColor = theme === Theme.DARK ? 'from-[#0a0f1e]' : theme === Theme.SEPIA ? 'from-[#f4ead8]' : 'from-[#f6f7fb]';
   useEffect(() => {
     if (!debugMode && !readerSettings.highlightDebugOverlay) return;
     if (!highlightEnabled || !highlightReady) {
@@ -228,7 +228,7 @@ const Reader: React.FC<ReaderProps> = ({
   const showHighlightOverlay = !!readerSettings.highlightDebugOverlay && !!highlightDebugData;
 
   return (
-    <div className="relative flex-1 flex flex-col min-h-0 overflow-hidden touch-manipulation text-theme">
+    <div className="relative flex-1 flex flex-col min-h-0 overflow-hidden touch-manipulation text-theme ui-font">
       <div className={`absolute top-0 left-0 right-0 h-16 lg:h-24 z-10 pointer-events-none bg-gradient-to-b ${fadeColor} to-transparent`} />
       {showHighlightOverlay && highlightDebugData && (
         <div
@@ -265,23 +265,23 @@ const Reader: React.FC<ReaderProps> = ({
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        className={`flex-1 overflow-y-auto px-4 lg:px-12 py-12 lg:py-24 scrollbar-hide ${readerSettings.followHighlight ? '' : 'scroll-smooth'}`}
+        className={`flex-1 overflow-y-auto overscroll-contain touch-pan-y px-4 lg:px-12 py-12 lg:py-24 scrollbar-hide ${readerSettings.followHighlight ? '' : 'scroll-smooth'}`}
         onDoubleClick={triggerJump}
       >
         <div
           style={containerStyles}
           className="max-w-[70ch] mx-auto pb-64 select-text cursor-text font-medium leading-relaxed"
         >
-          <div className={`mb-10 border-b pb-6 flex justify-between items-end select-none ${theme === Theme.DARK ? 'border-white/10' : 'border-black/10'}`}>
+          <div className={`mb-10 border-b pb-6 flex justify-between items-end select-none ${theme === Theme.DARK ? 'border-white/10' : theme === Theme.SEPIA ? 'border-black/10' : 'border-black/10'}`}>
             <div className="flex-1 min-w-0 pr-4">
               <button
                 onClick={handleBack}
-                className="flex items-center gap-1 text-[10px] font-black uppercase tracking-widest text-indigo-500 mb-4 hover:translate-x-[-2px] transition-transform"
+                className="flex items-center gap-1 text-[10px] font-black uppercase tracking-widest text-[color:var(--tvx-accent)] mb-4 hover:translate-x-[-2px] transition-transform"
               >
                 <ChevronLeft className="w-3 h-3" /> Back
               </button>
-              <div className="text-[11px] font-black uppercase tracking-widest text-indigo-600 mb-1">Chapter {chapter?.index || 0}</div>
-              <h1 className="text-2xl lg:text-4xl font-black tracking-tight leading-tight truncate">{chapter?.title || "Untitled"}</h1>
+              <div className="text-[11px] font-black uppercase tracking-widest text-[color:var(--tvx-accent)] mb-1">Chapter {chapter?.index || 0}</div>
+              <h1 className="text-3xl lg:text-5xl font-black tracking-tight leading-tight truncate heading-font">{chapter?.title || "Untitled"}</h1>
               {showHighlightPending && (
                 <div className="mt-2 text-[10px] font-black uppercase tracking-widest" style={{ color: themeTokens.muted }}>
                   Highlight generating…

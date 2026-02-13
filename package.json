@@ -1,7 +1,7 @@
 {
   "name": "talevox-tts",
   "private": true,
-  "version": "2.10.34",
+  "version": "2.10.36",
   "type": "module",
   "scripts": {
     "dev": "vite",

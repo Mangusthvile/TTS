@@ -1063,6 +1063,8 @@ const App: React.FC = () => {
     }
   }, [loadMoreChapters]);
 
+  const didRepairIndicesRef = useRef(false);
+
   const runStartup = useCallback(async () => {
     const runId = ++startupRunRef.current;
     setLaunchStage("splash");
@@ -4588,7 +4590,7 @@ const App: React.FC = () => {
       setIsLinkModalOpen(true);
   };
 
-  const listAllChapterMeta = async (bookId: string): Promise<Chapter[]> => {
+  const listAllChapterMeta = useCallback(async (bookId: string): Promise<Chapter[]> => {
     const all: Chapter[] = [];
     let after: number | null = -1;
     for (;;) {
@@ -4598,7 +4600,73 @@ const App: React.FC = () => {
       after = page.nextAfterIndex;
     }
     return normalizeChapterOrder(all);
-  };
+  }, []);
+
+  const repairOverwrittenChapterIndices = useCallback(async () => {
+    const books = stateRef.current.books;
+    if (!books.length) return;
+
+    const updatesByBook = new Map<string, Chapter[]>();
+    for (const book of books) {
+      const chapters = await listAllChapterMeta(book.id);
+      if (!chapters.length) continue;
+      const now = Date.now();
+      const repaired: Chapter[] = [];
+      chapters.forEach((chapter, idx) => {
+        const expectedSequential = idx + 1;
+        const indexValue = Number(chapter.index);
+        const sortOrder = Number(
+          Number.isFinite(Number(chapter.sortOrder)) && Number(chapter.sortOrder) > 0
+            ? chapter.sortOrder
+            : getChapterSortOrder(chapter)
+        );
+        if (
+          Number.isFinite(indexValue) &&
+          indexValue === expectedSequential &&
+          Number.isFinite(sortOrder) &&
+          sortOrder > 0 &&
+          sortOrder !== indexValue
+        ) {
+          repaired.push({
+            ...chapter,
+            index: Math.floor(sortOrder),
+            updatedAt: now,
+          });
+        }
+      });
+      if (!repaired.length) continue;
+      updatesByBook.set(book.id, repaired);
+      await libraryBulkUpsertChapters(
+        book.id,
+        repaired.map((chapter) => ({
+          chapter: { ...chapter, content: undefined },
+          content: undefined,
+        }))
+      );
+    }
+
+    if (!updatesByBook.size) return;
+
+    setState((prev) => {
+      const nextBooks = prev.books.map((book) => {
+        const updates = updatesByBook.get(book.id);
+        if (!updates) return book;
+        const byId = new Map(updates.map((chapter) => [chapter.id, chapter]));
+        const merged = book.chapters.map((chapter) =>
+          byId.has(chapter.id) ? { ...chapter, ...byId.get(chapter.id)! } : chapter
+        );
+        return { ...book, chapters: orderChaptersForDisplay(merged) };
+      });
+      return { ...prev, books: nextBooks };
+    });
+    markDirty();
+  }, [listAllChapterMeta, markDirty]);
+
+  useEffect(() => {
+    if (bootstrapStatus !== "done" || didRepairIndicesRef.current) return;
+    didRepairIndicesRef.current = true;
+    void repairOverwrittenChapterIndices();
+  }, [bootstrapStatus, repairOverwrittenChapterIndices]);
 
   const syncBookInventoryToDrive = async (book: Book): Promise<void> => {
     if (book.backend !== StorageBackend.DRIVE) return;
@@ -5602,7 +5670,7 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto relative flex">
+      <div className="flex-1 min-h-0 overflow-hidden relative flex">
         {activeTab === 'reader' && (isLoadingChapter || playbackPhase === 'LOADING_TEXT' || playbackPhase === 'LOADING_AUDIO') && (
             <div className="absolute inset-0 flex items-center justify-center bg-inherit z-[70]">
                 <div className="flex flex-col items-center gap-3">
@@ -5671,7 +5739,7 @@ const App: React.FC = () => {
         )}
 
         <div
-          className="flex-1 min-w-0 h-full overflow-y-hidden"
+          className="flex-1 min-w-0 min-h-0 h-full overflow-y-hidden"
           onTouchStart={handleTabSwipeStart}
           onTouchEnd={handleTabSwipeEnd}
         >

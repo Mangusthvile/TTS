@@ -4,42 +4,48 @@
 
 @layer base {
   :root {
-    --tvx-bg: #ffffff;
-    --tvx-surface: #f8fafc;
-    --tvx-surface-2: #ffffff;
+    --tvx-bg: #f6f7fb;
+    --tvx-surface: #ffffff;
+    --tvx-surface-2: #f0f3fa;
     --tvx-text: #0f172a;
-    --tvx-text-muted: #475569;
-    --tvx-border: rgba(15, 23, 42, 0.1);
+    --tvx-text-muted: #5b6478;
+    --tvx-border: rgba(15, 23, 42, 0.08);
     --tvx-card: #ffffff;
     --tvx-card-border: rgba(15, 23, 42, 0.08);
-    --tvx-input-bg: #f8fafc;
+    --tvx-input-bg: #f0f3fa;
     --tvx-input-text: #0f172a;
+    --tvx-accent: #4f46e5;
+    --tvx-accent-2: #0891b2;
   }
 
   body.dark-theme {
-    --tvx-bg: #0b1220;
+    --tvx-bg: #0a0f1e;
     --tvx-surface: #0f172a;
-    --tvx-surface-2: #111827;
-    --tvx-text: #e2e8f0;
-    --tvx-text-muted: #94a3b8;
+    --tvx-surface-2: #141b33;
+    --tvx-text: #e8edf7;
+    --tvx-text-muted: #9aa7c2;
     --tvx-border: rgba(255, 255, 255, 0.08);
-    --tvx-card: #0f172a;
+    --tvx-card: #121a30;
     --tvx-card-border: rgba(255, 255, 255, 0.08);
-    --tvx-input-bg: #0b1220;
-    --tvx-input-text: #e2e8f0;
+    --tvx-input-bg: #121a30;
+    --tvx-input-text: #e8edf7;
+    --tvx-accent: #6366f1;
+    --tvx-accent-2: #22d3ee;
   }
 
   body.sepia-theme {
-    --tvx-bg: #f4ecd8;
-    --tvx-surface: #efe6d5;
-    --tvx-surface-2: #f4ecd8;
+    --tvx-bg: #f4ead8;
+    --tvx-surface: #efe3cf;
+    --tvx-surface-2: #f7eedc;
     --tvx-text: #3c2f25;
     --tvx-text-muted: rgba(60, 47, 37, 0.7);
-    --tvx-border: rgba(60, 47, 37, 0.15);
-    --tvx-card: #efe6d5;
-    --tvx-card-border: rgba(60, 47, 37, 0.15);
-    --tvx-input-bg: #efe6d5;
+    --tvx-border: rgba(60, 47, 37, 0.16);
+    --tvx-card: #f3e7d3;
+    --tvx-card-border: rgba(60, 47, 37, 0.16);
+    --tvx-input-bg: #efe3cf;
     --tvx-input-text: #3c2f25;
+    --tvx-accent: #5c5bd6;
+    --tvx-accent-2: #2aa9b8;
   }
 
   body {
@@ -58,6 +64,67 @@
   .border-theme { border-color: var(--tvx-border); }
   .border-card { border-color: var(--tvx-card-border); }
   .input-theme { background-color: var(--tvx-input-bg); color: var(--tvx-input-text); }
+  .heading-font { font-family: 'Space Grotesk', sans-serif; }
+  .ui-font { font-family: 'Manrope', sans-serif; }
+  .card-cinematic {
+    background: var(--tvx-card);
+    border: 1px solid var(--tvx-card-border);
+    border-radius: 24px;
+    box-shadow: 0 18px 35px rgba(15, 23, 42, 0.15);
+  }
+  .glass-header {
+    backdrop-filter: blur(16px);
+    background: linear-gradient(180deg, color-mix(in srgb, var(--tvx-surface) 92%, transparent), color-mix(in srgb, var(--tvx-surface-2) 70%, transparent));
+    border-bottom: 1px solid var(--tvx-border);
+  }
+  .chip {
+    background: color-mix(in srgb, var(--tvx-accent) 15%, transparent);
+    color: var(--tvx-accent);
+    border: 1px solid color-mix(in srgb, var(--tvx-accent) 30%, transparent);
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+  }
+  .btn-primary {
+    background: linear-gradient(135deg, var(--tvx-accent), var(--tvx-accent-2));
+    color: white;
+    border-radius: 999px;
+    padding: 10px 18px;
+    font-weight: 800;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    box-shadow: 0 12px 24px rgba(99, 102, 241, 0.35);
+    transition: transform 150ms ease, box-shadow 150ms ease;
+  }
+  .btn-primary:active { transform: scale(0.97); }
+  .btn-secondary {
+    background: color-mix(in srgb, var(--tvx-surface-2) 80%, transparent);
+    color: var(--tvx-text);
+    border: 1px solid var(--tvx-border);
+    border-radius: 999px;
+    padding: 10px 18px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    transition: background 150ms ease, transform 150ms ease;
+  }
+  .btn-secondary:active { transform: scale(0.98); }
+  .btn-glass {
+    background: color-mix(in srgb, var(--tvx-surface) 55%, transparent);
+    border: 1px solid var(--tvx-border);
+    border-radius: 16px;
+  }
+}
+
+body, button, input, select, textarea {
+  font-family: 'Manrope', sans-serif;
+}
+
+h1, h2, h3, .heading-font {
+  font-family: 'Space Grotesk', sans-serif;
 }
 
 /* Minimal animation utilities to replace tailwindcss-animate plugin usage. */

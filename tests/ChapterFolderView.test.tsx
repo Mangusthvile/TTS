@@ -234,9 +234,12 @@ describe("ChapterFolderView chapter UX", () => {
     try {
       await renderView();
       const first = screen.getByText("Volume Chapter").closest("[data-chapter-id='c-1']") as HTMLElement;
-      const second = screen.getByText("Ungrouped Chapter").closest("[data-chapter-id='c-2']") as HTMLElement;
 
       await triggerLongPress(first, { pointerId: 21 });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const second = screen.getByText("Ungrouped Chapter").closest("[data-chapter-id='c-2']") as HTMLElement;
       await triggerLongPress(second, { pointerId: 22 });
 
       expect(screen.getByText("2 selected")).toBeInTheDocument();
