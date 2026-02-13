@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useLayoutEffect, useCallback } from 'react';
 import { ReaderSettings, Theme, SyncDiagnostics, UiMode, JobRecord, BackupOptions, BackupProgress, BackupSchedulerSettings } from '../types';
 import type { DiagnosticsReport } from '../services/diagnosticsService';
 import { RefreshCw, Cloud, CloudOff, Loader2, LogOut, Save, LogIn, Check, Sun, Coffee, Moon, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer, ClipboardCopy, FileWarning, Bug, Smartphone, Type, Palette, Monitor, LayoutTemplate, Library, List, Bell, Highlighter } from 'lucide-react';
@@ -127,6 +127,10 @@ const Settings: React.FC<SettingsProps> = ({
     backup: false,
     system: false,
   });
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const scrollTopRef = useRef(0);
+  const restoringRef = useRef(false);
+  const restoreRafRef = useRef<number | null>(null);
   
   const lastFatalError = useMemo(() => {
     try {
@@ -147,6 +151,51 @@ const Settings: React.FC<SettingsProps> = ({
     }, 1500);
     return () => clearInterval(interval);
   }, [isDiagExpanded]);
+
+  useEffect(() => {
+    return () => {
+      if (restoreRafRef.current !== null) {
+        cancelAnimationFrame(restoreRafRef.current);
+        restoreRafRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    if (restoringRef.current) return;
+    scrollTopRef.current = e.currentTarget.scrollTop;
+  }, []);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    scrollTopRef.current = 0;
+    if (!el) return;
+    restoringRef.current = true;
+    el.scrollTo({ top: 0, behavior: "auto" });
+    restoringRef.current = false;
+  }, [activeTab]);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (scrollTopRef.current <= 0) return;
+    if (el.scrollTop !== 0) return;
+
+    if (restoreRafRef.current !== null) {
+      cancelAnimationFrame(restoreRafRef.current);
+      restoreRafRef.current = null;
+    }
+
+    restoringRef.current = true;
+    restoreRafRef.current = requestAnimationFrame(() => {
+      const target = scrollRef.current;
+      if (target) {
+        target.scrollTop = scrollTopRef.current;
+      }
+      restoreRafRef.current = null;
+      restoringRef.current = false;
+    });
+  }, [settings, openSections, theme, activeTab]);
 
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
@@ -291,7 +340,11 @@ const Settings: React.FC<SettingsProps> = ({
   };
 
   return (
-    <div className="p-4 sm:p-8 h-full overflow-y-auto transition-colors duration-500 bg-surface text-theme">
+    <div
+      ref={scrollRef}
+      onScroll={handleScroll}
+      className="p-4 sm:p-8 h-full overflow-y-auto transition-colors duration-500 bg-surface text-theme"
+    >
       <div className="max-w-2xl mx-auto space-y-8 sm:space-y-12 pb-32">
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
           <div>

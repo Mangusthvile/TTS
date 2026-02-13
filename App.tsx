@@ -5671,7 +5671,7 @@ const App: React.FC = () => {
         )}
 
         <div
-          className="flex-1 min-w-0 h-full overflow-y-auto"
+          className="flex-1 min-w-0 h-full overflow-y-hidden"
           onTouchStart={handleTabSwipeStart}
           onTouchEnd={handleTabSwipeEnd}
         >

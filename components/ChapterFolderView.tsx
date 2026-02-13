@@ -1,6 +1,7 @@
-import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
+import React, { useMemo, useState, useEffect, useCallback, useRef, useTransition } from 'react';
+import { VariableSizeList, type ListChildComponentProps } from "react-window";
 import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile, Rule, UiMode, JobRecord } from '../types';
-import { LayoutGrid, AlignJustify, Eye, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, CloudOff, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon, Sparkles, CheckSquare, Repeat2, MoreVertical, GripVertical, FolderSync } from 'lucide-react';
+import { LayoutGrid, AlignJustify, Eye, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, CloudOff, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon, Sparkles, CheckSquare, Repeat2, MoreVertical, GripVertical, FolderSync, FolderPlus } from 'lucide-react';
 import { hasAudioInCache } from '../services/audioCache';
 import { getChapterAudioPath } from '../services/chapterAudioStore';
 import {
@@ -37,7 +38,26 @@ import {
 type ViewMode = 'sections' | 'grid';
 type ViewScrollState = { sections: number; grid: number };
 const LONG_PRESS_MS = 450;
+const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+const lerp = (start: number, end: number, t: number) => start + (end - start) * t;
 const LONG_PRESS_MOVE_THRESHOLD_PX = 10;
+
+type GroupPos = "single" | "first" | "middle" | "last";
+type SectionListItem =
+  | { type: "volume-header"; id: string; volumeName: string; chapterCount: number; isCollapsed: boolean; groupPos: GroupPos }
+  | { type: "table-header"; id: string; groupPos: GroupPos }
+  | { type: "chapter-row"; id: string; chapter: Chapter; fallbackIndex: number; groupPos: GroupPos }
+  | { type: "ungrouped-label"; id: string }
+  | { type: "spacer"; id: string; size: number }
+  | { type: "load-more"; id: string };
+type GroupedSectionItem = Extract<SectionListItem, { groupPos: GroupPos }>;
+
+type GridListItem =
+  | { type: "volume-header"; id: string; volumeName: string; chapterCount: number; isCollapsed: boolean }
+  | { type: "grid-row"; id: string; chapters: Array<{ chapter: Chapter; localIndex: number }> }
+  | { type: "ungrouped-label"; id: string }
+  | { type: "spacer"; id: string; size: number }
+  | { type: "load-more"; id: string };
 
 type LegacyGroup = {
   legacyIndex: number;
@@ -155,13 +175,53 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     if (saved === "grid") return "grid";
     return "sections";
   });
+  const [, startViewModeTransition] = useTransition();
+  const listWrapperRef = useRef<HTMLDivElement>(null);
+  const [listViewport, setListViewport] = useState({ width: 0, height: 0 });
+  const coverCardRef = useRef<HTMLDivElement | null>(null);
+  const coverRowRef = useRef<HTMLDivElement | null>(null);
+  const coverImageRef = useRef<HTMLDivElement | null>(null);
+  const coverMetaRef = useRef<HTMLDivElement | null>(null);
+  const coverCollapseRef = useRef(-1);
+  const coverRafRef = useRef<number | null>(null);
 
   useEffect(() => { localStorage.setItem(VIEW_MODE_KEY, viewMode); }, [viewMode, VIEW_MODE_KEY]);
+  useEffect(() => {
+    const el = listWrapperRef.current;
+    if (!el) return;
+    const update = () => {
+      setListViewport({ width: el.clientWidth, height: el.clientHeight });
+    };
+    update();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => update());
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
   useEffect(() => {
     if (!onUpdateBookSettings) return;
     const current = book.settings?.chapterLayout === "grid" ? "grid" : "sections";
     if (current === viewMode) return;
-    onUpdateBookSettings({ chapterLayout: viewMode });
+    let cancelled = false;
+    let timeoutId: number | null = null;
+    const requestIdle = (window as any).requestIdleCallback as undefined | ((cb: () => void, opts?: { timeout?: number }) => number);
+    const cancelIdle = (window as any).cancelIdleCallback as undefined | ((id: number) => void);
+    const persist = () => {
+      if (cancelled) return;
+      onUpdateBookSettings({ chapterLayout: viewMode });
+    };
+    if (requestIdle) {
+      const idleId = requestIdle(() => persist(), { timeout: 500 });
+      return () => {
+        cancelled = true;
+        if (cancelIdle) cancelIdle(idleId);
+      };
+    }
+    timeoutId = window.setTimeout(persist, 250);
+    return () => {
+      cancelled = true;
+      if (timeoutId) window.clearTimeout(timeoutId);
+    };
   }, [viewMode, onUpdateBookSettings, book.settings?.chapterLayout]);
   useEffect(() => {
     return () => {
@@ -243,6 +303,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [mobileMenuId, setMobileMenuId] = useState<string | null>(null);
   const [cachedAudioChapterIds, setCachedAudioChapterIds] = useState<Set<string>>(() => new Set());
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const sectionsListRef = useRef<VariableSizeList>(null);
+  const gridListRef = useRef<VariableSizeList>(null);
   const viewScrollRef = useRef<ViewScrollState>({ sections: 0, grid: 0 });
   const lastViewModeRef = useRef<ViewMode>(viewMode);
   const restoreKeyRef = useRef<string | null>(null);
@@ -272,7 +334,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   useEffect(() => {
     const preferred = book.settings?.chapterLayout === "grid" ? "grid" : "sections";
-    setViewMode(preferred);
+    startViewModeTransition(() => setViewMode(preferred));
   }, [book.id, book.settings?.chapterLayout]);
 
   useEffect(() => {
@@ -286,14 +348,87 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
   }, [book.settings?.enableSelectionMode, book.settings?.enableOrganizeMode, selectionMode, isOrganizeMode]);
 
+  useEffect(() => {
+    return () => {
+      if (coverRafRef.current !== null) {
+        cancelAnimationFrame(coverRafRef.current);
+        coverRafRef.current = null;
+      }
+    };
+  }, []);
+
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
-  const cardBg = isDark ? 'bg-slate-800 border-slate-700' : isSepia ? 'bg-[#f4ecd8] border-[#d8ccb6]' : 'bg-white border-black/10';
+  const cardSurface = isDark ? 'bg-slate-800' : isSepia ? 'bg-[#f4ecd8]' : 'bg-white';
+  const cardBorder = isDark ? 'border-slate-700' : isSepia ? 'border-[#d8ccb6]' : 'border-black/10';
+  const cardBg = `${cardSurface} ${cardBorder}`;
   const textSecondary = isDark ? 'text-slate-400' : isSepia ? 'text-[#3c2f25]/70' : 'text-slate-600';
   const subtleText = textSecondary;
   const stickyHeaderBg = isDark ? 'bg-slate-900/90' : isSepia ? 'bg-[#f4ecd8]/90' : 'bg-white/90';
   const accentButtonClass = `px-4 py-2 rounded-xl font-black uppercase tracking-widest text-[10px] transition-colors ${isDark ? 'bg-white/10 text-white border border-white/20 hover:bg-white/20' : 'bg-black/10 text-black border border-black/10 hover:bg-black/20'}`;
   const primaryActionClass = `px-4 py-2 rounded-xl font-black uppercase tracking-widest text-[10px] transition-colors ${isDark ? 'bg-indigo-500 text-white shadow-lg hover:bg-indigo-400' : 'bg-indigo-600 text-white shadow-lg hover:bg-indigo-500'}`;
+  const selectionRowClass = isDark ? "bg-indigo-600/20" : "bg-indigo-600/10";
+  const isMobileInterface = computeMobileMode(uiMode);
+  // Allow background-capable flows (WorkManager / native plugin) when we're in mobile mode.
+  const enableBackgroundJobs = isMobileInterface;
+  const listPaddingX = listViewport.width >= 640 ? 24 : 16;
+  const listContentWidth = Math.max(0, listViewport.width - listPaddingX * 2);
+  const useVirtualization = !isOrganizeMode && listViewport.width > 0 && listViewport.height > 0;
+  const coverCollapseRange = 160;
+  const coverIsWide = listViewport.width >= 640;
+  const coverExpandedSize = coverIsWide ? 120 : 96;
+  const coverCollapsedSize = coverIsWide ? 56 : 44;
+  const coverExpandedPadding = coverIsWide ? 20 : 16;
+  const coverCollapsedPadding = coverIsWide ? 12 : 10;
+  const coverExpandedGap = coverIsWide ? 20 : 16;
+  const coverCollapsedGap = coverIsWide ? 12 : 10;
+  const ListOuterElement = useMemo(() => {
+    return React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(function ListOuterElement(
+      { style, className, ...rest },
+      ref
+    ) {
+      return <div ref={ref} className={className} style={{ ...style, boxSizing: "border-box" }} {...rest} />;
+    });
+  }, []);
+
+  const applyCoverCollapse = useCallback(
+    (scrollTop: number, force = false) => {
+      if (selectionMode && !force) return;
+      const card = coverCardRef.current;
+      const row = coverRowRef.current;
+      const image = coverImageRef.current;
+      if (!card || !row || !image) return;
+      const progress = clamp01(scrollTop / coverCollapseRange);
+      if (!force && Math.abs(progress - coverCollapseRef.current) < 0.01) return;
+      coverCollapseRef.current = progress;
+      if (coverRafRef.current !== null) {
+        cancelAnimationFrame(coverRafRef.current);
+      }
+      coverRafRef.current = requestAnimationFrame(() => {
+        const padding = lerp(coverExpandedPadding, coverCollapsedPadding, progress);
+        const gap = lerp(coverExpandedGap, coverCollapsedGap, progress);
+        const size = lerp(coverExpandedSize, coverCollapsedSize, progress);
+        card.style.padding = `${padding}px`;
+        row.style.gap = `${gap}px`;
+        image.style.width = `${size}px`;
+        image.style.height = "auto";
+        if (coverMetaRef.current) {
+          coverMetaRef.current.style.opacity = String(1 - 0.4 * progress);
+        }
+        coverRafRef.current = null;
+      });
+    },
+    [
+      coverCollapseRange,
+      coverCollapsedGap,
+      coverCollapsedPadding,
+      coverCollapsedSize,
+      coverExpandedGap,
+      coverExpandedPadding,
+      coverExpandedSize,
+      selectionMode,
+    ]
+  );
 
   const chapters = useMemo(
     () => normalizeChapterOrder(book.chapters || []),
@@ -368,6 +503,155 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   }, [volumeSections, collapsedVolumes]);
 
   const visibleChapterIds = useMemo(() => new Set(visibleChapters.map((chapter) => chapter.id)), [visibleChapters]);
+
+  const sectionRowHeight = isMobileInterface ? 72 : 80;
+  const volumeHeaderHeight = isMobileInterface ? 52 : 56;
+  const tableHeaderHeight = isMobileInterface ? 0 : 34;
+  const ungroupedLabelHeight = 24;
+  const spacerHeight = isMobileInterface ? 12 : 16;
+  const labelSpacerHeight = 8;
+  const loadMoreHeight = 36;
+  const gridVolumeHeaderHeight = isMobileInterface ? 44 : 48;
+
+  const gridGap = 16;
+  const gridColumns = listViewport.width >= 1280 ? 6 : listViewport.width >= 1024 ? 5 : listViewport.width >= 768 ? 4 : listViewport.width >= 640 ? 3 : 2;
+  const gridCardSize = gridColumns > 0 ? Math.max(0, Math.floor((listContentWidth - gridGap * (gridColumns - 1)) / gridColumns)) : 0;
+  const gridRowHeight = gridCardSize + gridGap;
+
+  const sectionItems = useMemo<SectionListItem[]>(() => {
+    const items: SectionListItem[] = [];
+    const addGroup = (groupItems: GroupedSectionItem[]) => {
+      if (!groupItems.length) return;
+      groupItems.forEach((item, idx) => {
+        const pos: GroupPos =
+          groupItems.length === 1 ? "single" : idx === 0 ? "first" : idx === groupItems.length - 1 ? "last" : "middle";
+        item.groupPos = pos;
+      });
+      items.push(...groupItems);
+    };
+
+    volumeSections.volumes.forEach((group, groupIdx) => {
+      const isCollapsed = !!collapsedVolumes[group.volumeName];
+      const groupItems: GroupedSectionItem[] = [];
+      groupItems.push({
+        type: "volume-header",
+        id: `vol:${group.volumeName}`,
+        volumeName: group.volumeName,
+        chapterCount: group.chapters.length,
+        isCollapsed,
+        groupPos: "single",
+      });
+      if (!isCollapsed) {
+        if (!isMobileInterface) {
+          groupItems.push({ type: "table-header", id: `vol:${group.volumeName}:header`, groupPos: "single" });
+        }
+        group.chapters.forEach((chapter, idx) => {
+          groupItems.push({
+            type: "chapter-row",
+            id: `vol:${group.volumeName}:ch:${chapter.id}`,
+            chapter,
+            fallbackIndex: idx + 1,
+            groupPos: "single",
+          });
+        });
+      }
+      addGroup(groupItems);
+      const hasNextGroup = groupIdx < volumeSections.volumes.length - 1 || volumeSections.ungrouped.length > 0;
+      if (hasNextGroup) {
+        items.push({ type: "spacer", id: `spacer:vol:${group.volumeName}`, size: spacerHeight });
+      }
+    });
+
+    if (volumeSections.ungrouped.length > 0) {
+      items.push({ type: "ungrouped-label", id: "ungrouped-label" });
+      items.push({ type: "spacer", id: "spacer:ungrouped-label", size: labelSpacerHeight });
+      const groupItems: GroupedSectionItem[] = [];
+      if (!isMobileInterface) {
+        groupItems.push({ type: "table-header", id: "ungrouped:header", groupPos: "single" });
+      }
+      volumeSections.ungrouped.forEach((chapter, idx) => {
+        groupItems.push({
+          type: "chapter-row",
+          id: `ungrouped:ch:${chapter.id}`,
+          chapter,
+          fallbackIndex: idx + 1,
+          groupPos: "single",
+        });
+      });
+      addGroup(groupItems);
+    }
+
+    if (hasMoreChapters) {
+      items.push({ type: "load-more", id: "load-more" });
+    }
+
+    return items;
+  }, [volumeSections, collapsedVolumes, isMobileInterface, hasMoreChapters, spacerHeight, labelSpacerHeight]);
+
+  const sectionIndexByChapterId = useMemo(() => {
+    const map = new Map<string, number>();
+    sectionItems.forEach((item, idx) => {
+      if (item.type === "chapter-row") map.set(item.chapter.id, idx);
+    });
+    return map;
+  }, [sectionItems]);
+
+  const gridItems = useMemo<GridListItem[]>(() => {
+    const items: GridListItem[] = [];
+    const addSpacer = (id: string, size: number) => items.push({ type: "spacer", id, size });
+    const addGridRows = (prefix: string, chapters: Chapter[]) => {
+      let row: Array<{ chapter: Chapter; localIndex: number }> = [];
+      chapters.forEach((chapter, idx) => {
+        row.push({ chapter, localIndex: idx + 1 });
+        if (row.length >= gridColumns) {
+          items.push({ type: "grid-row", id: `${prefix}:row:${items.length}`, chapters: row });
+          row = [];
+        }
+      });
+      if (row.length) {
+        items.push({ type: "grid-row", id: `${prefix}:row:${items.length}`, chapters: row });
+      }
+    };
+
+    volumeSections.volumes.forEach((group, idx) => {
+      const isCollapsed = !!collapsedVolumes[group.volumeName];
+      items.push({
+        type: "volume-header",
+        id: `vol:${group.volumeName}`,
+        volumeName: group.volumeName,
+        chapterCount: group.chapters.length,
+        isCollapsed,
+      });
+      if (!isCollapsed) {
+        addGridRows(`vol:${group.volumeName}`, group.chapters);
+      }
+      const hasNextGroup = idx < volumeSections.volumes.length - 1 || volumeSections.ungrouped.length > 0;
+      if (hasNextGroup) addSpacer(`spacer:vol:${group.volumeName}`, spacerHeight);
+    });
+
+    if (volumeSections.ungrouped.length > 0) {
+      items.push({ type: "ungrouped-label", id: "ungrouped-label" });
+      addSpacer("spacer:ungrouped-label", labelSpacerHeight);
+      addGridRows("ungrouped", volumeSections.ungrouped);
+    }
+
+    if (hasMoreChapters) {
+      items.push({ type: "load-more", id: "load-more" });
+    }
+
+    return items;
+  }, [volumeSections, collapsedVolumes, gridColumns, hasMoreChapters, spacerHeight, labelSpacerHeight]);
+
+  const gridIndexByChapterId = useMemo(() => {
+    const map = new Map<string, number>();
+    gridItems.forEach((item, idx) => {
+      if (item.type !== "grid-row") return;
+      item.chapters.forEach(({ chapter }) => {
+        map.set(chapter.id, idx);
+      });
+    });
+    return map;
+  }, [gridItems]);
 
   useEffect(() => {
     let cancelled = false;
@@ -649,6 +933,31 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     closeSelectionMode();
   }, [closeSelectionMode, persistChapters, selectedChapterList]);
 
+  const handleBulkAssignVolume = useCallback(async () => {
+    if (!selectedChapterList.length) return;
+    const promptLabel =
+      selectedChapterList.length === 1
+        ? "Volume name for 1 chapter"
+        : `Volume name for ${selectedChapterList.length} chapters`;
+    const raw = prompt(promptLabel);
+    if (raw == null) return;
+    const name = raw.trim();
+    if (!name) return;
+    const now = Date.now();
+    const updated = selectedChapterList.map((chapter) => ({
+      ...chapter,
+      volumeName: name,
+      volumeLocalChapter: undefined,
+      updatedAt: now,
+    }));
+    await persistChapters(updated);
+    const current = Array.isArray(book.settings?.volumeOrder) ? [...book.settings.volumeOrder] : [];
+    if (!current.includes(name)) {
+      upsertBookSettings({ volumeOrder: [...current, name] });
+    }
+    closeSelectionMode();
+  }, [book.settings?.volumeOrder, closeSelectionMode, persistChapters, selectedChapterList, upsertBookSettings]);
+
   const handleBulkDelete = useCallback(async () => {
     if (!selectedChapterList.length) return;
     const ok = confirm(`Delete ${selectedChapterList.length} chapter(s)?`);
@@ -795,9 +1104,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
   }, [book.id, chapters, onReindexChapters, persistChapters, pushNotice]);
 
-  const isMobileInterface = computeMobileMode(uiMode);
-  // Allow background-capable flows (WorkManager / native plugin) when we're in mobile mode.
-  const enableBackgroundJobs = isMobileInterface;
   const bookJobs = useMemo(() => {
     return (jobs || []).filter((j) => {
       const bookId = (j as any)?.payloadJson?.bookId;
@@ -850,6 +1156,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    if (useVirtualization) return;
     if (!hasMoreChapters) return;
     if (!onLoadMoreChapters) return;
     const el = loadMoreSentinelRef.current;
@@ -864,33 +1171,47 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
     obs.observe(el);
     return () => obs.disconnect();
-  }, [hasMoreChapters, onLoadMoreChapters, isLoadingMoreChapters]);
+  }, [useVirtualization, hasMoreChapters, onLoadMoreChapters, isLoadingMoreChapters]);
 
   const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    if (useVirtualization) return;
     const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
     viewScrollRef.current[viewMode] = scrollTop;
     onScrollPositionChange?.(scrollTop);
+    applyCoverCollapse(scrollTop);
     if (scrollHeight - scrollTop - clientHeight < 200) {
       if (hasMoreChapters && !isLoadingMoreChapters && onLoadMoreChapters) {
         onLoadMoreChapters();
       }
     }
-  }, [hasMoreChapters, isLoadingMoreChapters, onLoadMoreChapters, onScrollPositionChange, viewMode]);
+  }, [useVirtualization, hasMoreChapters, isLoadingMoreChapters, onLoadMoreChapters, onScrollPositionChange, viewMode, applyCoverCollapse]);
 
   useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const previousMode = lastViewModeRef.current;
-    if (previousMode === viewMode) return;
-
-    viewScrollRef.current[previousMode] = container.scrollTop;
     lastViewModeRef.current = viewMode;
 
     window.requestAnimationFrame(() => {
       const nextScroll = viewScrollRef.current[viewMode] ?? 0;
+      if (useVirtualization) {
+        const listRef = viewMode === "sections" ? sectionsListRef.current : gridListRef.current;
+        listRef?.scrollTo(nextScroll);
+        applyCoverCollapse(nextScroll, true);
+        return;
+      }
+      const container = scrollContainerRef.current;
+      if (!container) return;
       container.scrollTop = nextScroll;
+      applyCoverCollapse(nextScroll, true);
     });
-  }, [viewMode]);
+  }, [viewMode, useVirtualization, applyCoverCollapse]);
+
+  useEffect(() => {
+    if (selectionMode) {
+      applyCoverCollapse(0, true);
+      return;
+    }
+    const nextScroll = viewScrollRef.current[viewMode] ?? 0;
+    applyCoverCollapse(nextScroll, true);
+  }, [selectionMode, viewMode, applyCoverCollapse]);
 
   useEffect(() => {
     if (!chapters.length) return;
@@ -901,6 +1222,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       restoreScrollTop ?? "none",
       restoreChapterId ?? restoreChapterIndex ?? "none",
       visibleChapters.length,
+      useVirtualization ? "virtual" : "dom",
     ].join("|");
     if (restoreKeyRef.current === key) return;
     restoreKeyRef.current = key;
@@ -913,6 +1235,25 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             chapter.index === restoreChapterIndex ||
             getChapterSortOrder(chapter) === restoreChapterIndex
         )?.id ?? null;
+    }
+
+    if (useVirtualization) {
+      const listRef = viewMode === "sections" ? sectionsListRef.current : gridListRef.current;
+      if (!listRef) return;
+      window.requestAnimationFrame(() => {
+        if (targetChapterId) {
+          const indexMap = viewMode === "sections" ? sectionIndexByChapterId : gridIndexByChapterId;
+          const targetIndex = indexMap.get(targetChapterId);
+          if (typeof targetIndex === "number") {
+            listRef.scrollToItem(targetIndex, "center");
+            return;
+          }
+        }
+        if (typeof restoreScrollTop === "number") {
+          listRef.scrollTo(restoreScrollTop);
+        }
+      });
+      return;
     }
 
     const container = scrollContainerRef.current;
@@ -931,6 +1272,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     restoreChapterId,
     restoreChapterIndex,
     restoreScrollTop,
+    sectionIndexByChapterId,
+    gridIndexByChapterId,
+    useVirtualization,
     viewMode,
   ]);
 
@@ -2160,7 +2504,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           }}
           className={`px-4 py-3 sm:px-6 sm:py-4 cursor-pointer border-b last:border-0 transition-colors ${
             isDark ? "hover:bg-white/5 border-slate-800" : "hover:bg-black/5 border-black/5"
-          } ${isCompleted ? "opacity-50" : ""} ${isSelected ? (isDark ? "bg-indigo-500/20" : "bg-indigo-100") : ""}`}
+          } ${isCompleted && !(selectionMode && isSelected) ? "opacity-50" : ""} ${selectionMode && isSelected ? selectionRowClass : ""}`}
         >
           <div className="flex items-start gap-3">
             <div className={`shrink-0 flex items-center gap-2 pt-0.5 ${textSecondary}`}>
@@ -2262,6 +2606,22 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     ]
   );
 
+  const renderTableHeader = useCallback(() => {
+    if (isMobileInterface) return null;
+    return (
+      <div
+        className={`grid grid-cols-[40px_1fr_80px_100px] md:grid-cols-[40px_1fr_100px_180px] px-6 py-3 text-[10px] font-black uppercase tracking-widest border-b ${
+          isDark ? "border-slate-800 bg-slate-950/40 text-indigo-400" : "border-black/5 bg-black/5 text-indigo-600"
+        }`}
+      >
+        <div>Idx</div>
+        <div>Title</div>
+        <div className="text-right px-4">Progress</div>
+        <div className="text-right">Actions</div>
+      </div>
+    );
+  }, [isDark, isMobileInterface]);
+
   const MobileChapterMenu = ({ chapterId }: { chapterId: string }) => {
     const ch = chapters.find(c => c.id === chapterId);
     if (!ch) return null;
@@ -2287,23 +2647,550 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     );
   };
 
-  const renderDetailsView = () => {
-    const renderTableHeader = () => {
-      if (isMobileInterface) return null;
+  const getGroupWrapperClass = useCallback(
+    (pos: GroupPos) => {
+      const isTop = pos === "first" || pos === "single";
+      const isBottom = pos === "last" || pos === "single";
+      return [
+        cardSurface,
+        "border-l border-r",
+        cardBorder,
+        isTop ? "border-t rounded-t-3xl overflow-hidden" : "",
+        isBottom ? "rounded-b-3xl overflow-hidden" : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+    },
+    [cardBorder, cardSurface]
+  );
+
+  const renderSectionRow = useCallback(
+    ({ index, style, data }: ListChildComponentProps<SectionListItem[]>) => {
+      const item = data[index];
+      if (item.type === "spacer") return <div style={style} />;
+      if (item.type === "ungrouped-label") {
+        return (
+          <div style={style} className="px-2 text-[10px] font-black uppercase tracking-widest opacity-60">
+            Chapters
+          </div>
+        );
+      }
+      if (item.type === "load-more") {
+        return (
+          <div style={style} className={`py-4 text-center text-xs ${subtleText}`}>
+            {isLoadingMoreChapters ? "Loading more..." : "Scroll to load more"}
+          </div>
+        );
+      }
+
+      const wrapperClass = getGroupWrapperClass(item.groupPos);
+      if (item.type === "volume-header") {
+        const canReorderVolumes = isOrganizeMode && book.settings?.allowDragReorderVolumes !== false;
+        const canMoveToVolume = isOrganizeMode && book.settings?.allowDragMoveToVolume !== false;
+        return (
+          <div style={style} className={wrapperClass}>
+            <div
+              className={`w-full px-6 py-3 flex items-center justify-between border-b ${
+                isDark ? "border-slate-800 bg-slate-950/30" : "border-black/5 bg-black/5"
+              }`}
+              draggable={canReorderVolumes}
+              onDragStart={() => {
+                if (!canReorderVolumes) return;
+                setDraggingVolumeName(item.volumeName);
+              }}
+              onDragEnd={() => setDraggingVolumeName(null)}
+              onDragOver={(event) => {
+                if ((canReorderVolumes && draggingVolumeName && draggingVolumeName !== item.volumeName) || (canMoveToVolume && draggingChapterId)) {
+                  event.preventDefault();
+                }
+              }}
+              onDrop={async (event) => {
+                if (canReorderVolumes && draggingVolumeName && draggingVolumeName !== item.volumeName) {
+                  event.preventDefault();
+                  reorderVolumes(draggingVolumeName, item.volumeName);
+                  setDraggingVolumeName(null);
+                  return;
+                }
+                if (canMoveToVolume && draggingChapterId) {
+                  event.preventDefault();
+                  await moveChapterToVolume(draggingChapterId, item.volumeName);
+                  setDraggingChapterId(null);
+                }
+              }}
+            >
+              <div className="text-left flex items-center gap-2 min-w-0">
+                {canReorderVolumes ? <GripVertical className="w-4 h-4 opacity-40" /> : null}
+                <button
+                  onClick={() =>
+                    setCollapsedVolumes((p) => {
+                      const next = { ...p, [item.volumeName]: !p[item.volumeName] };
+                      upsertBookSettings({ collapsedVolumes: next });
+                      return next;
+                    })
+                  }
+                  className="text-xs opacity-70 hover:opacity-100"
+                  title={item.isCollapsed ? "Expand" : "Collapse"}
+                >
+                  {item.isCollapsed ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+                </button>
+                <div className="min-w-0">
+                  <div className="text-[10px] font-black uppercase tracking-widest opacity-70 truncate">{item.volumeName}</div>
+                  <div className="text-[10px] font-bold opacity-50">
+                    {item.chapterCount} chapters{item.isCollapsed ? " (collapsed)" : ""}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => void renameVolume(item.volumeName)}
+                  className="p-2 opacity-40 hover:opacity-100"
+                  title="Rename volume"
+                >
+                  <Edit2 className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => void deleteVolumeToUngrouped(item.volumeName)}
+                  className="p-2 opacity-40 hover:opacity-100 text-red-500"
+                  title="Delete volume"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      if (item.type === "table-header") {
+        const header = renderTableHeader();
+        if (!header) return <div style={style} />;
+        return (
+          <div style={style} className={wrapperClass}>
+            {header}
+          </div>
+        );
+      }
+
+      if (item.type === "chapter-row") {
+        return (
+          <div style={style} className={wrapperClass}>
+            {renderDetailChapterRow(item.chapter, item.fallbackIndex)}
+          </div>
+        );
+      }
+
+      return <div style={style} />;
+    },
+    [
+      book.settings?.allowDragMoveToVolume,
+      book.settings?.allowDragReorderVolumes,
+      deleteVolumeToUngrouped,
+      draggingChapterId,
+      draggingVolumeName,
+      getGroupWrapperClass,
+      isDark,
+      isLoadingMoreChapters,
+      isOrganizeMode,
+      moveChapterToVolume,
+      renderDetailChapterRow,
+      renderTableHeader,
+      reorderVolumes,
+      renameVolume,
+      setCollapsedVolumes,
+      subtleText,
+      upsertBookSettings,
+    ]
+  );
+
+  const renderGridCard = useCallback(
+    (c: Chapter, localIndex: number) => {
+      const displayIndex = getDisplayIndex(c, localIndex);
+      const displayTitle = getDisplayTitle(c, displayIndex);
+      let percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
+      if (playbackSnapshot && playbackSnapshot.chapterId === c.id) {
+        percent = Math.floor(playbackSnapshot.percent * 100);
+      }
+      const isCompleted = c.isCompleted || false;
+      if (isCompleted) {
+        percent = 100;
+      }
+      const isSelected = selectedIds.has(c.id);
       return (
         <div
-          className={`grid grid-cols-[40px_1fr_80px_100px] md:grid-cols-[40px_1fr_100px_180px] px-6 py-3 text-[10px] font-black uppercase tracking-widest border-b ${
-            isDark ? "border-slate-800 bg-slate-950/40 text-indigo-400" : "border-black/5 bg-black/5 text-indigo-600"
+          key={c.id}
+          data-chapter-id={c.id}
+          onClick={(event) => {
+            if (longPressTriggeredRef.current) {
+              longPressTriggeredRef.current = false;
+              return;
+            }
+            handleChapterActivate(c, event as any);
+          }}
+          onContextMenu={(event) => handleChapterContextMenu(c, event as any)}
+          onPointerDown={(event) => {
+            startLongPressSelection(event, c.id);
+          }}
+          onPointerMove={handleLongPressPointerMove}
+          onPointerUp={finishLongPressSelection}
+          onPointerCancel={finishLongPressSelection}
+          draggable={isOrganizeMode && book.settings?.allowDragReorderChapters !== false}
+          onDragStart={() => {
+            if (!(isOrganizeMode && book.settings?.allowDragReorderChapters !== false)) return;
+            setDraggingChapterId(c.id);
+          }}
+          onDragEnd={() => setDraggingChapterId(null)}
+          onDragOver={(event) => {
+            if (!(isOrganizeMode && book.settings?.allowDragReorderChapters !== false)) return;
+            if (!draggingChapterId || draggingChapterId === c.id) return;
+            event.preventDefault();
+          }}
+          onDrop={async (event) => {
+            if (!(isOrganizeMode && book.settings?.allowDragReorderChapters !== false)) return;
+            if (!draggingChapterId || draggingChapterId === c.id) return;
+            event.preventDefault();
+            await reorderWithinVolume(draggingChapterId, c.id);
+            setDraggingChapterId(null);
+          }}
+          className={`aspect-square p-4 rounded-3xl border flex flex-col items-center justify-center text-center gap-2 cursor-pointer transition-all hover:scale-105 group relative ${cardBg} ${
+            selectionMode && isSelected ? selectionRowClass : ""
           }`}
         >
-          <div>Idx</div>
-          <div>Title</div>
-          <div className="text-right px-4">Progress</div>
-          <div className="text-right">Actions</div>
+          {selectionMode ? (
+            <div className="absolute top-3 left-3">
+              <input
+                type="checkbox"
+                checked={isSelected}
+                onChange={() => toggleChapterSelection(c.id)}
+                onClick={(event) => event.stopPropagation()}
+                className="accent-indigo-600"
+              />
+            </div>
+          ) : null}
+          <div className="absolute top-3 right-3 flex gap-1">
+            {renderTextStatusIcon(c)}
+            {renderAudioStatusIcon(c)}
+          </div>
+          <div
+            className={`w-12 h-12 rounded-2xl flex items-center justify-center font-mono text-lg font-black mb-1 ${
+              isDark ? "bg-slate-950 text-indigo-400" : "bg-indigo-50 text-indigo-600"
+            }`}
+          >
+            {displayIndex}
+          </div>
+          <div className="font-black text-xs line-clamp-2 leading-tight px-1">{displayTitle}</div>
+          <div className="mt-2 w-full px-4">
+            <div className={`h-1 w-full rounded-full overflow-hidden ${isDark ? "bg-slate-700" : "bg-black/5"}`}>
+              <div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${percent}%` }} />
+            </div>
+            <div className="text-[8px] font-black uppercase mt-1">{percent}%</div>
+          </div>
+          <div className="md:hidden absolute bottom-2 left-0 right-0 flex justify-center gap-2 px-2">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setMobileMenuId(c.id);
+              }}
+              title="Chapter menu"
+              className="p-2 bg-black/5 rounded-xl opacity-60"
+            >
+              <MoreVertical className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       );
-    };
+    },
+    [
+      book.settings?.allowDragReorderChapters,
+      cardBg,
+      draggingChapterId,
+      finishLongPressSelection,
+      getDisplayIndex,
+      getDisplayTitle,
+      handleChapterActivate,
+      handleChapterContextMenu,
+      handleLongPressPointerMove,
+      isDark,
+      isOrganizeMode,
+      playbackSnapshot,
+      renderAudioStatusIcon,
+      renderTextStatusIcon,
+      reorderWithinVolume,
+      selectionMode,
+      selectionRowClass,
+      selectedIds,
+      setDraggingChapterId,
+      setMobileMenuId,
+      startLongPressSelection,
+      toggleChapterSelection,
+    ]
+  );
 
+  const renderGridRow = useCallback(
+    ({ index, style, data }: ListChildComponentProps<GridListItem[]>) => {
+      const item = data[index];
+      if (item.type === "spacer") return <div style={style} />;
+      if (item.type === "ungrouped-label") {
+        return (
+          <div style={style} className="px-2 text-[10px] font-black uppercase tracking-widest opacity-60">
+            Chapters
+          </div>
+        );
+      }
+      if (item.type === "load-more") {
+        return (
+          <div style={style} className={`py-4 text-center text-xs ${subtleText}`}>
+            {isLoadingMoreChapters ? "Loading more..." : "Scroll to load more"}
+          </div>
+        );
+      }
+      if (item.type === "volume-header") {
+        const canReorderVolumes = isOrganizeMode && book.settings?.allowDragReorderVolumes !== false;
+        const canMoveToVolume = isOrganizeMode && book.settings?.allowDragMoveToVolume !== false;
+        return (
+          <div style={style}>
+            <div
+              className={`px-3 py-2 rounded-2xl cursor-pointer flex items-center justify-between ${
+                isDark ? "bg-white/5 hover:bg-white/10" : "bg-black/5 hover:bg-black/10"
+              }`}
+              draggable={canReorderVolumes}
+              onDragStart={() => {
+                if (!canReorderVolumes) return;
+                setDraggingVolumeName(item.volumeName);
+              }}
+              onDragEnd={() => setDraggingVolumeName(null)}
+              onDragOver={(event) => {
+                if ((canReorderVolumes && draggingVolumeName && draggingVolumeName !== item.volumeName) || (canMoveToVolume && draggingChapterId)) {
+                  event.preventDefault();
+                }
+              }}
+              onDrop={async (event) => {
+                if (canReorderVolumes && draggingVolumeName && draggingVolumeName !== item.volumeName) {
+                  event.preventDefault();
+                  reorderVolumes(draggingVolumeName, item.volumeName);
+                  setDraggingVolumeName(null);
+                  return;
+                }
+                if (canMoveToVolume && draggingChapterId) {
+                  event.preventDefault();
+                  await moveChapterToVolume(draggingChapterId, item.volumeName);
+                  setDraggingChapterId(null);
+                }
+              }}
+            >
+              <div className="min-w-0 flex items-center gap-2">
+                {canReorderVolumes ? <GripVertical className="w-4 h-4 opacity-40" /> : null}
+                <div className="text-xs font-black uppercase tracking-widest opacity-70 truncate">{item.volumeName}</div>
+                <div className="text-[10px] font-bold opacity-40">
+                  {item.chapterCount} chapters{item.isCollapsed ? " (collapsed)" : ""}
+                </div>
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setCollapsedVolumes((p) => {
+                      const next = { ...p, [item.volumeName]: !p[item.volumeName] };
+                      upsertBookSettings({ collapsedVolumes: next });
+                      return next;
+                    });
+                  }}
+                  className="p-1.5 opacity-60 hover:opacity-100"
+                >
+                  {item.isCollapsed ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+                </button>
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void renameVolume(item.volumeName);
+                  }}
+                  className="p-1.5 opacity-60 hover:opacity-100"
+                >
+                  <Edit2 className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void deleteVolumeToUngrouped(item.volumeName);
+                  }}
+                  className="p-1.5 opacity-60 hover:opacity-100 text-red-500"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      }
+      if (item.type === "grid-row") {
+        return (
+          <div style={{ ...style, paddingBottom: gridGap, boxSizing: "border-box" }}>
+            <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))` }}>
+              {item.chapters.map(({ chapter, localIndex }) => renderGridCard(chapter, localIndex))}
+            </div>
+          </div>
+        );
+      }
+      return <div style={style} />;
+    },
+    [
+      book.settings?.allowDragMoveToVolume,
+      book.settings?.allowDragReorderVolumes,
+      deleteVolumeToUngrouped,
+      draggingChapterId,
+      draggingVolumeName,
+      gridColumns,
+      gridGap,
+      isDark,
+      isLoadingMoreChapters,
+      isOrganizeMode,
+      moveChapterToVolume,
+      renameVolume,
+      renderGridCard,
+      reorderVolumes,
+      setCollapsedVolumes,
+      subtleText,
+      upsertBookSettings,
+    ]
+  );
+
+  const getSectionItemSize = useCallback(
+    (index: number) => {
+      const item = sectionItems[index];
+      switch (item.type) {
+        case "volume-header":
+          return volumeHeaderHeight;
+        case "table-header":
+          return tableHeaderHeight;
+        case "chapter-row":
+          return sectionRowHeight;
+        case "ungrouped-label":
+          return ungroupedLabelHeight;
+        case "spacer":
+          return item.size;
+        case "load-more":
+          return loadMoreHeight;
+        default:
+          return sectionRowHeight;
+      }
+    },
+    [loadMoreHeight, sectionItems, sectionRowHeight, tableHeaderHeight, ungroupedLabelHeight, volumeHeaderHeight]
+  );
+
+  const getGridItemSize = useCallback(
+    (index: number) => {
+      const item = gridItems[index];
+      switch (item.type) {
+        case "volume-header":
+          return gridVolumeHeaderHeight;
+        case "grid-row":
+          return gridRowHeight;
+        case "ungrouped-label":
+          return ungroupedLabelHeight;
+        case "spacer":
+          return item.size;
+        case "load-more":
+          return loadMoreHeight;
+        default:
+          return gridRowHeight;
+      }
+    },
+    [gridItems, gridRowHeight, gridVolumeHeaderHeight, loadMoreHeight, ungroupedLabelHeight]
+  );
+
+  useEffect(() => {
+    if (!useVirtualization) return;
+    sectionsListRef.current?.resetAfterIndex(0, true);
+  }, [
+    useVirtualization,
+    sectionItems.length,
+    sectionRowHeight,
+    volumeHeaderHeight,
+    tableHeaderHeight,
+    spacerHeight,
+    labelSpacerHeight,
+    loadMoreHeight,
+  ]);
+
+  useEffect(() => {
+    if (!useVirtualization) return;
+    gridListRef.current?.resetAfterIndex(0, true);
+  }, [
+    useVirtualization,
+    gridItems.length,
+    gridRowHeight,
+    gridVolumeHeaderHeight,
+    spacerHeight,
+    labelSpacerHeight,
+    loadMoreHeight,
+  ]);
+
+  const handleSectionItemsRendered = useCallback(
+    ({ visibleStopIndex }: { visibleStopIndex: number }) => {
+      if (!hasMoreChapters || isLoadingMoreChapters || !onLoadMoreChapters) return;
+      if (visibleStopIndex >= sectionItems.length - 3) {
+        onLoadMoreChapters();
+      }
+    },
+    [hasMoreChapters, isLoadingMoreChapters, onLoadMoreChapters, sectionItems.length]
+  );
+
+  const handleGridItemsRendered = useCallback(
+    ({ visibleStopIndex }: { visibleStopIndex: number }) => {
+      if (!hasMoreChapters || isLoadingMoreChapters || !onLoadMoreChapters) return;
+      if (visibleStopIndex >= gridItems.length - 3) {
+        onLoadMoreChapters();
+      }
+    },
+    [hasMoreChapters, isLoadingMoreChapters, onLoadMoreChapters, gridItems.length]
+  );
+
+  const renderDetailsViewVirtualized = () => (
+    <VariableSizeList
+      ref={sectionsListRef}
+      outerRef={scrollContainerRef}
+      outerElementType={ListOuterElement}
+      className="overflow-y-auto px-4 sm:px-6 py-6 sm:py-8"
+      height={listViewport.height}
+      width={listViewport.width}
+      itemCount={sectionItems.length}
+      itemSize={getSectionItemSize}
+      itemData={sectionItems}
+      itemKey={(index, data) => data[index].id}
+      onItemsRendered={handleSectionItemsRendered}
+      onScroll={({ scrollOffset }) => {
+        viewScrollRef.current[viewMode] = scrollOffset;
+        onScrollPositionChange?.(scrollOffset);
+        applyCoverCollapse(scrollOffset);
+      }}
+    >
+      {renderSectionRow}
+    </VariableSizeList>
+  );
+
+  const renderGridViewVirtualized = () => (
+    <VariableSizeList
+      ref={gridListRef}
+      outerRef={scrollContainerRef}
+      outerElementType={ListOuterElement}
+      className="overflow-y-auto px-4 sm:px-6 py-6 sm:py-8"
+      height={listViewport.height}
+      width={listViewport.width}
+      itemCount={gridItems.length}
+      itemSize={getGridItemSize}
+      itemData={gridItems}
+      itemKey={(index, data) => data[index].id}
+      onItemsRendered={handleGridItemsRendered}
+      onScroll={({ scrollOffset }) => {
+        viewScrollRef.current[viewMode] = scrollOffset;
+        onScrollPositionChange?.(scrollOffset);
+        applyCoverCollapse(scrollOffset);
+      }}
+    >
+      {renderGridRow}
+    </VariableSizeList>
+  );
+
+  const renderDetailsView = () => {
     return (
       <div className="space-y-4">
         {volumeSections.volumes.map((group) => {
@@ -2530,6 +3417,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                 {group.chapters.map((c, idx) => {
                   const displayIndex = getDisplayIndex(c, idx + 1);
                   const displayTitle = getDisplayTitle(c, displayIndex);
+                  const isSelected = selectedIds.has(c.id);
                   let percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
                   if (playbackSnapshot && playbackSnapshot.chapterId === c.id) {
                     percent = Math.floor(playbackSnapshot.percent * 100);
@@ -2574,7 +3462,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                         await reorderWithinVolume(draggingChapterId, c.id);
                         setDraggingChapterId(null);
                       }}
-                      className={`aspect-square p-4 rounded-3xl border flex flex-col items-center justify-center text-center gap-2 cursor-pointer transition-all hover:scale-105 group relative ${cardBg}`}
+                      className={`aspect-square p-4 rounded-3xl border flex flex-col items-center justify-center text-center gap-2 cursor-pointer transition-all hover:scale-105 group relative ${cardBg} ${selectionMode && isSelected ? selectionRowClass : ""}`}
                     >
                       {selectionMode ? (
                         <div className="absolute top-3 left-3">
@@ -2632,6 +3520,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             {volumeSections.ungrouped.map((c, idx) => {
               const displayIndex = getDisplayIndex(c, idx + 1);
               const displayTitle = getDisplayTitle(c, displayIndex);
+              const isSelected = selectedIds.has(c.id);
               let percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
               if (playbackSnapshot && playbackSnapshot.chapterId === c.id) {
                 percent = Math.floor(playbackSnapshot.percent * 100);
@@ -2676,7 +3565,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                     await reorderWithinVolume(draggingChapterId, c.id);
                     setDraggingChapterId(null);
                   }}
-                  className={`aspect-square p-4 rounded-3xl border flex flex-col items-center justify-center text-center gap-2 cursor-pointer transition-all hover:scale-105 group relative ${cardBg}`}
+                  className={`aspect-square p-4 rounded-3xl border flex flex-col items-center justify-center text-center gap-2 cursor-pointer transition-all hover:scale-105 group relative ${cardBg} ${selectionMode && isSelected ? selectionRowClass : ""}`}
                 >
                   {selectionMode ? (
                     <div className="absolute top-3 left-3">
@@ -2831,27 +3720,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                   Add Cover
                 </button>
               )}
-            </div>
-
-            <div className="space-y-3">
-              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Display</div>
-              <div className={`p-4 rounded-2xl border ${isDark ? "border-white/10 bg-white/5" : "border-black/10 bg-black/5"}`}>
-                <div className="text-xs font-black mb-2">Chapter Layout</div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => onUpdateBookSettings?.({ chapterLayout: "sections" })}
-                    className={`px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${viewMode === "sections" ? "bg-indigo-600 text-white" : "bg-black/5"}`}
-                  >
-                    Sections
-                  </button>
-                  <button
-                    onClick={() => onUpdateBookSettings?.({ chapterLayout: "grid" })}
-                    className={`px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${viewMode === "grid" ? "bg-indigo-600 text-white" : "bg-black/5"}`}
-                  >
-                    Grid
-                  </button>
-                </div>
-              </div>
             </div>
 
             <div className="space-y-3">
@@ -3188,7 +4056,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               </button>
               <div className="flex items-center gap-1 p-1 rounded-xl bg-black/5">
                 <button
-                  onClick={() => setViewMode("sections")}
+                  onClick={() => startViewModeTransition(() => setViewMode("sections"))}
                   className={`p-1.5 rounded-lg transition-all ${
                     viewMode === "sections" ? "bg-white shadow-sm text-indigo-600" : "opacity-40"
                   }`}
@@ -3197,7 +4065,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                   <AlignJustify className="w-3.5 h-3.5" />
                 </button>
                 <button
-                  onClick={() => setViewMode("grid")}
+                  onClick={() => startViewModeTransition(() => setViewMode("grid"))}
                   className={`p-1.5 rounded-lg transition-all ${
                     viewMode === "grid" ? "bg-white shadow-sm text-indigo-600" : "opacity-40"
                   }`}
@@ -3230,9 +4098,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       {!selectionMode ? (
         <div className="p-4 sm:p-6 lg:p-8 flex flex-col gap-4">
-          <div className={`rounded-3xl border p-4 sm:p-5 ${cardBg}`}>
-            <div className="flex items-start gap-4">
-              <div className="w-16 sm:w-20 aspect-[2/3] rounded-2xl overflow-hidden shadow-lg flex-shrink-0 bg-indigo-600/10 flex items-center justify-center">
+          <div ref={coverCardRef} className="p-4 sm:p-5 bg-transparent border-0 shadow-none">
+            <div ref={coverRowRef} className="flex items-start gap-4">
+              <div ref={coverImageRef} className="w-16 sm:w-20 aspect-[2/3] rounded-2xl overflow-hidden shadow-lg flex-shrink-0 bg-indigo-600/10 flex items-center justify-center">
                 {book.coverImage ? (
                   <img src={book.coverImage} className="w-full h-full object-cover" alt={book.title} />
                 ) : (
@@ -3276,7 +4144,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                           : "Local"}
                   </span>
                 </div>
-                <div className="mt-1 text-[10px] font-black uppercase tracking-widest opacity-50">
+                <div ref={coverMetaRef} className="mt-1 text-[10px] font-black uppercase tracking-widest opacity-50">
                   {(book.chapterCount ?? book.chapters.length)} chapters
                   {lastSavedAt ? ` • Last saved ${new Date(lastSavedAt).toLocaleTimeString()}` : ""}
                 </div>
@@ -3358,25 +4226,36 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         </div>
       )}
 
-      <div
-        ref={scrollContainerRef}
-        onScroll={handleScroll}
-        className="flex-1 px-4 sm:px-6 py-6 sm:py-8 overflow-y-auto"
-      >
-        {chapters.length === 0 ? (
-          <div className="p-12 text-center text-xs font-black opacity-30 uppercase">No chapters found</div>
+      <div ref={listWrapperRef} className="flex-1 min-h-0">
+        {useVirtualization ? (
+          chapters.length === 0 ? (
+            <div className="p-12 text-center text-xs font-black opacity-30 uppercase">No chapters found</div>
+          ) : (
+            viewMode === "sections" ? renderDetailsViewVirtualized() : renderGridViewVirtualized()
+          )
         ) : (
-          viewMode === "sections" ? renderDetailsView() : renderGridView()
+          <div
+            ref={scrollContainerRef}
+            onScroll={handleScroll}
+            className="h-full px-4 sm:px-6 py-6 sm:py-8 overflow-y-auto"
+          >
+            {chapters.length === 0 ? (
+              <div className="p-12 text-center text-xs font-black opacity-30 uppercase">No chapters found</div>
+            ) : (
+              viewMode === "sections" ? renderDetailsView() : renderGridView()
+            )}
+          </div>
         )}
       </div>
 
       {selectionMode ? (
         <div className={`sticky bottom-0 z-50 border-t p-3 sm:p-4 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] ${isDark ? 'bg-slate-900/95 border-slate-700' : 'bg-white/95 border-black/10'}`}>
-          <div className="grid grid-cols-5 gap-2">
+          <div className="grid grid-cols-6 gap-2">
             <button onClick={() => void handleBulkUpload()} disabled={!selectedIds.size || !canBulkUpload} className={`px-2 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${selectedIds.size && canBulkUpload ? 'bg-black/5 hover:bg-black/10' : 'opacity-40 bg-black/5 cursor-not-allowed'}`}><Cloud className="w-4 h-4 mx-auto mb-1" />Upload</button>
             <button onClick={() => void handleBulkRegenerateAudio()} disabled={!selectedIds.size} className={`px-2 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${selectedIds.size ? 'bg-black/5 hover:bg-black/10' : 'opacity-40 bg-black/5 cursor-not-allowed'}`}><Headphones className="w-4 h-4 mx-auto mb-1" />Regen Audio</button>
             <button onClick={() => void handleBulkMarkCompleted()} disabled={!selectedIds.size} className={`px-2 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${selectedIds.size ? 'bg-black/5 hover:bg-black/10' : 'opacity-40 bg-black/5 cursor-not-allowed'}`}><Check className="w-4 h-4 mx-auto mb-1" />Done</button>
             <button onClick={() => void handleBulkResetProgress()} disabled={!selectedIds.size} className={`px-2 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${selectedIds.size ? 'bg-black/5 hover:bg-black/10' : 'opacity-40 bg-black/5 cursor-not-allowed'}`}><RotateCcw className="w-4 h-4 mx-auto mb-1" />Reset</button>
+            <button onClick={() => void handleBulkAssignVolume()} disabled={!selectedIds.size} className={`px-2 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${selectedIds.size ? 'bg-black/5 hover:bg-black/10' : 'opacity-40 bg-black/5 cursor-not-allowed'}`}><FolderPlus className="w-4 h-4 mx-auto mb-1" />Volume</button>
             <button onClick={() => void handleBulkDelete()} disabled={!selectedIds.size} className={`px-2 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${selectedIds.size ? 'bg-red-500/10 text-red-600 hover:bg-red-500/20' : 'opacity-40 bg-black/5 cursor-not-allowed'}`}><Trash2 className="w-4 h-4 mx-auto mb-1" />Delete</button>
           </div>
           {bulkActionProgress ? (

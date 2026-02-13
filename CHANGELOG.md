@@ -1,5 +1,17 @@
 # TaleVox TTS Changelog
 
+## 2.10.34
+- Restored scroll-driven cover compression/expansion and removed the cover/title bubble card.
+- Increased the expanded cover size on the book header.
+- Eliminated double scrollbars by making inner views the sole scroll containers.
+- Re-saturated the active reader highlight for better visibility.
+- Auto-scroll now keeps the active highlight in view within long paragraphs.
+- Unified chapter selection overlays and removed the gray "last item" effect.
+- Virtualized chapter list/grid rendering to eliminate view-mode switch lag.
+- Removed duplicate chapter layout toggle from Book Settings.
+- Global Settings no longer jumps to the top when toggling controls.
+- Added bulk action to assign selected chapters to a volume.
+
 ## 2.10.33
 - Unified markdown and plain-text reader into a single block-based renderer with working highlight.
 - Markdown tables now render as tables while staying aligned to TTS cue offsets.

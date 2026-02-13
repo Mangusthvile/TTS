@@ -80,6 +80,8 @@ const ReaderList: React.FC<Props> = ({
   const autoScrollTimerRef = useRef<number | null>(null);
 
   const lastFollowedBlockRef = useRef<number | null>(null);
+  const followRafRef = useRef<number | null>(null);
+  const lastForcedScrollRef = useRef<number>(0);
 
   const activeBlockIndex = useMemo(() => {
     if (!activeCueRange) return null;
@@ -188,6 +190,55 @@ const ReaderList: React.FC<Props> = ({
     if (!autoFollow) return;
     if (isScrubbing) return;
     if (activeBlockIndex == null) return;
+    if (userScrollingRef.current) return;
+
+    if (followRafRef.current) {
+      window.cancelAnimationFrame(followRafRef.current);
+      followRafRef.current = null;
+    }
+
+    followRafRef.current = window.requestAnimationFrame(() => {
+      const container = containerRef.current;
+      const blockEl = blockRefs.current[activeBlockIndex];
+      if (!container || !blockEl) return;
+      const anchor =
+        blockEl.querySelector<HTMLElement>("[data-highlight-anchor='true']") ?? blockEl;
+      const containerRect = container.getBoundingClientRect();
+      const anchorRect = anchor.getBoundingClientRect();
+      const marginTop = containerRect.height * 0.25;
+      const marginBottom = containerRect.height * 0.25;
+      const topBound = containerRect.top + marginTop;
+      const bottomBound = containerRect.bottom - marginBottom;
+      const outOfView = anchorRect.top < topBound || anchorRect.bottom > bottomBound;
+
+      if (!outOfView) return;
+
+      const now = Date.now();
+      if (now - lastForcedScrollRef.current < 140) return;
+      lastForcedScrollRef.current = now;
+      scrollToBlock(activeBlockIndex, "smooth", false);
+    });
+
+    return () => {
+      if (followRafRef.current) {
+        window.cancelAnimationFrame(followRafRef.current);
+        followRafRef.current = null;
+      }
+    };
+  }, [
+    activeBlockIndex,
+    activeCueRange?.start,
+    activeCueRange?.end,
+    autoFollow,
+    containerRef,
+    isScrubbing,
+    scrollToBlock,
+  ]);
+
+  useEffect(() => {
+    if (!autoFollow) return;
+    if (isScrubbing) return;
+    if (activeBlockIndex == null) return;
 
     setUserScrolling(false);
 
@@ -231,7 +282,7 @@ const ReaderList: React.FC<Props> = ({
           data-base={blockStart + highlightStart}
           data-highlight-anchor="true"
           data-active="true"
-          className="rounded px-0.5 py-[0.05rem] bg-[var(--highlight-weak)]"
+          className="rounded px-0.5 py-[0.05rem] bg-[var(--highlight-strong)] text-[var(--highlight-strong-text)]"
         >
           {active}
         </span>
