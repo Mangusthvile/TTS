@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { ReaderSettings, Theme, SyncDiagnostics, UiMode, JobRecord } from '../types';
+import { ReaderSettings, Theme, SyncDiagnostics, UiMode, JobRecord, BackupOptions, BackupProgress, BackupSchedulerSettings } from '../types';
 import type { DiagnosticsReport } from '../services/diagnosticsService';
 import { RefreshCw, Cloud, CloudOff, Loader2, LogOut, Save, LogIn, Check, Sun, Coffee, Moon, FolderSync, Wrench, AlertTriangle, ChevronDown, ChevronUp, Terminal, Timer, ClipboardCopy, FileWarning, Bug, Smartphone, Type, Palette, Monitor, LayoutTemplate, Library, List, Bell, Highlighter } from 'lucide-react';
 import { getAuthSessionInfo, isTokenValid, getValidDriveToken } from '../services/driveAuth';
@@ -55,6 +55,18 @@ interface SettingsProps {
   diagnosticsReport?: DiagnosticsReport | null;
   onRefreshDiagnostics?: () => void;
   onSaveDiagnostics?: () => void;
+  backupOptions?: BackupOptions;
+  onUpdateBackupOptions?: (patch: Partial<BackupOptions>) => void;
+  backupInProgress?: boolean;
+  backupProgress?: BackupProgress | null;
+  onBackupToDrive?: () => void;
+  onBackupToDevice?: () => void;
+  onRestoreFromFile?: () => void;
+  onLoadDriveBackups?: () => void;
+  onRestoreFromDriveBackup?: (fileId: string) => void;
+  driveBackupCandidates?: Array<{ id: string; name: string; modifiedTime: string }>;
+  backupSettings?: BackupSchedulerSettings;
+  onUpdateBackupSettings?: (patch: Partial<BackupSchedulerSettings>) => void;
 }
 
 const Settings: React.FC<SettingsProps> = ({ 
@@ -85,10 +97,23 @@ const Settings: React.FC<SettingsProps> = ({
   onShowWorkInfo,
   diagnosticsReport = null,
   onRefreshDiagnostics,
-  onSaveDiagnostics
+  onSaveDiagnostics,
+  backupOptions,
+  onUpdateBackupOptions,
+  backupInProgress = false,
+  backupProgress = null,
+  onBackupToDrive,
+  onBackupToDevice,
+  onRestoreFromFile,
+  onLoadDriveBackups,
+  onRestoreFromDriveBackup,
+  driveBackupCandidates = [],
+  backupSettings,
+  onUpdateBackupSettings,
 }) => {
   const [authState, setAuthState] = useState(authManager.getState());
   const [isDiagExpanded, setIsDiagExpanded] = useState(false);
+  const [selectedDriveBackupId, setSelectedDriveBackupId] = useState<string>("");
   const [activeTab, setActiveTab] = useState<'general' | 'jobs'>('general');
   const [jobBusy, setJobBusy] = useState(false);
   const [recentLogs, setRecentLogs] = useState(() => getLogBuffer(20));
@@ -99,6 +124,7 @@ const Settings: React.FC<SettingsProps> = ({
     highlight: false,
     notifications: false,
     library: false,
+    backup: false,
     system: false,
   });
   
@@ -217,6 +243,20 @@ const Settings: React.FC<SettingsProps> = ({
   const tableLine = diag ? Object.entries(diag.tables).map(([k, v]) => `${k}:${v ? "yes" : "no"}`).join("  ") : "";
   const countLine = diag ? Object.entries(diag.counts).map(([k, v]) => `${k}:${v ?? "n/a"}`).join("  ") : "";
   const showUpdateControls = !import.meta.env.PROD;
+  const effectiveBackupOptions: BackupOptions = backupOptions ?? {
+    includeAudio: true,
+    includeDiagnostics: true,
+    includeAttachments: true,
+    includeChapterText: true,
+    includeOAuthTokens: false,
+  };
+  const effectiveBackupSettings: BackupSchedulerSettings = backupSettings ?? {
+    autoBackupToDrive: false,
+    autoBackupToDevice: false,
+    backupIntervalMin: 30,
+    keepDriveBackups: 10,
+    keepLocalBackups: 10,
+  };
 
   const toggleSection = (key: string) => {
     setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -565,6 +605,171 @@ const Settings: React.FC<SettingsProps> = ({
               <p className="text-[10px] opacity-50 px-1">
                 Fix inconsistent progress bars or "Done" status without resetting your actual reading position.
               </p>
+            </div>
+          </div>
+        </Section>
+
+        <Section id="backup" title="Backup and Restore" icon={Save}>
+          <div className="space-y-4">
+            <div className={`p-4 rounded-xl border ${isDark ? 'border-slate-800 bg-slate-950/40' : 'border-black/5 bg-white'}`}>
+              <div className="text-[10px] font-black uppercase tracking-widest opacity-60 mb-3">Backup Contents</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <label className="flex items-center justify-between text-xs font-bold">
+                  <span>Chapter text files</span>
+                  <input
+                    type="checkbox"
+                    checked={effectiveBackupOptions.includeChapterText}
+                    onChange={(e) => onUpdateBackupOptions?.({ includeChapterText: e.target.checked })}
+                    className="w-4 h-4 accent-indigo-600"
+                  />
+                </label>
+                <label className="flex items-center justify-between text-xs font-bold">
+                  <span>Audio cache files</span>
+                  <input
+                    type="checkbox"
+                    checked={effectiveBackupOptions.includeAudio}
+                    onChange={(e) => onUpdateBackupOptions?.({ includeAudio: e.target.checked })}
+                    className="w-4 h-4 accent-indigo-600"
+                  />
+                </label>
+                <label className="flex items-center justify-between text-xs font-bold">
+                  <span>Attachments</span>
+                  <input
+                    type="checkbox"
+                    checked={effectiveBackupOptions.includeAttachments}
+                    onChange={(e) => onUpdateBackupOptions?.({ includeAttachments: e.target.checked })}
+                    className="w-4 h-4 accent-indigo-600"
+                  />
+                </label>
+                <label className="flex items-center justify-between text-xs font-bold">
+                  <span>Diagnostics files</span>
+                  <input
+                    type="checkbox"
+                    checked={effectiveBackupOptions.includeDiagnostics}
+                    onChange={(e) => onUpdateBackupOptions?.({ includeDiagnostics: e.target.checked })}
+                    className="w-4 h-4 accent-indigo-600"
+                  />
+                </label>
+              </div>
+              <label className="flex items-center justify-between text-xs font-bold mt-3">
+                <span>Include OAuth tokens</span>
+                <input
+                  type="checkbox"
+                  checked={effectiveBackupOptions.includeOAuthTokens === true}
+                  onChange={(e) => onUpdateBackupOptions?.({ includeOAuthTokens: e.target.checked })}
+                  className="w-4 h-4 accent-amber-500"
+                />
+              </label>
+              <p className="text-[10px] text-amber-600 mt-2">
+                Off by default for security. Enable only for trusted personal backups.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <button
+                onClick={onBackupToDrive}
+                disabled={backupInProgress || !onBackupToDrive}
+                className="px-4 py-3 rounded-xl text-xs font-black uppercase tracking-widest bg-indigo-600 text-white disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {backupInProgress ? <Loader2 className="w-4 h-4 animate-spin" /> : <Cloud className="w-4 h-4" />}
+                Backup to Drive
+              </button>
+              <button
+                onClick={onBackupToDevice}
+                disabled={backupInProgress || !onBackupToDevice}
+                className={`px-4 py-3 rounded-xl text-xs font-black uppercase tracking-widest disabled:opacity-50 flex items-center justify-center gap-2 ${isDark ? 'bg-white/10 text-slate-100' : 'bg-black/10 text-black'}`}
+              >
+                <Save className="w-4 h-4" /> Backup to Device
+              </button>
+              <button
+                onClick={onRestoreFromFile}
+                disabled={backupInProgress || !onRestoreFromFile}
+                className="px-4 py-3 rounded-xl text-xs font-black uppercase tracking-widest bg-emerald-600 text-white disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                <FolderSync className="w-4 h-4" /> Restore from File
+              </button>
+              <button
+                onClick={onLoadDriveBackups}
+                disabled={backupInProgress || !onLoadDriveBackups}
+                className={`px-4 py-3 rounded-xl text-xs font-black uppercase tracking-widest disabled:opacity-50 flex items-center justify-center gap-2 ${isDark ? 'bg-white/10 text-slate-100' : 'bg-black/10 text-black'}`}
+              >
+                <RefreshCw className="w-4 h-4" /> Load Drive Backups
+              </button>
+            </div>
+
+            {driveBackupCandidates.length > 0 && (
+              <div className={`p-4 rounded-xl border ${isDark ? 'border-slate-800 bg-slate-950/40' : 'border-black/5 bg-white'}`}>
+                <div className="text-[10px] font-black uppercase tracking-widest opacity-60 mb-2">Restore from Drive</div>
+                <select
+                  className={`w-full rounded-lg px-3 py-2 text-xs font-bold ${isDark ? 'bg-slate-900 border border-slate-700 text-slate-100' : 'bg-white border border-black/10 text-black'}`}
+                  value={selectedDriveBackupId}
+                  onChange={(e) => setSelectedDriveBackupId(e.target.value)}
+                >
+                  <option value="">Select backup ZIP...</option>
+                  {driveBackupCandidates.map((candidate) => (
+                    <option key={candidate.id} value={candidate.id}>
+                      {candidate.name} ({new Date(candidate.modifiedTime).toLocaleString()})
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => selectedDriveBackupId && onRestoreFromDriveBackup?.(selectedDriveBackupId)}
+                  disabled={backupInProgress || !selectedDriveBackupId || !onRestoreFromDriveBackup}
+                  className="mt-3 w-full px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest bg-emerald-600 text-white disabled:opacity-50"
+                >
+                  Restore Selected Drive Backup
+                </button>
+              </div>
+            )}
+
+            {backupProgress && (
+              <div className={`p-3 rounded-xl text-[11px] font-bold ${isDark ? 'bg-indigo-500/10 text-indigo-300' : 'bg-indigo-50 text-indigo-700'}`}>
+                {backupProgress.message}
+                {(typeof backupProgress.current === "number" || typeof backupProgress.total === "number") && (
+                  <span className="ml-2 opacity-80">
+                    {typeof backupProgress.current === "number" ? backupProgress.current : 0}
+                    {typeof backupProgress.total === "number" ? ` / ${backupProgress.total}` : ""}
+                  </span>
+                )}
+              </div>
+            )}
+
+            <div className={`p-4 rounded-xl border ${isDark ? 'border-slate-800 bg-slate-950/40' : 'border-black/5 bg-white'}`}>
+              <div className="text-[10px] font-black uppercase tracking-widest opacity-60 mb-2">Auto Backup</div>
+              <div className="space-y-2">
+                <label className="flex items-center justify-between text-xs font-bold">
+                  <span>Auto Backup to Drive</span>
+                  <input
+                    type="checkbox"
+                    checked={effectiveBackupSettings.autoBackupToDrive}
+                    onChange={(e) => onUpdateBackupSettings?.({ autoBackupToDrive: e.target.checked })}
+                    className="w-4 h-4 accent-indigo-600"
+                  />
+                </label>
+                <label className="flex items-center justify-between text-xs font-bold">
+                  <span>Auto Backup to Device</span>
+                  <input
+                    type="checkbox"
+                    checked={effectiveBackupSettings.autoBackupToDevice}
+                    onChange={(e) => onUpdateBackupSettings?.({ autoBackupToDevice: e.target.checked })}
+                    className="w-4 h-4 accent-indigo-600"
+                  />
+                </label>
+                <div className="pt-2">
+                  <div className="text-[10px] font-black uppercase opacity-50 mb-2">Interval</div>
+                  <div className="grid grid-cols-4 gap-2">
+                    {[5, 15, 30, 60].map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => onUpdateBackupSettings?.({ backupIntervalMin: m as 5 | 15 | 30 | 60 })}
+                        className={`py-2 rounded-lg text-[10px] font-black border transition-all ${effectiveBackupSettings.backupIntervalMin === m ? 'bg-indigo-600 text-white border-indigo-600' : 'hover:bg-black/5 border-transparent'}`}
+                      >
+                        {m}m
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </Section>

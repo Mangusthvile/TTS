@@ -2,6 +2,7 @@ import { Directory, Encoding, Filesystem } from "@capacitor/filesystem";
 import { Capacitor } from "@capacitor/core";
 import {
   AppState,
+  BackupSchedulerSettings,
   Book,
   BookAttachment,
   BookSettings,
@@ -13,6 +14,11 @@ import {
 } from "../types";
 import { buildFullSnapshotV1, migrateSnapshot } from "./fullSnapshot";
 import { ensureRootStructure, fetchDriveFile, findFileSync, listSaveFileCandidates, uploadToDrive } from "./driveService";
+import {
+  deriveDisplayIndices,
+  getChapterSortOrder,
+  normalizeChapterOrder,
+} from "./chapterOrderingService";
 
 const POINTER_FILE_NAME = "talevox-latest.json";
 const SNAPSHOT_FILE_PREFIX = "talevox_full_";
@@ -30,20 +36,67 @@ function asNumber(value: unknown, fallback = 0): number {
 }
 
 function normalizeBookSettings(settings: BookSettings | undefined): BookSettings {
+  const volumeOrder = Array.isArray(settings?.volumeOrder)
+    ? settings.volumeOrder
+        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        .map((name) => name.trim())
+    : [];
+  const collapsedVolumes: Record<string, boolean> = {};
+  if (settings?.collapsedVolumes && typeof settings.collapsedVolumes === "object") {
+    for (const [name, value] of Object.entries(settings.collapsedVolumes)) {
+      const trimmed = name.trim();
+      if (trimmed && value === true) collapsedVolumes[trimmed] = true;
+    }
+  }
   return {
     useBookSettings: settings?.useBookSettings ?? false,
     highlightMode: settings?.highlightMode ?? HighlightMode.SENTENCE,
     playbackSpeed: settings?.playbackSpeed,
     selectedVoiceName: settings?.selectedVoiceName,
     defaultVoiceId: settings?.defaultVoiceId,
+    chapterLayout: settings?.chapterLayout === "grid" ? "grid" : "sections",
+    enableSelectionMode:
+      typeof settings?.enableSelectionMode === "boolean" ? settings.enableSelectionMode : true,
+    enableOrganizeMode:
+      typeof settings?.enableOrganizeMode === "boolean" ? settings.enableOrganizeMode : true,
+    allowDragReorderChapters:
+      typeof settings?.allowDragReorderChapters === "boolean"
+        ? settings.allowDragReorderChapters
+        : true,
+    allowDragMoveToVolume:
+      typeof settings?.allowDragMoveToVolume === "boolean" ? settings.allowDragMoveToVolume : true,
+    allowDragReorderVolumes:
+      typeof settings?.allowDragReorderVolumes === "boolean"
+        ? settings.allowDragReorderVolumes
+        : true,
+    volumeOrder,
+    collapsedVolumes,
     autoGenerateAudioOnAdd:
       typeof settings?.autoGenerateAudioOnAdd === "boolean" ? settings.autoGenerateAudioOnAdd : true,
+    autoUploadOnAdd: typeof settings?.autoUploadOnAdd === "boolean" ? settings.autoUploadOnAdd : false,
+    confirmBulkDelete: typeof settings?.confirmBulkDelete === "boolean" ? settings.confirmBulkDelete : true,
+  };
+}
+
+function normalizeBackupSettings(settings: unknown): BackupSchedulerSettings {
+  const raw = isRecord(settings) ? settings : {};
+  const interval = Number(raw.backupIntervalMin);
+  const normalizedInterval =
+    interval === 5 || interval === 15 || interval === 30 || interval === 60 ? interval : 30;
+  return {
+    autoBackupToDrive: raw.autoBackupToDrive === true,
+    autoBackupToDevice: raw.autoBackupToDevice === true,
+    backupIntervalMin: normalizedInterval,
+    keepDriveBackups: Math.max(1, asNumber(raw.keepDriveBackups, 10)),
+    keepLocalBackups: Math.max(1, asNumber(raw.keepLocalBackups, 10)),
   };
 }
 
 function normalizeChapter(chapter: Chapter): Chapter {
+  const sortOrder = getChapterSortOrder(chapter);
   return {
     ...chapter,
+    sortOrder,
     volumeName:
       typeof chapter.volumeName === "string" && chapter.volumeName.trim().length
         ? chapter.volumeName.trim()
@@ -100,10 +153,14 @@ function mergeJobs(localJobs: JobRecord[], incomingJobs: JobRecord[]): JobRecord
 
 function mergeBook(localBook: Book, incomingBook: Book): Book {
   const mergedBase = pickNewer(localBook, incomingBook);
-  const mergedChapters = mergeById(
+  const mergedChapters = deriveDisplayIndices(
+    normalizeChapterOrder(
+      mergeById(
     (localBook.chapters || []).map((chapter) => normalizeChapter(chapter)),
     (incomingBook.chapters || []).map((chapter) => normalizeChapter(chapter))
-  ).sort((a, b) => (a.index || 0) - (b.index || 0));
+      )
+    )
+  );
 
   return {
     ...mergedBase,
@@ -219,12 +276,25 @@ export function applyFullSnapshot(input: ApplySnapshotInput): ApplySnapshotResul
       typeof pref.showDiagnostics === "boolean"
         ? pref.showDiagnostics
         : currentState.showDiagnostics,
+    backupSettings: normalizeBackupSettings(pref.backupSettings ?? currentState.backupSettings),
+    lastBackupAt:
+      typeof pref.lastBackupAt === "number" ? pref.lastBackupAt : currentState.lastBackupAt,
+    lastBackupLocation:
+      typeof pref.lastBackupLocation === "string"
+        ? pref.lastBackupLocation
+        : currentState.lastBackupLocation,
+    lastBackupError:
+      typeof pref.lastBackupError === "string"
+        ? pref.lastBackupError
+        : currentState.lastBackupError,
     lastSavedAt: Date.now(),
   };
 
   for (const book of mergedState.books) {
     book.settings = normalizeBookSettings(book.settings);
-    book.chapters = (book.chapters || []).map((chapter) => normalizeChapter(chapter));
+    book.chapters = deriveDisplayIndices(
+      normalizeChapterOrder((book.chapters || []).map((chapter) => normalizeChapter(chapter)))
+    );
     book.chapterCount = book.chapters.length;
   }
 

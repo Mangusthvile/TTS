@@ -10,11 +10,26 @@ import {
   Rule,
   SavedSnapshot,
 } from "../types";
+import {
+  deriveDisplayIndices,
+  getChapterSortOrder,
+  normalizeChapterOrder,
+} from "./chapterOrderingService";
 
 const DEFAULT_BOOK_SETTINGS: BookSettings = {
   useBookSettings: false,
   highlightMode: HighlightMode.SENTENCE,
+  chapterLayout: "sections",
+  enableSelectionMode: true,
+  enableOrganizeMode: true,
+  allowDragReorderChapters: true,
+  allowDragMoveToVolume: true,
+  allowDragReorderVolumes: true,
+  volumeOrder: [],
+  collapsedVolumes: {},
   autoGenerateAudioOnAdd: true,
+  autoUploadOnAdd: false,
+  confirmBulkDelete: true,
 };
 
 const APP_VERSION_FALLBACK =
@@ -44,17 +59,45 @@ function normalizeVolumeLocalChapter(value: unknown): number | undefined {
 
 function normalizeBookSettings(value: unknown): BookSettings {
   const raw = isRecord(value) ? value : {};
+  const rawVolumeOrder = Array.isArray(raw.volumeOrder) ? raw.volumeOrder : [];
+  const volumeOrder = rawVolumeOrder
+    .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    .map((name) => name.trim());
+  const collapsedVolumesRaw = isRecord(raw.collapsedVolumes) ? raw.collapsedVolumes : {};
+  const collapsedVolumes: Record<string, boolean> = {};
+  for (const [key, val] of Object.entries(collapsedVolumesRaw)) {
+    const trimmed = key.trim();
+    if (!trimmed) continue;
+    if (val === true) collapsedVolumes[trimmed] = true;
+  }
   return {
     ...DEFAULT_BOOK_SETTINGS,
     ...raw,
+    chapterLayout: raw.chapterLayout === "grid" ? "grid" : "sections",
+    enableSelectionMode:
+      typeof raw.enableSelectionMode === "boolean" ? raw.enableSelectionMode : true,
+    enableOrganizeMode:
+      typeof raw.enableOrganizeMode === "boolean" ? raw.enableOrganizeMode : true,
+    allowDragReorderChapters:
+      typeof raw.allowDragReorderChapters === "boolean" ? raw.allowDragReorderChapters : true,
+    allowDragMoveToVolume:
+      typeof raw.allowDragMoveToVolume === "boolean" ? raw.allowDragMoveToVolume : true,
+    allowDragReorderVolumes:
+      typeof raw.allowDragReorderVolumes === "boolean" ? raw.allowDragReorderVolumes : true,
+    volumeOrder,
+    collapsedVolumes,
     autoGenerateAudioOnAdd:
       typeof raw.autoGenerateAudioOnAdd === "boolean" ? raw.autoGenerateAudioOnAdd : true,
+    autoUploadOnAdd: typeof raw.autoUploadOnAdd === "boolean" ? raw.autoUploadOnAdd : false,
+    confirmBulkDelete: typeof raw.confirmBulkDelete === "boolean" ? raw.confirmBulkDelete : true,
   };
 }
 
 function normalizeChapter(chapter: Chapter): Chapter {
+  const sortOrder = getChapterSortOrder(chapter);
   return {
     ...chapter,
+    sortOrder,
     volumeName: normalizeVolumeName((chapter as any).volumeName),
     volumeLocalChapter: normalizeVolumeLocalChapter((chapter as any).volumeLocalChapter),
     contentFormat: chapter.contentFormat === "markdown" ? "markdown" : "text",
@@ -62,10 +105,11 @@ function normalizeChapter(chapter: Chapter): Chapter {
 }
 
 function normalizeBook(book: Book): Book {
-  const chapters = Array.isArray(book.chapters)
-    ? book.chapters.map((c) => normalizeChapter(c))
-    : [];
-  chapters.sort((a, b) => (a.index || 0) - (b.index || 0));
+  const chapters = deriveDisplayIndices(
+    normalizeChapterOrder(
+      Array.isArray(book.chapters) ? book.chapters.map((c) => normalizeChapter(c)) : []
+    )
+  );
   return {
     ...book,
     settings: normalizeBookSettings(book.settings),
@@ -103,7 +147,8 @@ function normalizeSnapshot(snapshot: FullSnapshotV1): FullSnapshotV1 {
     (topLevelChapters.length ? topLevelChapters : inferredChapters).map((chapter) =>
       normalizeChapter(chapter)
     )
-  ).sort((a, b) => (a.index || 0) - (b.index || 0));
+  );
+  const orderedChapters = deriveDisplayIndices(normalizeChapterOrder(chapters));
 
   const attachments = dedupeById(
     Array.isArray(snapshot.attachments) ? snapshot.attachments : []
@@ -119,7 +164,7 @@ function normalizeSnapshot(snapshot: FullSnapshotV1): FullSnapshotV1 {
     appVersion: snapshot.appVersion || APP_VERSION_FALLBACK,
     createdAt: asNumber(snapshot.createdAt, Date.now()),
     books,
-    chapters,
+    chapters: orderedChapters,
     attachments,
     jobs,
     globalRules: Array.isArray(snapshot.globalRules) ? (snapshot.globalRules as Rule[]) : [],
@@ -235,8 +280,8 @@ export type BuildFullSnapshotInput = {
 
 export function buildFullSnapshotV1(input: BuildFullSnapshotInput): FullSnapshotV1 {
   const books = dedupeById((input.state.books || []).map((book) => normalizeBook(book)));
-  const chapters = dedupeById(books.flatMap((book) => book.chapters || [])).sort(
-    (a, b) => (a.index || 0) - (b.index || 0)
+  const chapters = deriveDisplayIndices(
+    normalizeChapterOrder(dedupeById(books.flatMap((book) => book.chapters || [])))
   );
 
   return normalizeSnapshot({

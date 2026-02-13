@@ -44,6 +44,7 @@ import {
   deleteChapterTombstone as idbDeleteChapterTombstone,
 } from "./libraryIdb";
 import type { SQLiteDBConnection } from "@capacitor-community/sqlite";
+import { getChapterSortOrder, normalizeChapterOrder } from "./chapterOrderingService";
 
 let initPromise: Promise<void> | null = null;
 const DB_NAME = appConfig.db.name;
@@ -274,18 +275,23 @@ export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promi
 
   const db = await mustSqliteDb();
   const updatedAt = chapter.updatedAt ?? Date.now();
+  const sortOrder = getChapterSortOrder(chapter);
+  const legacyIndex = Number.isFinite(Number(chapter.index)) && Number(chapter.index) > 0
+    ? Number(chapter.index)
+    : sortOrder;
 
   await db.run(
     `INSERT INTO chapters (
-       id, bookId, idx, title, filename, sourceUrl,
+       id, bookId, idx, sortOrder, title, filename, sourceUrl,
        volumeName, volumeLocalChapter,
        cloudTextFileId, cloudAudioFileId, audioDriveId,
        audioStatus, audioSignature, durationSec, textLength, wordCount, isFavorite, updatedAt
      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        bookId=excluded.bookId,
        idx=excluded.idx,
+       sortOrder=excluded.sortOrder,
        title=excluded.title,
        filename=excluded.filename,
        sourceUrl=excluded.sourceUrl,
@@ -304,7 +310,8 @@ export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promi
     [
       chapter.id,
       bookId,
-      chapter.index,
+      legacyIndex,
+      sortOrder,
       chapter.title,
       chapter.filename,
       chapter.sourceUrl ?? null,
@@ -604,19 +611,19 @@ export async function listChaptersPage(
 
   let where = `WHERE bookId = ? AND id NOT IN (SELECT chapterId FROM chapter_tombstones WHERE bookId = ?)`;
   if (afterIndex != null) {
-    where += ` AND idx > ?`;
+    where += ` AND COALESCE(sortOrder, idx) > ?`;
     params.push(afterIndex);
   }
 
   params.push(limit);
 
    const res = await db.query(
-    `SELECT id, idx as "index", title, filename, sourceUrl, volumeName, volumeLocalChapter,
+    `SELECT id, idx as "index", COALESCE(sortOrder, idx) as "sortOrder", title, filename, sourceUrl, volumeName, volumeLocalChapter,
             cloudTextFileId, cloudAudioFileId, audioDriveId,
             audioStatus, audioSignature, durationSec, textLength, wordCount, isFavorite, updatedAt
      FROM chapters
      ${where}
-     ORDER BY idx ASC
+     ORDER BY COALESCE(sortOrder, idx) ASC, idx ASC
      LIMIT ?`,
     params
   );
@@ -625,9 +632,13 @@ export async function listChaptersPage(
 
   const fallbackBase = typeof afterIndex === "number" ? afterIndex : 0;
   const chapters: Chapter[] = rows.map((r, i) => {
+    const rawSortOrder = Number(r.sortOrder ?? r.index ?? r.idx);
+    const normalizedSortOrder = Number.isFinite(rawSortOrder) && rawSortOrder > 0
+      ? Math.floor(rawSortOrder)
+      : fallbackBase + i + 1;
     const rawIndex = Number(r.index ?? r.idx);
     const fallbackIndex = fallbackBase + i + 1;
-    const index = Number.isFinite(rawIndex) && rawIndex > 0 ? rawIndex : fallbackIndex;
+    const index = Number.isFinite(rawIndex) && rawIndex > 0 ? Math.floor(rawIndex) : fallbackIndex;
     const rawTitle = typeof r.title === "string" ? r.title.trim() : "";
     const title = rawTitle && !rawTitle.toLowerCase().startsWith("imported")
       ? rawTitle
@@ -635,6 +646,7 @@ export async function listChaptersPage(
     return {
       id: String(r.id),
       index,
+      sortOrder: normalizedSortOrder,
       title,
     filename: String(r.filename),
     sourceUrl: r.sourceUrl ?? undefined,
@@ -662,7 +674,10 @@ export async function listChaptersPage(
     };
   });
 
-  const nextAfterIndex = chapters.length ? chapters[chapters.length - 1].index : null;
+  const orderedChapters = normalizeChapterOrder(chapters);
+  const nextAfterIndex = orderedChapters.length
+    ? getChapterSortOrder(orderedChapters[orderedChapters.length - 1])
+    : null;
   let totalCount: number | undefined;
   try {
     const countRes = await db.query(
@@ -679,8 +694,8 @@ export async function listChaptersPage(
   }
 
   return {
-    chapters,
-    nextAfterIndex: chapters.length < limit ? null : nextAfterIndex,
+    chapters: orderedChapters,
+    nextAfterIndex: orderedChapters.length < limit ? null : nextAfterIndex,
     totalCount,
   };
 }
@@ -704,14 +719,14 @@ export async function getChaptersByIds(bookId: string, chapterIds: string[]): Pr
     const chunk = ids.slice(i, i + chunkSize);
     const placeholders = chunk.map(() => "?").join(",");
     const res = await db.query(
-      `SELECT id, idx as "index", title, filename, sourceUrl, volumeName, volumeLocalChapter,
+      `SELECT id, idx as "index", COALESCE(sortOrder, idx) as "sortOrder", title, filename, sourceUrl, volumeName, volumeLocalChapter,
               cloudTextFileId, cloudAudioFileId, audioDriveId,
               audioStatus, audioSignature, durationSec, textLength, wordCount, isFavorite, updatedAt
        FROM chapters
        WHERE bookId = ?
          AND id IN (${placeholders})
          AND id NOT IN (SELECT chapterId FROM chapter_tombstones WHERE bookId = ?)
-       ORDER BY idx ASC`,
+       ORDER BY COALESCE(sortOrder, idx) ASC, idx ASC`,
       [bookId, ...chunk, bookId]
     );
     rows.push(...((res.values ?? []) as any[]));
@@ -721,6 +736,8 @@ export async function getChaptersByIds(bookId: string, chapterIds: string[]): Pr
   for (const r of rows) {
     const rawIndex = Number(r.index ?? r.idx);
     const index = Number.isFinite(rawIndex) && rawIndex > 0 ? rawIndex : 1;
+    const rawSortOrder = Number(r.sortOrder ?? r.index ?? r.idx);
+    const sortOrder = Number.isFinite(rawSortOrder) && rawSortOrder > 0 ? Math.floor(rawSortOrder) : index;
     const rawTitle = typeof r.title === "string" ? r.title.trim() : "";
     const title =
       rawTitle && !rawTitle.toLowerCase().startsWith("imported") ? rawTitle : `Chapter ${index}`;
@@ -728,6 +745,7 @@ export async function getChaptersByIds(bookId: string, chapterIds: string[]): Pr
     byId.set(String(r.id), {
       id: String(r.id),
       index,
+      sortOrder,
       title,
       filename: String(r.filename),
       sourceUrl: r.sourceUrl ?? undefined,
@@ -755,7 +773,7 @@ export async function getChaptersByIds(bookId: string, chapterIds: string[]): Pr
     } as any);
   }
 
-  return ids.map((id) => byId.get(id)).filter(Boolean) as Chapter[];
+  return normalizeChapterOrder(ids.map((id) => byId.get(id)).filter(Boolean) as Chapter[]);
 }
 
 export async function bulkUpsertChapters(

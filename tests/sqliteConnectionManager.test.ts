@@ -5,12 +5,15 @@ const createConnection = vi.fn();
 const retrieveConnection = vi.fn();
 const closeConnection = vi.fn();
 const checkConnectionsConsistency = vi.fn();
+const importFromJson = vi.fn();
+const isJsonValid = vi.fn();
 const fakeDb = {
   open: vi.fn(async () => {}),
   isDBOpen: vi.fn(async () => ({ result: true })),
   query: vi.fn(),
   run: vi.fn(),
   execute: vi.fn(),
+  exportToJson: vi.fn(async () => ({ database: "talevox_db", mode: "full", tables: [] })),
 };
 
 vi.mock("@capacitor-community/sqlite", () => {
@@ -20,6 +23,8 @@ vi.mock("@capacitor-community/sqlite", () => {
     retrieveConnection = retrieveConnection;
     createConnection = createConnection;
     closeConnection = closeConnection;
+    importFromJson = importFromJson;
+    isJsonValid = isJsonValid;
   }
 
   return {
@@ -36,8 +41,11 @@ describe("sqliteConnectionManager", () => {
     retrieveConnection.mockReset().mockResolvedValue(fakeDb);
     closeConnection.mockReset().mockResolvedValue(undefined);
     checkConnectionsConsistency.mockReset().mockResolvedValue({ result: true });
+    importFromJson.mockReset().mockResolvedValue({ changes: { changes: 1 } });
+    isJsonValid.mockReset().mockResolvedValue({ result: true });
     fakeDb.open.mockClear();
     fakeDb.isDBOpen.mockClear();
+    fakeDb.exportToJson.mockClear();
   });
 
   it("creates only one connection for concurrent calls", async () => {
@@ -56,5 +64,20 @@ describe("sqliteConnectionManager", () => {
     expect(db).toBe(fakeDb);
     expect(retrieveConnection).toHaveBeenCalledTimes(1);
     expect(createConnection).toHaveBeenCalledTimes(0);
+  });
+
+  it("exports sqlite json payload", async () => {
+    const { exportSqliteJson } = await import("../services/sqliteConnectionManager");
+    const payload = await exportSqliteJson("talevox_db", 1);
+    expect(typeof payload).toBe("string");
+    expect(fakeDb.exportToJson).toHaveBeenCalledWith("full");
+  });
+
+  it("validates and imports sqlite json payload", async () => {
+    const { importSqliteJson, isSqliteJsonValid } = await import("../services/sqliteConnectionManager");
+    const input = JSON.stringify({ database: "talevox_db", version: 1 });
+    await expect(isSqliteJsonValid(input)).resolves.toBe(true);
+    await expect(importSqliteJson(input, "talevox_db", 1)).resolves.toBeUndefined();
+    expect(importFromJson).toHaveBeenCalled();
   });
 });

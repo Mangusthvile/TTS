@@ -1,7 +1,8 @@
-import React, { useMemo, useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
+import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile, Rule, UiMode, JobRecord } from '../types';
-import { LayoutGrid, List, AlignJustify, Eye, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, CloudOff, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon, Sparkles } from 'lucide-react';
+import { LayoutGrid, AlignJustify, Eye, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, CloudOff, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Settings as GearIcon, Sparkles, CheckSquare, Repeat2, MoreVertical, GripVertical, FolderSync } from 'lucide-react';
 import { hasAudioInCache } from '../services/audioCache';
+import { getChapterAudioPath } from '../services/chapterAudioStore';
 import {
   uploadToDrive,
   listFilesInFolder,
@@ -27,13 +28,16 @@ import {
 import { initBookFolderManifests } from "../services/bookFolderInit";
 import { createDriveFolderAdapter } from "../services/driveFolderAdapter";
 import type { InventoryManifest } from "../services/bookManifests";
-import { FixedSizeList as VirtualList, type FixedSizeList, type ListChildComponentProps, type ListOnScrollProps } from "react-window";
+import {
+  fixChapterOrdering,
+  getChapterSortOrder,
+  normalizeChapterOrder,
+} from "../services/chapterOrderingService";
 
-type ViewMode = 'details' | 'list' | 'grid';
-
-type ChapterListRow =
-  | { kind: "volume"; volumeName: string; volumeNumber: number | null; count: number }
-  | { kind: "chapter"; chapter: Chapter; volumeName?: string; localIndex: number };
+type ViewMode = 'sections' | 'grid';
+type ViewScrollState = { sections: number; grid: number };
+const LONG_PRESS_MS = 450;
+const LONG_PRESS_MOVE_THRESHOLD_PX = 10;
 
 type LegacyGroup = {
   legacyIndex: number;
@@ -95,6 +99,8 @@ interface ChapterFolderViewProps {
     chapterTextRows?: number;
     missingFiles?: number;
   }>;
+  onReindexChapters?: () => Promise<{ updated: number; maxBefore: number; maxAfter: number }>;
+  onRegisterBackHandler?: (handler: (() => boolean) | null) => void;
 }
 
 const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
@@ -139,15 +145,24 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   onQueueGenerateJob,
   onBulkUpdateChapters,
   onSyncNativeLibrary,
+  onReindexChapters,
+  onRegisterBackHandler,
 }) => {
   const { driveFolderId } = book;
   const VIEW_MODE_KEY = `talevox:viewMode:${book.id}`;
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     const saved = localStorage.getItem(VIEW_MODE_KEY);
-    return (saved === 'details' || saved === 'list' || saved === 'grid') ? (saved as ViewMode) : 'details';
+    if (saved === "grid") return "grid";
+    return "sections";
   });
 
   useEffect(() => { localStorage.setItem(VIEW_MODE_KEY, viewMode); }, [viewMode, VIEW_MODE_KEY]);
+  useEffect(() => {
+    if (!onUpdateBookSettings) return;
+    const current = book.settings?.chapterLayout === "grid" ? "grid" : "sections";
+    if (current === viewMode) return;
+    onUpdateBookSettings({ chapterLayout: viewMode });
+  }, [viewMode, onUpdateBookSettings, book.settings?.chapterLayout]);
   useEffect(() => {
     return () => {
       scanRunRef.current += 1;
@@ -202,13 +217,35 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [showVoiceModal, setShowVoiceModal] = useState<{ chapterId?: string } | null>(null);
   const [rememberAsDefault, setRememberAsDefault] = useState(true);
 
-  const [isHeaderExpanded, setIsHeaderExpanded] = useState(false);
-  const [collapsedVolumes, setCollapsedVolumes] = useState<Record<string, boolean>>({});
+  const [collapsedVolumes, setCollapsedVolumes] = useState<Record<string, boolean>>(() => {
+    const raw = book.settings?.collapsedVolumes || {};
+    const next: Record<string, boolean> = {};
+    for (const [name, value] of Object.entries(raw)) {
+      const trimmed = String(name || "").trim();
+      if (trimmed && value === true) next[trimmed] = true;
+    }
+    return next;
+  });
+  const [searchQuery, setSearchQuery] = useState("");
+  const [showSearchBar, setShowSearchBar] = useState(false);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
+  const [isOrganizeMode, setIsOrganizeMode] = useState(false);
+  const [bulkActionProgress, setBulkActionProgress] = useState<{ label: string; current: number; total: number } | null>(null);
+  const [draggingChapterId, setDraggingChapterId] = useState<string | null>(null);
+  const [draggingVolumeName, setDraggingVolumeName] = useState<string | null>(null);
+  const longPressTimerRef = useRef<number | null>(null);
+  const longPressPointerIdRef = useRef<number | null>(null);
+  const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
+  const longPressChapterIdRef = useRef<string | null>(null);
+  const longPressTriggeredRef = useRef(false);
   const [mobileMenuId, setMobileMenuId] = useState<string | null>(null);
+  const [cachedAudioChapterIds, setCachedAudioChapterIds] = useState<Set<string>>(() => new Set());
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const virtualListRef = useRef<FixedSizeList | null>(null);
+  const viewScrollRef = useRef<ViewScrollState>({ sections: 0, grid: 0 });
+  const lastViewModeRef = useRef<ViewMode>(viewMode);
   const restoreKeyRef = useRef<string | null>(null);
-  const [listViewport, setListViewport] = useState({ width: 0, height: 0 });
   const [bgGenProgress, setBgGenProgress] = useState<{ current: number; total: number } | null>(null);
   const [isRegeneratingAudio, setIsRegeneratingAudio] = useState(false);
   const [showBookSettings, setShowBookSettings] = useState(false);
@@ -223,6 +260,32 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [isSyncingNative, setIsSyncingNative] = useState(false);
   const [syncSummary, setSyncSummary] = useState<{ books: number; chapters: number; texts: number; failures: number } | null>(null);
 
+  useEffect(() => {
+    const raw = book.settings?.collapsedVolumes || {};
+    const next: Record<string, boolean> = {};
+    for (const [name, value] of Object.entries(raw)) {
+      const trimmed = String(name || "").trim();
+      if (trimmed && value === true) next[trimmed] = true;
+    }
+    setCollapsedVolumes(next);
+  }, [book.id, book.settings?.collapsedVolumes]);
+
+  useEffect(() => {
+    const preferred = book.settings?.chapterLayout === "grid" ? "grid" : "sections";
+    setViewMode(preferred);
+  }, [book.id, book.settings?.chapterLayout]);
+
+  useEffect(() => {
+    if (book.settings?.enableSelectionMode === false && selectionMode) {
+      setSelectionMode(false);
+      setSelectedIds(new Set());
+      setSelectionAnchorId(null);
+    }
+    if (book.settings?.enableOrganizeMode === false && isOrganizeMode) {
+      setIsOrganizeMode(false);
+    }
+  }, [book.settings?.enableSelectionMode, book.settings?.enableOrganizeMode, selectionMode, isOrganizeMode]);
+
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
   const cardBg = isDark ? 'bg-slate-800 border-slate-700' : isSepia ? 'bg-[#f4ecd8] border-[#d8ccb6]' : 'bg-white border-black/10';
@@ -232,12 +295,25 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const accentButtonClass = `px-4 py-2 rounded-xl font-black uppercase tracking-widest text-[10px] transition-colors ${isDark ? 'bg-white/10 text-white border border-white/20 hover:bg-white/20' : 'bg-black/10 text-black border border-black/10 hover:bg-black/20'}`;
   const primaryActionClass = `px-4 py-2 rounded-xl font-black uppercase tracking-widest text-[10px] transition-colors ${isDark ? 'bg-indigo-500 text-white shadow-lg hover:bg-indigo-400' : 'bg-indigo-600 text-white shadow-lg hover:bg-indigo-500'}`;
 
-  const chapters = useMemo(() => [...(book.chapters || [])].sort((a, b) => a.index - b.index), [book.chapters]);
+  const chapters = useMemo(
+    () => normalizeChapterOrder(book.chapters || []),
+    [book.chapters]
+  );
+  const filteredChapters = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return chapters;
+    return chapters.filter((chapter) => {
+      const title = `${chapter.title || ""}`.toLowerCase();
+      const filename = `${chapter.filename || ""}`.toLowerCase();
+      const idx = `${chapter.index || getChapterSortOrder(chapter) || ""}`;
+      return title.includes(q) || filename.includes(q) || idx.includes(q);
+    });
+  }, [chapters, searchQuery]);
 
   const volumeSections = useMemo(() => {
     const grouped = new Map<string, Chapter[]>();
     const ungrouped: Chapter[] = [];
-    for (const ch of chapters) {
+    for (const ch of filteredChapters) {
       const volumeName =
         typeof (ch as any).volumeName === "string" ? String((ch as any).volumeName).trim() : "";
       if (!volumeName) {
@@ -252,12 +328,23 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     const volumes = Array.from(grouped.entries()).map(([volumeName, items]) => {
       const m = volumeName.match(/^(book|volume)\s*(\d+)/i);
       const volumeNumber = m ? parseInt(m[2], 10) : null;
-      const sorted = [...items].sort((a, b) => a.index - b.index);
+      const sorted = normalizeChapterOrder(items);
       return { volumeName, volumeNumber: Number.isFinite(volumeNumber) ? volumeNumber : null, chapters: sorted };
     });
 
+    const explicitOrder = Array.isArray(book.settings?.volumeOrder)
+      ? book.settings.volumeOrder
+          .filter((name): name is string => typeof name === "string" && name.trim().length > 0)
+          .map((name) => name.trim())
+      : [];
+    const explicitOrderMap = new Map<string, number>();
+    explicitOrder.forEach((name, idx) => explicitOrderMap.set(name, idx));
+
     const NONE = 1_000_000_000;
     volumes.sort((a, b) => {
+      const explicitA = explicitOrderMap.has(a.volumeName) ? explicitOrderMap.get(a.volumeName)! : NONE;
+      const explicitB = explicitOrderMap.has(b.volumeName) ? explicitOrderMap.get(b.volumeName)! : NONE;
+      if (explicitA !== explicitB) return explicitA - explicitB;
       const aN = a.volumeNumber ?? NONE;
       const bN = b.volumeNumber ?? NONE;
       if (aN !== bN) return aN - bN;
@@ -266,36 +353,449 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
     return {
       volumes,
-      ungrouped: [...ungrouped].sort((a, b) => a.index - b.index),
+      ungrouped: normalizeChapterOrder(ungrouped),
     };
-  }, [chapters]);
+  }, [filteredChapters, book.settings?.volumeOrder]);
 
-  const listRows = useMemo<ChapterListRow[]>(() => {
-    const rows: ChapterListRow[] = [];
+  const visibleChapters = useMemo(() => {
+    const rows: Chapter[] = [];
     for (const group of volumeSections.volumes) {
-      rows.push({
-        kind: "volume",
-        volumeName: group.volumeName,
-        volumeNumber: group.volumeNumber,
-        count: group.chapters.length,
-      });
       if (collapsedVolumes[group.volumeName]) continue;
-      group.chapters.forEach((chapter, i) => {
-        rows.push({ kind: "chapter", chapter, volumeName: group.volumeName, localIndex: i + 1 });
-      });
+      rows.push(...group.chapters);
     }
-    volumeSections.ungrouped.forEach((chapter, i) => {
-      rows.push({ kind: "chapter", chapter, volumeName: undefined, localIndex: i + 1 });
-    });
+    rows.push(...volumeSections.ungrouped);
     return rows;
   }, [volumeSections, collapsedVolumes]);
 
+  const visibleChapterIds = useMemo(() => new Set(visibleChapters.map((chapter) => chapter.id)), [visibleChapters]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const chapterIds = visibleChapters.map((chapter) => chapter.id);
+    if (!chapterIds.length) {
+      setCachedAudioChapterIds((prev) => (prev.size ? new Set() : prev));
+      return;
+    }
+
+    const chapterById = new Map(chapters.map((chapter) => [chapter.id, chapter]));
+
+    const run = async () => {
+      const detected = new Set<string>();
+      const concurrency = 8;
+      for (let i = 0; i < chapterIds.length; i += concurrency) {
+        const batch = chapterIds.slice(i, i + concurrency);
+        const checks = await Promise.allSettled(
+          batch.map(async (chapterId) => {
+            const chapter = chapterById.get(chapterId);
+            if (!chapter) return false;
+            if (chapter.audioSignature) {
+              const inSignatureCache = await hasAudioInCache(chapter.audioSignature);
+              if (inSignatureCache) return true;
+            }
+            const record = await getChapterAudioPath(chapterId);
+            return !!record?.localPath;
+          })
+        );
+        checks.forEach((result, idx) => {
+          if (result.status === "fulfilled" && result.value) {
+            detected.add(batch[idx]);
+          }
+        });
+      }
+      if (cancelled) return;
+      setCachedAudioChapterIds((prev) => {
+        const next = new Set(prev);
+        chapterIds.forEach((id) => next.delete(id));
+        detected.forEach((id) => next.add(id));
+        return next;
+      });
+    };
+
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [chapters, visibleChapters]);
+
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (chapters.some((chapter) => chapter.id === id)) next.add(id);
+      }
+      return next;
+    });
+  }, [chapters]);
+
+  useEffect(() => {
+    if (selectionMode && selectedIds.size === 0) {
+      setSelectionMode(false);
+      setSelectionAnchorId(null);
+    }
+  }, [selectionMode, selectedIds]);
+
+  const upsertBookSettings = useCallback(
+    (patch: Partial<Book["settings"]>) => {
+      onUpdateBookSettings?.({ ...(book.settings || {}), ...patch });
+    },
+    [onUpdateBookSettings, book.settings]
+  );
+
+  const persistChapters = useCallback(
+    async (nextChapters: Chapter[]) => {
+      if (!nextChapters.length) return;
+      if (onBulkUpdateChapters) {
+        await onBulkUpdateChapters(nextChapters, { syncInventory: true });
+        return;
+      }
+      for (const chapter of nextChapters) {
+        await onUpdateChapter(chapter);
+      }
+    },
+    [onBulkUpdateChapters, onUpdateChapter]
+  );
+
+  const closeSelectionMode = useCallback(() => {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+    setSelectionAnchorId(null);
+  }, []);
+
+  const handleBackRequest = useCallback(() => {
+    if (showBookSettings) {
+      setShowBookSettings(false);
+      return true;
+    }
+    if (selectionMode) {
+      closeSelectionMode();
+      return true;
+    }
+    return false;
+  }, [showBookSettings, selectionMode, closeSelectionMode]);
+
+  useEffect(() => {
+    if (!onRegisterBackHandler) return;
+    onRegisterBackHandler(handleBackRequest);
+    return () => {
+      onRegisterBackHandler(null);
+    };
+  }, [onRegisterBackHandler, handleBackRequest]);
+
+  useEffect(() => {
+    if (!showBookSettings || typeof document === "undefined") return;
+    const body = document.body;
+    const html = document.documentElement;
+    const prevBodyOverflow = body.style.overflow;
+    const prevHtmlOverflow = html.style.overflow;
+    body.style.overflow = "hidden";
+    html.style.overflow = "hidden";
+    return () => {
+      body.style.overflow = prevBodyOverflow;
+      html.style.overflow = prevHtmlOverflow;
+    };
+  }, [showBookSettings]);
+
+  const selectRangeTo = useCallback(
+    (targetId: string, additive = true) => {
+      if (!selectionAnchorId) {
+        setSelectedIds(new Set([targetId]));
+        setSelectionAnchorId(targetId);
+        return;
+      }
+      const order = visibleChapters.map((chapter) => chapter.id);
+      const startIdx = order.indexOf(selectionAnchorId);
+      const endIdx = order.indexOf(targetId);
+      if (startIdx === -1 || endIdx === -1) {
+        setSelectedIds((prev) => {
+          const next = additive ? new Set(prev) : new Set<string>();
+          next.add(targetId);
+          return next;
+        });
+        setSelectionAnchorId(targetId);
+        return;
+      }
+      const [lo, hi] = startIdx <= endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+      const rangeIds = order.slice(lo, hi + 1);
+      setSelectedIds((prev) => {
+        const next = additive ? new Set(prev) : new Set<string>();
+        rangeIds.forEach((id) => next.add(id));
+        return next;
+      });
+      setSelectionAnchorId(targetId);
+    },
+    [selectionAnchorId, visibleChapters]
+  );
+
+  const toggleChapterSelection = useCallback(
+    (chapterId: string, opts?: { range?: boolean; additive?: boolean }) => {
+      if (book.settings?.enableSelectionMode === false) return;
+      setSelectionMode(true);
+      if (opts?.range) {
+        selectRangeTo(chapterId, opts.additive !== false);
+        return;
+      }
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(chapterId)) next.delete(chapterId);
+        else next.add(chapterId);
+        return next;
+      });
+      setSelectionAnchorId((prev) => prev || chapterId);
+    },
+    [book.settings?.enableSelectionMode, selectRangeTo]
+  );
+
+  const handleSelectAllVisible = useCallback(() => {
+    const allVisibleIds = visibleChapters.map((chapter) => chapter.id);
+    setSelectionMode(true);
+    setSelectedIds(new Set(allVisibleIds));
+    setSelectionAnchorId(allVisibleIds[0] ?? null);
+  }, [visibleChapters]);
+
+  const handleInvertVisibleSelection = useCallback(() => {
+    const nextIds: string[] = [];
+    for (const chapter of visibleChapters) {
+      if (!selectedIds.has(chapter.id)) nextIds.push(chapter.id);
+    }
+    setSelectionMode(true);
+    setSelectedIds(new Set(nextIds));
+    setSelectionAnchorId((prev) => {
+      if (prev && nextIds.includes(prev)) return prev;
+      return nextIds[0] ?? null;
+    });
+  }, [selectedIds, visibleChapters]);
+
+  const selectedChapterList = useMemo(
+    () => chapters.filter((chapter) => selectedIds.has(chapter.id)),
+    [chapters, selectedIds]
+  );
+  const canBulkUpload = book.backend === StorageBackend.DRIVE;
+
+  const runBulkAction = useCallback(
+    async (
+      label: string,
+      action: (chapter: Chapter, index: number, total: number) => Promise<void> | void
+    ) => {
+      const total = selectedChapterList.length;
+      if (!total) return;
+      setBulkActionProgress({ label, current: 0, total });
+      for (let i = 0; i < total; i += 1) {
+        setBulkActionProgress({ label, current: i + 1, total });
+        await action(selectedChapterList[i], i, total);
+      }
+      setBulkActionProgress(null);
+    },
+    [selectedChapterList]
+  );
+
+  const handleBulkUpload = useCallback(async () => {
+    if (!canBulkUpload) {
+      pushNotice("Upload is only available for Drive books.", "info");
+      return;
+    }
+    await runBulkAction("Uploading", async (chapter) => {
+      onQueueChapterUpload(chapter.id);
+      await yieldToUi();
+    });
+  }, [canBulkUpload, onQueueChapterUpload, pushNotice, runBulkAction]);
+
+  const handleBulkRegenerateAudio = useCallback(async () => {
+    const chapterIds = selectedChapterList.map((chapter) => chapter.id);
+    if (!chapterIds.length) return;
+    if (onQueueGenerateJob) {
+      setBulkActionProgress({ label: "Queueing audio jobs", current: 0, total: chapterIds.length });
+      await onQueueGenerateJob(chapterIds, book.settings?.defaultVoiceId);
+      setBulkActionProgress(null);
+      closeSelectionMode();
+      return;
+    }
+    await runBulkAction("Generating audio", async (chapter) => {
+      await generateAudio(chapter, book.settings?.defaultVoiceId, { upload: false });
+    });
+    closeSelectionMode();
+  }, [book.settings?.defaultVoiceId, closeSelectionMode, onQueueGenerateJob, runBulkAction, selectedChapterList]);
+
+  const handleBulkMarkCompleted = useCallback(async () => {
+    const now = Date.now();
+    const updated = selectedChapterList.map((chapter) => {
+      const textLen = chapter.textLength || chapter.progressTotalLength || chapter.wordCount || 0;
+      return {
+        ...chapter,
+        isCompleted: true,
+        progress: 1,
+        progressChars: textLen,
+        progressSec: typeof chapter.durationSec === "number" ? chapter.durationSec : chapter.progressSec,
+        updatedAt: now,
+      };
+    });
+    await persistChapters(updated);
+    closeSelectionMode();
+  }, [closeSelectionMode, persistChapters, selectedChapterList]);
+
+  const handleBulkResetProgress = useCallback(async () => {
+    if (!selectedChapterList.length) return;
+    const ok = confirm(`Reset progress for ${selectedChapterList.length} chapter(s)?`);
+    if (!ok) return;
+    const now = Date.now();
+    const updated = selectedChapterList.map((chapter) => ({
+      ...chapter,
+      isCompleted: false,
+      progress: 0,
+      progressChars: 0,
+      progressSec: 0,
+      updatedAt: now,
+    }));
+    await persistChapters(updated);
+    closeSelectionMode();
+  }, [closeSelectionMode, persistChapters, selectedChapterList]);
+
+  const handleBulkDelete = useCallback(async () => {
+    if (!selectedChapterList.length) return;
+    const ok = confirm(`Delete ${selectedChapterList.length} chapter(s)?`);
+    if (!ok) return;
+    await runBulkAction("Deleting", async (chapter) => {
+      await onDeleteChapter(chapter.id);
+    });
+    closeSelectionMode();
+  }, [closeSelectionMode, onDeleteChapter, runBulkAction, selectedChapterList]);
+
+  const moveChapterToVolume = useCallback(
+    async (chapterId: string, nextVolumeName?: string) => {
+      const chapter = chapters.find((item) => item.id === chapterId);
+      if (!chapter) return;
+      const normalizedVolumeName =
+        typeof nextVolumeName === "string" && nextVolumeName.trim().length
+          ? nextVolumeName.trim()
+          : undefined;
+      await onUpdateChapter({
+        ...chapter,
+        volumeName: normalizedVolumeName,
+        volumeLocalChapter: undefined,
+        updatedAt: Date.now(),
+      });
+    },
+    [chapters, onUpdateChapter]
+  );
+
+  const renameVolume = useCallback(
+    async (oldName: string) => {
+      const nextNameRaw = prompt("Rename volume", oldName);
+      if (nextNameRaw == null) return;
+      const nextName = nextNameRaw.trim();
+      if (!nextName || nextName === oldName) return;
+      const now = Date.now();
+      const updates = chapters
+        .filter((chapter) => (chapter.volumeName || "").trim() === oldName)
+        .map((chapter) => ({ ...chapter, volumeName: nextName, updatedAt: now }));
+      await persistChapters(updates);
+      const volumeOrder = Array.isArray(book.settings?.volumeOrder) ? [...book.settings.volumeOrder] : [];
+      const replaced = volumeOrder.map((name) => (name === oldName ? nextName : name));
+      upsertBookSettings({ volumeOrder: Array.from(new Set(replaced)) });
+      setCollapsedVolumes((prev) => {
+        if (!prev[oldName]) return prev;
+        const copy = { ...prev };
+        delete copy[oldName];
+        copy[nextName] = true;
+        upsertBookSettings({ collapsedVolumes: copy });
+        return copy;
+      });
+    },
+    [book.settings?.volumeOrder, chapters, persistChapters, upsertBookSettings]
+  );
+
+  const deleteVolumeToUngrouped = useCallback(
+    async (volumeName: string) => {
+      const ok = confirm(`Delete volume "${volumeName}" and move its chapters to ungrouped?`);
+      if (!ok) return;
+      const now = Date.now();
+      const updates = chapters
+        .filter((chapter) => (chapter.volumeName || "").trim() === volumeName)
+        .map((chapter) => ({ ...chapter, volumeName: undefined, volumeLocalChapter: undefined, updatedAt: now }));
+      await persistChapters(updates);
+      const order = (book.settings?.volumeOrder || []).filter((name) => name !== volumeName);
+      const nextCollapsed = { ...(book.settings?.collapsedVolumes || {}) };
+      delete nextCollapsed[volumeName];
+      upsertBookSettings({ volumeOrder: order, collapsedVolumes: nextCollapsed });
+      setCollapsedVolumes(nextCollapsed);
+    },
+    [book.settings?.collapsedVolumes, book.settings?.volumeOrder, chapters, persistChapters, upsertBookSettings]
+  );
+
+  const reorderVolumes = useCallback(
+    (sourceVolumeName: string, targetVolumeName: string) => {
+      if (!sourceVolumeName || !targetVolumeName || sourceVolumeName === targetVolumeName) return;
+      const existing = volumeSections.volumes.map((group) => group.volumeName);
+      const order = Array.from(new Set([...(book.settings?.volumeOrder || []), ...existing]));
+      const sourceIndex = order.indexOf(sourceVolumeName);
+      const targetIndex = order.indexOf(targetVolumeName);
+      if (sourceIndex === -1 || targetIndex === -1) return;
+      const next = [...order];
+      const [moved] = next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, moved);
+      upsertBookSettings({ volumeOrder: next });
+    },
+    [book.settings?.volumeOrder, upsertBookSettings, volumeSections.volumes]
+  );
+
+  const reorderWithinVolume = useCallback(
+    async (sourceChapterId: string, targetChapterId: string) => {
+      if (sourceChapterId === targetChapterId) return;
+      const ordered = normalizeChapterOrder(chapters);
+      const sourceIdx = ordered.findIndex((chapter) => chapter.id === sourceChapterId);
+      const targetIdx = ordered.findIndex((chapter) => chapter.id === targetChapterId);
+      if (sourceIdx === -1 || targetIdx === -1) return;
+      const next = [...ordered];
+      const [moved] = next.splice(sourceIdx, 1);
+      const insertAt = sourceIdx < targetIdx ? targetIdx - 1 : targetIdx;
+      next.splice(insertAt, 0, moved);
+      const now = Date.now();
+      const reindexed = next.map((chapter, idx) => ({
+        ...chapter,
+        sortOrder: idx + 1,
+        index: idx + 1,
+        updatedAt: now,
+      }));
+      await persistChapters(reindexed);
+    },
+    [chapters, persistChapters]
+  );
+
+  const handleAddVolume = useCallback(async () => {
+    const raw = prompt("New volume name");
+    if (raw == null) return;
+    const name = raw.trim();
+    if (!name) return;
+    const current = Array.isArray(book.settings?.volumeOrder) ? [...book.settings.volumeOrder] : [];
+    if (current.includes(name)) return;
+    upsertBookSettings({ volumeOrder: [...current, name] });
+  }, [book.settings?.volumeOrder, upsertBookSettings]);
+
+  const handleReindexChapters = useCallback(async () => {
+    try {
+      if (onReindexChapters) {
+        const summary = await onReindexChapters();
+        pushNotice(
+          `Reindexed ${summary.updated} chapters (${summary.maxBefore} -> ${summary.maxAfter}).`,
+          "success"
+        );
+        return;
+      }
+      const repaired = await fixChapterOrdering(book.id, chapters);
+      if (!repaired.chapters.length) {
+        pushNotice("No chapters to reindex.", "info");
+        return;
+      }
+      await persistChapters(repaired.chapters);
+      pushNotice(
+        `Reindexed ${repaired.updated} chapters (${repaired.maxBefore} -> ${repaired.maxAfter}).`,
+        "success"
+      );
+    } catch (e: any) {
+      pushNotice(`Reindex failed: ${String(e?.message ?? e)}`, "error", 5000);
+    }
+  }, [book.id, chapters, onReindexChapters, persistChapters, pushNotice]);
+
   const isMobileInterface = computeMobileMode(uiMode);
-  const shouldVirtualize = chapters.length > 120 && viewMode !== "grid";
-  const useVirtualScroll = shouldVirtualize && viewMode === "details";
-  const detailRowHeight = isMobileInterface ? 96 : 78;
-  const listRowHeight = isMobileInterface ? 86 : 72;
-  const detailHeaderHeight = 44;
   // Allow background-capable flows (WorkManager / native plugin) when we're in mobile mode.
   const enableBackgroundJobs = isMobileInterface;
   const bookJobs = useMemo(() => {
@@ -304,6 +804,42 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       return !bookId || bookId === book.id;
     });
   }, [jobs, book.id]);
+  const hasInFlightBookJobs = useMemo(
+    () =>
+      (bookJobs || []).some((job) =>
+        job.status === "queued" || job.status === "running"
+      ),
+    [bookJobs]
+  );
+  const hasPausedBookJobs = useMemo(
+    () => (bookJobs || []).some((job) => job.status === "paused"),
+    [bookJobs]
+  );
+  const syncBadge = useMemo(() => {
+    if (book.backend !== StorageBackend.DRIVE) {
+      return { backendLabel: "LOCAL", statusLabel: "LOCAL", tone: "slate" as const };
+    }
+    if (hasInFlightBookJobs || uploadQueueCount > 0 || isUploadingAll || isCheckingDrive || isFixing || isRegeneratingAudio) {
+      return { backendLabel: "DRIVE", statusLabel: "SYNCING", tone: "indigo" as const };
+    }
+    if (hasPausedBookJobs) {
+      return { backendLabel: "DRIVE", statusLabel: "PAUSED", tone: "amber" as const };
+    }
+    if (isDirty) {
+      return { backendLabel: "DRIVE", statusLabel: "NOT SYNCED", tone: "amber" as const };
+    }
+    return { backendLabel: "DRIVE", statusLabel: "SYNCED", tone: "emerald" as const };
+  }, [
+    book.backend,
+    hasInFlightBookJobs,
+    hasPausedBookJobs,
+    uploadQueueCount,
+    isUploadingAll,
+    isCheckingDrive,
+    isFixing,
+    isRegeneratingAudio,
+    isDirty,
+  ]);
   const activeFixJob = useMemo(() => {
     if (fixJobId) {
       return (bookJobs || []).find((j) => j.jobId === fixJobId) || null;
@@ -312,23 +848,6 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   }, [bookJobs, fixJobId]);
 
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
-
-  useLayoutEffect(() => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    const update = () => {
-      setListViewport({ width: el.clientWidth, height: el.clientHeight });
-    };
-    update();
-    if (typeof ResizeObserver !== "undefined") {
-      const ro = new ResizeObserver(update);
-      ro.observe(el);
-      return () => ro.disconnect();
-    }
-    const handle = () => update();
-    window.addEventListener("resize", handle);
-    return () => window.removeEventListener("resize", handle);
-  }, []);
 
   useEffect(() => {
     if (!hasMoreChapters) return;
@@ -349,24 +868,29 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
+    viewScrollRef.current[viewMode] = scrollTop;
     onScrollPositionChange?.(scrollTop);
     if (scrollHeight - scrollTop - clientHeight < 200) {
       if (hasMoreChapters && !isLoadingMoreChapters && onLoadMoreChapters) {
         onLoadMoreChapters();
       }
     }
-  }, [hasMoreChapters, isLoadingMoreChapters, onLoadMoreChapters, onScrollPositionChange]);
+  }, [hasMoreChapters, isLoadingMoreChapters, onLoadMoreChapters, onScrollPositionChange, viewMode]);
 
-  const handleVirtualScroll = useCallback(({ scrollOffset }: ListOnScrollProps) => {
-    onScrollPositionChange?.(scrollOffset);
-  }, [onScrollPositionChange]);
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const previousMode = lastViewModeRef.current;
+    if (previousMode === viewMode) return;
 
-  const handleItemsRendered = useCallback(({ visibleStopIndex }: { visibleStopIndex: number }) => {
-    if (!hasMoreChapters || isLoadingMoreChapters || !onLoadMoreChapters) return;
-    if (visibleStopIndex >= listRows.length - 5) {
-      onLoadMoreChapters();
-    }
-  }, [listRows.length, hasMoreChapters, isLoadingMoreChapters, onLoadMoreChapters]);
+    viewScrollRef.current[previousMode] = container.scrollTop;
+    lastViewModeRef.current = viewMode;
+
+    window.requestAnimationFrame(() => {
+      const nextScroll = viewScrollRef.current[viewMode] ?? 0;
+      container.scrollTop = nextScroll;
+    });
+  }, [viewMode]);
 
   useEffect(() => {
     if (!chapters.length) return;
@@ -376,43 +900,19 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       viewMode,
       restoreScrollTop ?? "none",
       restoreChapterId ?? restoreChapterIndex ?? "none",
-      listRows.length,
+      visibleChapters.length,
     ].join("|");
     if (restoreKeyRef.current === key) return;
     restoreKeyRef.current = key;
 
-    const activeIndex = (() => {
-      if (restoreChapterId) {
-        const byId = listRows.findIndex((r) => r.kind === "chapter" && r.chapter.id === restoreChapterId);
-        if (byId >= 0) return byId;
-      }
-      if (restoreChapterIndex != null) {
-        const byIndex = listRows.findIndex(
-          (r) => r.kind === "chapter" && r.chapter.index === restoreChapterIndex
-        );
-        if (byIndex >= 0) return byIndex;
-      }
-      return -1;
-    })();
-
-    const rowHeight = viewMode === "details" ? detailRowHeight : listRowHeight;
-    const hasVirtual = shouldVirtualize;
-
-    if (hasVirtual && virtualListRef.current) {
-      if (typeof restoreScrollTop === "number") {
-        virtualListRef.current.scrollTo(restoreScrollTop);
-      }
-      if (activeIndex >= 0 && listViewport.height > 0) {
-        const top = typeof restoreScrollTop === "number" ? restoreScrollTop : 0;
-        const startIndex = Math.floor(top / rowHeight);
-        const endIndex = Math.max(startIndex, Math.ceil((top + listViewport.height) / rowHeight) - 1);
-        if (activeIndex < startIndex || activeIndex > endIndex) {
-          virtualListRef.current.scrollToItem(activeIndex, "center");
-        }
-      } else if (activeIndex >= 0) {
-        virtualListRef.current.scrollToItem(activeIndex, "center");
-      }
-      return;
+    let targetChapterId: string | null = restoreChapterId ?? null;
+    if (!targetChapterId && restoreChapterIndex != null) {
+      targetChapterId =
+        visibleChapters.find(
+          (chapter) =>
+            chapter.index === restoreChapterIndex ||
+            getChapterSortOrder(chapter) === restoreChapterIndex
+        )?.id ?? null;
     }
 
     const container = scrollContainerRef.current;
@@ -420,26 +920,17 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     if (typeof restoreScrollTop === "number") {
       container.scrollTop = restoreScrollTop;
     }
-    if (activeIndex >= 0) {
-      const targetChapterId =
-        restoreChapterId ??
-        (listRows[activeIndex]?.kind === "chapter" ? listRows[activeIndex].chapter.id : null);
-      const target = targetChapterId ? container.querySelector(`[data-chapter-id="${targetChapterId}"]`) : null;
-      if (target instanceof HTMLElement) {
-        target.scrollIntoView({ block: "center" });
-      }
+    if (targetChapterId) {
+      const target = container.querySelector(`[data-chapter-id="${targetChapterId}"]`);
+      if (target instanceof HTMLElement) target.scrollIntoView({ block: "center" });
     }
   }, [
     book.id,
     chapters,
-    detailRowHeight,
-    listRowHeight,
-    listViewport.height,
-    listRows,
+    visibleChapters,
     restoreChapterId,
     restoreChapterIndex,
     restoreScrollTop,
-    shouldVirtualize,
     viewMode,
   ]);
 
@@ -504,7 +995,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const fetchAllChapters = useCallback(async () => {
     const all: Chapter[] = [];
-    let afterIndex = 0;
+    let afterIndex = -1;
     const LIMIT = 200;
     while (true) {
       const page = await libraryListChaptersPage(book.id, afterIndex, LIMIT);
@@ -517,7 +1008,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       afterIndex = page.nextAfterIndex;
     }
-    return all.sort((a, b) => a.index - b.index);
+    return normalizeChapterOrder(all);
   }, [book.id]);
 
   const scanHasIssues = (scan: ScanResult | null | undefined) =>
@@ -1428,6 +1919,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   }, [book, driveFolderId, onUpdateBook, pushNotice]);
 
   const renderAudioStatusIcon = (c: Chapter) => {
+    const hasDriveAudio = !!(c.cloudAudioFileId || (c as any).audioDriveId);
+    const hasLocalAudio = !!(c.hasCachedAudio || cachedAudioChapterIds.has(c.id));
+
     if (c.audioStatus === AudioStatus.FAILED) {
       return (
         <span title="Audio generation failed" className="inline-flex items-center">
@@ -1435,17 +1929,24 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         </span>
       );
     }
-    if (c.cloudAudioFileId || (c as any).audioDriveId || c.audioStatus === AudioStatus.READY) {
+    if (synthesizingId === c.id || c.audioStatus === AudioStatus.GENERATING) {
+      return (
+        <span title="Generating audio..." className="inline-flex items-center">
+          <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />
+        </span>
+      );
+    }
+    if (hasDriveAudio) {
       return (
         <span title="Audio ready on Google Drive" className="inline-flex items-center">
           <Cloud className="w-4 h-4 text-emerald-500" />
         </span>
       );
     }
-    if (synthesizingId === c.id || c.audioStatus === AudioStatus.GENERATING) {
+    if (hasLocalAudio || c.audioStatus === AudioStatus.READY) {
       return (
-        <span title="Generating and Uploading..." className="inline-flex items-center">
-          <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />
+        <span title="Audio ready locally" className="inline-flex items-center">
+          <Headphones className="w-4 h-4 text-emerald-500" />
         </span>
       );
     }
@@ -1478,6 +1979,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const getDisplayIndex = (c: Chapter, fallback: number) => {
     const idx = Number(c.index);
     if (Number.isFinite(idx) && idx > 0) return idx;
+    const sortOrder = getChapterSortOrder(c);
+    if (Number.isFinite(sortOrder) && sortOrder > 0) return sortOrder;
     return fallback > 0 ? fallback : 1;
   };
 
@@ -1488,6 +1991,115 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
     return raw;
   };
+
+  const clearLongPressTimer = useCallback(() => {
+    if (longPressTimerRef.current) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    longPressPointerIdRef.current = null;
+    longPressStartRef.current = null;
+    longPressChapterIdRef.current = null;
+  }, []);
+
+  const startLongPressSelection = useCallback(
+    (event: React.PointerEvent, chapterId: string) => {
+      if (book.settings?.enableSelectionMode === false || isOrganizeMode) return;
+      if (event.pointerType === "mouse") return;
+      if (typeof event.isPrimary === "boolean" && !event.isPrimary) return;
+      clearLongPressTimer();
+      longPressTriggeredRef.current = false;
+      longPressPointerIdRef.current = event.pointerId;
+      longPressStartRef.current = { x: event.clientX, y: event.clientY };
+      longPressChapterIdRef.current = chapterId;
+      longPressTimerRef.current = window.setTimeout(() => {
+        if (longPressChapterIdRef.current !== chapterId) return;
+        longPressTriggeredRef.current = true;
+        if (!selectionMode) {
+          setSelectionMode(true);
+          setSelectedIds(new Set([chapterId]));
+          setSelectionAnchorId(chapterId);
+        } else {
+          selectRangeTo(chapterId, true);
+        }
+        clearLongPressTimer();
+      }, LONG_PRESS_MS);
+    },
+    [
+      book.settings?.enableSelectionMode,
+      clearLongPressTimer,
+      isOrganizeMode,
+      selectRangeTo,
+      selectionMode,
+    ]
+  );
+
+  const handleLongPressPointerMove = useCallback(
+    (event: React.PointerEvent) => {
+      if (!longPressTimerRef.current) return;
+      if (typeof event.isPrimary === "boolean" && !event.isPrimary) return;
+      if (event.pointerId !== longPressPointerIdRef.current) return;
+      const start = longPressStartRef.current;
+      if (!start) return;
+      const dx = event.clientX - start.x;
+      const dy = event.clientY - start.y;
+      if ((dx * dx) + (dy * dy) > (LONG_PRESS_MOVE_THRESHOLD_PX * LONG_PRESS_MOVE_THRESHOLD_PX)) {
+        clearLongPressTimer();
+      }
+    },
+    [clearLongPressTimer]
+  );
+
+  const finishLongPressSelection = useCallback((event?: React.PointerEvent) => {
+    if (event && longPressPointerIdRef.current != null && event.pointerId !== longPressPointerIdRef.current) {
+      return;
+    }
+    clearLongPressTimer();
+  }, [clearLongPressTimer]);
+
+  const handleChapterActivate = useCallback(
+    (chapter: Chapter, event?: React.MouseEvent) => {
+      if (isOrganizeMode) return;
+      if (selectionMode) {
+        if (event?.shiftKey) {
+          toggleChapterSelection(chapter.id, { range: true, additive: true });
+        } else {
+          toggleChapterSelection(chapter.id);
+        }
+        return;
+      }
+
+      const ctrlLike = !!(event?.ctrlKey || event?.metaKey);
+      const wantsRange = !!event?.shiftKey && book.settings?.enableSelectionMode !== false;
+      if (wantsRange && selectionAnchorId) {
+        setSelectionMode(true);
+        toggleChapterSelection(chapter.id, { range: true, additive: true });
+        return;
+      }
+      if (ctrlLike && book.settings?.enableSelectionMode !== false) {
+        toggleChapterSelection(chapter.id);
+        return;
+      }
+
+      onOpenChapter(chapter.id);
+    },
+    [book.settings?.enableSelectionMode, isOrganizeMode, onOpenChapter, selectionAnchorId, selectionMode, toggleChapterSelection]
+  );
+
+  const handleChapterContextMenu = useCallback(
+    (chapter: Chapter, event: React.MouseEvent) => {
+      event.preventDefault();
+      if (longPressTriggeredRef.current) {
+        longPressTriggeredRef.current = false;
+        return;
+      }
+      if (book.settings?.enableSelectionMode === false || isOrganizeMode) return;
+      const nativeMouse = event.nativeEvent as MouseEvent;
+      if (nativeMouse.button !== 2) return;
+      toggleChapterSelection(chapter.id);
+    },
+    [book.settings?.enableSelectionMode, isOrganizeMode, toggleChapterSelection]
+  );
 
   const renderDetailChapterRow = useCallback(
     (c: Chapter, fallbackLocalIndex: number, style?: React.CSSProperties) => {
@@ -1505,23 +2117,75 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         percent = 100;
       }
       const isEditing = editingChapterId === c.id;
+      const isSelected = selectedIds.has(c.id);
+      const showCheckbox = selectionMode;
+      const canDragRows = isOrganizeMode && book.settings?.allowDragReorderChapters !== false;
 
       return (
         <div
           style={style ? { ...style, width: "100%" } : undefined}
           data-chapter-id={c.id}
-          onClick={() => !isEditing && onOpenChapter(c.id)}
-          className={`grid grid-cols-[40px_1fr_80px_60px] md:grid-cols-[40px_1fr_100px_180px] items-center px-6 py-4 cursor-pointer border-b last:border-0 transition-colors ${
+          onClick={(event) => {
+            if (longPressTriggeredRef.current) {
+              longPressTriggeredRef.current = false;
+              return;
+            }
+            if (!isEditing) handleChapterActivate(c, event);
+          }}
+          onContextMenu={(event) => handleChapterContextMenu(c, event)}
+          onPointerDown={(event) => {
+            startLongPressSelection(event, c.id);
+          }}
+          onPointerMove={handleLongPressPointerMove}
+          onPointerUp={finishLongPressSelection}
+          onPointerCancel={finishLongPressSelection}
+          draggable={canDragRows}
+          onDragStart={() => {
+            if (!canDragRows) return;
+            setDraggingChapterId(c.id);
+          }}
+          onDragEnd={() => {
+            setDraggingChapterId(null);
+            setDraggingVolumeName(null);
+          }}
+          onDragOver={(event) => {
+            if (!canDragRows || !draggingChapterId || draggingChapterId === c.id) return;
+            event.preventDefault();
+          }}
+          onDrop={async (event) => {
+            if (!canDragRows || !draggingChapterId || draggingChapterId === c.id) return;
+            event.preventDefault();
+            await reorderWithinVolume(draggingChapterId, c.id);
+            setDraggingChapterId(null);
+          }}
+          className={`px-4 py-3 sm:px-6 sm:py-4 cursor-pointer border-b last:border-0 transition-colors ${
             isDark ? "hover:bg-white/5 border-slate-800" : "hover:bg-black/5 border-black/5"
-          } ${isCompleted ? "opacity-50" : ""}`}
+          } ${isCompleted ? "opacity-50" : ""} ${isSelected ? (isDark ? "bg-indigo-500/20" : "bg-indigo-100") : ""}`}
         >
-          <div className={`font-mono text-xs font-black ${textSecondary}`}>
-            {String(displayIndex).padStart(3, "0")}
-          </div>
-          <div className="flex flex-col gap-1 min-w-0 mr-4">
-            <div className="flex items-center gap-3">
+          <div className="flex items-start gap-3">
+            <div className={`shrink-0 flex items-center gap-2 pt-0.5 ${textSecondary}`}>
+              {showCheckbox ? (
+                <input
+                  type="checkbox"
+                  checked={isSelected}
+                  onChange={() => toggleChapterSelection(c.id)}
+                  onClick={(event) => event.stopPropagation()}
+                  className="accent-indigo-600"
+                />
+              ) : null}
+              {canDragRows ? <GripVertical className="w-3 h-3 opacity-40" /> : null}
+              <span
+                className={`font-mono text-xs font-black px-2 py-1 rounded-full ${
+                  isDark ? "bg-slate-900 text-indigo-300" : "bg-indigo-50 text-indigo-700"
+                }`}
+              >
+                {String(displayIndex).padStart(3, "0")}
+              </span>
+            </div>
+
+            <div className="flex-1 min-w-0">
               {isEditing ? (
-                <div className="flex-1 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                   <input
                     autoFocus
                     type="text"
@@ -1535,226 +2199,71 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                   />
                 </div>
               ) : (
-                <div className="font-black text-sm truncate flex items-center">
-                  {displayTitle}
+                <div className="font-black text-sm leading-tight line-clamp-2 flex items-center">
+                  <span className="truncate">{displayTitle}</span>
                   {renderTextStatusIcon(c)}
                 </div>
               )}
-              <span className="inline">{renderAudioStatusIcon(c)}</span>
-            </div>
-            <div className={`h-1 w-full rounded-full overflow-hidden ${isDark ? "bg-slate-700" : "bg-black/5"}`}>
-              <div
-                className={`h-full transition-all duration-300 ${isCompleted ? "bg-emerald-500" : "bg-indigo-500"}`}
-                style={{ width: `${percent}%` }}
-              />
-            </div>
-          </div>
-          <div className="text-right px-4">
-            <span
-              className={`text-[10px] font-black px-2 py-0.5 rounded-full ${
-                isCompleted ? "bg-emerald-500/20 text-emerald-600" : "bg-indigo-500/15 text-indigo-500"
-              }`}
-            >
-              {isCompleted ? "Done" : `${percent}%`}
-            </span>
-          </div>
-          <div className="flex justify-end items-center gap-2">
-            <div className="hidden md:flex items-center gap-2">
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setRememberAsDefault(true);
-                  setShowVoiceModal({ chapterId: c.id });
-                }}
-                className="p-2 opacity-40 hover:opacity-100"
-                title="Generate or regenerate audio"
-              >
-                <Headphones className="w-4 h-4" />
-              </button>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onQueueChapterUpload(c.id);
-                }}
-                className="p-2 opacity-40 hover:opacity-100 hover:text-emerald-500"
-                title="Upload chapter"
-              >
-                <Cloud className="w-4 h-4" />
-              </button>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setMobileMenuId(c.id);
-                }}
-                className="p-2 opacity-40 hover:opacity-100"
-                title="More actions"
-              >
-                <GearIcon className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="md:hidden flex items-center gap-2">
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setMobileMenuId(c.id);
-                }}
-                className="p-1.5 opacity-40"
-              >
-                <GearIcon className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        </div>
-      );
-    },
-    [
-      editingChapterId,
-      isDark,
-      onOpenChapter,
-      onQueueChapterUpload,
-      onUpdateChapterTitle,
-      playbackSnapshot,
-      renderAudioStatusIcon,
-      renderTextStatusIcon,
-      tempTitle,
-      textSecondary,
-    ]
-  );
-
-  const renderDetailRow = useCallback(
-    ({ index, style }: ListChildComponentProps) => {
-      const row = listRows[index];
-      if (!row) return null;
-
-      if (row.kind === "volume") {
-        const isCollapsed = !!collapsedVolumes[row.volumeName];
-        return (
-          <div
-            style={{ ...style, width: "100%" }}
-            className={`px-6 py-3 cursor-pointer border-b last:border-0 ${
-              isDark ? "border-slate-800 bg-slate-950/30 hover:bg-white/5" : "border-black/5 bg-black/5 hover:bg-black/10"
-            }`}
-            onClick={() =>
-              setCollapsedVolumes((p) => ({ ...p, [row.volumeName]: !p[row.volumeName] }))
-            }
-          >
-            <div className="flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-[10px] font-black uppercase tracking-widest opacity-70 truncate">
-                  {row.volumeName}
-                </div>
-                <div className="text-[10px] font-bold opacity-40">
-                  {row.count} chapters{isCollapsed ? " (collapsed)" : ""}
-                </div>
-              </div>
-              <div className="text-xs opacity-60">{isCollapsed ? "+" : "-"}</div>
-            </div>
-          </div>
-        );
-      }
-
-      return renderDetailChapterRow(row.chapter, row.localIndex, style);
-    },
-    [
-      listRows,
-      collapsedVolumes,
-      isDark,
-      renderDetailChapterRow,
-    ]
-  );
-
-  const renderListRow = useCallback(
-    ({ index, style }: ListChildComponentProps) => {
-      const row = listRows[index];
-      if (!row) return null;
-
-      if (row.kind === "volume") {
-        const isCollapsed = !!collapsedVolumes[row.volumeName];
-        return (
-          <div
-            style={{ ...style, width: "100%" }}
-            className={`px-2 py-2 rounded-xl cursor-pointer ${
-              isDark ? "hover:bg-white/5" : "hover:bg-black/5"
-            }`}
-            onClick={() =>
-              setCollapsedVolumes((p) => ({ ...p, [row.volumeName]: !p[row.volumeName] }))
-            }
-          >
-            <div className="flex items-center justify-between px-2">
-              <div className="text-xs font-black uppercase tracking-widest opacity-60">{row.volumeName}</div>
-              <div className="text-[10px] font-black uppercase tracking-widest opacity-50">
-                {row.count} chapters {isCollapsed ? "+" : "-"}
+              <div className={`mt-2 h-1 w-full rounded-full overflow-hidden ${isDark ? "bg-slate-700" : "bg-black/5"}`}>
+                <div
+                  className={`h-full transition-all duration-300 ${isCompleted ? "bg-emerald-500" : "bg-indigo-500"}`}
+                  style={{ width: `${percent}%` }}
+                />
               </div>
             </div>
-          </div>
-        );
-      }
 
-      const c = row.chapter;
-      const displayIndex = getDisplayIndex(
-        c,
-        Number.isFinite(Number(c.index)) && Number(c.index) > 0 ? Number(c.index) : row.localIndex
-      );
-      const displayTitle = getDisplayTitle(c, displayIndex);
-      let percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
-      if (playbackSnapshot && playbackSnapshot.chapterId === c.id) {
-        percent = Math.floor(playbackSnapshot.percent * 100);
-      }
-      const isCompleted = c.isCompleted || false;
-      if (isCompleted) {
-        percent = 100;
-      }
-
-      return (
-        <div
-          style={{ ...style, width: "100%" }}
-          data-chapter-id={c.id}
-          onClick={() => onOpenChapter(c.id)}
-          className={`flex flex-col gap-2 p-4 rounded-2xl border cursor-pointer transition-all hover:translate-x-1 ${cardBg}`}
-        >
-          <div className="flex items-center gap-4">
-            <div
-              className={`w-8 h-8 rounded-lg flex items-center justify-center font-mono text-[10px] font-black ${
-                isDark ? "bg-slate-950 text-indigo-400" : "bg-indigo-50 text-indigo-600"
-              }`}
-            >
-              {displayIndex}
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="font-black text-sm truncate flex items-center">
-                {displayTitle}
-                {renderTextStatusIcon(c)}
-              </div>
-            </div>
-            <div className="flex items-center gap-3">
-              <span className="text-[9px] font-black opacity-40 uppercase">{percent}%</span>
-              {renderAudioStatusIcon(c)}
-              <div className="flex md:hidden gap-1 items-center">
+            <div className="shrink-0 flex flex-col items-end gap-2 pl-1">
+              <span
+                className={`text-[10px] font-black px-2 py-0.5 rounded-full ${
+                  isCompleted ? "bg-emerald-500/20 text-emerald-600" : "bg-indigo-500/15 text-indigo-500"
+                }`}
+              >
+                {isCompleted ? "Done" : `${percent}%`}
+              </span>
+              <div className="flex items-center gap-1.5">
+                <span className="inline-flex">{renderAudioStatusIcon(c)}</span>
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
                     setMobileMenuId(c.id);
                   }}
-                  className="p-1.5 opacity-40"
+                  title="Chapter menu"
+                  className="p-1.5 opacity-40 hover:opacity-100"
                 >
-                  <GearIcon className="w-3.5 h-3.5" />
+                  <MoreVertical className="w-4 h-4" />
                 </button>
               </div>
             </div>
           </div>
-          <div className={`h-0.5 w-full rounded-full overflow-hidden ${isDark ? "bg-slate-700" : "bg-black/5"}`}>
-            <div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${percent}%` }} />
-          </div>
-          {isCompleted ? null : null}
         </div>
       );
     },
-    [listRows, collapsedVolumes, playbackSnapshot, isDark, cardBg, onOpenChapter, renderAudioStatusIcon, renderTextStatusIcon]
+            [
+      editingChapterId,
+      handleChapterActivate,
+      handleChapterContextMenu,
+      handleLongPressPointerMove,
+      isOrganizeMode,
+      isDark,
+      onUpdateChapterTitle,
+      playbackSnapshot,
+      reorderWithinVolume,
+      renderAudioStatusIcon,
+      renderTextStatusIcon,
+      selectedIds,
+      selectionMode,
+      startLongPressSelection,
+      finishLongPressSelection,
+      tempTitle,
+      toggleChapterSelection,
+      textSecondary,
+      book.settings?.allowDragReorderChapters,
+      draggingChapterId,
+    ]
   );
 
   const MobileChapterMenu = ({ chapterId }: { chapterId: string }) => {
     const ch = chapters.find(c => c.id === chapterId);
-    const [showMoreActions, setShowMoreActions] = useState(false);
     if (!ch) return null;
     return (
       <div className="fixed inset-0 z-[110] flex items-end sm:items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setMobileMenuId(null)}>
@@ -1765,75 +2274,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
            </div>
            <div className="space-y-2">
               <button
-                disabled={synthesizingId === ch.id}
-                onClick={() => {
-                  setMobileMenuId(null);
-                  setRememberAsDefault(true);
-                  setShowVoiceModal({ chapterId: ch.id });
-                }}
-                title={ch.cloudAudioFileId || ch.hasCachedAudio ? "Regenerate audio" : "Generate audio"}
-                className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${
-                  isDark ? 'bg-white/5 text-white hover:bg-white/10' : 'bg-black/5 text-black hover:bg-black/10'
-                } ${synthesizingId === ch.id ? 'opacity-60' : ''}`}
+                onClick={() => { setMobileMenuId(null); setEditingChapterId(ch.id); setTempTitle(ch.title); }}
+                title="Edit title"
+                className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}
               >
-                <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg">
-                  {synthesizingId === ch.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Headphones className="w-4 h-4" />}
-                </div>
-                {ch.cloudAudioFileId || ch.hasCachedAudio ? 'Regenerate Audio' : 'Generate Audio'}
+                <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg"><Edit2 className="w-4 h-4" /></div>
+                Edit Title
               </button>
-
-              <button
-                onClick={() => {
-                  setMobileMenuId(null);
-                  onQueueChapterUpload(ch.id);
-                }}
-                title="Upload this chapter"
-                className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'bg-white/5 text-white hover:bg-white/10' : 'bg-black/5 text-black hover:bg-black/10'}`}
-              >
-                <div className="p-2 bg-emerald-600/10 text-emerald-500 rounded-lg">
-                  <Cloud className="w-4 h-4" />
-                </div>
-                Upload Chapter
-              </button>
-
-              <button
-                onClick={() => setShowMoreActions((v) => !v)}
-                className={`w-full flex items-center justify-between px-4 py-3 rounded-2xl border text-[10px] font-black uppercase tracking-widest ${isDark ? 'border-white/10 hover:bg-white/5' : 'border-black/10 hover:bg-black/5'}`}
-                title="More actions"
-              >
-                More Actions
-                {showMoreActions ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-              </button>
-
-              {showMoreActions && (
-                <div className="space-y-2">
-                  <button
-                    onClick={() => { setMobileMenuId(null); onResetChapterProgress(book.id, ch.id); }}
-                    title="Reset progress"
-                    className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}
-                  >
-                    <div className="p-2 bg-emerald-600/10 text-emerald-600 rounded-lg"><RefreshCw className="w-4 h-4" /></div>
-                    Reset Progress
-                  </button>
-                  <button
-                    onClick={() => { setMobileMenuId(null); setEditingChapterId(ch.id); setTempTitle(ch.title); }}
-                    title="Edit title"
-                    className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}
-                  >
-                    <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg"><Edit2 className="w-4 h-4" /></div>
-                    Edit Title
-                  </button>
-                  <div className="text-[10px] font-black uppercase tracking-widest opacity-60 pt-2">Danger Zone</div>
-                  <button
-                    onClick={() => { if (confirm('Delete?')) { onDeleteChapter(ch.id); setMobileMenuId(null); } }}
-                    title="Delete chapter"
-                    className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm text-red-500 transition-all ${isDark ? 'hover:bg-red-500/10' : 'hover:bg-red-500/5'}`}
-                  >
-                    <div className="p-2 bg-red-500/10 text-red-500 rounded-lg"><Trash2 className="w-4 h-4" /></div>
-                    Delete Chapter
-                  </button>
-                </div>
-              )}
            </div>
         </div>
       </div>
@@ -1841,41 +2288,98 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   };
 
   const renderDetailsView = () => {
-    const renderTableHeader = () => (
-      <div
-        className={`grid grid-cols-[40px_1fr_80px_100px] md:grid-cols-[40px_1fr_100px_180px] px-6 py-3 text-[10px] font-black uppercase tracking-widest border-b ${
-          isDark ? "border-slate-800 bg-slate-950/40 text-indigo-400" : "border-black/5 bg-black/5 text-indigo-600"
-        }`}
-      >
-        <div>Idx</div>
-        <div>Title</div>
-        <div className="text-right px-4">Progress</div>
-        <div className="text-right">Actions</div>
-      </div>
-    );
+    const renderTableHeader = () => {
+      if (isMobileInterface) return null;
+      return (
+        <div
+          className={`grid grid-cols-[40px_1fr_80px_100px] md:grid-cols-[40px_1fr_100px_180px] px-6 py-3 text-[10px] font-black uppercase tracking-widest border-b ${
+            isDark ? "border-slate-800 bg-slate-950/40 text-indigo-400" : "border-black/5 bg-black/5 text-indigo-600"
+          }`}
+        >
+          <div>Idx</div>
+          <div>Title</div>
+          <div className="text-right px-4">Progress</div>
+          <div className="text-right">Actions</div>
+        </div>
+      );
+    };
 
     return (
       <div className="space-y-4">
         {volumeSections.volumes.map((group) => {
           const isCollapsed = !!collapsedVolumes[group.volumeName];
+          const canReorderVolumes = isOrganizeMode && book.settings?.allowDragReorderVolumes !== false;
+          const canMoveToVolume = isOrganizeMode && book.settings?.allowDragMoveToVolume !== false;
           return (
             <div key={group.volumeName} className={`rounded-3xl border shadow-sm overflow-hidden ${cardBg}`}>
-              <button
-                onClick={() =>
-                  setCollapsedVolumes((p) => ({ ...p, [group.volumeName]: !p[group.volumeName] }))
-                }
+              <div
                 className={`w-full px-6 py-3 flex items-center justify-between border-b ${
-                  isDark ? "border-slate-800 bg-slate-950/30 hover:bg-white/5" : "border-black/5 bg-black/5 hover:bg-black/10"
+                  isDark ? "border-slate-800 bg-slate-950/30" : "border-black/5 bg-black/5"
                 }`}
+                draggable={canReorderVolumes}
+                onDragStart={() => {
+                  if (!canReorderVolumes) return;
+                  setDraggingVolumeName(group.volumeName);
+                }}
+                onDragEnd={() => setDraggingVolumeName(null)}
+                onDragOver={(event) => {
+                  if ((canReorderVolumes && draggingVolumeName && draggingVolumeName !== group.volumeName) || (canMoveToVolume && draggingChapterId)) {
+                    event.preventDefault();
+                  }
+                }}
+                onDrop={async (event) => {
+                  if (canReorderVolumes && draggingVolumeName && draggingVolumeName !== group.volumeName) {
+                    event.preventDefault();
+                    reorderVolumes(draggingVolumeName, group.volumeName);
+                    setDraggingVolumeName(null);
+                    return;
+                  }
+                  if (canMoveToVolume && draggingChapterId) {
+                    event.preventDefault();
+                    await moveChapterToVolume(draggingChapterId, group.volumeName);
+                    setDraggingChapterId(null);
+                  }
+                }}
               >
-                <div className="text-left">
-                  <div className="text-[10px] font-black uppercase tracking-widest opacity-70">{group.volumeName}</div>
-                  <div className="text-[10px] font-bold opacity-50">
-                    {group.chapters.length} chapters{isCollapsed ? " (collapsed)" : ""}
+                <div className="text-left flex items-center gap-2 min-w-0">
+                  {canReorderVolumes ? <GripVertical className="w-4 h-4 opacity-40" /> : null}
+                  <button
+                    onClick={() =>
+                      setCollapsedVolumes((p) => {
+                        const next = { ...p, [group.volumeName]: !p[group.volumeName] };
+                        upsertBookSettings({ collapsedVolumes: next });
+                        return next;
+                      })
+                    }
+                    className="text-xs opacity-70 hover:opacity-100"
+                    title={isCollapsed ? "Expand" : "Collapse"}
+                  >
+                    {isCollapsed ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+                  </button>
+                  <div className="min-w-0">
+                    <div className="text-[10px] font-black uppercase tracking-widest opacity-70 truncate">{group.volumeName}</div>
+                    <div className="text-[10px] font-bold opacity-50">
+                      {group.chapters.length} chapters{isCollapsed ? " (collapsed)" : ""}
+                    </div>
                   </div>
                 </div>
-                <div className="text-xs opacity-60">{isCollapsed ? "+" : "-"}</div>
-              </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => void renameVolume(group.volumeName)}
+                    className="p-2 opacity-40 hover:opacity-100"
+                    title="Rename volume"
+                  >
+                    <Edit2 className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => void deleteVolumeToUngrouped(group.volumeName)}
+                    className="p-2 opacity-40 hover:opacity-100 text-red-500"
+                    title="Delete volume"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
               {isCollapsed ? null : (
                 <>
                   {renderTableHeader()}
@@ -1893,15 +2397,38 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         })}
 
         {volumeSections.ungrouped.length > 0 && (
-          <div className={`rounded-3xl border shadow-sm overflow-hidden ${cardBg}`}>
-            {renderTableHeader()}
-            <div className="divide-y divide-black/5">
-              {volumeSections.ungrouped.map((chapter, idx) => (
-                <React.Fragment key={chapter.id}>
-                  {renderDetailChapterRow(chapter, idx + 1)}
-                </React.Fragment>
-              ))}
+          <div className="space-y-2">
+            <div className="px-2 text-[10px] font-black uppercase tracking-widest opacity-60">Chapters</div>
+            <div className={`rounded-3xl border shadow-sm overflow-hidden ${cardBg}`}>
+              {renderTableHeader()}
+              <div className="divide-y divide-black/5">
+                {volumeSections.ungrouped.map((chapter, idx) => (
+                  <React.Fragment key={chapter.id}>
+                    {renderDetailChapterRow(chapter, idx + 1)}
+                  </React.Fragment>
+                ))}
+              </div>
             </div>
+          </div>
+        )}
+
+        {isOrganizeMode && book.settings?.allowDragMoveToVolume !== false && (
+          <div
+            className={`rounded-2xl border border-dashed px-4 py-6 text-center text-[10px] font-black uppercase tracking-widest ${
+              isDark ? "border-slate-700 text-slate-300" : "border-black/20 text-slate-600"
+            }`}
+            onDragOver={(event) => {
+              if (!draggingChapterId) return;
+              event.preventDefault();
+            }}
+            onDrop={async (event) => {
+              if (!draggingChapterId) return;
+              event.preventDefault();
+              await moveChapterToVolume(draggingChapterId, undefined);
+              setDraggingChapterId(null);
+            }}
+          >
+            Drop Here To Ungroup
           </div>
         )}
 
@@ -1920,67 +2447,83 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     );
   };
 
-  const renderListView = () => {
-    if (shouldVirtualize && listViewport.height > 0) {
-      return (
-        <VirtualList
-          ref={virtualListRef}
-          height={Math.max(200, listViewport.height)}
-          itemCount={listRows.length}
-          itemSize={listRowHeight}
-          width="100%"
-          onItemsRendered={handleItemsRendered}
-          onScroll={handleVirtualScroll}
-          itemKey={(index: number) => {
-            const row = listRows[index];
-            if (!row) return index;
-            return row.kind === "volume" ? `volume:${row.volumeName}` : row.chapter.id;
-          }}
-        >
-          {renderListRow}
-        </VirtualList>
-      );
-    }
-    return (
-      <div className="space-y-2">
-        {listRows.map((row, idx) => {
-          const key = row.kind === "volume" ? `volume:${row.volumeName}` : row.chapter.id;
-          return (
-            <React.Fragment key={key}>
-              {renderListRow({ index: idx, style: {} } as ListChildComponentProps)}
-            </React.Fragment>
-          );
-        })}
-      {hasMoreChapters && (
-        <div ref={loadMoreSentinelRef} className={`py-4 text-center text-xs ${subtleText}`}>
-          {isLoadingMoreChapters ? 'Loading more...' : 'Scroll to load more'}
-        </div>
-      )}
-    </div>
-  );
-  };
-
   const renderGridView = () => (
     <div className="space-y-6">
       {volumeSections.volumes.map((group) => {
         const isCollapsed = !!collapsedVolumes[group.volumeName];
+        const canReorderVolumes = isOrganizeMode && book.settings?.allowDragReorderVolumes !== false;
+        const canMoveToVolume = isOrganizeMode && book.settings?.allowDragMoveToVolume !== false;
         return (
           <div key={group.volumeName} className="space-y-3">
             <div
               className={`px-3 py-2 rounded-2xl cursor-pointer flex items-center justify-between ${
                 isDark ? "bg-white/5 hover:bg-white/10" : "bg-black/5 hover:bg-black/10"
               }`}
-              onClick={() =>
-                setCollapsedVolumes((p) => ({ ...p, [group.volumeName]: !p[group.volumeName] }))
-              }
+              draggable={canReorderVolumes}
+              onDragStart={() => {
+                if (!canReorderVolumes) return;
+                setDraggingVolumeName(group.volumeName);
+              }}
+              onDragEnd={() => setDraggingVolumeName(null)}
+              onDragOver={(event) => {
+                if ((canReorderVolumes && draggingVolumeName && draggingVolumeName !== group.volumeName) || (canMoveToVolume && draggingChapterId)) {
+                  event.preventDefault();
+                }
+              }}
+              onDrop={async (event) => {
+                if (canReorderVolumes && draggingVolumeName && draggingVolumeName !== group.volumeName) {
+                  event.preventDefault();
+                  reorderVolumes(draggingVolumeName, group.volumeName);
+                  setDraggingVolumeName(null);
+                  return;
+                }
+                if (canMoveToVolume && draggingChapterId) {
+                  event.preventDefault();
+                  await moveChapterToVolume(draggingChapterId, group.volumeName);
+                  setDraggingChapterId(null);
+                }
+              }}
             >
-              <div className="min-w-0">
+              <div className="min-w-0 flex items-center gap-2">
+                {canReorderVolumes ? <GripVertical className="w-4 h-4 opacity-40" /> : null}
                 <div className="text-xs font-black uppercase tracking-widest opacity-70 truncate">{group.volumeName}</div>
                 <div className="text-[10px] font-bold opacity-40">
                   {group.chapters.length} chapters{isCollapsed ? " (collapsed)" : ""}
                 </div>
               </div>
-              <div className="text-xs opacity-60">{isCollapsed ? "+" : "-"}</div>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setCollapsedVolumes((p) => {
+                      const next = { ...p, [group.volumeName]: !p[group.volumeName] };
+                      upsertBookSettings({ collapsedVolumes: next });
+                      return next;
+                    });
+                  }}
+                  className="p-1.5 opacity-60 hover:opacity-100"
+                >
+                  {isCollapsed ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+                </button>
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void renameVolume(group.volumeName);
+                  }}
+                  className="p-1.5 opacity-60 hover:opacity-100"
+                >
+                  <Edit2 className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void deleteVolumeToUngrouped(group.volumeName);
+                  }}
+                  className="p-1.5 opacity-60 hover:opacity-100 text-red-500"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
             </div>
             {isCollapsed ? null : (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
@@ -1999,9 +2542,51 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                     <div
                       key={c.id}
                       data-chapter-id={c.id}
-                      onClick={() => onOpenChapter(c.id)}
+                      onClick={(event) => {
+                        if (longPressTriggeredRef.current) {
+                          longPressTriggeredRef.current = false;
+                          return;
+                        }
+                        handleChapterActivate(c, event as any);
+                      }}
+                      onContextMenu={(event) => handleChapterContextMenu(c, event as any)}
+                      onPointerDown={(event) => {
+                        startLongPressSelection(event, c.id);
+                      }}
+                      onPointerMove={handleLongPressPointerMove}
+                      onPointerUp={finishLongPressSelection}
+                      onPointerCancel={finishLongPressSelection}
+                      draggable={isOrganizeMode && book.settings?.allowDragReorderChapters !== false}
+                      onDragStart={() => {
+                        if (!(isOrganizeMode && book.settings?.allowDragReorderChapters !== false)) return;
+                        setDraggingChapterId(c.id);
+                      }}
+                      onDragEnd={() => setDraggingChapterId(null)}
+                      onDragOver={(event) => {
+                        if (!(isOrganizeMode && book.settings?.allowDragReorderChapters !== false)) return;
+                        if (!draggingChapterId || draggingChapterId === c.id) return;
+                        event.preventDefault();
+                      }}
+                      onDrop={async (event) => {
+                        if (!(isOrganizeMode && book.settings?.allowDragReorderChapters !== false)) return;
+                        if (!draggingChapterId || draggingChapterId === c.id) return;
+                        event.preventDefault();
+                        await reorderWithinVolume(draggingChapterId, c.id);
+                        setDraggingChapterId(null);
+                      }}
                       className={`aspect-square p-4 rounded-3xl border flex flex-col items-center justify-center text-center gap-2 cursor-pointer transition-all hover:scale-105 group relative ${cardBg}`}
                     >
+                      {selectionMode ? (
+                        <div className="absolute top-3 left-3">
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(c.id)}
+                            onChange={() => toggleChapterSelection(c.id)}
+                            onClick={(event) => event.stopPropagation()}
+                            className="accent-indigo-600"
+                          />
+                        </div>
+                      ) : null}
                       <div className="absolute top-3 right-3 flex gap-1">
                         {renderTextStatusIcon(c)}
                         {renderAudioStatusIcon(c)}
@@ -2020,24 +2605,16 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                         </div>
                         <div className="text-[8px] font-black uppercase mt-1">{percent}%</div>
                       </div>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (confirm("Delete?")) onDeleteChapter(c.id);
-                        }}
-                        className="hidden md:block absolute bottom-2 right-2 p-2 opacity-0 group-hover:opacity-100 text-red-500 transition-opacity"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
                       <div className="md:hidden absolute bottom-2 left-0 right-0 flex justify-center gap-2 px-2">
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
                             setMobileMenuId(c.id);
                           }}
+                          title="Chapter menu"
                           className="p-2 bg-black/5 rounded-xl opacity-60"
                         >
-                          <GearIcon className="w-3.5 h-3.5" />
+                          <MoreVertical className="w-3.5 h-3.5" />
                         </button>
                       </div>
                     </div>
@@ -2049,66 +2626,122 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         );
       })}
       {volumeSections.ungrouped.length > 0 && (
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-          {volumeSections.ungrouped.map((c, idx) => {
-            const displayIndex = getDisplayIndex(c, idx + 1);
-            const displayTitle = getDisplayTitle(c, displayIndex);
-            let percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
-            if (playbackSnapshot && playbackSnapshot.chapterId === c.id) {
-              percent = Math.floor(playbackSnapshot.percent * 100);
-            }
-            const isCompleted = c.isCompleted || false;
-            if (isCompleted) {
-              percent = 100;
-            }
-            return (
-              <div
-                key={c.id}
-                data-chapter-id={c.id}
-                onClick={() => onOpenChapter(c.id)}
-                className={`aspect-square p-4 rounded-3xl border flex flex-col items-center justify-center text-center gap-2 cursor-pointer transition-all hover:scale-105 group relative ${cardBg}`}
-              >
-                <div className="absolute top-3 right-3 flex gap-1">
-                  {renderTextStatusIcon(c)}
-                  {renderAudioStatusIcon(c)}
-                </div>
+        <div className="space-y-2">
+          <div className="px-2 text-[10px] font-black uppercase tracking-widest opacity-60">Chapters</div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+            {volumeSections.ungrouped.map((c, idx) => {
+              const displayIndex = getDisplayIndex(c, idx + 1);
+              const displayTitle = getDisplayTitle(c, displayIndex);
+              let percent = c.progress !== undefined ? Math.floor(c.progress * 100) : 0;
+              if (playbackSnapshot && playbackSnapshot.chapterId === c.id) {
+                percent = Math.floor(playbackSnapshot.percent * 100);
+              }
+              const isCompleted = c.isCompleted || false;
+              if (isCompleted) {
+                percent = 100;
+              }
+              return (
                 <div
-                  className={`w-12 h-12 rounded-2xl flex items-center justify-center font-mono text-lg font-black mb-1 ${
-                    isDark ? "bg-slate-950 text-indigo-400" : "bg-indigo-50 text-indigo-600"
-                  }`}
-                >
-                  {displayIndex}
-                </div>
-                <div className="font-black text-xs line-clamp-2 leading-tight px-1">{displayTitle}</div>
-                <div className="mt-2 w-full px-4">
-                  <div className={`h-1 w-full rounded-full overflow-hidden ${isDark ? "bg-slate-700" : "bg-black/5"}`}>
-                    <div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${percent}%` }} />
-                  </div>
-                  <div className="text-[8px] font-black uppercase mt-1">{percent}%</div>
-                </div>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (confirm("Delete?")) onDeleteChapter(c.id);
+                  key={c.id}
+                  data-chapter-id={c.id}
+                  onClick={(event) => {
+                    if (longPressTriggeredRef.current) {
+                      longPressTriggeredRef.current = false;
+                      return;
+                    }
+                    handleChapterActivate(c, event as any);
                   }}
-                  className="hidden md:block absolute bottom-2 right-2 p-2 opacity-0 group-hover:opacity-100 text-red-500 transition-opacity"
+                  onContextMenu={(event) => handleChapterContextMenu(c, event as any)}
+                  onPointerDown={(event) => {
+                    startLongPressSelection(event, c.id);
+                  }}
+                  onPointerMove={handleLongPressPointerMove}
+                  onPointerUp={finishLongPressSelection}
+                  onPointerCancel={finishLongPressSelection}
+                  draggable={isOrganizeMode && book.settings?.allowDragReorderChapters !== false}
+                  onDragStart={() => {
+                    if (!(isOrganizeMode && book.settings?.allowDragReorderChapters !== false)) return;
+                    setDraggingChapterId(c.id);
+                  }}
+                  onDragEnd={() => setDraggingChapterId(null)}
+                  onDragOver={(event) => {
+                    if (!(isOrganizeMode && book.settings?.allowDragReorderChapters !== false)) return;
+                    if (!draggingChapterId || draggingChapterId === c.id) return;
+                    event.preventDefault();
+                  }}
+                  onDrop={async (event) => {
+                    if (!(isOrganizeMode && book.settings?.allowDragReorderChapters !== false)) return;
+                    if (!draggingChapterId || draggingChapterId === c.id) return;
+                    event.preventDefault();
+                    await reorderWithinVolume(draggingChapterId, c.id);
+                    setDraggingChapterId(null);
+                  }}
+                  className={`aspect-square p-4 rounded-3xl border flex flex-col items-center justify-center text-center gap-2 cursor-pointer transition-all hover:scale-105 group relative ${cardBg}`}
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-                <div className="md:hidden absolute bottom-2 left-0 right-0 flex justify-center gap-2 px-2">
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setMobileMenuId(c.id);
-                    }}
-                    className="p-2 bg-black/5 rounded-xl opacity-60"
+                  {selectionMode ? (
+                    <div className="absolute top-3 left-3">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(c.id)}
+                        onChange={() => toggleChapterSelection(c.id)}
+                        onClick={(event) => event.stopPropagation()}
+                        className="accent-indigo-600"
+                      />
+                    </div>
+                  ) : null}
+                  <div className="absolute top-3 right-3 flex gap-1">
+                    {renderTextStatusIcon(c)}
+                    {renderAudioStatusIcon(c)}
+                  </div>
+                  <div
+                    className={`w-12 h-12 rounded-2xl flex items-center justify-center font-mono text-lg font-black mb-1 ${
+                      isDark ? "bg-slate-950 text-indigo-400" : "bg-indigo-50 text-indigo-600"
+                    }`}
                   >
-                    <GearIcon className="w-3.5 h-3.5" />
-                  </button>
+                    {displayIndex}
+                  </div>
+                  <div className="font-black text-xs line-clamp-2 leading-tight px-1">{displayTitle}</div>
+                  <div className="mt-2 w-full px-4">
+                    <div className={`h-1 w-full rounded-full overflow-hidden ${isDark ? "bg-slate-700" : "bg-black/5"}`}>
+                      <div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${percent}%` }} />
+                    </div>
+                    <div className="text-[8px] font-black uppercase mt-1">{percent}%</div>
+                  </div>
+                  <div className="md:hidden absolute bottom-2 left-0 right-0 flex justify-center gap-2 px-2">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setMobileMenuId(c.id);
+                      }}
+                      title="Chapter menu"
+                      className="p-2 bg-black/5 rounded-xl opacity-60"
+                    >
+                      <MoreVertical className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {isOrganizeMode && book.settings?.allowDragMoveToVolume !== false && (
+        <div
+          className={`rounded-2xl border border-dashed px-4 py-6 text-center text-[10px] font-black uppercase tracking-widest ${
+            isDark ? "border-slate-700 text-slate-300" : "border-black/20 text-slate-600"
+          }`}
+          onDragOver={(event) => {
+            if (!draggingChapterId) return;
+            event.preventDefault();
+          }}
+          onDrop={async (event) => {
+            if (!draggingChapterId) return;
+            event.preventDefault();
+            await moveChapterToVolume(draggingChapterId, undefined);
+            setDraggingChapterId(null);
+          }}
+        >
+          Drop Here To Ungroup
         </div>
       )}
       {hasMoreChapters && (
@@ -2150,18 +2783,31 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       )}
 
       {showBookSettings && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-          <div className={`w-full max-w-lg rounded-[2rem] shadow-2xl p-8 space-y-6 ${isDark ? 'bg-slate-900 border border-slate-800' : 'bg-white border border-black/5'}`}>
-            <div className="flex items-center justify-between">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-sm overflow-y-auto">
+          <div
+            data-testid="book-settings-modal"
+            className={`w-full max-w-lg rounded-[2rem] shadow-2xl flex max-h-[calc(100dvh-1rem)] sm:max-h-[calc(100dvh-2rem)] flex-col overflow-hidden ${isDark ? 'bg-slate-900 border border-slate-800' : 'bg-white border border-black/5'}`}
+          >
+            <div className={`sticky top-0 z-10 px-5 sm:px-6 py-4 flex items-center justify-between border-b ${isDark ? "border-white/10 bg-slate-900/95" : "border-black/10 bg-white/95"}`}>
               <div>
                 <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Book Settings</div>
                 <div className="text-xl font-black tracking-tight">{book.title}</div>
               </div>
-              <button onClick={() => setShowBookSettings(false)} className="p-2 opacity-60 hover:opacity-100">
+              <button
+                onClick={() => setShowBookSettings(false)}
+                title="Close Book Settings"
+                aria-label="Close Book Settings"
+                className="p-2 opacity-60 hover:opacity-100"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
+            <div
+              data-testid="book-settings-scroll"
+              className="flex-1 overflow-y-auto overscroll-contain px-5 sm:px-6 py-5 space-y-6 pb-[calc(env(safe-area-inset-bottom)+1rem)]"
+              style={{ WebkitOverflowScrolling: "touch" }}
+            >
             <div className="space-y-3">
               <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Cover</div>
               {book.coverImage ? (
@@ -2188,26 +2834,102 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             </div>
 
             <div className="space-y-3">
-              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Audio</div>
+              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Display</div>
+              <div className={`p-4 rounded-2xl border ${isDark ? "border-white/10 bg-white/5" : "border-black/10 bg-black/5"}`}>
+                <div className="text-xs font-black mb-2">Chapter Layout</div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => onUpdateBookSettings?.({ chapterLayout: "sections" })}
+                    className={`px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${viewMode === "sections" ? "bg-indigo-600 text-white" : "bg-black/5"}`}
+                  >
+                    Sections
+                  </button>
+                  <button
+                    onClick={() => onUpdateBookSettings?.({ chapterLayout: "grid" })}
+                    className={`px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${viewMode === "grid" ? "bg-indigo-600 text-white" : "bg-black/5"}`}
+                  >
+                    Grid
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Organize</div>
+              {[
+                { key: "enableSelectionMode", label: "Enable Selection Mode", value: book.settings?.enableSelectionMode !== false },
+                { key: "enableOrganizeMode", label: "Enable Organize Mode", value: book.settings?.enableOrganizeMode !== false },
+                { key: "allowDragReorderChapters", label: "Drag Reorder Chapters", value: book.settings?.allowDragReorderChapters !== false },
+                { key: "allowDragMoveToVolume", label: "Drag Move To Volume", value: book.settings?.allowDragMoveToVolume !== false },
+                { key: "allowDragReorderVolumes", label: "Drag Reorder Volumes", value: book.settings?.allowDragReorderVolumes !== false },
+              ].map((item) => (
+                <label
+                  key={item.key}
+                  className={`flex items-center justify-between gap-4 p-4 rounded-2xl border ${
+                    isDark ? "border-white/10 bg-white/5" : "border-black/10 bg-black/5"
+                  }`}
+                >
+                  <div className="text-xs font-black">{item.label}</div>
+                  <input
+                    type="checkbox"
+                    checked={item.value}
+                    onChange={(e) => onUpdateBookSettings?.({ [item.key]: e.target.checked })}
+                    className="w-5 h-5 accent-indigo-600"
+                  />
+                </label>
+              ))}
+            </div>
+
+            <div className="space-y-3">
+              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Audio and Upload</div>
+              {[
+                { key: "autoGenerateAudioOnAdd", label: "Auto-generate On Add", help: "Generate chapter audio automatically when new chapters are added.", value: book.settings?.autoGenerateAudioOnAdd !== false },
+                { key: "autoUploadOnAdd", label: "Auto-upload On Add", help: "Queue chapter upload automatically after add.", value: book.settings?.autoUploadOnAdd === true },
+              ].map((item) => (
+                <label
+                  key={item.key}
+                  className={`flex items-center justify-between gap-4 p-4 rounded-2xl border ${
+                    isDark ? "border-white/10 bg-white/5" : "border-black/10 bg-black/5"
+                  }`}
+                >
+                  <div>
+                    <div className="text-xs font-black">{item.label}</div>
+                    <div className="text-[10px] opacity-60">{item.help}</div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={item.value}
+                    onChange={(e) => onUpdateBookSettings?.({ [item.key]: e.target.checked })}
+                    className="w-5 h-5 accent-indigo-600"
+                  />
+                </label>
+              ))}
+              <button
+                onClick={() => {
+                  setRememberAsDefault(true);
+                  setShowVoiceModal({});
+                }}
+                className="w-full px-4 py-3 rounded-2xl border border-indigo-600/20 text-indigo-600 text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50"
+              >
+                Default Voice: {book.settings?.defaultVoiceId || "Not set"}
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Safety</div>
               <label
                 className={`flex items-center justify-between gap-4 p-4 rounded-2xl border ${
                   isDark ? "border-white/10 bg-white/5" : "border-black/10 bg-black/5"
                 }`}
               >
                 <div>
-                  <div className="text-xs font-black">Auto-generate On Add</div>
-                  <div className="text-[10px] opacity-60">
-                    Generate chapter audio automatically when new chapters are added.
-                  </div>
+                  <div className="text-xs font-black">Confirm Bulk Delete</div>
+                  <div className="text-[10px] opacity-60">Ask for confirmation before deleting selected chapters.</div>
                 </div>
                 <input
                   type="checkbox"
-                  checked={book.settings?.autoGenerateAudioOnAdd !== false}
-                  onChange={(e) =>
-                    onUpdateBookSettings?.({
-                      autoGenerateAudioOnAdd: e.target.checked,
-                    })
-                  }
+                  checked={book.settings?.confirmBulkDelete !== false}
+                  onChange={(e) => onUpdateBookSettings?.({ confirmBulkDelete: e.target.checked })}
                   className="w-5 h-5 accent-indigo-600"
                 />
               </label>
@@ -2305,6 +3027,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               >
                 Delete Book
               </button>
+            </div>
             </div>
           </div>
         </div>
@@ -2417,57 +3140,193 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       )}
 
       <div className={`sticky top-0 z-50 border-b border-black/5 backdrop-blur-md transition-all duration-300 ${stickyHeaderBg}`}>
-        <div className={`p-4 sm:p-6 lg:p-8 flex flex-col gap-4 ${!isHeaderExpanded ? 'md:block' : ''}`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <button onClick={onBackToLibrary} className="flex items-center gap-1 text-[10px] font-black uppercase tracking-widest text-indigo-500 hover:translate-x-[-2px] transition-transform"><ChevronLeft className="w-3 h-3" /> Library</button>
+        {selectionMode ? (
+          <div className="p-4 sm:p-5 flex items-center justify-between gap-3">
+            <button
+              onClick={closeSelectionMode}
+              className="p-2 rounded-xl bg-black/5 hover:bg-black/10"
+              title="Close selection"
+            >
+              <X className="w-4 h-4" />
+            </button>
+            <div className="font-black text-xs uppercase tracking-widest">
+              {selectedIds.size} selected
             </div>
-            <div className="flex items-center gap-1 p-1 rounded-xl bg-black/5">
-              <button onClick={() => setViewMode('grid')} className={`p-1.5 rounded-lg transition-all ${viewMode === 'grid' ? 'bg-white shadow-sm text-indigo-600' : 'opacity-40'}`}><LayoutGrid className="w-3.5 h-3.5" /></button>
-              <button onClick={() => setViewMode('list')} className={`p-1.5 rounded-lg transition-all ${viewMode === 'list' ? 'bg-white shadow-sm text-indigo-600' : 'opacity-40'}`}><AlignJustify className="w-3.5 h-3.5" /></button>
-              <button onClick={() => setViewMode('details')} className={`p-1.5 rounded-lg transition-all ${viewMode === 'details' ? 'bg-white shadow-sm text-indigo-600' : 'opacity-40'}`}><List className="w-3.5 h-3.5" /></button>
-            </div>
-          </div>
-          
-            <div className="flex items-center justify-between gap-3">
-              <div className={`flex items-center gap-3 sm:gap-8 cursor-pointer md:cursor-default flex-1 min-w-0`} onClick={() => window.innerWidth < 768 && setIsHeaderExpanded(!isHeaderExpanded)}>
-                <div className={`rounded-xl sm:rounded-2xl overflow-hidden shadow-xl flex-shrink-0 bg-indigo-600/10 flex items-center justify-center transition-all duration-300 ${isHeaderExpanded ? 'w-24 sm:w-32 aspect-[2/3]' : 'w-12 sm:w-32 aspect-[1/1] sm:aspect-[2/3]'}`}>{book.coverImage ? <img src={book.coverImage} className="w-full h-full object-cover" alt={book.title} /> : <ImageIcon className="w-5 h-5 sm:w-10 sm:h-10 opacity-20" />}</div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <h1 className={`font-black tracking-tight truncate transition-all duration-300 ${isHeaderExpanded ? 'text-xl sm:text-3xl' : 'text-sm sm:text-3xl'}`}>{book.title}</h1>
-                    {isDirty && book.backend === StorageBackend.DRIVE && (
-                      <span className={`px-2 py-1 rounded-full text-[9px] font-black uppercase tracking-widest ${isDark ? 'bg-amber-500/20 text-amber-300' : 'bg-amber-500/20 text-amber-700'}`}>
-                        Not synced
-                      </span>
-                    )}
-                    <div className="md:hidden">{isHeaderExpanded ? <ChevronUp className="w-4 h-4 opacity-40" /> : <ChevronDown className="w-4 h-4 opacity-40" />}</div>
-                  </div>
-                  <p className={`font-bold opacity-60 uppercase tracking-widest transition-all duration-300 ${isHeaderExpanded ? 'text-[10px] sm:text-xs mt-1' : 'text-[8px] sm:text-xs'}`}>{book.chapterCount ?? book.chapters.length} Chapters {isHeaderExpanded && `• ${book.backend} backend`}</p>
-                  {book.backend === StorageBackend.DRIVE && lastSavedAt && (
-                    <div className="text-[8px] sm:text-[9px] font-black uppercase tracking-widest opacity-50 mt-1">
-                      Last saved {new Date(lastSavedAt).toLocaleTimeString()}
-                    </div>
-                  )}
-                </div>
-              </div>
-              <button onClick={() => setShowBookSettings(true)} className="p-2 rounded-lg bg-black/5 hover:bg-black/10">
-                <GearIcon className="w-5 h-5" />
+            <div className="flex items-center gap-1">
+              <button
+                onClick={handleSelectAllVisible}
+                className="p-2 rounded-xl bg-black/5 hover:bg-black/10"
+                title="Select all visible"
+              >
+                <CheckSquare className="w-4 h-4" />
+              </button>
+              <button
+                onClick={handleInvertVisibleSelection}
+                className="p-2 rounded-xl bg-black/5 hover:bg-black/10"
+                title="Invert selection"
+              >
+                <Repeat2 className="w-4 h-4" />
               </button>
             </div>
+          </div>
+        ) : (
+          <div className="p-3 sm:p-4 flex items-center justify-between gap-3">
+            <button
+              onClick={onBackToLibrary}
+              className="p-2 rounded-xl bg-black/5 hover:bg-black/10"
+              title="Back"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setShowSearchBar((v) => !v)}
+                className="p-2 rounded-xl bg-black/5 hover:bg-black/10"
+                title="Search"
+              >
+                <Search className="w-4 h-4" />
+              </button>
+              <div className="flex items-center gap-1 p-1 rounded-xl bg-black/5">
+                <button
+                  onClick={() => setViewMode("sections")}
+                  className={`p-1.5 rounded-lg transition-all ${
+                    viewMode === "sections" ? "bg-white shadow-sm text-indigo-600" : "opacity-40"
+                  }`}
+                  title="Sections"
+                >
+                  <AlignJustify className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => setViewMode("grid")}
+                  className={`p-1.5 rounded-lg transition-all ${
+                    viewMode === "grid" ? "bg-white shadow-sm text-indigo-600" : "opacity-40"
+                  }`}
+                  title="Grid"
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <button
+                onClick={() => setShowBookSettings(true)}
+                className="p-2 rounded-xl bg-black/5 hover:bg-black/10"
+                title="Book settings"
+              >
+                <GearIcon className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+        {!selectionMode && showSearchBar ? (
+          <div className="px-4 sm:px-6 pb-3">
+            <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search chapters..."
+              className={`w-full px-3 py-2 rounded-xl border ${isDark ? "bg-slate-900 border-slate-700" : "bg-white border-black/10"}`}
+            />
+          </div>
+        ) : null}
+      </div>
 
-          <div className={`flex flex-wrap gap-2 transition-all duration-300 ${isHeaderExpanded || window.innerWidth >= 768 ? 'opacity-100 max-h-40 pointer-events-auto' : 'opacity-0 max-h-0 pointer-events-none overflow-hidden sm:opacity-100 sm:max-h-40 sm:pointer-events-auto'}`}>
-            <button onClick={onAddChapter} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-indigo-600 text-white rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center gap-2"><Plus className="w-3.5 h-3.5" /> Add Chapter</button>
+      {!selectionMode ? (
+        <div className="p-4 sm:p-6 lg:p-8 flex flex-col gap-4">
+          <div className={`rounded-3xl border p-4 sm:p-5 ${cardBg}`}>
+            <div className="flex items-start gap-4">
+              <div className="w-16 sm:w-20 aspect-[2/3] rounded-2xl overflow-hidden shadow-lg flex-shrink-0 bg-indigo-600/10 flex items-center justify-center">
+                {book.coverImage ? (
+                  <img src={book.coverImage} className="w-full h-full object-cover" alt={book.title} />
+                ) : (
+                  <ImageIcon className="w-6 h-6 opacity-20" />
+                )}
+              </div>
+              <div className="flex-1 min-w-0">
+                <h1 className="font-black tracking-tight text-lg sm:text-2xl truncate">{book.title}</h1>
+                <div className="mt-1 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest opacity-70">
+                  <span>{syncBadge.backendLabel}</span>
+                  <span
+                    className={`inline-flex items-center gap-1 ${
+                      syncBadge.tone === "emerald"
+                        ? "text-emerald-500"
+                        : syncBadge.tone === "amber"
+                          ? "text-amber-500"
+                          : syncBadge.tone === "indigo"
+                            ? "text-indigo-500"
+                            : "text-slate-500"
+                    }`}
+                  >
+                    {syncBadge.statusLabel === "SYNCING" ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : syncBadge.statusLabel === "PAUSED" ? (
+                      <AlertCircle className="w-3 h-3" />
+                    ) : syncBadge.statusLabel === "NOT SYNCED" ? (
+                      <CloudOff className="w-3 h-3" />
+                    ) : syncBadge.statusLabel === "SYNCED" ? (
+                      <Cloud className="w-3 h-3" />
+                    ) : (
+                      <FolderSync className="w-3 h-3" />
+                    )}
+                    {syncBadge.statusLabel === "NOT SYNCED"
+                      ? "Not synced"
+                      : syncBadge.statusLabel === "SYNCING"
+                        ? "Syncing"
+                        : syncBadge.statusLabel === "PAUSED"
+                          ? "Paused"
+                        : syncBadge.statusLabel === "SYNCED"
+                          ? "Synced"
+                          : "Local"}
+                  </span>
+                </div>
+                <div className="mt-1 text-[10px] font-black uppercase tracking-widest opacity-50">
+                  {(book.chapterCount ?? book.chapters.length)} chapters
+                  {lastSavedAt ? ` • Last saved ${new Date(lastSavedAt).toLocaleTimeString()}` : ""}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <button onClick={onAddChapter} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-indigo-600 text-white rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center gap-2"><Plus className="w-3.5 h-3.5" /> Add</button>
+            <button
+              onClick={() => {
+                if (book.settings?.enableOrganizeMode === false) {
+                  pushNotice("Organize mode disabled in Book Settings.", "info");
+                  return;
+                }
+                setIsOrganizeMode((v) => !v);
+                setSelectionMode(false);
+                setSelectedIds(new Set());
+              }}
+              className={`flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest transition-all flex items-center justify-center gap-2 ${
+                isOrganizeMode
+                  ? "bg-indigo-600 text-white shadow-xl hover:scale-105 active:scale-95"
+                  : "bg-white text-indigo-600 border border-indigo-600/20 shadow-lg hover:bg-indigo-50 active:scale-95"
+              }`}
+              title={isOrganizeMode ? "Done organizing" : "Organize chapters"}
+            >
+              <Edit2 className="w-3.5 h-3.5" /> {isOrganizeMode ? "Done" : "Edit"}
+            </button>
             <button onClick={handleCheckIntegrity} disabled={isCheckingDrive} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center justify-center gap-2">{isCheckingDrive ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}{isCheckingDrive ? '...' : 'Check'}</button>
+            <button
+              onClick={() => void handleReindexChapters()}
+              className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center justify-center gap-2"
+            >
+              <RefreshCw className="w-3.5 h-3.5" /> Reindex
+            </button>
             <button
               disabled={!hasIssues}
               className={hasIssues ? "flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-orange-500 text-white rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center gap-2" : "flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-orange-500/40 text-white/60 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest cursor-not-allowed flex items-center justify-center gap-2"}
               onClick={() => setShowFixModal(true)}
             >
-              <Wrench className="w-3.5 h-3.5" /> FIX
+              <Wrench className="w-3.5 h-3.5" /> Fix
             </button>
+            {isOrganizeMode ? (
+              <button onClick={handleAddVolume} className="flex-1 sm:flex-none px-4 py-2 sm:px-6 sm:py-3 bg-white text-indigo-600 border border-indigo-600/20 rounded-xl sm:rounded-2xl font-black uppercase text-[9px] sm:text-[10px] tracking-widest shadow-lg hover:bg-indigo-50 active:scale-95 transition-all flex items-center justify-center gap-2">
+                <Plus className="w-3.5 h-3.5" /> Add Volume
+              </button>
+            ) : null}
           </div>
         </div>
-      </div>
+      ) : null}
 
       {notice && (
         <div className="px-4 sm:px-6">
@@ -2501,19 +3360,32 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       <div
         ref={scrollContainerRef}
-        onScroll={useVirtualScroll ? undefined : handleScroll}
-        className={`flex-1 px-4 sm:px-6 py-6 sm:py-8 ${useVirtualScroll ? "overflow-hidden" : "overflow-y-auto"}`}
+        onScroll={handleScroll}
+        className="flex-1 px-4 sm:px-6 py-6 sm:py-8 overflow-y-auto"
       >
         {chapters.length === 0 ? (
           <div className="p-12 text-center text-xs font-black opacity-30 uppercase">No chapters found</div>
         ) : (
-          <>
-            {viewMode === "details" && renderDetailsView()}
-            {viewMode === "list" && renderListView()}
-            {viewMode === "grid" && renderGridView()}
-          </>
+          viewMode === "sections" ? renderDetailsView() : renderGridView()
         )}
       </div>
+
+      {selectionMode ? (
+        <div className={`sticky bottom-0 z-50 border-t p-3 sm:p-4 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] ${isDark ? 'bg-slate-900/95 border-slate-700' : 'bg-white/95 border-black/10'}`}>
+          <div className="grid grid-cols-5 gap-2">
+            <button onClick={() => void handleBulkUpload()} disabled={!selectedIds.size || !canBulkUpload} className={`px-2 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${selectedIds.size && canBulkUpload ? 'bg-black/5 hover:bg-black/10' : 'opacity-40 bg-black/5 cursor-not-allowed'}`}><Cloud className="w-4 h-4 mx-auto mb-1" />Upload</button>
+            <button onClick={() => void handleBulkRegenerateAudio()} disabled={!selectedIds.size} className={`px-2 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${selectedIds.size ? 'bg-black/5 hover:bg-black/10' : 'opacity-40 bg-black/5 cursor-not-allowed'}`}><Headphones className="w-4 h-4 mx-auto mb-1" />Regen Audio</button>
+            <button onClick={() => void handleBulkMarkCompleted()} disabled={!selectedIds.size} className={`px-2 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${selectedIds.size ? 'bg-black/5 hover:bg-black/10' : 'opacity-40 bg-black/5 cursor-not-allowed'}`}><Check className="w-4 h-4 mx-auto mb-1" />Done</button>
+            <button onClick={() => void handleBulkResetProgress()} disabled={!selectedIds.size} className={`px-2 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${selectedIds.size ? 'bg-black/5 hover:bg-black/10' : 'opacity-40 bg-black/5 cursor-not-allowed'}`}><RotateCcw className="w-4 h-4 mx-auto mb-1" />Reset</button>
+            <button onClick={() => void handleBulkDelete()} disabled={!selectedIds.size} className={`px-2 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${selectedIds.size ? 'bg-red-500/10 text-red-600 hover:bg-red-500/20' : 'opacity-40 bg-black/5 cursor-not-allowed'}`}><Trash2 className="w-4 h-4 mx-auto mb-1" />Delete</button>
+          </div>
+          {bulkActionProgress ? (
+            <div className="mt-2 text-[10px] font-black uppercase tracking-widest opacity-70 text-center">
+              {bulkActionProgress.label} {bulkActionProgress.current} of {bulkActionProgress.total}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 };

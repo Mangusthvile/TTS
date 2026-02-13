@@ -1,8 +1,5 @@
 import { AudioStatus, Book, Chapter, Rule, StorageBackend, UiMode } from "../types";
-import { applyRules } from "./speechService";
-import { reflowLineBreaks } from "./textFormat";
-import { markdownToPlainText } from "../utils/markdownToText";
-import { stripChapterTemplateHeader } from "../utils/stripChapterTemplateHeader";
+import { buildSpeakTextFromContent } from "../utils/markdownBlockParser";
 import { synthesizeChunk } from "./cloudTtsService";
 import { generateAudioKey, saveAudioToCache } from "./audioCache";
 import { persistChapterAudio } from "./audioStorage";
@@ -22,13 +19,6 @@ type GenerateAndPersistChapterAudioArgs = {
   loadChapterText?: (bookId: string, chapterId: string) => Promise<string | null>;
   onChapterUpdated?: (chapter: Chapter) => void | Promise<void>;
 };
-
-function sanitizeSpeechSource(chapter: Chapter, rawText: string): string {
-  const stripped = stripChapterTemplateHeader(rawText || "");
-  const isMarkdown =
-    chapter.contentFormat === "markdown" || (chapter.filename || "").toLowerCase().endsWith(".md");
-  return isMarkdown ? markdownToPlainText(stripped) : stripped;
-}
 
 async function publishChapterUpdate(
   bookId: string,
@@ -74,12 +64,22 @@ export async function generateAndPersistChapterAudio(
     throw new Error("No chapter text found.");
   }
 
-  const speechInput = sanitizeSpeechSource(chapter, sourceText);
-  let textToSpeak = applyRules(speechInput, rules);
-  if (reflowLineBreaksEnabled) textToSpeak = reflowLineBreaks(textToSpeak);
+  const isMarkdown =
+    chapter.contentFormat === "markdown" || (chapter.filename || "").toLowerCase().endsWith(".md");
+  const textToSpeak = buildSpeakTextFromContent(
+    sourceText,
+    isMarkdown,
+    rules,
+    reflowLineBreaksEnabled
+  );
 
   const displayTitle = (chapter.title || "").trim() || `Chapter ${chapter.index}`;
-  const introText = applyRules(`Chapter ${chapter.index}. ${displayTitle}. `, rules);
+  const introText = buildSpeakTextFromContent(
+    `Chapter ${chapter.index}. ${displayTitle}. `,
+    false,
+    rules,
+    reflowLineBreaksEnabled
+  );
   const fullText = introText + textToSpeak;
 
   const cloudRes = await synthesizeChunk(fullText, voiceId, playbackSpeed);

@@ -52,7 +52,7 @@ export default defineConfig(({ mode }) => {
 
     define: {
       "process.env": {},
-      __APP_VERSION__: JSON.stringify("2.10.25"),
+      __APP_VERSION__: JSON.stringify("2.10.33"),
       __ANDROID_ONLY__: JSON.stringify(isAndroidOnly),
     },
 

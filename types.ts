@@ -169,6 +169,7 @@ export type ParagraphMap = {
 export interface Chapter {
   id: string;
   index: number;
+  sortOrder?: number;
   title: string;
   sourceUrl?: string;
   filename: string;
@@ -208,7 +209,17 @@ export interface BookSettings {
   defaultVoiceId?: string; 
   useBookSettings: boolean;
   highlightMode: HighlightMode;
+  chapterLayout?: "sections" | "grid";
+  enableSelectionMode?: boolean;
+  enableOrganizeMode?: boolean;
+  allowDragReorderChapters?: boolean;
+  allowDragMoveToVolume?: boolean;
+  allowDragReorderVolumes?: boolean;
+  volumeOrder?: string[];
+  collapsedVolumes?: Record<string, boolean>;
   autoGenerateAudioOnAdd?: boolean;
+  autoUploadOnAdd?: boolean;
+  confirmBulkDelete?: boolean;
 }
 
 export type BookAttachment = {
@@ -337,6 +348,56 @@ export interface SnapshotPointerV1 {
   latestCreatedAt: number;
 }
 
+export const BACKUP_SCHEMA_VERSION = 1 as const;
+
+export type BackupTarget = "drive" | "localFolder" | "download";
+
+export type BackupOptions = {
+  includeAudio: boolean;
+  includeDiagnostics: boolean;
+  includeAttachments: boolean;
+  includeChapterText: boolean;
+  includeOAuthTokens?: boolean;
+};
+
+export type BackupProgressStep =
+  | "collecting_state"
+  | "exporting_sqlite"
+  | "collecting_files"
+  | "zipping"
+  | "saving_drive"
+  | "saving_local"
+  | "downloading"
+  | "restoring_db"
+  | "restoring_prefs"
+  | "restoring_files"
+  | "finalizing";
+
+export type BackupProgress = {
+  step: BackupProgressStep;
+  message: string;
+  current?: number;
+  total?: number;
+};
+
+export interface BackupMetaV1 {
+  backupSchemaVersion: typeof BACKUP_SCHEMA_VERSION;
+  appVersion: string;
+  createdAt: number;
+  platform: "web" | "android" | "ios";
+  notes: string;
+  warnings: string[];
+  options: BackupOptions;
+}
+
+export interface BackupSchedulerSettings {
+  autoBackupToDrive: boolean;
+  autoBackupToDevice: boolean;
+  backupIntervalMin: 5 | 15 | 30 | 60;
+  keepDriveBackups: number;
+  keepLocalBackups: number;
+}
+
 export interface FullSnapshotV1 {
   schemaVersion: 1;
   createdAt: number;
@@ -378,4 +439,9 @@ export interface AppState {
   autoSaveInterval: number;
   globalRules: Rule[];
   showDiagnostics: boolean;
+  backupSettings: BackupSchedulerSettings;
+  backupInProgress?: boolean;
+  lastBackupAt?: number;
+  lastBackupLocation?: string;
+  lastBackupError?: string;
 }

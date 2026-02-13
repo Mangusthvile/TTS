@@ -26,9 +26,10 @@ import type {
   BookAttachment,
   ChapterTombstone,
 } from "../types";
+import { getChapterSortOrder, normalizeChapterOrder } from "./chapterOrderingService";
 
 const DB_NAME = "TalevoxLibrary";
-const DB_VERSION = 6;
+const DB_VERSION = 7;
 
 const STORE_BOOKS = "books";
 const STORE_CHAPTERS = "chapters";
@@ -63,6 +64,7 @@ type ChapterRow = {
   id: string;
   bookId: string;
   idx: number;
+  sortOrder?: number;
   title: string;
   filename: string;
   sourceUrl?: string;
@@ -130,6 +132,29 @@ function ensureIndexedDbAvailable(): void {
   }
 }
 
+function backfillSortOrder(store: IDBObjectStore): void {
+  const req = store.openCursor();
+  req.onsuccess = () => {
+    const cursor = req.result;
+    if (!cursor) return;
+    const row = cursor.value as ChapterRow;
+    const normalizedSortOrder = getChapterSortOrder({
+      id: row.id,
+      index: Number(row.idx) || 0,
+      sortOrder: Number(row.sortOrder),
+      title: row.title,
+      filename: row.filename,
+      wordCount: Number(row.wordCount ?? 0),
+      progress: 0,
+      progressChars: 0,
+    } as Chapter);
+    if (row.sortOrder !== normalizedSortOrder) {
+      cursor.update({ ...row, sortOrder: normalizedSortOrder });
+    }
+    cursor.continue();
+  };
+}
+
 function openDb(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
 
@@ -150,11 +175,16 @@ function openDb(): Promise<IDBDatabase> {
         s.createIndex("byBookId", "bookId", { unique: false });
         s.createIndex("byBookIndex", ["bookId", "idx"], { unique: false });
         s.createIndex("bookId_index", ["bookId", "idx"], { unique: false });
+        s.createIndex("byBookSortOrder", ["bookId", "sortOrder", "idx"], { unique: false });
       } else {
         const s = req.transaction!.objectStore(STORE_CHAPTERS);
         if (!s.indexNames.contains("byBookId")) s.createIndex("byBookId", "bookId", { unique: false });
         if (!s.indexNames.contains("byBookIndex")) s.createIndex("byBookIndex", ["bookId", "idx"], { unique: false });
         if (!s.indexNames.contains("bookId_index")) s.createIndex("bookId_index", ["bookId", "idx"], { unique: false });
+        if (!s.indexNames.contains("byBookSortOrder")) {
+          s.createIndex("byBookSortOrder", ["bookId", "sortOrder", "idx"], { unique: false });
+        }
+        backfillSortOrder(s);
       }
 
       if (!db.objectStoreNames.contains(STORE_CHAPTER_TEXT)) {
@@ -235,9 +265,20 @@ function toBook(row: BookRow): Book {
 }
 
 function toChapter(row: ChapterRow): Chapter {
+  const normalizedSortOrder = getChapterSortOrder({
+    id: row.id,
+    index: Number(row.idx) || 0,
+    sortOrder: Number(row.sortOrder),
+    title: row.title,
+    filename: row.filename,
+    wordCount: Number(row.wordCount ?? 0),
+    progress: 0,
+    progressChars: 0,
+  } as Chapter);
   return {
     id: row.id,
     index: row.idx,
+    sortOrder: normalizedSortOrder,
     title: row.title,
     filename: row.filename,
     sourceUrl: row.sourceUrl,
@@ -331,11 +372,17 @@ export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promi
 
   const existingChapter = (await reqToPromise(sCh.get(chapter.id) as any)) as ChapterRow | undefined;
   const isNewChapter = !existingChapter;
+  const sortOrder = getChapterSortOrder(chapter);
+  const legacyIndex =
+    Number.isFinite(Number(chapter.index)) && Number(chapter.index) > 0
+      ? Math.floor(Number(chapter.index))
+      : sortOrder;
 
   const row: ChapterRow = {
     id: chapter.id,
     bookId,
-    idx: chapter.index,
+    idx: legacyIndex,
+    sortOrder,
     title: chapter.title,
     filename: chapter.filename,
     sourceUrl: chapter.sourceUrl,
@@ -522,13 +569,19 @@ export async function listChaptersPage(
   const tombstoneRows = (await reqToPromise(tombstoneIdx.getAll(bookId))) as ChapterTombstoneRow[];
   const tombstonedIds = new Set<string>((tombstoneRows ?? []).map((r) => r.chapterId));
 
-  const idx =
-    store.indexNames.contains("byBookIndex")
+  const idx = store.indexNames.contains("byBookSortOrder")
+    ? store.index("byBookSortOrder")
+    : store.indexNames.contains("byBookIndex")
       ? store.index("byBookIndex")
       : store.index("bookId_index");
 
   const start = (afterIndex ?? -1) + 1;
-  const range = IDBKeyRange.bound([bookId, start], [bookId, Number.MAX_SAFE_INTEGER]);
+  const range = idx.name === "byBookSortOrder"
+    ? IDBKeyRange.bound(
+        [bookId, start, Number.MIN_SAFE_INTEGER],
+        [bookId, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]
+      )
+    : IDBKeyRange.bound([bookId, start], [bookId, Number.MAX_SAFE_INTEGER]);
 
   const chapters: Chapter[] = [];
   let totalCount: number | undefined;
@@ -562,10 +615,11 @@ export async function listChaptersPage(
 
   await txDone(tx);
 
-  const nextAfterIndex = chapters.length ? chapters[chapters.length - 1].index : null;
+  const ordered = normalizeChapterOrder(chapters);
+  const nextAfterIndex = ordered.length ? getChapterSortOrder(ordered[ordered.length - 1]) : null;
   return {
-    chapters,
-    nextAfterIndex: chapters.length < limit ? null : nextAfterIndex,
+    chapters: ordered,
+    nextAfterIndex: ordered.length < limit ? null : nextAfterIndex,
     totalCount,
   };
 }
@@ -588,7 +642,7 @@ export async function getChaptersByIds(bookId: string, chapterIds: string[]): Pr
 
   await txDone(tx);
 
-  return ids.map((id) => out.get(id)).filter(Boolean) as Chapter[];
+  return normalizeChapterOrder(ids.map((id) => out.get(id)).filter(Boolean) as Chapter[]);
 }
 
 export const idbGetChaptersByIds = getChaptersByIds;
@@ -644,14 +698,20 @@ export async function bulkUpsertChapters(
 
     const existing = (await reqToPromise(sCh.get(c.id))) as ChapterRow | undefined;
     if (!existing) newCount += 1;
+    const sortOrder = getChapterSortOrder(c);
+    const legacyIndex =
+      Number.isFinite(Number(c.index)) && Number(c.index) > 0 ? Math.floor(Number(c.index)) : sortOrder;
 
     const row: ChapterRow = {
       id: c.id,
       bookId,
-      idx: c.index,
+      idx: legacyIndex,
+      sortOrder,
       title: c.title,
       filename: c.filename,
       sourceUrl: c.sourceUrl,
+      volumeName: (c as any).volumeName,
+      volumeLocalChapter: (c as any).volumeLocalChapter,
 
       cloudTextFileId: (c as any).cloudTextFileId,
       cloudAudioFileId: (c as any).cloudAudioFileId,

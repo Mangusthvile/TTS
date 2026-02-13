@@ -1,17 +1,19 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { buildChunks, chunkIndexFromChar } from "../utils/chunking";
+import React, { useCallback, useEffect, useMemo, useRef } from "react";
+import { Theme } from "../types";
+import { RenderBlock } from "../utils/markdownBlockParser";
 
 type CueRange = { start: number; end: number };
 
 type Props = {
-  text: string;
-  ttsCharIndex: number | null;
+  blocks: RenderBlock[];
   activeCueRange?: CueRange | null;
   autoFollow: boolean;
   isScrubbing: boolean;
   followNudge: number;
   containerRef: React.RefObject<HTMLDivElement | null>;
   onUserScrollingChange?: (v: boolean) => void;
+  theme?: Theme;
+  spacerClassName?: string;
 };
 
 function clamp(n: number, min: number, max: number): number {
@@ -22,74 +24,81 @@ function isWhitespaceChar(ch: string | undefined): boolean {
   return !!ch && /\s/.test(ch);
 }
 
-function snapCharIndexOffWhitespace(text: string, idx: number | null): number | null {
-  if (idx == null) return null;
-  if (!Number.isFinite(idx)) return null;
-  if (!text.length) return null;
-  const clamped = clamp(Math.floor(idx), 0, Math.max(0, text.length - 1));
-  if (!isWhitespaceChar(text[clamped])) return clamped;
-
-  for (let i = clamped; i >= 0; i -= 1) {
-    if (!isWhitespaceChar(text[i])) return i;
-  }
-  for (let i = clamped + 1; i < text.length; i += 1) {
-    if (!isWhitespaceChar(text[i])) return i;
-  }
-  return clamped;
-}
-
 function computeTargetTop(container: HTMLElement, target: HTMLElement): number {
   const containerRect = container.getBoundingClientRect();
   const targetRect = target.getBoundingClientRect();
   return targetRect.top - containerRect.top + container.scrollTop;
 }
 
+function isSpeakableBlock(block: RenderBlock): boolean {
+  return block.startIndex >= 0 && block.endIndex > block.startIndex;
+}
+
+function findActiveBlockIndex(blocks: RenderBlock[], index: number): number | null {
+  const direct = blocks.findIndex(
+    (b) =>
+      isSpeakableBlock(b) &&
+      index >= b.startIndex &&
+      index < b.endIndex
+  );
+  if (direct >= 0) return direct;
+
+  let previous: number | null = null;
+  for (let i = 0; i < blocks.length; i += 1) {
+    const b = blocks[i];
+    if (!isSpeakableBlock(b)) continue;
+    if (b.endIndex <= index) previous = i;
+  }
+  if (previous != null) return previous;
+
+  for (let i = 0; i < blocks.length; i += 1) {
+    const b = blocks[i];
+    if (!isSpeakableBlock(b)) continue;
+    if (b.startIndex > index) return i;
+  }
+
+  return null;
+}
+
 const ReaderList: React.FC<Props> = ({
-  text,
-  ttsCharIndex,
+  blocks,
   activeCueRange = null,
   autoFollow,
   isScrubbing,
   followNudge,
   containerRef,
   onUserScrollingChange,
+  theme,
+  spacerClassName,
 }) => {
-  const chunks = useMemo(() => buildChunks(text), [text]);
-  const itemRefs = useRef<Array<HTMLParagraphElement | null>>([]);
+  const blockRefs = useRef<Array<HTMLElement | null>>([]);
 
   const userScrollingRef = useRef(false);
-  const [isUserScrolling, setIsUserScrolling] = useState(false);
   const lockoutTimerRef = useRef<number | null>(null);
 
   const isAutoScrollingRef = useRef(false);
   const autoScrollTimerRef = useRef<number | null>(null);
 
-  const lastFollowedChunkRef = useRef<number | null>(null);
+  const lastFollowedBlockRef = useRef<number | null>(null);
 
-  const snappedCharIndex = useMemo(() => snapCharIndexOffWhitespace(text, ttsCharIndex), [text, ttsCharIndex]);
-
-  const activeChunkIndex = useMemo(() => {
-    if (snappedCharIndex == null) return null;
-    if (!chunks.length) return null;
-    return chunkIndexFromChar(chunks, snappedCharIndex);
-  }, [chunks, snappedCharIndex]);
+  const activeBlockIndex = useMemo(() => {
+    if (!activeCueRange) return null;
+    return findActiveBlockIndex(blocks, activeCueRange.start);
+  }, [blocks, activeCueRange]);
 
   const setUserScrolling = useCallback(
     (v: boolean) => {
       userScrollingRef.current = v;
-      setIsUserScrolling(v);
       onUserScrollingChange?.(v);
     },
     [onUserScrollingChange]
   );
 
-  // Reset follow state when chapter text changes.
   useEffect(() => {
-    lastFollowedChunkRef.current = null;
+    lastFollowedBlockRef.current = null;
     setUserScrolling(false);
-  }, [text, setUserScrolling]);
+  }, [blocks, setUserScrolling]);
 
-  // Detect manual scrolling without being tripped by our own programmatic scroll.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -106,7 +115,6 @@ const ReaderList: React.FC<Props> = ({
     };
 
     const onUserInput = () => {
-      // If the user is interacting during a smooth programmatic scroll, let them take over.
       if (isAutoScrollingRef.current) isAutoScrollingRef.current = false;
     };
 
@@ -123,16 +131,16 @@ const ReaderList: React.FC<Props> = ({
     };
   }, [containerRef, setUserScrolling]);
 
-  const scrollToChunk = useCallback(
+  const scrollToBlock = useCallback(
     (index: number, behavior: ScrollBehavior, force: boolean) => {
       const container = containerRef.current;
       if (!container) return false;
-      const item = itemRefs.current[index];
+      const item = blockRefs.current[index];
       if (!item) return false;
       if (!force && userScrollingRef.current) return false;
 
       const anchor =
-        item.querySelector<HTMLElement>('[data-highlight-anchor="true"]') ?? item;
+        item.querySelector<HTMLElement>("[data-highlight-anchor='true']") ?? item;
       const targetTop = computeTargetTop(container, anchor);
       const anchorY = container.clientHeight * 0.3;
 
@@ -158,128 +166,229 @@ const ReaderList: React.FC<Props> = ({
     [containerRef]
   );
 
-  // Follow highlight as it moves.
   useEffect(() => {
     if (!autoFollow) return;
     if (isScrubbing) return;
-    if (activeChunkIndex == null) return;
-    if (snappedCharIndex == null) return;
+    if (activeBlockIndex == null) return;
     if (userScrollingRef.current) return;
-    if (lastFollowedChunkRef.current === activeChunkIndex) return;
+    if (lastFollowedBlockRef.current === activeBlockIndex) return;
 
-    const prev = lastFollowedChunkRef.current;
-    const jump = prev == null ? 0 : Math.abs(activeChunkIndex - prev);
+    const prev = lastFollowedBlockRef.current;
+    const jump = prev == null ? 0 : Math.abs(activeBlockIndex - prev);
     const behavior: ScrollBehavior = jump <= 2 ? "smooth" : "auto";
 
     const raf = window.requestAnimationFrame(() => {
-      const didScroll = scrollToChunk(activeChunkIndex, behavior, false);
-      if (didScroll) lastFollowedChunkRef.current = activeChunkIndex;
+      const didScroll = scrollToBlock(activeBlockIndex, behavior, false);
+      if (didScroll) lastFollowedBlockRef.current = activeBlockIndex;
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [activeChunkIndex, autoFollow, isScrubbing, snappedCharIndex, scrollToChunk]);
+  }, [activeBlockIndex, autoFollow, isScrubbing, scrollToBlock]);
 
-  // Forced snap after explicit seek/scrub.
   useEffect(() => {
     if (!autoFollow) return;
     if (isScrubbing) return;
-    if (activeChunkIndex == null) return;
-    if (snappedCharIndex == null) return;
+    if (activeBlockIndex == null) return;
 
     setUserScrolling(false);
 
     const raf = window.requestAnimationFrame(() => {
-      const didScroll = scrollToChunk(activeChunkIndex, "auto", true);
-      if (didScroll) lastFollowedChunkRef.current = activeChunkIndex;
+      const didScroll = scrollToBlock(activeBlockIndex, "auto", true);
+      if (didScroll) lastFollowedBlockRef.current = activeBlockIndex;
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [
-    followNudge,
-    autoFollow,
-    isScrubbing,
-    activeChunkIndex,
-    snappedCharIndex,
-    scrollToChunk,
-    setUserScrolling,
-  ]);
+  }, [followNudge, autoFollow, isScrubbing, activeBlockIndex, scrollToBlock, setUserScrolling]);
 
-  const dimOthers = activeChunkIndex != null;
+  const dimOthers = activeBlockIndex != null;
+
+  const renderHighlightedText = (text: string, blockStart: number) => {
+    if (!activeCueRange) return <span data-base={blockStart}>{text}</span>;
+
+    const relStart = Math.max(0, activeCueRange.start - blockStart);
+    const relEnd = Math.min(text.length, activeCueRange.end - blockStart);
+
+    if (relStart >= relEnd) return <span data-base={blockStart}>{text}</span>;
+
+    let highlightStart = relStart;
+    let highlightEnd = relEnd;
+    while (highlightStart < highlightEnd && isWhitespaceChar(text[highlightStart])) {
+      highlightStart += 1;
+    }
+    while (highlightEnd > highlightStart && isWhitespaceChar(text[highlightEnd - 1])) {
+      highlightEnd -= 1;
+    }
+    if (highlightEnd <= highlightStart) {
+      return <span data-base={blockStart}>{text}</span>;
+    }
+
+    const before = text.slice(0, highlightStart);
+    const active = text.slice(highlightStart, highlightEnd);
+    const after = text.slice(highlightEnd);
+
+    return (
+      <>
+        {before && <span data-base={blockStart}>{before}</span>}
+        <span
+          data-base={blockStart + highlightStart}
+          data-highlight-anchor="true"
+          data-active="true"
+          className="rounded px-0.5 py-[0.05rem] bg-[var(--highlight-weak)]"
+        >
+          {active}
+        </span>
+        {after && <span data-base={blockStart + highlightEnd}>{after}</span>}
+      </>
+    );
+  };
+
+  const tableChrome =
+    theme === Theme.DARK
+      ? "border-sky-400/30 bg-sky-500/10 text-slate-100"
+      : theme === Theme.SEPIA
+        ? "border-sky-700/20 bg-sky-600/10 text-[#3c2f25]"
+        : "border-sky-500/20 bg-sky-500/10 text-slate-900";
+  const cellBorder = theme === Theme.DARK ? "border-white/10" : "border-black/10";
+  const spacerClass = spacerClassName ?? "h-6";
 
   return (
-    <div className="whitespace-pre-wrap">
-      {chunks.map((chunk, idx) => {
-        const isActiveChunk = idx === activeChunkIndex;
-        const hasActiveCue =
-          activeCueRange != null &&
-          activeCueRange.end > chunk.start &&
-          activeCueRange.start < chunk.end;
+    <div className="whitespace-pre-wrap flex flex-col">
+      {blocks.map((block, idx) => {
+        const isActiveBlock = idx === activeBlockIndex;
+        const opacityClass = dimOthers ? (isActiveBlock ? "opacity-100" : "opacity-60") : "opacity-100";
 
-        let content: React.ReactNode = (
-          <span data-base={chunk.start}>{chunk.text}</span>
-        );
-
-        if (hasActiveCue && activeCueRange) {
-          const relStart = Math.max(0, activeCueRange.start - chunk.start);
-          const relEnd = Math.min(
-            chunk.text.length,
-            Math.max(relStart, activeCueRange.end - chunk.start)
+        if (block.type === "spacer") {
+          return (
+            <div
+              key={block.id}
+              className={`${spacerClass} w-full select-none`}
+              aria-hidden="true"
+              ref={(el) => {
+                blockRefs.current[idx] = el as HTMLElement | null;
+              }}
+            />
           );
-          let highlightStart = relStart;
-          let highlightEnd = relEnd;
-          while (highlightStart < highlightEnd && isWhitespaceChar(chunk.text[highlightStart])) {
-            highlightStart += 1;
-          }
-          while (highlightEnd > highlightStart && isWhitespaceChar(chunk.text[highlightEnd - 1])) {
-            highlightEnd -= 1;
-          }
-          if (highlightEnd > highlightStart) {
-            const before = chunk.text.slice(0, highlightStart);
-            const active = chunk.text.slice(highlightStart, highlightEnd);
-            const after = chunk.text.slice(highlightEnd);
-            content = (
-              <>
-                {before && <span data-base={chunk.start}>{before}</span>}
-                <span
-                  data-base={chunk.start + highlightStart}
-                  data-highlight-anchor="true"
-                  data-active="true"
-                  className="rounded px-0.5 py-[0.05rem] bg-[var(--highlight-weak)]"
-                >
-                  {active}
-                </span>
-                {after && (
-                  <span data-base={chunk.start + highlightEnd}>{after}</span>
-                )}
-              </>
-            );
-          }
         }
 
-        const chunkClassName = [
-          "leading-relaxed rounded-md px-1 -mx-1 transition-colors",
-          dimOthers ? (isActiveChunk ? "opacity-100" : "opacity-60") : "",
-        ]
-          .filter(Boolean)
-          .join(" ");
-        const activeTextClass = isActiveChunk
-          ? "rounded px-0.5 py-[0.05rem] bg-[var(--highlight-strong)] text-[var(--highlight-strong-text)]"
-          : "";
+        if (block.type === "table" && block.rows) {
+          const headerRow = block.headers ?? [];
+          const bodyRows = block.rows ?? [];
+
+          return (
+            <div
+              key={block.id}
+              ref={(el) => {
+                blockRefs.current[idx] = el as HTMLElement | null;
+              }}
+              className={`my-4 overflow-x-auto rounded-2xl border ${tableChrome} ${opacityClass} transition-opacity duration-300`}
+            >
+              <table className="min-w-full border-separate border-spacing-0 text-sm">
+                {headerRow.length > 0 && (
+                  <thead className={`text-[10px] font-black uppercase tracking-widest opacity-80 border-b ${cellBorder}`}>
+                    <tr>
+                      {headerRow.map((cell, colIdx) => {
+                        const cellRange = block.cellRanges?.find(
+                          (r) => r.row === 0 && r.col === colIdx && r.isHeader
+                        );
+                        const content = cellRange
+                          ? renderHighlightedText(cell, cellRange.startIndex)
+                          : cell;
+                        return (
+                          <th key={colIdx} className={`px-4 py-3 text-left whitespace-nowrap border-b ${cellBorder}`}>
+                            {content}
+                          </th>
+                        );
+                      })}
+                    </tr>
+                  </thead>
+                )}
+                <tbody className="text-sm">
+                  {bodyRows.map((row, rIdx) => (
+                    <tr key={rIdx} className={`border-b last:border-0 ${cellBorder}`}>
+                      {row.map((cell, cIdx) => {
+                        const cellRange = block.cellRanges?.find(
+                          (r) => r.row === rIdx + 1 && r.col === cIdx && !r.isHeader
+                        );
+                        const content = cellRange
+                          ? renderHighlightedText(cell, cellRange.startIndex)
+                          : cell;
+                        return (
+                          <td key={cIdx} className={`px-4 py-3 align-top border-b ${cellBorder}`}>
+                            {content}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        }
+
+        if (block.type === "code") {
+          return (
+            <pre
+              key={block.id}
+              ref={(el) => {
+                blockRefs.current[idx] = el as HTMLElement | null;
+              }}
+              className={`my-4 overflow-x-auto rounded-xl p-4 text-xs ${theme === Theme.DARK ? "bg-slate-950/80" : "bg-black/5"} ${opacityClass} transition-opacity duration-300`}
+            >
+              <code>{block.content}</code>
+            </pre>
+          );
+        }
+
+        if (block.type === "heading") {
+          const Tag = `h${Math.min(6, Math.max(1, block.level || 1))}` as React.ElementType;
+          const sizeClass = block.level === 1 ? "text-2xl" : block.level === 2 ? "text-xl" : "text-lg";
+          return (
+            <Tag
+              key={block.id}
+              ref={(el: HTMLElement | null) => {
+                blockRefs.current[idx] = el;
+              }}
+              className={`mt-4 mb-2 font-black tracking-tight ${sizeClass} ${opacityClass} transition-opacity duration-300`}
+            >
+              {renderHighlightedText(block.content || "", block.startIndex)}
+            </Tag>
+          );
+        }
+
+        if (block.type === "list" && block.items) {
+          const ListTag = block.ordered ? "ol" : "ul";
+          return (
+            <ListTag
+              key={block.id}
+              ref={(el) => {
+                blockRefs.current[idx] = el as HTMLElement | null;
+              }}
+              className={`my-4 ${block.ordered ? "list-decimal" : "list-disc"} pl-6 space-y-2 ${opacityClass} transition-opacity duration-300`}
+            >
+              {block.items.map((item, itemIdx) => {
+                const range = block.itemRanges?.find((r) => r.index === itemIdx);
+                return (
+                  <li key={itemIdx} className="leading-relaxed">
+                    {range ? renderHighlightedText(item, range.startIndex) : item}
+                  </li>
+                );
+              })}
+            </ListTag>
+          );
+        }
 
         return (
           <p
-            key={chunk.id}
+            key={block.id}
             ref={(el) => {
-              itemRefs.current[idx] = el;
+              blockRefs.current[idx] = el as HTMLElement | null;
             }}
-            data-base={chunk.start}
-            data-chunk-index={idx}
-            data-active={isActiveChunk ? "true" : "false"}
-            className={chunkClassName}
+            className={`leading-relaxed rounded-md transition-opacity duration-300 ${opacityClass} ${isActiveBlock ? "font-semibold" : ""}`}
           >
-            <span className={activeTextClass}>{content}</span>
+            {renderHighlightedText(block.content || "", block.startIndex)}
           </p>
         );
       })}
-      {!chunks.length && <p className="opacity-60">No text</p>}
+      {!blocks.length && <p className="opacity-60">No text</p>}
     </div>
   );
 };

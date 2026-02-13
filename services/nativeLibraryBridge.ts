@@ -55,6 +55,7 @@ async function ensureSchema(conn: SQLiteDBConnection): Promise<void> {
       id TEXT PRIMARY KEY,
       bookId TEXT NOT NULL,
       idx INTEGER NOT NULL,
+      sortOrder INTEGER,
       title TEXT NOT NULL,
       filename TEXT NOT NULL,
       sourceUrl TEXT,
@@ -104,6 +105,21 @@ async function ensureSchema(conn: SQLiteDBConnection): Promise<void> {
     await conn.execute(`ALTER TABLE chapters ADD COLUMN volumeLocalChapter INTEGER`);
   } catch {
     // Column already exists
+  }
+  try {
+    await conn.execute(`ALTER TABLE chapters ADD COLUMN sortOrder INTEGER`);
+  } catch {
+    // Column already exists
+  }
+  try {
+    await conn.execute(`UPDATE chapters SET sortOrder = idx WHERE sortOrder IS NULL`);
+  } catch {
+    // best-effort backfill
+  }
+  try {
+    await conn.execute(`CREATE INDEX IF NOT EXISTS idx_chapters_book_sort ON chapters(bookId, sortOrder, idx)`);
+  } catch {
+    // best-effort index creation
   }
 }
 
@@ -163,6 +179,7 @@ export async function ensureNativeChapter(
     id: string;
     title: string;
     idx?: number;
+    sortOrder?: number;
     filename?: string;
     sourceUrl?: string;
     volumeName?: string;
@@ -183,18 +200,20 @@ export async function ensureNativeChapter(
   const now = Date.now();
   const filename = chapter.filename ?? `${chapter.id}.txt`;
   const idx = chapter.idx ?? 0;
+  const sortOrder = chapter.sortOrder ?? idx;
   await conn.run(
     `INSERT INTO chapters (
-      id, bookId, idx, title, filename, sourceUrl,
+      id, bookId, idx, sortOrder, title, filename, sourceUrl,
       volumeName, volumeLocalChapter,
       cloudTextFileId, cloudAudioFileId, audioDriveId,
       audioStatus, audioSignature, durationSec, textLength, wordCount,
       isFavorite, updatedAt
      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        bookId=excluded.bookId,
        idx=excluded.idx,
+       sortOrder=excluded.sortOrder,
        title=excluded.title,
        filename=excluded.filename,
        sourceUrl=excluded.sourceUrl,
@@ -214,6 +233,7 @@ export async function ensureNativeChapter(
       chapter.id,
       bookId,
       idx,
+      sortOrder,
       chapter.title,
       filename,
       chapter.sourceUrl ?? null,
@@ -270,6 +290,7 @@ export async function ensureNativeLibraryForGenerateAudio(
     id: string;
     title: string;
     index?: number;
+    sortOrder?: number;
     filename?: string;
     sourceUrl?: string;
     cloudTextFileId?: string;
@@ -300,6 +321,7 @@ export async function ensureNativeLibraryForGenerateAudio(
       id: ch.id,
       title: ch.title,
       idx: ch.index,
+      sortOrder: ch.sortOrder,
       filename: ch.filename,
       sourceUrl: ch.sourceUrl,
       cloudTextFileId: ch.cloudTextFileId,

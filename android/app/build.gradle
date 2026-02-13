@@ -12,7 +12,7 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 22
-        versionName "2.10.25"
+        versionName "2.10.33"
         buildConfigField "String", "OPENAI_API_KEY", "\"${openaiApiKey}\""
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {

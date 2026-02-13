@@ -1,13 +1,8 @@
 import React, { useEffect, useRef, useMemo, useState } from 'react';
 import { Chapter, Rule, Theme, ReaderSettings, ParagraphMap } from '../types';
-import { applyRules } from '../services/speechService';
-import { reflowLineBreaks } from '../services/textFormat';
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { Bug, Plus, ChevronLeft, ArrowDownCircle, MoreVertical, Paperclip } from 'lucide-react';
-import { markdownToPlainText } from "../utils/markdownToText";
-import { stripChapterTemplateHeader } from "../utils/stripChapterTemplateHeader";
 import ReaderList from "./ReaderList";
+import { RenderBlock, buildReaderModel } from "../utils/markdownBlockParser";
 
 interface ReaderProps {
   chapter: Chapter | null;
@@ -45,6 +40,7 @@ interface ReaderProps {
   isMobile: boolean;
   isScrubbing?: boolean;
   seekNudge?: number;
+  readerBlocks?: RenderBlock[];
 }
 
 function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
@@ -103,7 +99,8 @@ const Reader: React.FC<ReaderProps> = ({
   readerSettings,
   isMobile,
   isScrubbing = false,
-  seekNudge = 0
+  seekNudge = 0,
+  readerBlocks
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const lastRestoreKeyRef = useRef<string | null>(null);
@@ -111,42 +108,23 @@ const Reader: React.FC<ReaderProps> = ({
   const [isUserScrolling, setIsUserScrolling] = useState(false);
   const [resumeNudge, setResumeNudge] = useState(0);
   const [showToolsMenu, setShowToolsMenu] = useState(false);
-  const [markdownView, setMarkdownView] = useState<"formatted" | "reading">("formatted");
-
-  const speakText = useMemo(() => {
-    if (typeof speechText === "string") return speechText;
-    if (!chapter) return "";
+  const { blocks, speakText } = useMemo(() => {
+    if (readerBlocks && typeof speechText === "string") {
+      return { blocks: readerBlocks, speakText: speechText };
+    }
+    if (!chapter) return { blocks: [], speakText: "" };
     const baseText =
       typeof chapterText === "string" && chapterText.length > 0 ? chapterText : (chapter.content ?? "");
-    const normalized = stripChapterTemplateHeader(baseText);
     const chapterFilename = chapter.filename ?? "";
     const isMarkdown =
       chapter.contentFormat === "markdown" ||
       chapterFilename.toLowerCase().endsWith(".md");
-    const inputForSpeech = isMarkdown ? markdownToPlainText(normalized) : normalized;
-    const ruled = applyRules(inputForSpeech, rules);
-    return readerSettings.reflowLineBreaks ? reflowLineBreaks(ruled) : ruled;
-  }, [speechText, chapter, chapterText, rules, readerSettings.reflowLineBreaks]);
+    return buildReaderModel(baseText, isMarkdown, rules, !!readerSettings.reflowLineBreaks);
+  }, [readerBlocks, speechText, chapter, chapterText, rules, readerSettings.reflowLineBreaks]);
 
-  const isMarkdown =
-    chapter?.contentFormat === "markdown" ||
-    (chapter?.filename ?? "").toLowerCase().endsWith(".md");
-  const isMarkdownReadingView = isMarkdown && markdownView === "reading";
-  const effectiveHighlightEnabled = highlightEnabled && (!isMarkdown || isMarkdownReadingView);
+  const effectiveHighlightEnabled = highlightEnabled;
   const autoFollowEnabled = effectiveHighlightEnabled && readerSettings.followHighlight && highlightReady;
   const showResumeButton = isMobile && autoFollowEnabled && isUserScrolling;
-
-  useEffect(() => {
-    if (!isMarkdown) return;
-    setMarkdownView("formatted");
-  }, [chapter?.id, isMarkdown]);
-
-  useEffect(() => {
-    if (!isMarkdown) return;
-    if (activeCueRange && highlightReady) {
-      setMarkdownView("reading");
-    }
-  }, [activeCueRange, highlightReady, isMarkdown]);
 
   const themeTokens = useMemo(() => {
     const strong = readerSettings.highlightColor || '#4f46e5';
@@ -171,11 +149,11 @@ const Reader: React.FC<ReaderProps> = ({
     ['--highlight-strong-text' as any]: themeTokens.highlightStrongText,
   };
 
-  const paragraphClass =
-    readerSettings.paragraphSpacing === 0 ? 'space-y-0' :
-    readerSettings.paragraphSpacing === 1 ? 'space-y-2' :
-    readerSettings.paragraphSpacing === 2 ? 'space-y-6' :
-    'space-y-10';
+  const spacerClassName =
+    readerSettings.paragraphSpacing === 0 ? 'h-0' :
+    readerSettings.paragraphSpacing === 1 ? 'h-2' :
+    readerSettings.paragraphSpacing === 2 ? 'h-6' :
+    'h-10';
 
   const fadeColor = theme === Theme.DARK ? 'from-slate-900' : theme === Theme.SEPIA ? 'from-[#efe6d5]' : 'from-white';
   useEffect(() => {
@@ -249,72 +227,6 @@ const Reader: React.FC<ReaderProps> = ({
   const showHighlightPending = highlightEnabled && !!chapter && !highlightReady;
   const showHighlightOverlay = !!readerSettings.highlightDebugOverlay && !!highlightDebugData;
 
-  const markdownComponents = useMemo(() => {
-    const tableChrome =
-      theme === Theme.DARK
-        ? "border-sky-400/30 bg-sky-500/10 text-slate-100"
-        : theme === Theme.SEPIA
-          ? "border-sky-700/20 bg-sky-600/10 text-[#3c2f25]"
-          : "border-sky-500/20 bg-sky-500/10 text-slate-900";
-
-    const cellBorder = theme === Theme.DARK ? "border-white/10" : "border-black/10";
-
-    return {
-      p: ({ children }: { children?: React.ReactNode }) => (
-        <p className="mb-5 leading-relaxed whitespace-pre-wrap">{children}</p>
-      ),
-      h1: ({ children }: { children?: React.ReactNode }) => (
-        <h1 className="mt-8 mb-4 text-2xl font-black tracking-tight">{children}</h1>
-      ),
-      h2: ({ children }: { children?: React.ReactNode }) => (
-        <h2 className="mt-7 mb-3 text-xl font-black tracking-tight">{children}</h2>
-      ),
-      h3: ({ children }: { children?: React.ReactNode }) => (
-        <h3 className="mt-6 mb-3 text-lg font-black tracking-tight">{children}</h3>
-      ),
-      ul: ({ children }: { children?: React.ReactNode }) => (
-        <ul className="my-4 list-disc pl-6 space-y-2">{children}</ul>
-      ),
-      ol: ({ children }: { children?: React.ReactNode }) => (
-        <ol className="my-4 list-decimal pl-6 space-y-2">{children}</ol>
-      ),
-      li: ({ children }: { children?: React.ReactNode }) => <li className="leading-relaxed">{children}</li>,
-      blockquote: ({ children }: { children?: React.ReactNode }) => (
-        <blockquote className={`my-6 border-l-4 pl-4 italic ${cellBorder}`}>{children}</blockquote>
-      ),
-      pre: ({ children }: { children?: React.ReactNode }) => (
-        <pre className={`my-6 overflow-x-auto rounded-xl p-4 text-xs ${theme === Theme.DARK ? "bg-slate-950/80" : "bg-black/5"}`}>
-          {children}
-        </pre>
-      ),
-      code: ({ children }: { children?: React.ReactNode }) => (
-        <code className={`rounded px-1.5 py-0.5 ${theme === Theme.DARK ? "bg-slate-800/80" : "bg-black/10"}`}>
-          {children}
-        </code>
-      ),
-      table: ({ children }: { children?: React.ReactNode }) => (
-        <div className={`my-6 overflow-x-auto rounded-2xl border ${tableChrome}`}>
-          <table className="min-w-full border-separate border-spacing-0 text-sm">{children}</table>
-        </div>
-      ),
-      thead: ({ children }: { children?: React.ReactNode }) => (
-        <thead className={`text-[10px] font-black uppercase tracking-widest opacity-80 border-b ${cellBorder}`}>
-          {children}
-        </thead>
-      ),
-      tbody: ({ children }: { children?: React.ReactNode }) => <tbody className="text-sm">{children}</tbody>,
-      tr: ({ children }: { children?: React.ReactNode }) => (
-        <tr className={`border-b last:border-0 ${cellBorder}`}>{children}</tr>
-      ),
-      th: ({ children }: { children?: React.ReactNode }) => (
-        <th className={`px-4 py-3 text-left whitespace-nowrap border-b ${cellBorder}`}>{children}</th>
-      ),
-      td: ({ children }: { children?: React.ReactNode }) => (
-        <td className={`px-4 py-3 align-top border-b ${cellBorder}`}>{children}</td>
-      ),
-    };
-  }, [theme]);
-
   return (
     <div className="relative flex-1 flex flex-col min-h-0 overflow-hidden touch-manipulation text-theme">
       <div className={`absolute top-0 left-0 right-0 h-16 lg:h-24 z-10 pointer-events-none bg-gradient-to-b ${fadeColor} to-transparent`} />
@@ -354,7 +266,7 @@ const Reader: React.FC<ReaderProps> = ({
         ref={containerRef}
         onScroll={handleScroll}
         className={`flex-1 overflow-y-auto px-4 lg:px-12 py-12 lg:py-24 scrollbar-hide ${readerSettings.followHighlight ? '' : 'scroll-smooth'}`}
-        onDoubleClick={isMarkdown && !isMarkdownReadingView ? undefined : triggerJump}
+        onDoubleClick={triggerJump}
       >
         <div
           style={containerStyles}
@@ -392,30 +304,6 @@ const Reader: React.FC<ReaderProps> = ({
               )}
             </div>
             <div className="flex items-center gap-1 relative">
-              {isMarkdown && (
-                <div
-                  className={`flex items-center rounded-xl p-1 mr-1 ${
-                    theme === Theme.DARK ? "bg-white/10" : "bg-black/5"
-                  }`}
-                >
-                  <button
-                    onClick={() => setMarkdownView("reading")}
-                    className={`px-2.5 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest ${
-                      markdownView === "reading" ? "bg-indigo-600 text-white" : "opacity-70 hover:opacity-100"
-                    }`}
-                  >
-                    Reading
-                  </button>
-                  <button
-                    onClick={() => setMarkdownView("formatted")}
-                    className={`px-2.5 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest ${
-                      markdownView === "formatted" ? "bg-indigo-600 text-white" : "opacity-70 hover:opacity-100"
-                    }`}
-                  >
-                    Formatted
-                  </button>
-                </div>
-              )}
               <button
                 onClick={() => setShowToolsMenu((v) => !v)}
                 title="Reader tools"
@@ -451,38 +339,17 @@ const Reader: React.FC<ReaderProps> = ({
               )}
             </div>
           </div>
-          {isMarkdown && !isMarkdownReadingView ? (
-            <div className="whitespace-normal">
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={markdownComponents as any}
-                className="space-y-2"
-              >
-                {stripChapterTemplateHeader(
-                  typeof chapterText === "string" && chapterText.length > 0 ? chapterText : (chapter?.content ?? "")
-                )}
-              </ReactMarkdown>
-            </div>
-          ) : (
-            <div className={`${paragraphClass}`}>
-              <ReaderList
-                text={speakText}
-                ttsCharIndex={
-                  effectiveHighlightEnabled && highlightReady
-                    ? (activeCueRange?.start ?? null)
-                    : null
-                }
-                activeCueRange={
-                  effectiveHighlightEnabled && highlightReady ? activeCueRange ?? null : null
-                }
-                autoFollow={autoFollowEnabled}
-                isScrubbing={isScrubbing}
-                followNudge={seekNudge + resumeNudge}
-                containerRef={containerRef}
-                onUserScrollingChange={setIsUserScrolling}
-              />
-            </div>
-          )}
+          <ReaderList
+            blocks={blocks}
+            activeCueRange={effectiveHighlightEnabled && highlightReady ? activeCueRange ?? null : null}
+            autoFollow={autoFollowEnabled}
+            isScrubbing={isScrubbing}
+            followNudge={seekNudge + resumeNudge}
+            containerRef={containerRef}
+            onUserScrollingChange={setIsUserScrolling}
+            theme={theme}
+            spacerClassName={spacerClassName}
+          />
         </div>
       </div>
       <div className={`absolute bottom-0 left-0 right-0 h-24 lg:h-32 z-10 pointer-events-none bg-gradient-to-t ${fadeColor} to-transparent`} />

@@ -1,9 +1,64 @@
 # TaleVox TTS Changelog
 
+## 2.10.33
+- Unified markdown and plain-text reader into a single block-based renderer with working highlight.
+- Markdown tables now render as tables while staying aligned to TTS cue offsets.
+- Paragraph spacing handled via spacer blocks, eliminating whitespace-only highlight flashes.
+- Removed markdown highlight limitation banner and extra reader mode toggle.
+
+## 2.10.32
+- Fixed Book Settings modal scrolling on small screens and kept controls reachable to the bottom.
+- Added Android back-button overlay priority: close Book Settings first, then exit selection mode.
+- Added explicit in-modal close control and hardened mobile modal behavior.
+- Prevented background/body scroll bleed while Book Settings modal is open and added safe-area-friendly modal padding.
+
+## 2.10.31
+- Fixed unreliable long-press chapter selection in both sections and grid layouts.
+- Unified selection behavior across views, including range select, select-all, and invert.
+- Hardened selection persistence when switching between sections and grid views.
+- Centralized chapter bulk actions in the selection dock and simplified per-chapter menu to `Edit Title` only.
+- Improved bulk action consistency and progress feedback across multi-select operations.
+
+## 2.10.30
+- Fixed chapter lists disappearing during open/sync/view transitions by separating loading state from chapter data state.
+- Added canonical `sortOrder` chapter ordering with derived display indices to prevent index explosions and ordering drift.
+- Added a one-click `Reindex` repair action in the chapter screen to safely normalize corrupted chapter ordering.
+- Updated sync/job status handling so paused jobs no longer keep the UI stuck in active loading/syncing state.
+- Hardened chapter merge flows so empty/partial sync responses never wipe local chapter lists.
+
+## 2.10.29
+- Mobile-first Book screen redesign with a minimal top bar and consolidated hero metadata.
+- Removed spreadsheet-style mobile chapter header row and tightened row-level progress/audio alignment.
+- Simplified sync state display to a single subtle hero indicator instead of repeated badges.
+- Hardened Sections/Grid switching with single-view mounting and per-view scroll restoration.
+- Unified audio-ready icon behavior so local cache and Drive-ready chapters both show green-ready state.
+
+## 2.10.28
+- Mobile book screen parity pass for top bar, section layout, and selection/organize mode transitions.
+- Selection mode behavior aligned across sections and grid, including range selection and sticky bulk action dock.
+- Organize drag/reorder/move-to-volume flows hardened with persisted volume ordering and collapse state.
+- Audio status icon logic now detects both Drive and local cached audio, showing green-ready state for local-only audio.
+- Markdown reader now defaults markdown chapters to highlight/reading mode, keeps rich markdown optional, and improves highlight whitespace behavior.
+
+## 2.10.27
+- Finalized sticky chapter screen app bar with dual normal/selection mode UX.
+- Selection mode top bar and bottom bulk dock now follow Tachiyomi-style multi-select flows.
+- Volume sections and grid rendering refined for Speechify-style grouping parity.
+- Organize mode drag/reorder/move-to-volume behaviors hardened and persisted through `volumeOrder`.
+- Chapter row actions simplified to edit/move, with upload/audio/reset/delete centralized as bulk actions.
+- Removed visible "Ungrouped" folder labeling in chapter list rendering.
+
+## 2.10.26
+- Chapter screen redesigned with Speechify-style volume sections and per-section headers.
+- Added Tachiyomi-style selection mode with bulk dock actions (upload, regenerate audio, mark complete, reset, delete).
+- Added organize mode controls for volume/chapter management and drag/drop move flows.
+- Book settings expanded with chapter layout, selection/organize controls, drag options, and safety toggles.
+
 ## 2.10.25
 - Version bump.
 - Added OpenAI TTS as an optional voice provider for background audio jobs.
 - Added full snapshot save/restore plumbing (`FullSnapshotV1`) with Drive pointer restore support.
+- Added full Backup ZIP workflow (Drive/device/download targets, restore from ZIP/Drive, schema migration scaffold, and backup progress UI).
 - Autosave now writes full snapshots (books, chapters, prefs, rules, progress, attachments metadata, jobs metadata) and can restore on startup when newer cloud state exists.
 - Chapter collection details view now renders per-volume sections with in-section headers; ungrouped chapters are listed without a fake "Ungrouped" folder.
 - Added per-book `autoGenerateAudioOnAdd` setting (default on), and chapter add now auto-generates Drive audio in the background.

@@ -60,10 +60,11 @@ const LIBRARY_SCHEMA_SQL = `
     updatedAt INTEGER NOT NULL
   );
 
-  CREATE TABLE IF NOT EXISTS chapters (
+   CREATE TABLE IF NOT EXISTS chapters (
      id TEXT PRIMARY KEY,
      bookId TEXT NOT NULL,
      idx INTEGER NOT NULL,
+     sortOrder INTEGER,
      title TEXT NOT NULL,
      filename TEXT NOT NULL,
      sourceUrl TEXT,
@@ -779,6 +780,21 @@ export class SqliteStorageDriver implements StorageDriver {
       await this.db!.execute(`ALTER TABLE chapters ADD COLUMN volumeLocalChapter INTEGER`);
     } catch {
       // Column already exists
+    }
+    try {
+      await this.db!.execute(`ALTER TABLE chapters ADD COLUMN sortOrder INTEGER`);
+    } catch {
+      // Column already exists
+    }
+    try {
+      await this.db!.execute(`UPDATE chapters SET sortOrder = idx WHERE sortOrder IS NULL`);
+    } catch {
+      // best-effort backfill
+    }
+    try {
+      await this.db!.execute(`CREATE INDEX IF NOT EXISTS idx_chapters_book_sort ON chapters(bookId, sortOrder, idx)`);
+    } catch {
+      // best-effort index creation
     }
   }
 

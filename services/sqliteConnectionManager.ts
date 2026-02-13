@@ -387,3 +387,62 @@ export async function getSqliteStatus(name: string): Promise<{
     pending: dbReady.has(name),
   };
 }
+
+export async function exportSqliteJson(name: string, version: number): Promise<string> {
+  const db = await getSqliteDb(name, version);
+  const opened = await ensureDbOpen(db);
+  if (!opened) {
+    throw new DbNotOpenError(name, "export");
+  }
+  const exporter = (db as any).exportToJson;
+  if (typeof exporter !== "function") {
+    throw new Error("SQLite exportToJson is not available on this platform.");
+  }
+  const payload = await exporter.call(db, "full");
+  return typeof payload === "string" ? payload : JSON.stringify(payload);
+}
+
+export async function isSqliteJsonValid(jsonString: string): Promise<boolean> {
+  if (!jsonString || typeof jsonString !== "string") return false;
+
+  const validator = (sqlite as any).isJsonValid;
+  if (typeof validator !== "function") {
+    throw new Error("SQLite isJsonValid is not available on this platform.");
+  }
+
+  try {
+    const result = await validator.call(sqlite, jsonString);
+    return toBool(result);
+  } catch {
+    const result = await validator.call(sqlite, { jsonstring: jsonString });
+    return toBool(result);
+  }
+}
+
+export async function importSqliteJson(
+  jsonString: string,
+  name: string,
+  version: number
+): Promise<void> {
+  const valid = await isSqliteJsonValid(jsonString);
+  if (!valid) {
+    throw new Error("Invalid SQLite JSON payload.");
+  }
+
+  await closeSqliteDb(name);
+  consistencyChecked = false;
+
+  const importer = (sqlite as any).importFromJson;
+  if (typeof importer !== "function") {
+    throw new Error("SQLite importFromJson is not available on this platform.");
+  }
+
+  try {
+    await importer.call(sqlite, jsonString);
+  } catch {
+    const parsed = JSON.parse(jsonString);
+    await importer.call(sqlite, parsed);
+  }
+
+  await getSqliteDb(name, version);
+}

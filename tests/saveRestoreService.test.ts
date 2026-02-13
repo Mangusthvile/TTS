@@ -55,6 +55,13 @@ function makeState(): AppState {
     autoSaveInterval: 30,
     globalRules: [],
     showDiagnostics: false,
+    backupSettings: {
+      autoBackupToDrive: false,
+      autoBackupToDevice: false,
+      backupIntervalMin: 30,
+      keepDriveBackups: 10,
+      keepLocalBackups: 10,
+    },
   };
 }
 
