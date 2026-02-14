@@ -35,6 +35,7 @@ public class DriveUploadWorker extends Worker {
     private static final String DB_FILE = DB_NAME + "SQLite.db";
     private static final int MAX_UPLOAD_RETRIES = 5;
     private static final String CHANNEL_ID = JobNotificationChannels.CHANNEL_JOBS_ID;
+    private static final String KEY_UPLOAD_QUEUE_PAUSED = "upload_queue_paused";
 
     public DriveUploadWorker(@NonNull Context context, @NonNull WorkerParameters params) {
         super(context, params);
@@ -52,6 +53,10 @@ public class DriveUploadWorker extends Worker {
             progress.json.put("succeededCount", progress.completed);
             progress.json.put("failedCount", progress.json.optInt("failedCount", 0));
             updateJob(jobId, "running", progress.json, null);
+            if (isUploadQueuePaused()) {
+                finishJob(jobId, progress, "paused", "Uploads paused");
+                return Result.success();
+            }
             if (progress.total == 0) {
                 progress.total = countPendingUploads();
                 progress.json.put("total", progress.total);
@@ -81,6 +86,10 @@ public class DriveUploadWorker extends Worker {
                 markUploadUploading(item.id, nextAttemptAt);
 
                 try {
+                    if (isUploadQueuePaused()) {
+                        finishJob(jobId, progress, "paused", "Uploads paused");
+                        return Result.success();
+                    }
                     String resolvedPath = resolveExistingPath(item.localPath, item.chapterId);
                     if (resolvedPath != null && (item.localPath == null || !resolvedPath.equals(item.localPath))) {
                         updateUploadLocalPath(item.id, resolvedPath);
@@ -165,8 +174,11 @@ public class DriveUploadWorker extends Worker {
     private void finishJob(String jobId, ProgressState progress, String status, String message) {
         try {
             if (progress != null) {
-                String errorToStore = "completed".equals(status) ? null : message;
+                String errorToStore = ("completed".equals(status) || "paused".equals(status)) ? null : message;
                 if ("completed".equals(status) && message != null) {
+                    progress.json.put("lastMessage", message);
+                }
+                if ("paused".equals(status) && message != null) {
                     progress.json.put("lastMessage", message);
                 }
                 updateJob(jobId, status, progress.json, errorToStore);
@@ -177,7 +189,7 @@ public class DriveUploadWorker extends Worker {
                     Notification notification = JobNotificationHelper.buildFinished(
                         getApplicationContext(),
                         jobId,
-                        "Upload complete",
+                        "Uploads " + status,
                         message != null ? message : "",
                         "completed".equals(status)
                     );
@@ -208,7 +220,12 @@ public class DriveUploadWorker extends Worker {
             "nextAttemptAt INTEGER," +
             "lastError TEXT," +
             "createdAt INTEGER," +
-            "updatedAt INTEGER" +
+            "updatedAt INTEGER," +
+            "priority INTEGER," +
+            "queuedAt INTEGER," +
+            "source TEXT," +
+            "lastAttemptAt INTEGER," +
+            "manual INTEGER" +
             ")"
         );
         db.execSQL(
@@ -259,6 +276,33 @@ public class DriveUploadWorker extends Worker {
             ")"
         );
         return db;
+    }
+
+    private boolean isUploadQueuePaused() {
+        SQLiteDatabase db = getDb();
+        Cursor cursor = db.query(
+            "kv",
+            new String[]{"json"},
+            "key = ?",
+            new String[]{KEY_UPLOAD_QUEUE_PAUSED},
+            null,
+            null,
+            null,
+            "1"
+        );
+        try {
+            if (!cursor.moveToFirst()) return false;
+            String raw = cursor.getString(cursor.getColumnIndexOrThrow("json"));
+            if (raw == null || raw.isEmpty()) return false;
+            try {
+                JSONObject obj = new JSONObject(raw);
+                return obj.optBoolean("paused", false);
+            } catch (JSONException e) {
+                return "true".equalsIgnoreCase(raw);
+            }
+        } finally {
+            cursor.close();
+        }
     }
 
     private ProgressState loadJobProgress(String jobId) {
@@ -350,7 +394,7 @@ public class DriveUploadWorker extends Worker {
             new String[]{"queued", "failed", String.valueOf(now)},
             null,
             null,
-            "nextAttemptAt ASC, createdAt ASC",
+            "priority DESC, queuedAt ASC, nextAttemptAt ASC",
             "1"
         );
         if (!cursor.moveToFirst()) {
@@ -371,8 +415,8 @@ public class DriveUploadWorker extends Worker {
     private void markUploadUploading(String id, long nextAttemptAt) {
         SQLiteDatabase db = getDb();
         db.execSQL(
-            "UPDATE drive_upload_queue SET status = 'uploading', attempts = attempts + 1, nextAttemptAt = ?, updatedAt = ? WHERE id = ?",
-            new Object[]{nextAttemptAt, System.currentTimeMillis(), id}
+            "UPDATE drive_upload_queue SET status = 'uploading', attempts = attempts + 1, nextAttemptAt = ?, lastAttemptAt = ?, updatedAt = ? WHERE id = ?",
+            new Object[]{nextAttemptAt, System.currentTimeMillis(), System.currentTimeMillis(), id}
         );
     }
 
@@ -384,8 +428,8 @@ public class DriveUploadWorker extends Worker {
     private void markUploadFailed(String id, String error, long nextAttemptAt) {
         SQLiteDatabase db = getDb();
         db.execSQL(
-            "UPDATE drive_upload_queue SET status = 'failed', lastError = ?, nextAttemptAt = ?, attempts = attempts + 1, updatedAt = ? WHERE id = ?",
-            new Object[]{error, nextAttemptAt, System.currentTimeMillis(), id}
+            "UPDATE drive_upload_queue SET status = 'failed', lastError = ?, nextAttemptAt = ?, lastAttemptAt = ?, attempts = attempts + 1, updatedAt = ? WHERE id = ?",
+            new Object[]{error, nextAttemptAt, System.currentTimeMillis(), System.currentTimeMillis(), id}
         );
     }
 

@@ -69,6 +69,14 @@ export class JobRunnerWeb extends WebPlugin implements JobRunnerPlugin {
     return { jobId: null };
   }
 
+  async setUploadQueuePaused(): Promise<void> {
+    return;
+  }
+
+  async getUploadQueuePaused(): Promise<{ paused: boolean }> {
+    return { paused: false };
+  }
+
   async checkNotificationPermission(): Promise<{ supported: boolean; granted: boolean; enabled: boolean }> {
     return { supported: false, granted: true, enabled: true };
   }

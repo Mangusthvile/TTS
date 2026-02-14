@@ -212,6 +212,7 @@ class SpeechController {
 
   private commitLocalProgress(completed: boolean, reason: string) {
     const chapterId = this.getActiveChapterId();
+    const bookId = this.context?.bookId ?? null;
     if (!chapterId) {
       // Only surface missing context for resume/save paths that should never run without a chapter.
       if (reason === "resume_seeked" || reason === "saveProgress" || reason === "saveProgress:completed") {
@@ -230,6 +231,7 @@ class SpeechController {
     const dur = Number.isFinite(duration) ? duration : undefined;
 
     void commitProgressLocal({
+      bookId,
       chapterId,
       timeSec: Math.max(0, t),
       durationSec: dur,
@@ -659,7 +661,7 @@ class SpeechController {
         traceError("audio:resume:no_context", new Error("Missing context.chapterId before resume"));
       } else {
         try {
-          const local = await loadProgressLocal(chapterId);
+          const local = await loadProgressLocal(chapterId, this.context?.bookId ?? null);
           if (local?.timeSec != null && local.timeSec > 0) {
             // Prefer local resume unless caller explicitly asked for a different time
             if (resumeTime <= 0.01 || Math.abs(local.timeSec - resumeTime) > 2) {

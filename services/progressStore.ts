@@ -1,125 +1,111 @@
-// services/progressStore.ts
-import { getStorage, initStorage } from "./storageSingleton";
-import type { ChapterProgress } from "./storageDriver";
-import { clamp, computePercent } from "../utils/progress";
+import { PROGRESS_STORE_KEY, PROGRESS_STORE_LEGACY_KEYS } from './speechService';
+import { safeSetLocalStorage } from '../utils/safeStorage';
 
-type CommitInput = {
-  chapterId: string;
-  timeSec: number;
+export type ProgressStoreEntry = {
+  timeSec?: number;
   durationSec?: number;
-  // Optional overrides if you already compute these elsewhere:
   percent?: number;
-  isComplete?: boolean;
+  completed?: boolean;
+  updatedAt?: number;
 };
 
-const lastCommittedAtByChapter = new Map<string, number>();
-const lastCommittedTimeByChapter = new Map<string, number>();
+export type ProgressStorePayload = {
+  schemaVersion: number;
+  books: Record<string, Record<string, ProgressStoreEntry>>;
+};
 
-export async function commitProgressLocal(input: CommitInput): Promise<void> {
-  // Ensure storage is ready (safe to call repeatedly)
-  await initStorage();
+const PROGRESS_STORE_SCHEMA_VERSION = 1;
 
-  const now = Date.now();
-
-  // Throttle: don’t write more than once per 1500ms per chapter
-  const lastAt = lastCommittedAtByChapter.get(input.chapterId) ?? 0;
-  if (now - lastAt < 1500) return;
-
-  // Also avoid writing identical time repeatedly (tiny seeks / jitter)
-  const lastTime = lastCommittedTimeByChapter.get(input.chapterId);
-  if (typeof lastTime === "number" && Math.abs(lastTime - input.timeSec) < 0.25) {
-    // Less than 250ms change — ignore
-    return;
+export const normalizeProgressStore = (value: any): ProgressStorePayload | null => {
+  if (!value || typeof value !== 'object') return null;
+  if ('schemaVersion' in value) {
+    const schemaVersion = Number((value as ProgressStorePayload).schemaVersion);
+    const books = value.books && typeof value.books === 'object' ? value.books : {};
+    return { schemaVersion: Number.isFinite(schemaVersion) ? schemaVersion : PROGRESS_STORE_SCHEMA_VERSION, books };
   }
+  return { schemaVersion: PROGRESS_STORE_SCHEMA_VERSION, books: value as ProgressStorePayload['books'] };
+};
 
-  const durationSec =
-    typeof input.durationSec === "number" && Number.isFinite(input.durationSec) ? input.durationSec : undefined;
-  let timeSec = Math.max(0, input.timeSec);
-  if (durationSec && timeSec > durationSec + 0.5) {
-    timeSec = durationSec;
+export const readProgressStore = (): ProgressStorePayload => {
+  if (typeof window === 'undefined') {
+    return { schemaVersion: PROGRESS_STORE_SCHEMA_VERSION, books: {} };
   }
-
-  const percent =
-    typeof input.percent === "number" ? clamp(input.percent, 0, 1) : computePercent(timeSec, durationSec);
-
-  const isComplete = typeof input.isComplete === "boolean" ? input.isComplete : undefined;
-
-  const progress: ChapterProgress = {
-    chapterId: input.chapterId,
-    timeSec,
-    durationSec,
-    percent,
-    isComplete,
-    updatedAt: now,
-  };
-
-  const storage = getStorage();
-  const res = await storage.saveChapterProgress(progress);
-
-  if (!res.ok) {
-    console.warn("[TaleVox][Progress] saveChapterProgress failed:", res.error);
-    return;
-  }
-
-  lastCommittedAtByChapter.set(input.chapterId, now);
-  lastCommittedTimeByChapter.set(input.chapterId, input.timeSec);
-
-  console.log("[TaleVox][Progress] committed", {
-    chapterId: input.chapterId,
-    timeSec: input.timeSec,
-    durationSec: input.durationSec,
-    percent,
-    isComplete,
-  });
-}
-
-export async function loadProgressLocal(chapterId: string): Promise<ChapterProgress | null> {
-  await initStorage();
-  const storage = getStorage();
-  const res = await storage.loadChapterProgress(chapterId);
-  if (!res.ok) return null;
-  return res.value ?? null;
-}
-
-/**
- * Restore audio currentTime safely.
- * Use this when you load a chapter audio source.
- *
- * It handles the case where duration isn't known yet by applying again on loadedmetadata.
- */
-export async function restoreAudioTimeFromLocalProgress(
-  audio: HTMLAudioElement,
-  chapterId: string
-): Promise<void> {
-  const p = await loadProgressLocal(chapterId);
-  if (!p || !p.timeSec || p.timeSec <= 0) return;
-
-  const apply = () => {
+  const tryParse = (raw: string | null) => {
+    if (!raw) return null;
     try {
-      // Don’t seek past duration (can throw or clamp weirdly)
-      const dur = Number.isFinite(audio.duration) ? audio.duration : undefined;
-      const target = dur && dur > 0 ? clamp(p.timeSec, 0, Math.max(0, dur - 0.15)) : p.timeSec;
-
-      // Only set if it’s meaningfully different
-      if (Math.abs(audio.currentTime - target) > 0.35) {
-        audio.currentTime = target;
-        console.log("[TaleVox][Progress] restored audio time", { chapterId, target });
-      }
-    } catch (e) {
-      console.warn("[TaleVox][Progress] restore seek failed:", e);
+      const parsed = JSON.parse(raw);
+      return normalizeProgressStore(parsed);
+    } catch {
+      return null;
     }
   };
 
-  // If metadata already loaded, apply now.
-  if (audio.readyState >= 1) {
-    apply();
-    return;
+  const stable = tryParse(localStorage.getItem(PROGRESS_STORE_KEY));
+  if (stable) return stable;
+
+  for (const legacyKey of PROGRESS_STORE_LEGACY_KEYS) {
+    const legacy = tryParse(localStorage.getItem(legacyKey));
+    if (legacy && Object.keys(legacy.books ?? {}).length > 0) {
+      safeSetLocalStorage(PROGRESS_STORE_KEY, JSON.stringify({ ...legacy, schemaVersion: PROGRESS_STORE_SCHEMA_VERSION }));
+      return legacy;
+    }
   }
 
-  // Otherwise apply once metadata loads.
-  const onMeta = () => {
-    audio.removeEventListener("loadedmetadata", onMeta);
-    apply();
-  };
-  audio.addEventListener("loadedmetadata", onMeta);
+  const empty = { schemaVersion: PROGRESS_STORE_SCHEMA_VERSION, books: {} };
+  safeSetLocalStorage(PROGRESS_STORE_KEY, JSON.stringify(empty));
+  return empty;
+};
+
+export const writeProgressStore = (store: ProgressStorePayload) => {
+  if (typeof window === 'undefined') return;
+  safeSetLocalStorage(PROGRESS_STORE_KEY, JSON.stringify({ ...store, schemaVersion: PROGRESS_STORE_SCHEMA_VERSION }));
+};
+
+export async function commitProgressLocal(args: {
+  bookId?: string | null;
+  chapterId: string;
+  timeSec: number;
+  durationSec?: number;
+  isComplete?: boolean;
+  updatedAt?: number;
+}): Promise<void> {
+  if (typeof window === 'undefined') return;
+  const { bookId, chapterId, timeSec, durationSec, isComplete, updatedAt } = args;
+  try {
+    const store = readProgressStore();
+    const books = { ...store.books };
+    const resolvedBookId =
+      bookId ??
+      Object.keys(books).find((id) => books[id] && books[id][chapterId]) ??
+      "unknown";
+    if (!books[resolvedBookId]) books[resolvedBookId] = {};
+    const prev = books[resolvedBookId][chapterId] || {};
+    books[resolvedBookId][chapterId] = {
+      ...prev,
+      timeSec,
+      durationSec: durationSec ?? prev.durationSec,
+      completed: isComplete ?? prev.completed,
+      updatedAt: updatedAt ?? Date.now(),
+    };
+    writeProgressStore({ ...store, books });
+  } catch {
+    // ignore
+  }
+}
+
+export async function loadProgressLocal(chapterId: string, bookId?: string | null): Promise<ProgressStoreEntry | null> {
+  if (typeof window === 'undefined') return null;
+  try {
+    const store = readProgressStore();
+    if (bookId && store.books[bookId] && store.books[bookId][chapterId]) {
+      return store.books[bookId][chapterId] ?? null;
+    }
+    for (const id of Object.keys(store.books)) {
+      const entry = store.books[id]?.[chapterId];
+      if (entry) return entry;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }

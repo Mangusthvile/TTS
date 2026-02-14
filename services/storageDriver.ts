@@ -92,6 +92,7 @@ export type StorageDriver = {
   getChapterAudioPath(chapterId: string): Promise<LoadResult<{ localPath: string; sizeBytes: number; updatedAt: number } | null>>;
   deleteChapterAudioPath(chapterId: string): Promise<SaveResult>;
   enqueueUpload(item: DriveUploadQueuedItem): Promise<SaveResult>;
+  updateUploadItem?: (id: string, patch: Partial<DriveUploadQueuedItem>) => Promise<SaveResult>;
   getNextReadyUpload(now: number): Promise<LoadResult<DriveUploadQueuedItem | null>>;
   markUploadUploading(id: string, nextAttemptAt: number): Promise<SaveResult>;
   markUploadDone(id: string): Promise<SaveResult>;
@@ -111,6 +112,11 @@ export type DriveUploadQueuedItem = {
   lastError?: string;
   createdAt: number;
   updatedAt: number;
+  priority?: number;
+  queuedAt?: number;
+  source?: "audio" | "backup" | "fix";
+  lastAttemptAt?: number;
+  manual?: boolean;
 };
 
 function isNativeCapacitor(): boolean {
@@ -290,7 +296,23 @@ class MemoryStorageDriver implements StorageDriver {
   }
 
   async enqueueUpload(item: DriveUploadQueuedItem): Promise<SaveResult> {
-    this.uploadQueue.set(item.id, { ...item });
+    const now = Date.now();
+    this.uploadQueue.set(item.id, {
+      ...item,
+      priority: Number.isFinite(item.priority) ? item.priority : 0,
+      queuedAt: Number.isFinite(item.queuedAt) ? item.queuedAt : now,
+      source: item.source ?? "audio",
+      lastAttemptAt: Number.isFinite(item.lastAttemptAt) ? item.lastAttemptAt : 0,
+      manual: item.manual ?? false,
+    });
+    return { ok: true, where: "memory" };
+  }
+
+  async updateUploadItem(id: string, patch: Partial<DriveUploadQueuedItem>): Promise<SaveResult> {
+    const item = this.uploadQueue.get(id);
+    if (!item) return { ok: false, where: "memory", error: "missing" };
+    const next = { ...item, ...patch, updatedAt: Date.now() };
+    this.uploadQueue.set(id, next);
     return { ok: true, where: "memory" };
   }
 
@@ -298,7 +320,11 @@ class MemoryStorageDriver implements StorageDriver {
     let candidate: DriveUploadQueuedItem | null = null;
     for (const item of this.uploadQueue.values()) {
       if ((item.status === "queued" || item.status === "failed") && item.nextAttemptAt <= now) {
-        if (!candidate || item.nextAttemptAt < candidate.nextAttemptAt) {
+        if (
+          !candidate ||
+          (item.priority ?? 0) > (candidate.priority ?? 0) ||
+          ((item.priority ?? 0) === (candidate.priority ?? 0) && (item.queuedAt ?? 0) < (candidate.queuedAt ?? 0))
+        ) {
           candidate = item;
         }
       }
@@ -311,6 +337,7 @@ class MemoryStorageDriver implements StorageDriver {
     if (!item) return { ok: false, where: "memory", error: "missing" };
     item.status = "uploading";
     item.attempts += 1;
+    item.lastAttemptAt = this.nowMs();
     item.nextAttemptAt = nextAttemptAt;
     item.updatedAt = this.nowMs();
     this.uploadQueue.set(id, item);
@@ -328,6 +355,7 @@ class MemoryStorageDriver implements StorageDriver {
     item.status = "failed";
     item.lastError = error;
     item.nextAttemptAt = nextAttemptAt;
+    item.lastAttemptAt = this.nowMs();
     item.attempts += 1;
     item.updatedAt = this.nowMs();
     this.uploadQueue.set(id, item);
@@ -343,7 +371,11 @@ class MemoryStorageDriver implements StorageDriver {
   }
 
   async listQueuedUploads(limit?: number): Promise<LoadResult<DriveUploadQueuedItem[]>> {
-    const list = Array.from(this.uploadQueue.values()).sort((a, b) => b.createdAt - a.createdAt);
+    const list = Array.from(this.uploadQueue.values()).sort((a, b) => {
+      const p = (b.priority ?? 0) - (a.priority ?? 0);
+      if (p !== 0) return p;
+      return (a.queuedAt ?? a.createdAt) - (b.queuedAt ?? b.createdAt);
+    });
     return { ok: true, where: "memory", value: typeof limit === "number" ? list.slice(0, limit) : list };
   }
 }
@@ -572,7 +604,23 @@ class SafeLocalStorageDriver implements StorageDriver {
 
   async enqueueUpload(item: DriveUploadQueuedItem): Promise<SaveResult> {
     const queue = await this.loadUploadQueue();
-    queue[item.id] = { ...item };
+    const now = Date.now();
+    queue[item.id] = {
+      ...item,
+      priority: Number.isFinite(item.priority) ? item.priority : 0,
+      queuedAt: Number.isFinite(item.queuedAt) ? item.queuedAt : now,
+      source: item.source ?? "audio",
+      lastAttemptAt: Number.isFinite(item.lastAttemptAt) ? item.lastAttemptAt : 0,
+      manual: item.manual ?? false,
+    };
+    return this.saveUploadQueue(queue);
+  }
+
+  async updateUploadItem(id: string, patch: Partial<DriveUploadQueuedItem>): Promise<SaveResult> {
+    const queue = await this.loadUploadQueue();
+    const item = queue[id];
+    if (!item) return { ok: false, where: "localStorage", error: "missing" };
+    queue[id] = { ...item, ...patch, updatedAt: this.nowMs() };
     return this.saveUploadQueue(queue);
   }
 
@@ -581,7 +629,11 @@ class SafeLocalStorageDriver implements StorageDriver {
     let candidate: DriveUploadQueuedItem | null = null;
     for (const item of Object.values(queue)) {
       if ((item.status === "queued" || item.status === "failed") && item.nextAttemptAt <= now) {
-        if (!candidate || item.nextAttemptAt < candidate.nextAttemptAt) {
+        if (
+          !candidate ||
+          (item.priority ?? 0) > (candidate.priority ?? 0) ||
+          ((item.priority ?? 0) === (candidate.priority ?? 0) && (item.queuedAt ?? 0) < (candidate.queuedAt ?? 0))
+        ) {
           candidate = item;
         }
       }
@@ -595,6 +647,7 @@ class SafeLocalStorageDriver implements StorageDriver {
     if (!item) return { ok: false, where: "localStorage", error: "missing" };
     item.status = "uploading";
     item.attempts += 1;
+    item.lastAttemptAt = this.nowMs();
     item.nextAttemptAt = nextAttemptAt;
     item.updatedAt = this.nowMs();
     queue[id] = item;
@@ -617,6 +670,7 @@ class SafeLocalStorageDriver implements StorageDriver {
     item.status = "failed";
     item.lastError = error;
     item.nextAttemptAt = nextAttemptAt;
+    item.lastAttemptAt = this.nowMs();
     item.attempts += 1;
     item.updatedAt = this.nowMs();
     queue[id] = item;
@@ -634,7 +688,11 @@ class SafeLocalStorageDriver implements StorageDriver {
 
   async listQueuedUploads(limit?: number): Promise<LoadResult<DriveUploadQueuedItem[]>> {
     const queue = await this.loadUploadQueue();
-    const list = Object.values(queue).sort((a, b) => b.createdAt - a.createdAt);
+    const list = Object.values(queue).sort((a, b) => {
+      const p = (b.priority ?? 0) - (a.priority ?? 0);
+      if (p !== 0) return p;
+      return (a.queuedAt ?? a.createdAt) - (b.queuedAt ?? b.createdAt);
+    });
     return { ok: true, where: "localStorage", value: typeof limit === "number" ? list.slice(0, limit) : list };
   }
 

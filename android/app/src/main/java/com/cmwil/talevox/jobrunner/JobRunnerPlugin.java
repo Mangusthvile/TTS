@@ -90,9 +90,53 @@ public class JobRunnerPlugin extends Plugin {
         lastForegroundAt = System.currentTimeMillis();
     }
 
+    private void setUploadQueuePausedFlag(boolean paused) {
+        SQLiteDatabase db = getDb();
+        JSONObject obj = new JSONObject();
+        try { obj.put("paused", paused); } catch (JSONException ignored) {}
+        ContentValues values = new ContentValues();
+        values.put("key", "upload_queue_paused");
+        values.put("json", obj.toString());
+        values.put("updatedAt", System.currentTimeMillis());
+        db.insertWithOnConflict("kv", null, values, SQLiteDatabase.CONFLICT_REPLACE);
+    }
+
+    private boolean isUploadQueuePaused() {
+        SQLiteDatabase db = getDb();
+        Cursor cursor = db.query("kv", new String[]{"json"}, "key = ?", new String[]{"upload_queue_paused"}, null, null, null, "1");
+        try {
+            if (!cursor.moveToFirst()) return false;
+            String raw = cursor.getString(cursor.getColumnIndexOrThrow("json"));
+            if (raw == null || raw.isEmpty()) return false;
+            JSONObject obj = new JSONObject(raw);
+            return obj.optBoolean("paused", false);
+        } catch (Exception e) {
+            return false;
+        } finally {
+            cursor.close();
+        }
+    }
+
+    private Constraints buildUploadConstraints(PluginCall call) {
+        JSObject constraints = call.getObject("constraints");
+        boolean wifiOnly = constraints != null && constraints.optBoolean("wifiOnly", false);
+        boolean requiresCharging = constraints != null && constraints.optBoolean("requiresCharging", false);
+        Constraints.Builder builder = new Constraints.Builder();
+        builder.setRequiredNetworkType(wifiOnly ? NetworkType.UNMETERED : NetworkType.CONNECTED);
+        if (requiresCharging) builder.setRequiresCharging(true);
+        return builder.build();
+    }
+
     private SQLiteDatabase getDb() {
         Context ctx = getContext();
         SQLiteDatabase db = ctx.openOrCreateDatabase(DB_FILE, Context.MODE_PRIVATE, null);
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS kv (" +
+            "key TEXT PRIMARY KEY," +
+            "json TEXT NOT NULL," +
+            "updatedAt INTEGER NOT NULL" +
+            ")"
+        );
         db.execSQL(
             "CREATE TABLE IF NOT EXISTS jobs (" +
             "jobId TEXT PRIMARY KEY," +
@@ -124,7 +168,12 @@ public class JobRunnerPlugin extends Plugin {
             "nextAttemptAt INTEGER," +
             "lastError TEXT," +
             "createdAt INTEGER," +
-            "updatedAt INTEGER" +
+            "updatedAt INTEGER," +
+            "priority INTEGER," +
+            "queuedAt INTEGER," +
+            "source TEXT," +
+            "lastAttemptAt INTEGER," +
+            "manual INTEGER" +
             ")"
         );
         return db;
@@ -198,6 +247,12 @@ public class JobRunnerPlugin extends Plugin {
     @PluginMethod
     public void ensureUploadQueueJob(PluginCall call) {
         try {
+            if (isUploadQueuePaused()) {
+                JSObject out = new JSObject();
+                out.put("jobId", (String) null);
+                call.resolve(out);
+                return;
+            }
             int pending = countQueuedUploads();
             if (pending == 0) {
                 JSObject out = new JSObject();
@@ -237,6 +292,8 @@ public class JobRunnerPlugin extends Plugin {
             OneTimeWorkRequest request =
                 new OneTimeWorkRequest.Builder(DriveUploadWorker.class)
                     .setInputData(new Data.Builder().putString("jobId", jobId).build())
+                    .setConstraints(buildUploadConstraints(call))
+                    .addTag("drive_upload_queue")
                     .build();
             WorkManager.getInstance(getContext()).enqueue(request);
 
@@ -304,6 +361,20 @@ public class JobRunnerPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void setUploadQueuePaused(PluginCall call) {
+        Boolean paused = call.getBoolean("paused", false);
+        setUploadQueuePausedFlag(paused != null && paused);
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void getUploadQueuePaused(PluginCall call) {
+        JSObject out = new JSObject();
+        out.put("paused", isUploadQueuePaused());
+        call.resolve(out);
+    }
+
+    @PluginMethod
     public void enqueueUploadJob(PluginCall call) {
         if (!ensureNotificationAllowed(call)) return;
         long now = System.currentTimeMillis();
@@ -333,6 +404,8 @@ public class JobRunnerPlugin extends Plugin {
             new OneTimeWorkRequest.Builder(DriveUploadWorker.class)
                 .setInputData(new Data.Builder().putString("jobId", jobId).build())
                 .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .setConstraints(buildUploadConstraints(call))
+                .addTag("drive_upload_queue")
                 .build();
         WorkManager.getInstance(getContext()).enqueue(request);
 

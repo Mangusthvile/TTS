@@ -24,8 +24,10 @@ export type JobRunnerPayload = {
 export interface JobRunnerPlugin {
   enqueueGenerateAudio: (options: { payload: JobRunnerPayload }) => Promise<{ jobId: string }>;
   enqueueFixIntegrity: (options: { payload: { bookId: string; driveFolderId?: string; options?: { genAudio?: boolean; cleanupStrays?: boolean; convertLegacy?: boolean }; voice?: JobRunnerVoice; settings?: JobRunnerSettings } }) => Promise<{ jobId: string }>;
-  enqueueUploadJob: (options?: {}) => Promise<{ jobId: string }>;
-  ensureUploadQueueJob: () => Promise<{ jobId: string | null }>;
+  enqueueUploadJob: (options?: { constraints?: { wifiOnly?: boolean; requiresCharging?: boolean } }) => Promise<{ jobId: string }>;
+  ensureUploadQueueJob: (options?: { constraints?: { wifiOnly?: boolean; requiresCharging?: boolean } }) => Promise<{ jobId: string | null }>;
+  setUploadQueuePaused: (options: { paused: boolean }) => Promise<void>;
+  getUploadQueuePaused: () => Promise<{ paused: boolean }>;
   checkNotificationPermission: () => Promise<{ supported: boolean; granted: boolean; enabled: boolean }>;
   requestNotificationPermission: () => Promise<{ granted: boolean }>;
   openNotificationSettings: () => Promise<void>;

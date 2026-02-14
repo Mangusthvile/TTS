@@ -197,10 +197,13 @@ export async function forceStartJob(jobId: string, uiMode: UiMode): Promise<void
   }
 }
 
-export async function enqueueUploadJob(uiMode: UiMode): Promise<{ jobId: string }> {
+export async function enqueueUploadJob(
+  uiMode: UiMode,
+  opts?: { constraints?: { wifiOnly?: boolean; requiresCharging?: boolean } }
+): Promise<{ jobId: string }> {
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
-    const res = await JobRunner.enqueueUploadJob({});
+    const res = await JobRunner.enqueueUploadJob(opts ?? {});
     jobLog.info("enqueueUploadJob", res);
     return res;
   }
@@ -254,12 +257,31 @@ export async function getWorkInfo(jobId: string, uiMode: UiMode): Promise<{ stat
   return null;
 }
 
-export async function ensureUploadQueueJob(uiMode: UiMode): Promise<{ jobId: string | null }> {
+export async function ensureUploadQueueJob(
+  uiMode: UiMode,
+  opts?: { constraints?: { wifiOnly?: boolean; requiresCharging?: boolean } }
+): Promise<{ jobId: string | null }> {
   const interfaceMode = getInterfaceMode(uiMode);
   if (interfaceMode === "mobile") {
-    const res = await JobRunner.ensureUploadQueueJob();
+    const res = await JobRunner.ensureUploadQueueJob(opts ?? {});
     jobLog.info("ensureUploadQueueJob", res);
     return res;
   }
   return { jobId: null };
+}
+
+export async function setUploadQueuePaused(paused: boolean, uiMode: UiMode): Promise<void> {
+  const interfaceMode = getInterfaceMode(uiMode);
+  if (interfaceMode === "mobile") {
+    await JobRunner.setUploadQueuePaused({ paused });
+  }
+}
+
+export async function getUploadQueuePaused(uiMode: UiMode): Promise<boolean> {
+  const interfaceMode = getInterfaceMode(uiMode);
+  if (interfaceMode === "mobile") {
+    const res = await JobRunner.getUploadQueuePaused();
+    return !!res?.paused;
+  }
+  return false;
 }

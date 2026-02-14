@@ -529,13 +529,18 @@ export class SqliteStorageDriver implements StorageDriver {
     const db = await this.dbConn();
     try {
       await db.run(
-        `INSERT INTO drive_upload_queue (id, chapterId, bookId, localPath, status, attempts, nextAttemptAt, lastError, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO drive_upload_queue (id, chapterId, bookId, localPath, status, attempts, nextAttemptAt, lastError, createdAt, updatedAt, priority, queuedAt, source, lastAttemptAt, manual)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(chapterId) DO UPDATE SET
            status = excluded.status,
            localPath = excluded.localPath,
            nextAttemptAt = excluded.nextAttemptAt,
-           updatedAt = excluded.updatedAt`,
+           updatedAt = excluded.updatedAt,
+           priority = excluded.priority,
+           queuedAt = excluded.queuedAt,
+           source = excluded.source,
+           lastAttemptAt = excluded.lastAttemptAt,
+           manual = excluded.manual`,
         [
           item.id,
           item.chapterId,
@@ -547,6 +552,11 @@ export class SqliteStorageDriver implements StorageDriver {
           item.lastError ?? null,
           item.createdAt,
           item.updatedAt,
+          item.priority ?? 0,
+          item.queuedAt ?? item.createdAt,
+          item.source ?? "audio",
+          item.lastAttemptAt ?? 0,
+          item.manual ? 1 : 0,
         ]
       );
       return { ok: true, where: "sqlite" };
@@ -561,7 +571,7 @@ export class SqliteStorageDriver implements StorageDriver {
       const res = await db.query(
         `SELECT * FROM drive_upload_queue
          WHERE (status = 'queued' OR status = 'failed') AND nextAttemptAt <= ?
-         ORDER BY nextAttemptAt ASC, createdAt ASC
+         ORDER BY priority DESC, queuedAt ASC, nextAttemptAt ASC
          LIMIT 1`,
         [now]
       );
@@ -581,6 +591,11 @@ export class SqliteStorageDriver implements StorageDriver {
           lastError: row.lastError == null ? undefined : String(row.lastError),
           createdAt: Number(row.createdAt) || 0,
           updatedAt: Number(row.updatedAt) || 0,
+          priority: Number(row.priority) || 0,
+          queuedAt: Number(row.queuedAt) || Number(row.createdAt) || 0,
+          source: row.source == null ? "audio" : String(row.source) as DriveUploadQueuedItem["source"],
+          lastAttemptAt: Number(row.lastAttemptAt) || 0,
+          manual: row.manual === 1 || row.manual === true,
         },
       };
     } catch (e: any) {
@@ -596,9 +611,10 @@ export class SqliteStorageDriver implements StorageDriver {
          SET status = 'uploading',
              attempts = attempts + 1,
              nextAttemptAt = ?,
+             lastAttemptAt = ?,
              updatedAt = ?
          WHERE id = ?`,
-        [nextAttemptAt, Date.now(), id]
+        [nextAttemptAt, Date.now(), Date.now(), id]
       );
       return { ok: true, where: "sqlite" };
     } catch (e: any) {
@@ -624,10 +640,11 @@ export class SqliteStorageDriver implements StorageDriver {
          SET status = 'failed',
              lastError = ?,
              nextAttemptAt = ?,
+             lastAttemptAt = ?,
              attempts = attempts + 1,
              updatedAt = ?
          WHERE id = ?`,
-        [error, nextAttemptAt, Date.now(), id]
+        [error, nextAttemptAt, Date.now(), Date.now(), id]
       );
       return { ok: true, where: "sqlite" };
     } catch (e: any) {
@@ -652,10 +669,11 @@ export class SqliteStorageDriver implements StorageDriver {
     const db = await this.dbConn();
     try {
       const res = await db.query(
-        `SELECT id, chapterId, bookId, localPath, status, attempts, nextAttemptAt, lastError, createdAt, updatedAt
+        `SELECT id, chapterId, bookId, localPath, status, attempts, nextAttemptAt, lastError, createdAt, updatedAt,
+                priority, queuedAt, source, lastAttemptAt, manual
          FROM drive_upload_queue
          WHERE status IN ('queued', 'failed')
-         ORDER BY createdAt DESC
+         ORDER BY priority DESC, queuedAt ASC, createdAt ASC
          ${typeof limit === "number" ? `LIMIT ${limit}` : ""}`
       );
       const rows = (res.values ?? []) as any[];
@@ -670,6 +688,11 @@ export class SqliteStorageDriver implements StorageDriver {
         lastError: row.lastError == null ? undefined : String(row.lastError),
         createdAt: Number(row.createdAt) || 0,
         updatedAt: Number(row.updatedAt) || 0,
+        priority: Number(row.priority) || 0,
+        queuedAt: Number(row.queuedAt) || Number(row.createdAt) || 0,
+        source: row.source == null ? "audio" : String(row.source) as DriveUploadQueuedItem["source"],
+        lastAttemptAt: Number(row.lastAttemptAt) || 0,
+        manual: row.manual === 1 || row.manual === true,
       }));
       return { ok: true, where: "sqlite", value: items };
     } catch (e: any) {
@@ -711,6 +734,40 @@ export class SqliteStorageDriver implements StorageDriver {
       // open is idempotent; ignore errors like "already open"
     }
     return this.db;
+  }
+
+  async updateUploadItem(id: string, patch: Partial<DriveUploadQueuedItem>): Promise<SaveResult> {
+    const db = await this.dbConn();
+    try {
+      const fields: string[] = [];
+      const values: any[] = [];
+      const setField = (name: string, value: any) => {
+        fields.push(`${name} = ?`);
+        values.push(value);
+      };
+
+      if (patch.status) setField("status", patch.status);
+      if (patch.localPath !== undefined) setField("localPath", patch.localPath);
+      if (patch.attempts !== undefined) setField("attempts", patch.attempts);
+      if (patch.nextAttemptAt !== undefined) setField("nextAttemptAt", patch.nextAttemptAt);
+      if (patch.lastError !== undefined) setField("lastError", patch.lastError ?? null);
+      if (patch.priority !== undefined) setField("priority", patch.priority);
+      if (patch.queuedAt !== undefined) setField("queuedAt", patch.queuedAt);
+      if (patch.source !== undefined) setField("source", patch.source);
+      if (patch.lastAttemptAt !== undefined) setField("lastAttemptAt", patch.lastAttemptAt);
+      if (patch.manual !== undefined) setField("manual", patch.manual ? 1 : 0);
+
+      setField("updatedAt", Date.now());
+      values.push(id);
+
+      await db.run(
+        `UPDATE drive_upload_queue SET ${fields.join(", ")} WHERE id = ?`,
+        values
+      );
+      return { ok: true, where: "sqlite" };
+    } catch (e: any) {
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
   }
 
   private async ensureSchema(): Promise<void> {
@@ -761,7 +818,12 @@ export class SqliteStorageDriver implements StorageDriver {
         nextAttemptAt INTEGER,
         lastError TEXT,
         createdAt INTEGER,
-        updatedAt INTEGER
+        updatedAt INTEGER,
+        priority INTEGER,
+        queuedAt INTEGER,
+        source TEXT,
+        lastAttemptAt INTEGER,
+        manual INTEGER
       );
     `);
 
@@ -795,6 +857,41 @@ export class SqliteStorageDriver implements StorageDriver {
       await this.db!.execute(`CREATE INDEX IF NOT EXISTS idx_chapters_book_sort ON chapters(bookId, sortOrder, idx)`);
     } catch {
       // best-effort index creation
+    }
+    try {
+      await this.db!.execute(`ALTER TABLE drive_upload_queue ADD COLUMN priority INTEGER`);
+    } catch {
+      // Column already exists
+    }
+    try {
+      await this.db!.execute(`ALTER TABLE drive_upload_queue ADD COLUMN queuedAt INTEGER`);
+    } catch {
+      // Column already exists
+    }
+    try {
+      await this.db!.execute(`ALTER TABLE drive_upload_queue ADD COLUMN source TEXT`);
+    } catch {
+      // Column already exists
+    }
+    try {
+      await this.db!.execute(`ALTER TABLE drive_upload_queue ADD COLUMN lastAttemptAt INTEGER`);
+    } catch {
+      // Column already exists
+    }
+    try {
+      await this.db!.execute(`ALTER TABLE drive_upload_queue ADD COLUMN manual INTEGER`);
+    } catch {
+      // Column already exists
+    }
+    try {
+      await this.db!.execute(`UPDATE drive_upload_queue SET priority = 0 WHERE priority IS NULL`);
+    } catch {
+      // best-effort backfill
+    }
+    try {
+      await this.db!.execute(`UPDATE drive_upload_queue SET queuedAt = createdAt WHERE queuedAt IS NULL`);
+    } catch {
+      // best-effort backfill
     }
   }
 

@@ -1120,6 +1120,11 @@ public class GenerateAudioWorker extends Worker {
             values.put("lastError", (String) null);
             values.put("createdAt", now);
             values.put("updatedAt", now);
+            values.put("priority", 0);
+            values.put("queuedAt", now);
+            values.put("source", "audio");
+            values.put("lastAttemptAt", 0);
+            values.put("manual", 0);
             db.insertWithOnConflict("drive_upload_queue", null, values, SQLiteDatabase.CONFLICT_REPLACE);
         } catch (Exception ignored) {}
     }

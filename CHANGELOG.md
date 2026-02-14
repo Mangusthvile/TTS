@@ -1,5 +1,11 @@
 # TaleVox TTS Changelog
 
+## 2.10.37
+- Added TachiyomiSY-inspired screen state modules for Library, Book, and Reader.
+- Refactored core UI into smaller Book/Library/Reader components for stability.
+- Centralized in-app notifications with a shared NotificationHost.
+- Added shared selection store and Chapter list/grid wrappers.
+
 ## 2.10.36
 - Mobile-first Book screen spacing with simplified hero and top bar.
 - Selection UX parity across list and grid with long-press gestures.

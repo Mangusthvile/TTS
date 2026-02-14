@@ -1,0 +1,11 @@
+export const STATE_FILENAME = 'talevox_state_v2917.json';
+export const LOG_JOBS_KEY = 'talevox_log_jobs';
+export const STABLE_POINTER_NAME = 'talevox-latest.json';
+export const SNAPSHOT_KEY = 'talevox_saved_snapshot_v1';
+export const BACKUP_KEY = 'talevox_sync_backup';
+export const BACKUP_SETTINGS_KEY = 'talevox_backup_settings_v1';
+export const UI_MODE_KEY = 'talevox_ui_mode';
+export const PREFS_KEY = 'talevox_prefs_v3';
+export const NAV_CONTEXT_KEY = 'talevox_nav_context_v1';
+export const LAUNCH_SYNC_KEY = 'talevox_launch_sync_v1';
+export const LAUNCH_SYNC_MIN_MS = 10 * 60 * 1000;

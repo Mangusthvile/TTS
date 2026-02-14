@@ -9,24 +9,13 @@ import { ensureDbReady, ensureAuthReady } from "./src/app/bootstrap";
 // Help TypeScript recognize Vite's injected global
 declare const __APP_VERSION__: string;
 
-declare global {
-  interface Window {
-    __APP_VERSION__: string;
-    gapi: any;
-    google: any;
-    Capacitor: any;
-    __TALEVOX_FATAL_ERROR__?: any;
-    __TALEVOX_SOCIALLOGIN_READY__?: Promise<void>;
-  }
-}
-
 // ---------------------------
 // Version + Early Init
 // ---------------------------
 
 // Prefer Vite-injected version; fallback only if somehow missing.
 window.__APP_VERSION__ =
-  (typeof __APP_VERSION__ !== "undefined" && __APP_VERSION__) || "2.10.36";
+  (typeof __APP_VERSION__ !== "undefined" && __APP_VERSION__) || "2.10.37";
 
 // Install global trace listeners immediately
 installGlobalTraceHandlers();

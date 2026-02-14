@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo, Suspense } from 'react';
-import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, PlaybackPhase, UiMode, ReaderSettings, JobRecord, CueMap, AudioChunkMetadata, ParagraphMap, BookAttachment, BackupOptions, BackupProgress, BackupTarget, BookSettings } from './types';
+// Architecture notes: see docs/ARCHITECTURE.md for module map and folder split.
+import { Book, Chapter, AppState, Theme, HighlightMode, StorageBackend, RuleType, AudioStatus, CLOUD_VOICES, SyncDiagnostics, Rule, PlaybackMetadata, UiMode, ReaderSettings, JobRecord, CueMap, AudioChunkMetadata, ParagraphMap, BookAttachment, BackupOptions, BackupProgress, BackupTarget, BookSettings } from './types';
 import Library from './src/features/library/Library';
 import Reader from './src/features/reader/Reader';
 import Player from './src/features/reader/Player';
 import ChapterSidebar from './src/features/library/ChapterSidebar';
-import { speechController, PROGRESS_STORE_KEY, PROGRESS_STORE_LEGACY_KEYS } from './services/speechService';
-import { DesktopPlaybackAdapter, type PlaybackAdapter, type PlaybackItem } from './services/playbackAdapter';
+import { speechController } from './services/speechService';
+import { type PlaybackAdapter } from './services/playbackAdapter';
 import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, moveFileToTrash, openFolderPicker, listFilesSortedByModified, resolveFolderIdByName, listSaveFileCandidates, createDriveFolder, listFoldersInFolder, findTaleVoxRoots } from './services/driveService';
 import type { InventoryManifest } from "./services/bookManifests";
 import { initDriveAuth, getValidDriveToken, clearStoredToken, isTokenValid, ensureValidToken } from './services/driveAuth';
@@ -14,26 +15,25 @@ import { saveChapterToFile } from './services/fileService';
 import { getImportAdapter } from "./services/importAdapter";
 import { synthesizeChunk } from './services/cloudTtsService';
 import { extractChapterWithAI } from './services/geminiService';
-import { saveAudioToCache, getAudioFromCache, generateAudioKey } from './services/audioCache';
-import { persistChapterAudio, resolveChapterAudioUrl, resolveChapterAudioLocalPath, getAudioStorage } from './services/audioStorage';
 import { idbSet } from './services/storageService';
 import { listBooks as libraryListBooks, upsertBook as libraryUpsertBook, deleteBook as libraryDeleteBook, listChaptersPage as libraryListChaptersPage, upsertChapterMeta as libraryUpsertChapterMeta, deleteChapter as libraryDeleteChapter, saveChapterText as librarySaveChapterText, loadChapterText as libraryLoadChapterText, getChaptersByIds as libraryGetChaptersByIds, bulkUpsertChapters as libraryBulkUpsertChapters, listBookAttachments as libraryListBookAttachments, upsertBookAttachment as libraryUpsertBookAttachment, bulkUpsertBookAttachments as libraryBulkUpsertBookAttachments, listChapterTombstones as libraryListChapterTombstones } from './services/libraryStore';
 import { bootstrapCore } from './src/app/bootstrap';
-import { Sun, Coffee, Moon, X, Settings as SettingsIcon, Loader2, Save, Library as LibraryIcon, Zap, Menu, LogIn, RefreshCw, AlertCircle, Cloud, Terminal, List, FolderSync, CheckCircle2, Plus } from 'lucide-react';
+import { X, Loader2, Terminal, FolderSync, CheckCircle2, Plus } from 'lucide-react';
+import { useNotify } from "./hooks/useNotify";
 import { trace, traceError } from './utils/trace';
 import { computeMobileMode } from './utils/platform';
 import { getLogger, setLogEnabled, createCorrelationId } from './utils/logger';
 import { MissingTextError, toUserMessage } from "./utils/errors";
 import { yieldToUi } from './utils/async';
-import { clamp, computePercent, isNearCompletion } from "./utils/progress";
-import { computeProgressUpdate, ProgressCommitReason } from "./utils/progressCommit";
+import { computePercent } from "./utils/progress";
 import { buildReaderModel, buildSpeakTextFromContent } from "./utils/markdownBlockParser";
 import { parseTtsVoiceId } from "./utils/ttsVoice";
 import { JobRunner } from './src/plugins/jobRunner';
 import { appConfig } from "./src/config/appConfig";
-import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService, deleteJob as deleteJobService, clearJobs as clearJobsService, enqueueGenerateAudio, enqueueUploadJob, getWorkInfo, forceStartJob as forceStartJobService, getJobById, jobRunnerHealthCheck, getJobRunnerCapability } from './services/jobRunnerService';
+import { cancelJob as cancelJobService, retryJob as retryJobService, deleteJob as deleteJobService, clearJobs as clearJobsService, enqueueGenerateAudio, getWorkInfo, forceStartJob as forceStartJobService, getJobById, getJobRunnerCapability } from './services/jobRunnerService';
 import { getNativeChapterTextCount, ensureNativeBook, ensureNativeChapter, ensureNativeChapterText, hasNativeBook } from "./services/nativeLibraryBridge";
-import { countQueuedUploads, listQueuedUploads, enqueueChapterUpload, removeQueuedUpload, type DriveUploadQueuedItem } from './services/driveUploadQueueService';
+import { type DriveUploadQueuedItem } from './services/driveUploadQueueService';
+import { enqueueUploads } from "./services/uploadManager";
 import { getChapterAudioPath } from './services/chapterAudioStore';
 import { Capacitor } from "@capacitor/core";
 import { App as CapacitorApp } from "@capacitor/app";
@@ -46,6 +46,43 @@ import { collectDiagnostics, saveDiagnosticsToFile, type DiagnosticsReport } fro
 import { useHighlightSync } from "./hooks/useHighlightSync";
 import { useReaderProgress, type ChapterProgress, type ProgressMap } from "./hooks/useReaderProgress";
 import { normalizeChapterTitle } from "./utils/titleCase";
+import { safeSetLocalStorage } from './utils/safeStorage';
+import { formatBytes } from './utils/formatBytes';
+import {
+  normalizeChapterProgress,
+  orderChaptersForDisplay,
+  normalizeBookChapters,
+  getEffectivePrefixLen,
+  deriveIntroMsFromChunkMap,
+  normalizeChunkMapForChapter,
+  computeIntroMs,
+} from './utils/chapterBookUtils';
+import { readProgressStore, writeProgressStore, normalizeProgressStore, type ProgressStorePayload } from './services/progressStore';
+import { DEFAULT_BOOK_SETTINGS, normalizeBookSettings } from './src/features/library/bookSettings';
+import { handleAndroidBackPriority } from './src/app/androidBack';
+import {
+  STATE_FILENAME,
+  LOG_JOBS_KEY,
+  STABLE_POINTER_NAME,
+  SNAPSHOT_KEY,
+  BACKUP_KEY,
+  BACKUP_SETTINGS_KEY,
+  UI_MODE_KEY,
+  PREFS_KEY,
+  NAV_CONTEXT_KEY,
+  LAUNCH_SYNC_KEY,
+  LAUNCH_SYNC_MIN_MS,
+} from './src/app/constants';
+import { useUploadQueue } from "./src/app/state/useUploadQueue";
+import { useJobs } from "./src/app/state/useJobs";
+import { useChapterPaging } from "./src/app/state/useChapterPaging";
+import { useBackup } from "./src/app/state/useBackup";
+import { useDiagnostics } from "./src/app/state/useDiagnostics";
+import { useNotifications } from "./src/app/state/useNotifications";
+import { useAppBootstrap } from "./src/app/state/useAppBootstrap";
+import { RouteContext } from "./src/app/types";
+import { usePlayback } from "./src/app/state/usePlayback";
+import AppShell from "./src/app/AppShell";
 import {
   applyFullSnapshot,
   buildFullSnapshot,
@@ -80,301 +117,12 @@ type DownloadedChapterInfo = {
   hasDriveAudio: boolean;
 };
 
-type RouteContext = {
-  bookId?: string;
-  chapterId?: string;
-  chapterIndex?: number;
-  scrollTop?: number;
-  collectionScrollTop?: number;
-  lastViewType?: 'library' | 'collection' | 'reader' | 'rules' | 'settings';
-  lastNonReaderViewType?: 'library' | 'collection' | 'rules' | 'settings';
-  updatedAt?: number;
-};
-
-const STATE_FILENAME = 'talevox_state_v2917.json';
-const LOG_JOBS_KEY = 'talevox_log_jobs';
-const STABLE_POINTER_NAME = 'talevox-latest.json';
-const SNAPSHOT_KEY = "talevox_saved_snapshot_v1";
-const BACKUP_KEY = "talevox_sync_backup";
-const BACKUP_SETTINGS_KEY = "talevox_backup_settings_v1";
-const UI_MODE_KEY = "talevox_ui_mode";
-const PREFS_KEY = 'talevox_prefs_v3';
-const NAV_CONTEXT_KEY = "talevox_nav_context_v1";
-const LAUNCH_SYNC_KEY = "talevox_launch_sync_v1";
-const LAUNCH_SYNC_MIN_MS = 10 * 60 * 1000;
 const jobLog = getLogger("Jobs");
 const LazyExtractor = React.lazy(() => import('./src/features/library/Extractor'));
 const LazyChapterFolderView = React.lazy(() => import('./src/features/library/ChapterFolderView'));
 const LazyRuleManager = React.lazy(() => import('./src/features/rules/RuleManager'));
 const LazySettings = React.lazy(() => import('./src/features/settings/Settings'));
 
-const DEFAULT_BOOK_SETTINGS: BookSettings = {
-  useBookSettings: false,
-  highlightMode: HighlightMode.SENTENCE,
-  chapterLayout: "sections",
-  enableSelectionMode: true,
-  enableOrganizeMode: true,
-  allowDragReorderChapters: true,
-  allowDragMoveToVolume: true,
-  allowDragReorderVolumes: true,
-  volumeOrder: [],
-  collapsedVolumes: {},
-  autoGenerateAudioOnAdd: true,
-  autoUploadOnAdd: false,
-  confirmBulkDelete: true,
-};
-
-function normalizeBookSettings(settings?: BookSettings): BookSettings {
-  const raw: Partial<BookSettings> = settings ?? {};
-  const volumeOrder = Array.isArray(raw.volumeOrder)
-    ? raw.volumeOrder
-        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-        .map((name) => name.trim())
-    : [];
-  const collapsedVolumes: Record<string, boolean> = {};
-  if (raw.collapsedVolumes && typeof raw.collapsedVolumes === "object") {
-    for (const [name, value] of Object.entries(raw.collapsedVolumes)) {
-      const trimmed = name.trim();
-      if (trimmed && value === true) collapsedVolumes[trimmed] = true;
-    }
-  }
-  return {
-    ...DEFAULT_BOOK_SETTINGS,
-    ...raw,
-    chapterLayout: raw.chapterLayout === "grid" ? "grid" : "sections",
-    enableSelectionMode: typeof raw.enableSelectionMode === "boolean" ? raw.enableSelectionMode : true,
-    enableOrganizeMode: typeof raw.enableOrganizeMode === "boolean" ? raw.enableOrganizeMode : true,
-    allowDragReorderChapters:
-      typeof raw.allowDragReorderChapters === "boolean" ? raw.allowDragReorderChapters : true,
-    allowDragMoveToVolume:
-      typeof raw.allowDragMoveToVolume === "boolean" ? raw.allowDragMoveToVolume : true,
-    allowDragReorderVolumes:
-      typeof raw.allowDragReorderVolumes === "boolean" ? raw.allowDragReorderVolumes : true,
-    volumeOrder,
-    collapsedVolumes,
-    autoGenerateAudioOnAdd:
-      typeof raw.autoGenerateAudioOnAdd === "boolean" ? raw.autoGenerateAudioOnAdd : true,
-    autoUploadOnAdd: typeof raw.autoUploadOnAdd === "boolean" ? raw.autoUploadOnAdd : false,
-    confirmBulkDelete: typeof raw.confirmBulkDelete === "boolean" ? raw.confirmBulkDelete : true,
-  };
-}
-
-// --- Safe Storage Helper ---
-const safeSetLocalStorage = (key: string, value: string) => {
-  if (value.length > 250000 && (key === BACKUP_KEY || key.includes('backup'))) {
-     console.warn(`[SafeStorage] Skipping backup write for ${key} (size ${value.length} > 250kb) to prevent quota issues.`);
-     return;
-  }
-  try {
-    localStorage.setItem(key, value);
-  } catch (e: any) {
-    console.warn(`LocalStorage write failed for key "${key}":`, e.message);
-    if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED') {
-      const diagStr = localStorage.getItem('talevox_sync_diag') || '{}';
-      try {
-        const diag = JSON.parse(diagStr);
-        diag.lastSyncError = `Storage Quota Exceeded: ${e.message}`;
-        localStorage.setItem('talevox_sync_diag', JSON.stringify(diag));
-      } catch (inner) {}
-    }
-  }
-};
-
-type ProgressStoreEntry = {
-  timeSec?: number;
-  durationSec?: number;
-  percent?: number;
-  completed?: boolean;
-  updatedAt?: number;
-};
-
-type ProgressStorePayload = {
-  schemaVersion: number;
-  books: Record<string, Record<string, ProgressStoreEntry>>;
-};
-
-const PROGRESS_STORE_SCHEMA_VERSION = 1;
-
-const normalizeProgressStore = (value: any): ProgressStorePayload | null => {
-  if (!value || typeof value !== "object") return null;
-  if ("schemaVersion" in value) {
-    const schemaVersion = Number(value.schemaVersion);
-    const books = value.books && typeof value.books === "object" ? value.books : {};
-    return { schemaVersion: Number.isFinite(schemaVersion) ? schemaVersion : PROGRESS_STORE_SCHEMA_VERSION, books };
-  }
-  return { schemaVersion: PROGRESS_STORE_SCHEMA_VERSION, books: value as ProgressStorePayload["books"] };
-};
-
-const readProgressStore = (): ProgressStorePayload => {
-  if (typeof window === "undefined") {
-    return { schemaVersion: PROGRESS_STORE_SCHEMA_VERSION, books: {} };
-  }
-  const tryParse = (raw: string | null) => {
-    if (!raw) return null;
-    try {
-      const parsed = JSON.parse(raw);
-      return normalizeProgressStore(parsed);
-    } catch {
-      return null;
-    }
-  };
-
-  const stable = tryParse(localStorage.getItem(PROGRESS_STORE_KEY));
-  if (stable) return stable;
-
-  for (const legacyKey of PROGRESS_STORE_LEGACY_KEYS) {
-    const legacy = tryParse(localStorage.getItem(legacyKey));
-    if (legacy && Object.keys(legacy.books ?? {}).length > 0) {
-      safeSetLocalStorage(PROGRESS_STORE_KEY, JSON.stringify({ ...legacy, schemaVersion: PROGRESS_STORE_SCHEMA_VERSION }));
-      return legacy;
-    }
-  }
-
-  const empty = { schemaVersion: PROGRESS_STORE_SCHEMA_VERSION, books: {} };
-  safeSetLocalStorage(PROGRESS_STORE_KEY, JSON.stringify(empty));
-  return empty;
-};
-
-const writeProgressStore = (store: ProgressStorePayload) => {
-  if (typeof window === "undefined") return;
-  safeSetLocalStorage(PROGRESS_STORE_KEY, JSON.stringify({ ...store, schemaVersion: PROGRESS_STORE_SCHEMA_VERSION }));
-};
-
-const formatBytes = (bytes?: number) => {
-  if (!bytes || bytes <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  const idx = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
-  const value = bytes / Math.pow(1024, idx);
-  return `${value.toFixed(value >= 10 || idx === 0 ? 0 : 1)} ${units[idx]}`;
-};
-
-
-const normalizeChapterProgress = (c: Chapter): Chapter => {
-  let percent = typeof c.progress === "number" ? c.progress : 0;
-  if (c.progress === undefined) {
-    if (typeof c.progressSec === "number" && c.durationSec) {
-      percent = computePercent(c.progressSec, c.durationSec) ?? 0;
-    } else if (typeof c.progressChars === "number" && c.textLength) {
-      percent = computePercent(c.progressChars, c.textLength) ?? 0;
-    }
-  }
-
-  percent = clamp(percent, 0, 1);
-  const isCompleted = !!c.isCompleted;
-  if (isCompleted) percent = 1;
-  return { ...c, progress: percent, isCompleted };
-};
-
-const orderChaptersForDisplay = (chapters: Chapter[]): Chapter[] => {
-  return deriveDisplayIndices(normalizeChapterOrder(chapters || [])).map((chapter) =>
-    normalizeChapterProgress(chapter)
-  );
-};
-
-const normalizeBookChapters = (book: Book): Book => {
-  const ordered = orderChaptersForDisplay(book.chapters || []);
-  return {
-    ...book,
-    chapters: ordered,
-    chapterCount:
-      typeof book.chapterCount === "number"
-        ? Math.max(book.chapterCount, ordered.length)
-        : ordered.length,
-  };
-};
-
-const getEffectivePrefixLen = (chapter: Chapter, fallbackIntroLen: number): number => {
-  if (Number.isFinite(chapter.audioPrefixLen)) {
-    return Math.max(0, Number(chapter.audioPrefixLen));
-  }
-  if (chapter.audioSignature) {
-    return Math.max(0, fallbackIntroLen);
-  }
-  return 0;
-};
-
-const deriveIntroMsFromChunkMap = (chunkMap: AudioChunkMetadata[], prefixLen: number): number => {
-  if (!chunkMap.length || prefixLen <= 0) return 0;
-  let introMs = 0;
-  for (const chunk of chunkMap) {
-    const segLen = Math.max(1, chunk.endChar - chunk.startChar);
-    if (chunk.endChar <= prefixLen) {
-      introMs += chunk.durSec * 1000;
-    } else if (chunk.startChar < prefixLen) {
-      const ratio = (prefixLen - chunk.startChar) / segLen;
-      introMs += chunk.durSec * 1000 * Math.max(0, Math.min(1, ratio));
-    }
-  }
-  return Math.floor(introMs);
-};
-
-const normalizeChunkMapForChapter = (
-  chunkMap: AudioChunkMetadata[] | undefined,
-  textLen: number,
-  prefixLen: number
-): { chunkMap: AudioChunkMetadata[]; introMsFromChunk: number } => {
-  if (!chunkMap || chunkMap.length === 0 || textLen <= 0) {
-    return { chunkMap: [], introMsFromChunk: 0 };
-  }
-  const safePrefix = Math.max(0, prefixLen);
-  const maxEnd = chunkMap.reduce((acc, c) => Math.max(acc, c.endChar), 0);
-  const looksPrefixed = safePrefix > 0 && maxEnd > textLen + 2;
-  let introMsFromChunk = 0;
-  let mapped = chunkMap;
-  if (looksPrefixed) {
-    introMsFromChunk = deriveIntroMsFromChunkMap(chunkMap, safePrefix);
-    mapped = chunkMap.map((c) => ({
-      ...c,
-      startChar: c.startChar - safePrefix,
-      endChar: c.endChar - safePrefix,
-    }));
-  }
-  const clamped = mapped
-    .filter((c) => c.endChar > 0)
-    .map((c) => ({
-      ...c,
-      startChar: Math.max(0, c.startChar),
-      endChar: Math.min(textLen, Math.max(0, c.endChar)),
-    }))
-    .filter((c) => c.endChar > c.startChar);
-  return { chunkMap: clamped, introMsFromChunk };
-};
-
-const computeIntroMs = (opts: {
-  audioIntroDurSec?: number;
-  audioPrefixLen?: number;
-  textLen: number;
-  durationMs?: number;
-  introMsFromChunk?: number;
-}): number => {
-  if (opts.audioIntroDurSec && opts.audioIntroDurSec > 0) {
-    return Math.floor(opts.audioIntroDurSec * 1000);
-  }
-  if (opts.introMsFromChunk && opts.introMsFromChunk > 0) {
-    return Math.floor(opts.introMsFromChunk);
-  }
-  const prefixLen = Math.max(0, opts.audioPrefixLen ?? 0);
-  const durationMs = Math.max(0, opts.durationMs ?? 0);
-  if (prefixLen > 0 && durationMs > 0) {
-    const totalLen = prefixLen + Math.max(1, opts.textLen);
-    return Math.min(durationMs, Math.floor((prefixLen / totalLen) * durationMs));
-  }
-  return 0;
-};
-
-export const handleAndroidBackPriority = (opts: {
-  canGoBack: boolean;
-  consumeOverlayBack: () => boolean;
-  goBack: () => void;
-  exitApp: () => void;
-}): void => {
-  if (opts.consumeOverlayBack()) return;
-  if (opts.canGoBack) {
-    opts.goBack();
-    return;
-  }
-  opts.exitApp();
-};
 
 const App: React.FC = () => {
   const [isDirty, setIsDirty] = useState(false);
@@ -390,128 +138,29 @@ const App: React.FC = () => {
   const [scanProgress, setScanProgress] = useState('');
   const [isLinkModalOpen, setIsLinkModalOpen] = useState(false);
 
-  const [toast, setToast] = useState<{ message: string; type: "info" | "success" | "error" | "reconnect" } | null>(null);
-  const [backupOptions, setBackupOptions] = useState<BackupOptions>(DEFAULT_BACKUP_OPTIONS);
-  const [backupProgress, setBackupProgress] = useState<BackupProgress | null>(null);
-  const [driveBackupCandidates, setDriveBackupCandidates] = useState<DriveBackupCandidate[]>([]);
-  const noticeTimerRef = useRef<number | null>(null);
-  const backupBusyRef = useRef(false);
   const chapterBackHandlerRef = useRef<(() => boolean) | null>(null);
   const registerChapterBackHandler = useCallback((handler: (() => boolean) | null) => {
     chapterBackHandlerRef.current = handler;
   }, []);
-  const pushNotice = useCallback((n: { type: "info" | "success" | "error" | "reconnect"; message: string; ms?: number }) => {
-    setToast({ message: n.message, type: n.type });
+  const pushNotice = useNotify();
+  const pushNoticeSafe = useCallback(
+    (opts: { message: string; type?: "info" | "success" | "error" | "reconnect"; ms?: number }) => {
+      pushNotice({ message: opts.message, type: opts.type ?? "info", ms: opts.ms });
+    },
+    [pushNotice]
+  );
+  const {
+    diagnosticsReport,
+    refreshDiagnostics,
+    handleSaveDiagnostics,
+    jobRunnerAvailable,
+  } = useDiagnostics(pushNoticeSafe);
 
-    if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
-
-    const ms = n.ms ?? (n.type === "error" ? 4500 : 2500);
-    noticeTimerRef.current = window.setTimeout(() => setToast(null), ms);
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
-    };
-  }, []);
-
-  const [playbackPhase, setPlaybackPhase] = useState<PlaybackPhase>('IDLE');
-  const [phaseSince, setPhaseSince] = useState(Date.now());
-  const [lastPlaybackError, setLastPlaybackError] = useState<string | null>(null);
-  const [currentIntroDurSec, setCurrentIntroDurSec] = useState(5);
-  const [isScrubbing, setIsScrubbing] = useState(false);
-  
-  const [playbackSnapshot, setPlaybackSnapshot] = useState<{chapterId: string, percent: number} | null>(null);
-  const lastSnapshotRef = useRef(0);
-  
   const chapterSessionRef = useRef(0);
   const chapterTextInFlightRef = useRef<Map<string, Promise<string | null>>>(new Map());
   const chapterTextCacheRef = useRef<Map<string, string>>(new Map());
-  const warnedTextClearRef = useRef<Set<string>>(new Set());
   const isInIntroRef = useRef(false);
-  const lastProgressCommitTime = useRef(0);
-  const lastProgressWarnRef = useRef(0);
-  const isScrubbingRef = useRef(false);
-  const scrubPreviewSecRef = useRef(0);
-  const itemChangeInFlightRef = useRef<string | null>(null);
-  const wasPlayingBeforeScrubRef = useRef(false);
-  const resumeAfterScrubRef = useRef(false);
-  const isUserScrubbingRef = useRef(false);
-  const seekTxnRef = useRef<{ id: number; inFlight: boolean; targetMs: number; reason: string }>({
-    id: 0,
-    inFlight: false,
-    targetMs: 0,
-    reason: "",
-  });
-  const seekIdRef = useRef(0);
   
-  const gestureArmedRef = useRef(false);
-  const lastGestureAt = useRef(0);
-  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
-
-  useEffect(() => {
-    if (playbackPhase === 'SEEKING') {
-      const timer = setTimeout(() => {
-        trace('watchdog:seek_timeout');
-        setPlaybackPhase('READY'); 
-        pushNotice({ message: "Seek timed out", type: 'error' });
-      }, 6000);
-      return () => clearTimeout(timer);
-    }
-  }, [playbackPhase]);
-
-  useEffect(() => {
-    const handleVisChange = () => {
-      if (document.visibilityState === 'visible') {
-        speechController.emitSyncTick();
-      } else {
-        const s = stateRef.current;
-        if (s.activeBookId && s.books) {
-           const b = s.books.find(bk => bk.id === s.activeBookId);
-           if (b) {
-              const meta = speechController.getMetadata();
-              const chapterId = meta.chapterId ?? b.currentChapterId;
-              if (chapterId) {
-                commitProgressUpdate(b.id, chapterId, meta, "sceneChange", false, true);
-              }
-           }
-        }
-      }
-    };
-    document.addEventListener('visibilitychange', handleVisChange);
-    return () => document.removeEventListener('visibilitychange', handleVisChange);
-  }, []);
-
-  useEffect(() => {
-    const handleUnload = () => {
-        const s = stateRef.current;
-        if (s.activeBookId && s.books) {
-           const b = s.books.find(bk => bk.id === s.activeBookId);
-           if (b) {
-              const meta = speechController.getMetadata();
-              const chapterId = meta.chapterId ?? b.currentChapterId;
-              if (chapterId) {
-                commitProgressUpdate(b.id, chapterId, meta, "sceneChange", false, true);
-              }
-           }
-        }
-    };
-    window.addEventListener('beforeunload', handleUnload);
-    return () => window.removeEventListener('beforeunload', handleUnload);
-  }, []);
-
-  useEffect(() => {
-    const armGesture = () => {
-      gestureArmedRef.current = true;
-      lastGestureAt.current = Date.now();
-    };
-    window.addEventListener('pointerdown', armGesture, { capture: true });
-    window.addEventListener('keydown', armGesture, { capture: true });
-    return () => {
-      window.removeEventListener('pointerdown', armGesture, { capture: true });
-      window.removeEventListener('keydown', armGesture, { capture: true });
-    };
-  }, []);
 
   useEffect(() => {
     if (Capacitor.getPlatform() !== "android") return;
@@ -619,6 +268,11 @@ const App: React.FC = () => {
     };
   });
 
+  const stateRef = useRef(state);
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
   useEffect(() => {
     const pref = __ANDROID_ONLY__ ? "mobile" : state.readerSettings.uiMode || "auto";
     if (__ANDROID_ONLY__ && state.readerSettings.uiMode !== "mobile") {
@@ -636,11 +290,6 @@ const App: React.FC = () => {
     if (state.theme === Theme.DARK) document.body.classList.add('dark-theme');
     else if (state.theme === Theme.SEPIA) document.body.classList.add('sepia-theme');
   }, [state.theme]);
-
-  const bootstrapPromiseRef = useRef<Promise<void> | null>(null);
-  const bootstrapRunRef = useRef(0);
-  const [bootstrapStatus, setBootstrapStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
-  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
 
   const [effectiveMobileMode, setEffectiveMobileMode] = useState(
     __ANDROID_ONLY__ ? true : computeMobileMode(state.readerSettings.uiMode)
@@ -665,25 +314,27 @@ const App: React.FC = () => {
   }, [state.readerSettings.uiMode]);
 
   const [activeTab, setActiveTab] = useState<'library' | 'collection' | 'reader' | 'rules' | 'settings'>('library');
-  const [launchStage, setLaunchStage] = useState<'splash' | 'signin' | 'ready'>('splash');
-  const [launchMessage, setLaunchMessage] = useState('Loading library...');
-  const [signInError, setSignInError] = useState<string | null>(null);
-  const startupRunRef = useRef(0);
   const navContextRef = useRef<RouteContext | null>(null);
   const navPersistTimerRef = useRef<number | null>(null);
-  const navRestoreRef = useRef<RouteContext | null>(null);
-  const navAppliedRef = useRef(false);
   const lastNonReaderTabRef = useRef<'library' | 'collection' | 'rules' | 'settings'>('library');
   const [readerInitialScrollTop, setReaderInitialScrollTop] = useState<number | null>(null);
   const [isAddChapterOpen, setIsAddChapterOpen] = useState(false);
   const [isChapterSidebarOpen, setIsChapterSidebarOpen] = useState(false);
-  const [chapterPagingByBook, setChapterPagingByBook] = useState<Record<string, { afterIndex: number; hasMore: boolean; loading: boolean }>>({});
-  const chapterPagingRef = useRef<Record<string, { afterIndex: number; hasMore: boolean; loading: boolean }>>({});
+  const {
+    chapterPagingByBook,
+    setChapterPagingByBook,
+    loadMoreChapters,
+    preserveChapterContent,
+  } = useChapterPaging(setState);
   const [logJobs, setLogJobs] = useState<boolean>(() => localStorage.getItem(LOG_JOBS_KEY) === 'true');
-  const [notificationStatus, setNotificationStatus] = useState<{ supported: boolean; granted: boolean; enabled: boolean } | null>(null);
-  const [jobRunnerCap, setJobRunnerCap] = useState<{ available: boolean; platform: string; reason?: string } | null>(null);
-  const [diagnosticsReport, setDiagnosticsReport] = useState<DiagnosticsReport | null>(null);
   useEffect(() => { localStorage.setItem(LOG_JOBS_KEY, logJobs ? 'true' : 'false'); }, [logJobs]);
+  const {
+    notificationStatus,
+    refreshNotificationStatus,
+    handleRequestNotifications,
+    handleOpenNotificationSettings,
+    handleSendTestNotification,
+  } = useNotifications(jobRunnerAvailable, logJobs, pushNoticeSafe);
   useEffect(() => { setLogEnabled("Jobs", logJobs); }, [logJobs]);
   useEffect(() => {
     try {
@@ -700,30 +351,6 @@ const App: React.FC = () => {
     } catch {}
   }, []);
 
-  const refreshDiagnostics = useCallback(async () => {
-    try {
-      const report = await collectDiagnostics();
-      setDiagnosticsReport(report);
-      return report;
-    } catch (e: any) {
-      jobLog.error("diagnostics.refreshFailed", e);
-      return null;
-    }
-  }, []);
-
-  useEffect(() => {
-    let mounted = true;
-    getJobRunnerCapability().then((cap) => {
-      if (mounted) {
-        setJobRunnerCap({ available: cap.available, platform: cap.platform, reason: cap.reason });
-        jobLog.info("capability", cap);
-      }
-    });
-    return () => { mounted = false; };
-  }, []);
-
-  const jobRunnerAvailable = jobRunnerCap?.available ?? false;
-
   const updateNavContext = useCallback((patch: Partial<RouteContext>) => {
     const next: RouteContext = {
       ...(navContextRef.current ?? {}),
@@ -739,167 +366,12 @@ const App: React.FC = () => {
     }, 300);
   }, []);
 
-  const refreshNotificationStatus = useCallback(async () => {
-    try {
-      if (!jobRunnerAvailable) {
-        setNotificationStatus({ supported: false, granted: false, enabled: false });
-        return;
-      }
-      const res = await JobRunner.checkNotificationPermission();
-      setNotificationStatus(res);
-      jobLog.info("notifications.status", res);
-    } catch {
-      setNotificationStatus(null);
-    }
-  }, [logJobs, jobRunnerAvailable]);
-
-  useEffect(() => {
-    refreshNotificationStatus();
-  }, [refreshNotificationStatus]);
-
-  useEffect(() => { chapterPagingRef.current = chapterPagingByBook; }, [chapterPagingByBook]);
-
-  const preserveChapterContent = useCallback((prev: Chapter, next: Chapter, reason: string): Chapter => {
-    const prevContent = typeof prev.content === "string" && prev.content.length > 0 ? prev.content : null;
-    const nextContent = typeof next.content === "string" && next.content.length > 0 ? next.content : null;
-    if (prevContent && !nextContent) {
-      if (!warnedTextClearRef.current.has(prev.id)) {
-        warnedTextClearRef.current.add(prev.id);
-        trace("text:clear:prevented", { chapterId: prev.id, reason }, "warn");
-      }
-      return {
-        ...next,
-        content: prevContent,
-        textLength: prev.textLength ?? prevContent.length,
-      };
-    }
-    if (nextContent && (!next.textLength || next.textLength === 0)) {
-      return { ...next, textLength: nextContent.length };
-    }
-    return next;
-  }, []);
-
-  const loadMoreChapters = useCallback(async (bookId: string, reset: boolean = false) => {
-    const limit = 200;
-
-    const current = chapterPagingRef.current[bookId] ?? { afterIndex: -1, hasMore: true, loading: false };
-    if (current.loading) return;
-    if (!current.hasMore && !reset) return;
-
-    setChapterPagingByBook((p) => ({
-      ...p,
-      [bookId]: { ...current, afterIndex: reset ? -1 : current.afterIndex, hasMore: true, loading: true },
-    }));
-
-    try {
-      const afterIndex = reset ? -1 : current.afterIndex;
-      const page = await libraryListChaptersPage(bookId, afterIndex, limit);
-      const normalizedPageChapters = page.chapters.map((chapter) => {
-        const sortOrder = getChapterSortOrder(chapter);
-        const fallbackTitle =
-          Number.isFinite(sortOrder) && sortOrder > 0 ? `Chapter ${sortOrder}` : "Chapter";
-        const normalizedTitle = normalizeChapterTitle(chapter.title, fallbackTitle);
-        if (normalizedTitle && normalizedTitle !== chapter.title) {
-          const normalizedChapter = {
-            ...chapter,
-            sortOrder,
-            title: normalizedTitle,
-          };
-          void libraryUpsertChapterMeta(bookId, { ...normalizedChapter, content: undefined });
-          return normalizedChapter;
-        }
-        return {
-          ...chapter,
-          sortOrder,
-        };
-      });
-
-      setState((p) => {
-        const books = p.books.map((b) => {
-          if (b.id !== bookId) return b;
-          const existing = b.chapters;
-          const byId = new Map<string, Chapter>();
-
-          const isPlaceholderTitle = (title?: string) => {
-            if (!title) return true;
-            const t = title.trim().toLowerCase();
-            return t.length === 0 || t.startsWith("imported");
-          };
-
-          for (const c of existing) {
-            byId.set(c.id, c);
-          }
-          for (const c of normalizedPageChapters) {
-            const prev = byId.get(c.id);
-            if (!prev) {
-              byId.set(c.id, c);
-              continue;
-            }
-            let merged: Chapter = { ...prev, ...c };
-            merged.sortOrder = getChapterSortOrder(c);
-            if (!isPlaceholderTitle(c.title)) {
-              merged.title = c.title;
-            } else if (!isPlaceholderTitle(prev.title)) {
-              merged.title = prev.title;
-            }
-            merged = preserveChapterContent(prev, merged, "loadMoreChapters");
-            byId.set(c.id, merged);
-          }
-
-          const deduped = orderChaptersForDisplay(Array.from(byId.values()));
-          return {
-            ...b,
-            chapters: deduped,
-            chapterCount:
-              page.totalCount ??
-              (typeof b.chapterCount === "number" ? Math.max(b.chapterCount, deduped.length) : deduped.length),
-          };
-        });
-
-        return { ...p, books };
-      });
-
-      const hasMore = page.nextAfterIndex != null && page.chapters.length > 0;
-      const nextAfterIndex = page.nextAfterIndex ?? (reset ? -1 : current.afterIndex);
-
-      setChapterPagingByBook((p) => ({
-        ...p,
-        [bookId]: { afterIndex: nextAfterIndex, hasMore, loading: false },
-      }));
-    } catch (e) {
-      console.error("Failed to load chapters page", e);
-      setChapterPagingByBook((p) => ({
-        ...p,
-        [bookId]: { ...current, loading: false },
-      }));
-    }
-  }, []);
   
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [isLoadingChapter, setIsLoadingChapter] = useState(false);
-  const isPlayingRef = useRef(isPlaying);
-  useEffect(() => { isPlayingRef.current = isPlaying }, [isPlaying]);
-
-  const [sleepTimerSeconds, setSleepTimerSeconds] = useState<number | null>(null);
-  const [stopAfterChapter, setStopAfterChapter] = useState(false);
-  const [audioDuration, setAudioDuration] = useState(0);
-  const [audioCurrentTime, setAudioCurrentTime] = useState(0);
-  const [seekNudge, setSeekNudge] = useState(0);
-  const sleepTimerEndsAtRef = useRef<number | null>(null);
-  const sleepTimerRemainingRef = useRef<number | null>(null);
-  const sleepTimerIntervalRef = useRef<any>(null);
-  const manualStopRef = useRef(false);
-  const sleepStopRef = useRef(false);
   
   const [authState, setAuthState] = useState<AuthState>(authManager.getState());
   const isAuthorized = authState.status === 'signed_in' && !!authManager.getToken();
 
-  const [uploadQueueCount, setUploadQueueCount] = useState(0);
-  const [isUploadingAll, setIsUploadingAll] = useState(false);
-  const [uploadQueueItems, setUploadQueueItems] = useState<DriveUploadQueuedItem[]>([]);
   const [downloadedChapters, setDownloadedChapters] = useState<DownloadedChapterInfo[]>([]);
-  const [showDownloadedChapters, setShowDownloadedChapters] = useState(false);
-  const [showUploadQueue, setShowUploadQueue] = useState(false);
   const [showAttachments, setShowAttachments] = useState(false);
   const [attachmentsBookId, setAttachmentsBookId] = useState<string | null>(null);
   const [attachmentsList, setAttachmentsList] = useState<BookAttachment[]>([]);
@@ -930,259 +402,142 @@ const App: React.FC = () => {
   useEffect(() => { activeCueMapRef.current = activeCueMap; }, [activeCueMap]);
   useEffect(() => { activeParagraphMapRef.current = activeParagraphMap; }, [activeParagraphMap]);
 
-  const refreshUploadQueueCount = useCallback(async () => {
-    try {
-      const count = await countQueuedUploads();
-      setUploadQueueCount(count);
-    } catch {
-      // ignore
+  const base64ToBlob = (base64: string, mimeType: string) => {
+    const cleaned = base64.replace(/^data:.*;base64,/, "");
+    const byteChars = atob(cleaned);
+    const byteNumbers = new Array(byteChars.length);
+    for (let i = 0; i < byteChars.length; i++) {
+      byteNumbers[i] = byteChars.charCodeAt(i);
     }
-  }, []);
+    const byteArray = new Uint8Array(byteNumbers);
+    return new Blob([byteArray], { type: mimeType });
+  };
 
-  const refreshUploadQueueList = useCallback(async () => {
-    try {
-      const items = await listQueuedUploads();
-      setUploadQueueItems(items);
-      setUploadQueueCount(items.length);
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  const [jobs, setJobs] = useState<JobRecord[]>([]);
-  const refreshJobs = useCallback(async () => {
-    try {
-      const all = await listAllJobs(state.readerSettings.uiMode);
-      setJobs(all);
-      jobLog.info("refresh", {
-        count: all.length,
-        jobs: all.map((j) => ({
-          jobId: j.jobId,
-          status: j.status,
-          workRequestId: (j as any).progressJson?.workRequestId ?? null,
-        })),
-      });
-      await refreshUploadQueueCount();
-      // Lightweight plugin health check to surface missing native registration
-      await jobRunnerHealthCheck(state.readerSettings.uiMode);
-    } catch (e) {
-      // ignore
-    }
-  }, [state.readerSettings.uiMode, refreshUploadQueueCount, logJobs]);
-
-  const runBootstrap = useCallback(async () => {
-    if (bootstrapPromiseRef.current) return bootstrapPromiseRef.current;
-    const runId = ++bootstrapRunRef.current;
-    setBootstrapStatus("running");
-    setBootstrapError(null);
-    bootstrapPromiseRef.current = (async () => {
-      await bootstrapCore(stateRef.current.googleClientId);
-      if (bootstrapRunRef.current !== runId) return;
-
-      const loadedBooks = (await libraryListBooks()).map((book) => ({
-        ...book,
-        settings: normalizeBookSettings(book.settings),
-      }));
-      if (bootstrapRunRef.current !== runId) return;
-
-      const preloadLimit = 200;
-      const preloadResults = await Promise.all(
-        loadedBooks.map(async (book) => {
-          try {
-            const page = await libraryListChaptersPage(book.id, -1, preloadLimit);
-            return { bookId: book.id, page };
-          } catch {
-            return null;
-          }
-        })
-      );
-      if (bootstrapRunRef.current !== runId) return;
-
-      const pagingSeed: Record<string, { afterIndex: number; hasMore: boolean; loading: boolean }> = {};
-      const preloadMap = new Map(
-        preloadResults
-          .filter((entry): entry is { bookId: string; page: Awaited<ReturnType<typeof libraryListChaptersPage>> } => !!entry)
-          .map((entry) => [entry.bookId, entry.page])
-      );
-      const books = loadedBooks.map((book) => {
-        const page = preloadMap.get(book.id);
-        if (!page) {
-          pagingSeed[book.id] = { afterIndex: -1, hasMore: true, loading: false };
-          return normalizeBookChapters(book);
-        }
-        const ordered = orderChaptersForDisplay(page.chapters || []);
-        pagingSeed[book.id] = {
-          afterIndex: page.nextAfterIndex ?? -1,
-          hasMore: page.nextAfterIndex != null,
-          loading: false,
-        };
-        return normalizeBookChapters({
-          ...book,
-          chapters: ordered,
-          chapterCount:
-            page.totalCount ??
-            (typeof book.chapterCount === "number" ? Math.max(book.chapterCount, ordered.length) : ordered.length),
-        });
-      });
-      setChapterPagingByBook((prev) => ({ ...prev, ...pagingSeed }));
-
-      let nextActiveBookId: string | undefined;
-      setState((p) => {
-        const desired = p.activeBookId;
-        const valid = desired && books.some((b) => b.id === desired);
-        nextActiveBookId = valid ? desired : (books[0]?.id ?? undefined);
-        return { ...p, books, activeBookId: nextActiveBookId };
-      });
-
-      console.log("[TaleVox][Library] Loaded books:", books.length);
-      if (bootstrapRunRef.current !== runId) return;
-      await refreshJobs();
-      setBootstrapStatus("done");
-    })().catch((e: any) => {
-      console.error("App bootstrap failed", e);
-      setBootstrapStatus("error");
-      setBootstrapError(String(e?.message ?? e));
-      bootstrapPromiseRef.current = null;
+  const blobToDataUrl = (blob: Blob): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ""));
+      reader.onerror = () => reject(new Error("Failed to read blob"));
+      reader.readAsDataURL(blob);
     });
-    return bootstrapPromiseRef.current;
-  }, [refreshJobs]);
 
-  const restoreNavContext = useCallback(async () => {
-    if (navAppliedRef.current) return;
-    const ctx = navContextRef.current;
-    if (!ctx) return;
-    navAppliedRef.current = true;
-    navRestoreRef.current = ctx;
-
-    if (ctx.bookId) {
-      setState((p) => ({ ...p, activeBookId: ctx.bookId }));
-    }
-
-    if ((ctx.lastViewType === "collection" || ctx.lastViewType === "reader") && ctx.bookId) {
-      await loadMoreChapters(ctx.bookId, true);
-    }
-  }, [loadMoreChapters]);
-
-  const didRepairIndicesRef = useRef(false);
-
-  const runStartup = useCallback(async () => {
-    const runId = ++startupRunRef.current;
-    setLaunchStage("splash");
-    setLaunchMessage("Loading library...");
-    setSignInError(null);
-
+  const readLocalAudioBlob = useCallback(async (chapterId: string) => {
+    const record = await getChapterAudioPath(chapterId);
+    if (!record?.localPath) return null;
     try {
-      await runBootstrap();
-      if (startupRunRef.current !== runId) return;
-
-      setLaunchMessage("Checking session...");
-      let authOk = false;
+      const res = await Filesystem.readFile({ path: record.localPath });
+      if (res.data instanceof Blob) return res.data;
+      return base64ToBlob(res.data, 'audio/mpeg');
+    } catch {
       try {
-        await ensureValidToken(false);
-        authOk = true;
+        const res = await Filesystem.readFile({ path: `${appConfig.paths.audioDir}/${chapterId}.mp3`, directory: Directory.Data });
+        if (res.data instanceof Blob) return res.data;
+        return base64ToBlob(res.data, 'audio/mpeg');
       } catch {
-        authOk = false;
+        return null;
       }
-
-      if (startupRunRef.current !== runId) return;
-
-      if (authOk && stateRef.current.driveRootFolderId && isOnline) {
-        try {
-          const restoreResult = await restoreFromDriveIfAvailable({
-            rootFolderId: stateRef.current.driveRootFolderId,
-            lastSnapshotCreatedAt: readLocalSnapshotMeta().lastSnapshotCreatedAt,
-          });
-          if (restoreResult.restored) {
-            const currentState = stateRef.current;
-            const attachmentLists = await Promise.all(
-              currentState.books.map((book) => libraryListBookAttachments(book.id).catch(() => []))
-            );
-            const merged = applyFullSnapshot({
-              snapshot: restoreResult.snapshot,
-              currentState,
-              currentAttachments: attachmentLists.flat(),
-              currentJobs: [],
-            });
-            try {
-              if (restoreResult.snapshot.readerProgress) {
-                safeSetLocalStorage(
-                  "talevox_reader_progress",
-                  JSON.stringify(restoreResult.snapshot.readerProgress)
-                );
-              }
-              if (restoreResult.snapshot.legacyProgressStore) {
-                safeSetLocalStorage(
-                  PROGRESS_STORE_KEY,
-                  JSON.stringify(restoreResult.snapshot.legacyProgressStore)
-                );
-              }
-            } catch {}
-            for (const restoredBook of merged.state.books) {
-              await libraryUpsertBook({ ...restoredBook, chapters: [], directoryHandle: undefined });
-              if (restoredBook.chapters.length > 0) {
-                await libraryBulkUpsertChapters(
-                  restoredBook.id,
-                  restoredBook.chapters.map((chapter) => ({
-                    chapter: { ...chapter, content: undefined },
-                    content: typeof chapter.content === "string" ? chapter.content : null,
-                  }))
-                );
-              }
-            }
-            if (merged.attachments.length) {
-              const attachmentsByBook = new Map<string, BookAttachment[]>();
-              for (const attachment of merged.attachments) {
-                const list = attachmentsByBook.get(attachment.bookId) || [];
-                list.push(attachment);
-                attachmentsByBook.set(attachment.bookId, list);
-              }
-              for (const [bookId, items] of attachmentsByBook.entries()) {
-                await libraryBulkUpsertBookAttachments(bookId, items);
-              }
-            }
-            setState(merged.state);
-            setJobs(merged.jobs);
-            setIsDirty(false);
-            pushNotice({ message: "Restored from Drive", type: "success" });
-          }
-        } catch (e) {
-          console.warn("[Startup] restoreFromDriveIfAvailable failed", e);
-        }
-      }
-
-      if (authOk && stateRef.current.driveRootFolderId && isOnline) {
-        const lastSync = Number(localStorage.getItem(LAUNCH_SYNC_KEY) || 0);
-        const now = Date.now();
-        if (now - lastSync > LAUNCH_SYNC_MIN_MS) {
-          setLaunchMessage("Checking library...");
-          localStorage.setItem(LAUNCH_SYNC_KEY, String(now));
-          try {
-            await performFullDriveSyncRef.current(false);
-          } catch (e) {
-            console.warn("[Startup] launch sync failed", e);
-          }
-        }
-      }
-
-      await restoreNavContext();
-
-      if (startupRunRef.current !== runId) return;
-
-      if (authOk) {
-        setLaunchStage("ready");
-      } else {
-        setLaunchStage("signin");
-      }
-    } catch (e: any) {
-      console.error("Startup failed", e);
-      setSignInError(String(e?.message ?? e));
-      setLaunchStage("signin");
     }
-  }, [isOnline, restoreNavContext, runBootstrap]);
+  }, []);
 
-  useEffect(() => {
-    void runStartup();
-  }, [runStartup]);
+  const resolveLocalPathForUpload = useCallback(async (chapterId: string, fallbackPath?: string) => {
+    const record = await getChapterAudioPath(chapterId);
+    if (record?.localPath) return record.localPath;
+    if (fallbackPath && (fallbackPath.startsWith("/") || fallbackPath.startsWith("file://"))) {
+      return fallbackPath;
+    }
+    return null;
+  }, []);
+
+  const uploadChapterNow = useCallback(async (bookId: string, chapterId: string) => {
+    const book = state.books.find((b) => b.id === bookId);
+    if (!book || !book.driveFolderId) throw new Error("Drive folder not set");
+    const chapter = book.chapters.find((c) => c.id === chapterId);
+    if (!chapter) throw new Error("Chapter not found");
+    const blob = await readLocalAudioBlob(chapterId);
+    if (!blob) throw new Error("Local audio not found");
+    const filename = buildMp3Name(bookId, chapterId);
+    const cloudAudioFileId = await uploadToDrive(
+      book.driveFolderId,
+      filename,
+      blob,
+      chapter.cloudAudioFileId,
+      "audio/mpeg"
+    );
+    const updated: Chapter = {
+      ...chapter,
+      cloudAudioFileId,
+      audioDriveId: cloudAudioFileId,
+      audioStatus: AudioStatus.READY,
+      updatedAt: Date.now(),
+    };
+    await libraryUpsertChapterMeta(bookId, updated);
+    setState((prev) => ({
+      ...prev,
+      books: prev.books.map((b) =>
+        b.id === bookId
+          ? { ...b, chapters: b.chapters.map((c) => (c.id === chapterId ? updated : c)) }
+          : b
+      ),
+    }));
+    return true;
+  }, [readLocalAudioBlob, state.books]);
+
+  const {
+    uploadQueueCount,
+    uploadQueueItems,
+    isUploadingAll,
+    showDownloadedChapters,
+    setShowDownloadedChapters,
+    showUploadQueue,
+    setShowUploadQueue,
+    refreshUploadQueueCount,
+    refreshUploadQueueList,
+    handleQueueChapterUpload,
+    handleUploadAllChapters,
+    handleDismissQueuedUpload,
+    kickUploadQueue,
+  } = useUploadQueue({
+    uiMode: state.readerSettings.uiMode,
+    books: state.books,
+    activeBookId: state.activeBookId,
+    resolveLocalPathForUpload,
+    uploadChapterNow,
+    pushNotice,
+  });
+
+
+  const { jobs, setJobs, refreshJobs } = useJobs({
+    uiMode: state.readerSettings.uiMode,
+    refreshUploadQueueCount,
+    logJobs,
+  });
+  const {
+    launchStage,
+    launchMessage,
+    signInError,
+    setLaunchStage,
+    setLaunchMessage,
+    setSignInError,
+    bootstrapStatus,
+    bootstrapError,
+    runBootstrap,
+    restoreNavContext,
+    runStartup,
+    navRestoreRef,
+    didRepairIndicesRef,
+  } = useAppBootstrap({
+    stateRef,
+    setState,
+    setChapterPagingByBook,
+    loadMoreChapters,
+    isOnline,
+    performFullDriveSyncRef,
+    refreshJobs,
+    setJobs,
+    pushNotice: pushNoticeSafe,
+    setIsDirty,
+    navContextRef,
+  });
 
   useEffect(() => {
     const unsubscribe = authManager.subscribe(setAuthState);
@@ -1458,32 +813,32 @@ const App: React.FC = () => {
     };
   }, [state.activeBookId, state.books, state.readerSettings.uiMode]);
 
-  const stateRef = useRef(state);
-  useEffect(() => { stateRef.current = state; }, [state]);
-
-  useEffect(() => {
-    const adapter = playbackAdapter ?? speechController.getPlaybackAdapter();
-    if (!adapter || !adapter.onState) return;
-    const unsubscribe = adapter.onState((playbackState) => {
-      if (isScrubbingRef.current) return;
-      setIsPlaying(playbackState.isPlaying);
-    });
-    return () => {
-      if (unsubscribe) unsubscribe();
-    };
-  }, [playbackAdapter]);
-
-  useEffect(() => {
-    if (!state.debugMode) return;
-    console.debug("[Playback] isPlaying", { isPlaying });
-  }, [isPlaying, state.debugMode]);
-
   const activeBook = useMemo(() => state.books.find(b => b.id === state.activeBookId), [state.books, state.activeBookId]);
   const effectivePlaybackSpeedForUi =
     activeBook?.settings.useBookSettings && activeBook.settings.playbackSpeed
       ? activeBook.settings.playbackSpeed
       : state.playbackSpeed;
   const activeChapterMetadata = useMemo(() => activeBook?.chapters.find(c => c.id === activeBook.currentChapterId), [activeBook]);
+  const {
+    backupOptions,
+    setBackupOptions,
+    backupProgress,
+    driveBackupCandidates,
+    handleBackupToDriveZip,
+    handleBackupToDeviceZip,
+    handleRestoreFromFileZip,
+    handleLoadDriveBackupCandidates,
+    handleRestoreFromDriveBackup,
+    runBackup,
+  } = useBackup({
+    stateRef,
+    setState,
+    jobs,
+    activeChapterId: activeChapterMetadata?.id ?? null,
+    activeTab,
+    pushNotice: pushNoticeSafe,
+    isOnline,
+  });
   const activeChapterKey = activeBook?.currentChapterId ? `${activeBook.id}:${activeBook.currentChapterId}` : null;
   const activeChapterText = useMemo(() => {
     const content = activeChapterMetadata?.content;
@@ -1699,25 +1054,6 @@ const App: React.FC = () => {
     state.debugMode,
     state.readerSettings.highlightDebugOverlay,
   ]);
-  const highlightDebugData = useMemo(() => ({
-    positionMs: Math.floor(audioCurrentTime * 1000),
-    durationMs: Math.floor(audioDuration * 1000),
-    cueIndex: highlightEnabled ? activeCueIndex : null,
-    cueCount: activeCueMap?.cues?.length ?? 0,
-    paragraphIndex: highlightEnabled ? activeParagraphIndex : null,
-    paragraphCount: activeParagraphMap?.paragraphs?.length ?? 0,
-    mode: "paragraph",
-    isPlaying,
-  }), [
-    audioCurrentTime,
-    audioDuration,
-    highlightEnabled,
-    activeCueIndex,
-    activeParagraphIndex,
-    activeCueMap,
-    activeParagraphMap,
-    isPlaying,
-  ]);
   const lastSyncAt = state.syncDiagnostics?.lastSyncSuccessAt ?? state.syncDiagnostics?.lastSyncAttemptAt;
 
   useEffect(() => { activeCueIndexRef.current = activeCueIndex; }, [activeCueIndex]);
@@ -1737,73 +1073,6 @@ const App: React.FC = () => {
       pushNotice({ message: 'Drive session expired. Reconnect required.', type: 'reconnect', ms: 6000 });
     }
   }, [authState.status, authState.lastError, launchStage, pushNotice]);
-
-  const handleSaveDiagnostics = useCallback(async () => {
-    const report = diagnosticsReport ?? (await refreshDiagnostics());
-    if (!report) {
-      pushNotice({ message: "Diagnostics unavailable", type: "error" });
-      return;
-    }
-    try {
-      const path = await saveDiagnosticsToFile(report);
-      if (path) {
-        pushNotice({ message: `Diagnostics saved: ${path}`, type: "success" });
-      } else {
-        pushNotice({ message: "Diagnostics file save not supported on web", type: "error" });
-      }
-    } catch (e: any) {
-      pushNotice({ message: `Diagnostics save failed: ${String(e?.message ?? e)}`, type: "error" });
-    }
-  }, [diagnosticsReport, refreshDiagnostics, pushNotice]);
-
-  const handleRequestNotifications = useCallback(async () => {
-    try {
-      if (!jobRunnerAvailable) {
-        pushNotice({ type: "error", message: "Notifications are only supported on Android." });
-        return;
-      }
-      const res = await JobRunner.requestNotificationPermission();
-      if (!res.granted) {
-        pushNotice({ type: "error", message: "Notifications are required for background jobs. Permission denied." });
-      }
-      await refreshNotificationStatus();
-    } catch (e: any) {
-      pushNotice({ type: "error", message: `Notification request failed: ${String(e?.message ?? e)}` });
-    }
-  }, [refreshNotificationStatus, pushNotice, jobRunnerAvailable]);
-
-  const handleOpenNotificationSettings = useCallback(async () => {
-    try {
-      if (!jobRunnerAvailable) {
-        pushNotice({ type: "error", message: "Notification settings are only available on Android." });
-        return;
-      }
-      await JobRunner.openNotificationSettings();
-    } catch (e) {
-      console.warn("openNotificationSettings failed", e);
-    }
-  }, [jobRunnerAvailable, pushNotice]);
-
-  const handleSendTestNotification = useCallback(async () => {
-    try {
-      if (!jobRunnerAvailable) {
-        pushNotice({ type: "error", message: "Test notifications are only available on Android." });
-        return;
-      }
-      await JobRunner.sendTestNotification();
-    } catch (e) {
-      console.warn("sendTestNotification failed", e);
-    }
-  }, [jobRunnerAvailable, pushNotice]);
-
-  const updatePhase = useCallback((p: PlaybackPhase) => {
-    const validPhases: PlaybackPhase[] = ['IDLE', 'LOADING_TEXT', 'READY', 'LOADING_AUDIO', 'SEEKING', 'SCRUBBING', 'PLAYING_INTRO', 'PLAYING_BODY', 'ENDING_SETTLE', 'TRANSITIONING', 'ERROR'];
-    if (validPhases.includes(p)) {
-        trace(`phase:change`, { from: playbackPhase, to: p });
-    }
-    setPlaybackPhase(p);
-    setPhaseSince(Date.now());
-  }, [playbackPhase]);
 
   const updateDiagnostics = useCallback((updates: Partial<SyncDiagnostics>) => {
     setState(p => {
@@ -1879,418 +1148,109 @@ const App: React.FC = () => {
     onCommit: applyReaderProgressCommit,
   });
 
-  const commitProgressUpdate = useCallback((
-    bookId: string,
-    chapterId: string,
+  const handleCueSyncUpdate = useCallback((
     meta: PlaybackMetadata & { completed?: boolean },
-    reason: ProgressCommitReason,
-    force: boolean = false,
-    bypassThrottle: boolean = false,
-    allowDecrease: boolean = false
+    ctx: { currentIntroDurSec: number; setCurrentIntroDurSec: (next: number) => void }
   ) => {
-    if (!chapterId) {
-      const now = Date.now();
-      if (now - lastProgressWarnRef.current > 2000) {
-        lastProgressWarnRef.current = now;
-        console.warn("[Progress] skipped commit with missing chapterId", { reason, bookId });
-      }
-      return;
-    }
-    const now = Date.now();
-    const throttleMs = effectiveMobileMode ? 800 : 250;
-
-    const s = stateRef.current;
-    const bIdx = s.books.findIndex(b => b.id === bookId);
-    if (bIdx === -1) return;
-    const book = s.books[bIdx];
-
-    if (book.currentChapterId && book.currentChapterId !== chapterId) {
-      if (now - lastProgressWarnRef.current > 2000) {
-        lastProgressWarnRef.current = now;
-        console.warn("[Progress] commit for non-active chapter", {
-          reason,
-          bookId,
-          chapterId,
-          activeChapterId: book.currentChapterId,
-        });
-      }
-    }
-
-    const effectiveReason: ProgressCommitReason = meta.completed ? "ended" : reason;
-    const isCompletionReason =
-      effectiveReason === "ended" || effectiveReason === "scrubToEnd" || effectiveReason === "seekToNearEnd";
-
-    if (
-      !force &&
-      !bypassThrottle &&
-      !isCompletionReason &&
-      now - lastProgressCommitTime.current < throttleMs
-    ) {
-      return;
-    }
-    lastProgressCommitTime.current = now;
-
-    const cIdx = book.chapters.findIndex(c => c.id === chapterId);
-    if (cIdx === -1) {
-      if (now - lastProgressWarnRef.current > 2000) {
-        lastProgressWarnRef.current = now;
-        console.warn("[Progress] skipped commit; chapter not found", { reason, bookId, chapterId });
-      }
-      return;
-    }
-
-    const chapter = book.chapters[cIdx];
-
-    const canClearCompletion = effectiveReason === "reset";
-    const lockCompleted = chapter.isCompleted && !canClearCompletion;
-    const effectiveAllowDecrease = lockCompleted ? false : allowDecrease;
-
-    const { next } = computeProgressUpdate({
-      current: {
-        progress: chapter.progress,
-        progressSec: chapter.progressSec,
-        durationSec: chapter.durationSec,
-        progressChars: chapter.progressChars,
-        textLength: chapter.textLength ?? chapter.content?.length,
-        isCompleted: chapter.isCompleted,
-      },
-      timeSec: meta.currentTime,
-      durationSec: meta.duration,
-      progressChars: meta.charOffset,
-      textLength: meta.textLength,
-      reason: effectiveReason,
-      completed: meta.completed,
-      allowDecrease: effectiveAllowDecrease,
-    });
-
-    const updated: Chapter = {
-      ...chapter,
-      progress: next.progress,
-      progressSec: next.progressSec,
-      progressChars: typeof next.progressChars === "number" ? next.progressChars : chapter.progressChars,
-      durationSec: next.durationSec ?? chapter.durationSec,
-      textLength: next.textLength ?? chapter.textLength,
-      isCompleted: next.isCompleted,
-    };
-
-    if (
-      force ||
-      updated.isCompleted !== chapter.isCompleted ||
-      Math.abs(updated.progress - chapter.progress) > 0.01 ||
-      Math.abs((updated.progressSec || 0) - (chapter.progressSec || 0)) > 2
-    ) {
-      setState(prev => {
-        const newBooks = [...prev.books];
-        const newChapters = [...newBooks[bIdx].chapters];
-        newChapters[cIdx] = {
-          ...updated,
-          updatedAt: now
-        };
-        newBooks[bIdx] = { ...newBooks[bIdx], chapters: newChapters };
-        return { ...prev, books: newBooks };
-      });
-
-      const shouldPersistProgress = ![
-        "scrub",
-        "scrubToEnd",
-        "seek",
-        "seekToNearEnd",
-        "ended",
-      ].includes(effectiveReason);
-      if (shouldPersistProgress) {
-        try {
-          const store = readProgressStore();
-          const books = { ...store.books };
-          if (!books[bookId]) books[bookId] = {};
-          const nextEntry = {
-            timeSec: updated.progressSec,
-            durationSec: updated.durationSec,
-            percent: updated.progress,
-            completed: updated.isCompleted,
-            updatedAt: now,
-          };
-          const prevEntry = books[bookId][chapterId];
-          const isSame =
-            prevEntry &&
-            Math.abs((prevEntry.timeSec ?? 0) - (nextEntry.timeSec ?? 0)) < 0.0001 &&
-            Math.abs((prevEntry.durationSec ?? 0) - (nextEntry.durationSec ?? 0)) < 0.0001 &&
-            Math.abs((prevEntry.percent ?? 0) - (nextEntry.percent ?? 0)) < 0.0001 &&
-            prevEntry.completed === nextEntry.completed;
-          if (!isSame) {
-            books[bookId][chapterId] = nextEntry;
-            writeProgressStore({ ...store, books });
-          }
-        } catch (e) {
-          console.warn("Progress write failed", e);
-        }
-      }
-
-      if (stateRef.current.debugMode) {
-        console.debug("[Progress] commit", {
-          reason: effectiveReason,
-          bookId,
-          chapterId,
-          timeSec: updated.progressSec,
-          durationSec: updated.durationSec,
-          percentBefore: chapter.progress,
-          percentAfter: updated.progress,
-          completedBefore: chapter.isCompleted,
-          completedAfter: updated.isCompleted,
-        });
-      }
-
-      markDirty();
-    }
-
-  }, [effectiveMobileMode, markDirty]);
-
-  const commitCurrentProgress = useCallback((
-    reason: ProgressCommitReason,
-    opts?: { force?: boolean; bypassThrottle?: boolean }
-  ) => {
-    const s = stateRef.current;
-    const b = s.activeBookId ? s.books.find(bk => bk.id === s.activeBookId) : null;
-    if (!b || !b.currentChapterId) return;
-    const meta = speechController.getMetadata();
-    const chapterId = meta.chapterId ?? b.currentChapterId;
-    if (!chapterId) return;
-    commitProgressUpdate(
-      b.id,
-      chapterId,
-      meta,
-      reason,
-      opts?.force ?? false,
-      opts?.bypassThrottle ?? true
-    );
-  }, [commitProgressUpdate]);
-
-  const resolveSeekCommitReason = (
-    base: "scrub" | "seek",
-    timeSec: number,
-    durationSec?: number
-  ): ProgressCommitReason => {
-    if (isNearCompletion(timeSec, durationSec)) {
-      return base === "scrub" ? "scrubToEnd" : "seekToNearEnd";
-    }
-    return base;
-  };
-
-  const commitSeekProgress = useCallback((
-    targetMs: number,
-    baseReason: "scrub" | "seek"
-  ) => {
-    const s = stateRef.current;
-    const b = s.activeBookId ? s.books.find(bk => bk.id === s.activeBookId) : null;
-    if (!b || !b.currentChapterId) return;
-    const meta = speechController.getMetadata();
-    const chapterId = meta.chapterId ?? b.currentChapterId;
-    if (!chapterId) return;
-    const timeSec = targetMs / 1000;
-    const durationSec =
-      (meta.duration && meta.duration > 0 ? meta.duration : 0) ||
-      audioDuration ||
-      b.chapters.find(c => c.id === chapterId)?.durationSec ||
-      0;
-    const reason = resolveSeekCommitReason(baseReason, timeSec, durationSec);
-    commitProgressUpdate(
-      b.id,
-      chapterId,
-      { ...meta, currentTime: timeSec, duration: durationSec },
-      reason,
-      true,
-      true
-    );
-  }, [commitProgressUpdate, audioDuration]);
-
-  const resolveProgressInput = useCallback((
-    chapterId: string,
-    meta: PlaybackMetadata,
-    overrides?: { timeSec?: number; durationSec?: number; charOffset?: number }
-  ) => {
-    const s = stateRef.current;
-    const book = s.activeBookId ? s.books.find(bk => bk.id === s.activeBookId) : null;
-    const chapter = book?.chapters.find(c => c.id === chapterId);
-    const durationSec =
-      typeof overrides?.durationSec === "number"
-        ? overrides.durationSec
-        : meta.duration > 0
-          ? meta.duration
-          : audioDuration || chapter?.durationSec || 0;
-    const timeSec =
-      typeof overrides?.timeSec === "number"
-        ? overrides.timeSec
-        : typeof meta.currentTime === "number"
-          ? meta.currentTime
-          : 0;
-    const textLength =
-      typeof meta.textLength === "number" && meta.textLength > 0
-        ? meta.textLength
-        : typeof chapter?.textLength === "number" && chapter.textLength > 0
-          ? chapter.textLength
-          : typeof chapter?.content === "string"
-            ? chapter.content.length
-            : 0;
-    const offsetCandidate =
-      typeof overrides?.charOffset === "number" ? overrides.charOffset : meta.charOffset;
-    const hasOffset = typeof offsetCandidate === "number" && Number.isFinite(offsetCandidate);
-    let index = hasOffset ? offsetCandidate : 0;
-    if (!hasOffset && durationSec > 0 && textLength > 0) {
-      index = Math.round((timeSec / durationSec) * textLength);
-    }
-    if (textLength > 0) {
-      index = clamp(index, 0, textLength);
-    } else {
-      index = Math.max(0, index);
-    }
-    const total = textLength > 0 ? textLength : Math.max(0, index);
-    return { index, total, timeSec, durationSec };
-  }, [audioDuration]);
-
-  const handleSyncUpdate = useCallback((meta: PlaybackMetadata & { completed?: boolean }) => {
-    if (isScrubbingRef.current) return;
-    if (meta.duration > 0) {
-      if (!audioDuration || Math.abs(meta.duration - audioDuration) > 0.1) {
-        setAudioDuration(meta.duration);
-      }
-    }
-
-    if (['LOADING_AUDIO', 'SEEKING', 'TRANSITIONING', 'LOADING_TEXT', 'SCRUBBING'].includes(playbackPhase)) {
-        if (playbackPhase === 'SEEKING') {
-             const now = Date.now();
-             if (now - lastSnapshotRef.current > 50) {
-                 const percent = meta.duration > 0 ? meta.currentTime / meta.duration : 0;
-                 const s = stateRef.current;
-                 const b = s.books.find(bk => bk.id === s.activeBookId);
-                 if (b && b.currentChapterId) {
-                    setPlaybackSnapshot({ chapterId: b.currentChapterId, percent });
-                 }
-                 lastSnapshotRef.current = now;
-             }
-        }
-        if (playbackPhase === 'SEEKING' && meta.currentTime > 0) {
-          setAudioCurrentTime(meta.currentTime);
-        }
-        return;
-    }
-    
-    if (
-        !seekTxnRef.current.inFlight &&
-        (playbackPhase === 'READY' || playbackPhase === 'PLAYING_INTRO' || playbackPhase === 'PLAYING_BODY')
-      ) {
-        if (meta.currentTime > (currentIntroDurSec + 0.6) && playbackPhase !== 'PLAYING_BODY') {
-            updatePhase('PLAYING_BODY');
-            isInIntroRef.current = false;
-        } else if (meta.currentTime <= (currentIntroDurSec + 0.6) && playbackPhase !== 'PLAYING_INTRO') {
-            updatePhase('PLAYING_INTRO');
-            isInIntroRef.current = true;
-        }
-    }
-
-    setAudioCurrentTime(meta.currentTime);
-    if (meta.duration > 0) {
-      setAudioDuration(meta.duration);
-    }
-
     const s = stateRef.current;
     const b = s.books.find(bk => bk.id === s.activeBookId);
     const activeChapterId = b?.currentChapterId ?? null;
     const chapterExists = !!(b && meta.chapterId && b.chapters.some(c => c.id === meta.chapterId));
-    const safeCompleted = !!(meta.completed && meta.chapterId && chapterExists);
-    const safeMeta = safeCompleted ? meta : { ...meta, completed: false };
-    const playingChapterId = chapterExists ? safeMeta.chapterId ?? activeChapterId : activeChapterId;
+    const playingChapterId = chapterExists ? meta.chapterId ?? activeChapterId : activeChapterId;
 
     const pendingFallback = pendingCueFallbackRef.current;
     if (pendingFallback && meta.duration > 0) {
-        if (playingChapterId === pendingFallback.chapterId && !activeCueMapRef.current) {
-            pendingCueFallbackRef.current = null;
-            void (async () => {
-                const chapter = b?.chapters.find(c => c.id === pendingFallback.chapterId);
-                const introMs = computeIntroMs({
-                  audioIntroDurSec: chapter?.audioIntroDurSec,
-                  audioPrefixLen: pendingFallback.prefixLen,
-                  textLen: pendingFallback.text.length,
-                  durationMs: Math.floor(meta.duration * 1000),
-                });
-                if (introMs > 0) {
-                  setCurrentIntroDurSec(introMs / 1000);
-                }
-            const built = generateFallbackCueMap({
-              chapterId: pendingFallback.chapterId,
-              text: pendingFallback.text,
-              durationMs: Math.floor(meta.duration * 1000),
-              introOffsetMs: introMs,
-            });
-            await saveCueMap(pendingFallback.chapterId, built);
-            console.log("[Highlight] cue map generated", {
-              chapterId: pendingFallback.chapterId,
-              cueCount: built.cues.length,
-              method: built.method,
-              durationMs: Math.floor(meta.duration * 1000),
-            });
-            setActiveCueMap(built);
-            setCueMeta({ method: built.method, count: built.cues.length });
-            })().catch((e) => {
-                console.warn("Cue map fallback build failed", e);
-            });
-        }
+      if (playingChapterId === pendingFallback.chapterId && !activeCueMapRef.current) {
+        pendingCueFallbackRef.current = null;
+        void (async () => {
+          const chapter = b?.chapters.find(c => c.id === pendingFallback.chapterId);
+          const introMs = computeIntroMs({
+            audioIntroDurSec: chapter?.audioIntroDurSec,
+            audioPrefixLen: pendingFallback.prefixLen,
+            textLen: pendingFallback.text.length,
+            durationMs: Math.floor(meta.duration * 1000),
+          });
+          if (introMs > 0) {
+            ctx.setCurrentIntroDurSec(introMs / 1000);
+          }
+          const built = generateFallbackCueMap({
+            chapterId: pendingFallback.chapterId,
+            text: pendingFallback.text,
+            durationMs: Math.floor(meta.duration * 1000),
+            introOffsetMs: introMs,
+          });
+          await saveCueMap(pendingFallback.chapterId, built);
+          console.log("[Highlight] cue map generated", {
+            chapterId: pendingFallback.chapterId,
+            cueCount: built.cues.length,
+            method: built.method,
+            durationMs: Math.floor(meta.duration * 1000),
+          });
+          setActiveCueMap(built);
+          setCueMeta({ method: built.method, count: built.cues.length });
+        })().catch((e) => {
+          console.warn("Cue map fallback build failed", e);
+        });
+      }
     }
 
     const cueMap = activeCueMapRef.current;
     if (cueMap && cueMap.cues.length > 0) {
-        const positionMs = Math.floor(meta.currentTime * 1000);
-        const idx = findCueIndex(cueMap.cues, positionMs);
+      const positionMs = Math.floor(meta.currentTime * 1000);
+      const idx = findCueIndex(cueMap.cues, positionMs);
 
-        const activeSpeak = activeSpeakTextRef.current;
-        if (
-          activeSpeak &&
-          playingChapterId === activeSpeak.chapterId &&
-          meta.duration > 5 &&
-          meta.currentTime > 2 &&
-          activeSpeak.text.length > 0
-        ) {
-          const durationMs = Math.floor(meta.duration * 1000);
-          if (durationMs > 0 && cueMap.durationMs) {
-            const durationState = cueDurationRef.current;
-            if (durationState.chapterId !== activeSpeak.chapterId) {
-              durationState.chapterId = activeSpeak.chapterId;
-              durationState.lastDurationMs = durationMs;
-              durationState.lastRebuildAt = 0;
-            }
+      const activeSpeak = activeSpeakTextRef.current;
+      if (
+        activeSpeak &&
+        playingChapterId === activeSpeak.chapterId &&
+        meta.duration > 5 &&
+        meta.currentTime > 2 &&
+        activeSpeak.text.length > 0
+      ) {
+        const durationMs = Math.floor(meta.duration * 1000);
+        if (durationMs > 0 && cueMap.durationMs) {
+          const durationState = cueDurationRef.current;
+          if (durationState.chapterId !== activeSpeak.chapterId) {
+            durationState.chapterId = activeSpeak.chapterId;
+            durationState.lastDurationMs = durationMs;
+            durationState.lastRebuildAt = 0;
+          }
 
-            const driftMs = Math.abs(cueMap.durationMs - durationMs);
-            const now = Date.now();
-            if (driftMs > 1500 && now - durationState.lastRebuildAt > 20000) {
-              durationState.lastRebuildAt = now;
-              void (async () => {
-                const introMsForRebuild = Math.max(0, Math.floor(currentIntroDurSec * 1000));
-                const built = generateFallbackCueMap({
-                  chapterId: activeSpeak.chapterId,
-                  text: activeSpeak.text,
-                  durationMs,
-                  introOffsetMs: introMsForRebuild,
-                });
-                await saveCueMap(activeSpeak.chapterId, built);
-                setActiveCueMap(built);
-                setCueMeta({ method: built.method, count: built.cues.length });
-                console.log("[Highlight] cue map regenerated (duration change)", {
-                  chapterId: activeSpeak.chapterId,
-                  cueCount: built.cues.length,
-                  method: built.method,
-                  durationMs,
-                  previousDurationMs: cueMap.durationMs,
-                });
-              })().catch((e) => {
-                console.warn("Cue map duration rebuild failed", e);
+          const driftMs = Math.abs(cueMap.durationMs - durationMs);
+          const now = Date.now();
+          if (driftMs > 1500 && now - durationState.lastRebuildAt > 20000) {
+            durationState.lastRebuildAt = now;
+            void (async () => {
+              const introMsForRebuild = Math.max(0, Math.floor(ctx.currentIntroDurSec * 1000));
+              const built = generateFallbackCueMap({
+                chapterId: activeSpeak.chapterId,
+                text: activeSpeak.text,
+                durationMs,
+                introOffsetMs: introMsForRebuild,
               });
-            }
+              await saveCueMap(activeSpeak.chapterId, built);
+              setActiveCueMap(built);
+              setCueMeta({ method: built.method, count: built.cues.length });
+              console.log("[Highlight] cue map regenerated (duration change)", {
+                chapterId: activeSpeak.chapterId,
+                cueCount: built.cues.length,
+                method: built.method,
+                durationMs,
+                previousDurationMs: cueMap.durationMs,
+              });
+            })().catch((e) => {
+              console.warn("Cue map duration rebuild failed", e);
+            });
           }
+        }
 
-          const driftState = cueIntegrityRef.current;
-          if (driftState.chapterId !== activeSpeak.chapterId) {
-            driftState.chapterId = activeSpeak.chapterId;
-            driftState.driftCount = 0;
-            driftState.lastRebuildAt = 0;
-          }
+        const driftState = cueIntegrityRef.current;
+        if (driftState.chapterId !== activeSpeak.chapterId) {
+          driftState.chapterId = activeSpeak.chapterId;
+          driftState.driftCount = 0;
+          driftState.lastRebuildAt = 0;
+        }
+        if (meta.duration > 0) {
           const linearOffset = Math.floor((meta.currentTime / meta.duration) * activeSpeak.text.length);
           const cueOffset = cueMap.cues[idx]?.startChar ?? 0;
           const drift = Math.abs(cueOffset - linearOffset);
@@ -2306,7 +1266,7 @@ const App: React.FC = () => {
             driftState.lastRebuildAt = now;
             driftState.driftCount = 0;
             void (async () => {
-              const introMsForRebuild = Math.max(0, Math.floor(currentIntroDurSec * 1000));
+              const introMsForRebuild = Math.max(0, Math.floor(ctx.currentIntroDurSec * 1000));
               const built = generateFallbackCueMap({
                 chapterId: activeSpeak.chapterId,
                 text: activeSpeak.text,
@@ -2331,45 +1291,14 @@ const App: React.FC = () => {
             });
           }
         }
+      }
     } else {
-        const nextOffset = Number.isFinite(meta.charOffset) ? meta.charOffset : stateRef.current.currentOffsetChars;
-        if (Math.abs(nextOffset - stateRef.current.currentOffsetChars) > 5) {
-            setState(p => ({ ...p, currentOffsetChars: nextOffset }));
-        }
-    }
-
-    const shouldCommitProgress = !!safeMeta.completed || safeMeta.duration > 0 || safeMeta.currentTime > 0;
-    if (shouldCommitProgress && s.activeBookId && s.books) {
-      const b = s.books.find(b => b.id === s.activeBookId);
-      const chapterId = playingChapterId;
-      if (b && chapterId) {
-        const now = Date.now();
-        if (now - lastSnapshotRef.current > 100) {
-          const percent = safeMeta.duration > 0 ? safeMeta.currentTime / safeMeta.duration : 0;
-          setPlaybackSnapshot({ chapterId, percent });
-          lastSnapshotRef.current = now;
-        }
-        const chapter = b.chapters.find((c) => c.id === chapterId);
-        if (
-          chapter &&
-          safeMeta.currentTime <= 0.01 &&
-          (chapter.progressSec ?? 0) > 1 &&
-          !safeMeta.completed &&
-          !["PLAYING_BODY", "PLAYING_INTRO"].includes(playbackPhase)
-        ) {
-          return;
-        }
-
-        const reason: ProgressCommitReason = safeMeta.completed ? "ended" : "tick";
-        commitProgressUpdate(b.id, chapterId, safeMeta, reason);
+      const nextOffset = Number.isFinite(meta.charOffset) ? meta.charOffset : stateRef.current.currentOffsetChars;
+      if (Math.abs(nextOffset - stateRef.current.currentOffsetChars) > 5) {
+        setState(p => ({ ...p, currentOffsetChars: nextOffset }));
       }
     }
-
-  }, [audioDuration, playbackPhase, currentIntroDurSec, updatePhase, commitProgressUpdate, pushNotice]);
-
-  useEffect(() => {
-    speechController.setSyncCallback(handleSyncUpdate);
-  }, [handleSyncUpdate]);
+  }, [pushNotice, setActiveCueMap, setCueMeta]);
 
   useEffect(() => {
     document.documentElement.style.setProperty('--highlight-color', state.readerSettings.highlightColor);
@@ -2452,220 +1381,6 @@ const App: React.FC = () => {
     }, intervalMs);
     return () => window.clearInterval(timer);
   }, [handleSaveState, isDirty, state.autoSaveInterval, state.driveRootFolderId]);
-
-  const collectBackupContext = useCallback(async () => {
-    const s = stateRef.current;
-    const preferencesRaw = localStorage.getItem(PREFS_KEY);
-    const preferences = preferencesRaw ? (JSON.parse(preferencesRaw) as Record<string, unknown>) : {};
-    let readerProgress: Record<string, unknown> = {};
-    try {
-      const raw = localStorage.getItem("talevox_reader_progress");
-      if (raw) readerProgress = JSON.parse(raw);
-    } catch {
-      readerProgress = {};
-    }
-    const progressStorePayload = readProgressStore();
-    const attachmentLists = await Promise.all(
-      s.books.map((book) => libraryListBookAttachments(book.id).catch(() => []))
-    );
-    return {
-      state: s,
-      preferences,
-      readerProgress,
-      legacyProgressStore: (progressStorePayload as unknown as Record<string, unknown>) || {},
-      attachments: attachmentLists.flat(),
-      jobs,
-      activeChapterId: activeChapterMetadata?.id,
-      activeTab,
-    };
-  }, [activeChapterMetadata?.id, activeTab, jobs]);
-
-  const runBackup = useCallback(async (
-    target: BackupTarget,
-    cfg?: { nativeMode?: "prompt" | "internalOnly" }
-  ) => {
-    if (backupBusyRef.current) return;
-    backupBusyRef.current = true;
-    setState((p) => ({ ...p, backupInProgress: true, lastBackupError: undefined }));
-    setBackupProgress(null);
-    try {
-      const ctx = await collectBackupContext();
-      const zipBlob = await createFullBackupZip(backupOptions, setBackupProgress, ctx);
-      const saveRes = await saveBackup(
-        target,
-        zipBlob,
-        undefined,
-        setBackupProgress,
-        {
-          rootFolderId: stateRef.current.driveRootFolderId,
-          keepDriveBackups: stateRef.current.backupSettings?.keepDriveBackups ?? 10,
-          keepLocalBackups: stateRef.current.backupSettings?.keepLocalBackups ?? 10,
-          nativeMode: cfg?.nativeMode,
-        }
-      );
-      setState((p) => ({
-        ...p,
-        backupInProgress: false,
-        lastBackupAt: Date.now(),
-        lastBackupLocation: saveRes.locationLabel,
-        lastBackupError: undefined,
-      }));
-      setBackupProgress({ step: "finalizing", message: "Backup complete" });
-      pushNotice({ message: `Backup complete: ${saveRes.locationLabel}`, type: "success" });
-    } catch (e: any) {
-      const message = String(e?.message ?? e);
-      setState((p) => ({
-        ...p,
-        backupInProgress: false,
-        lastBackupError: message,
-      }));
-      setBackupProgress({ step: "finalizing", message: `Backup failed: ${message}` });
-      pushNotice({ message: `Backup failed: ${message}`, type: "error", ms: 0 });
-    } finally {
-      backupBusyRef.current = false;
-      setTimeout(() => setBackupProgress(null), 2500);
-    }
-  }, [backupOptions, collectBackupContext, pushNotice]);
-
-  const handleBackupToDriveZip = useCallback(async () => {
-    if (!stateRef.current.driveRootFolderId) {
-      pushNotice({ message: "Drive root folder not configured", type: "error" });
-      return;
-    }
-    await runBackup("drive");
-  }, [pushNotice, runBackup]);
-
-  const handleBackupToDeviceZip = useCallback(async () => {
-    await runBackup(Capacitor.isNativePlatform() ? "localFolder" : "download");
-  }, [runBackup]);
-
-  const handleRestoreFromFileZip = useCallback(async () => {
-    if (backupBusyRef.current) return;
-    backupBusyRef.current = true;
-    setState((p) => ({ ...p, backupInProgress: true, lastBackupError: undefined }));
-    try {
-      if (Capacitor.isNativePlatform()) {
-        const picker = (Capacitor as any)?.Plugins?.CapacitorFilePicker || (Capacitor as any)?.Plugins?.FilePicker;
-        if (!picker?.pickFiles) {
-          throw new Error("File picker is not available on this platform.");
-        }
-        const res = await picker.pickFiles({
-          multiple: false,
-          types: ["application/zip"],
-        });
-        const file = res?.files?.[0];
-        const uri = file?.path || file?.uri;
-        if (!uri) return;
-        const read = await Filesystem.readFile({ path: uri });
-        let blob: Blob | null = null;
-        if (read.data instanceof Blob) {
-          blob = read.data;
-        } else if (typeof read.data === "string") {
-          const b64 = read.data.includes(",") ? read.data.split(",")[1] : read.data;
-          const bin = atob(b64);
-          const bytes = new Uint8Array(bin.length);
-          for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
-          blob = new Blob([bytes], { type: "application/zip" });
-        }
-        if (!blob) throw new Error("Unable to read backup ZIP.");
-        await restoreFromBackupZip(blob, setBackupProgress);
-      } else {
-        const input = document.createElement("input");
-        input.type = "file";
-        input.accept = ".zip,application/zip";
-        input.style.display = "none";
-        document.body.appendChild(input);
-
-        const selected = await new Promise<File | null>((resolve) => {
-          input.onchange = () => {
-            const picked = input.files?.[0] ?? null;
-            resolve(picked);
-          };
-          input.click();
-        });
-        document.body.removeChild(input);
-        if (!selected) return;
-        await restoreFromBackupZip(selected, setBackupProgress);
-      }
-    } catch (e: any) {
-      const message = String(e?.message ?? e);
-      setState((p) => ({ ...p, backupInProgress: false, lastBackupError: message }));
-      pushNotice({ message: `Restore failed: ${message}`, type: "error", ms: 0 });
-    } finally {
-      backupBusyRef.current = false;
-      setState((p) => ({ ...p, backupInProgress: false }));
-    }
-  }, [pushNotice]);
-
-  const handleLoadDriveBackupCandidates = useCallback(async () => {
-    if (!stateRef.current.driveRootFolderId) {
-      pushNotice({ message: "Drive root folder not configured", type: "error" });
-      return;
-    }
-    try {
-      const items = await listDriveBackupCandidates(stateRef.current.driveRootFolderId);
-      setDriveBackupCandidates(items);
-      if (!items.length) {
-        pushNotice({ message: "No Drive backup ZIP files found", type: "info" });
-      }
-    } catch (e: any) {
-      pushNotice({ message: `Failed to list Drive backups: ${String(e?.message ?? e)}`, type: "error", ms: 0 });
-    }
-  }, [pushNotice]);
-
-  const handleRestoreFromDriveBackup = useCallback(async (fileId: string) => {
-    if (!fileId) return;
-    if (backupBusyRef.current) return;
-    backupBusyRef.current = true;
-    setState((p) => ({ ...p, backupInProgress: true, lastBackupError: undefined }));
-    try {
-      await restoreFromDriveSave(fileId, setBackupProgress);
-    } catch (e: any) {
-      const message = String(e?.message ?? e);
-      setState((p) => ({ ...p, backupInProgress: false, lastBackupError: message }));
-      pushNotice({ message: `Drive restore failed: ${message}`, type: "error", ms: 0 });
-    } finally {
-      backupBusyRef.current = false;
-      setState((p) => ({ ...p, backupInProgress: false }));
-    }
-  }, [pushNotice]);
-
-  useEffect(() => {
-    const settings = state.backupSettings || DEFAULT_BACKUP_SETTINGS;
-    const shouldAutoDrive = settings.autoBackupToDrive;
-    const shouldAutoDevice = settings.autoBackupToDevice;
-    if (!shouldAutoDrive && !shouldAutoDevice) return;
-
-    const minutes = Math.max(1, Number(settings.backupIntervalMin) || 30);
-    const intervalMs = minutes * 60 * 1000;
-    const timer = window.setInterval(() => {
-      if (backupBusyRef.current) return;
-      void (async () => {
-        const current = stateRef.current;
-        if (current.backupInProgress) return;
-
-        if (shouldAutoDrive && current.driveRootFolderId && isOnline) {
-          try {
-            await ensureValidToken(false);
-            await runBackup("drive");
-            return;
-          } catch {
-            // Continue to device backup fallback.
-          }
-        }
-
-        if (shouldAutoDevice && Capacitor.isNativePlatform()) {
-          await runBackup("localFolder", { nativeMode: "internalOnly" });
-        }
-      })();
-    }, intervalMs);
-
-    return () => window.clearInterval(timer);
-  }, [
-    isOnline,
-    runBackup,
-    state.backupSettings,
-  ]);
 
   const ensureChapterContentLoaded = useCallback(
     async (bookId: string, chapterId: string, session: number): Promise<string | null> => {
@@ -2904,11 +1619,6 @@ const App: React.FC = () => {
       }
   }, [markDirty, pushNotice]);
 
-  const handleResetChapterProgress = (bid: string, cid: string) => {
-      commitProgressUpdate(bid, cid, { currentTime: 0, duration: 0, charOffset: 0, completed: false }, "reset", true, true, true);
-      pushNotice({ message: "Reset", type: 'info', ms: 1000 });
-  };
-
   const getEffectivePlaybackSpeed = useCallback(() => {
     const s = stateRef.current;
     const book = s.books.find(b => b.id === s.activeBookId);
@@ -2916,386 +1626,88 @@ const App: React.FC = () => {
     return bookSpeed && bookSpeed > 0 ? bookSpeed : s.playbackSpeed;
   }, []);
 
-  const handleNextChapterRef = useRef<(autoTrigger?: boolean) => void>(() => {});
+  const {
+    playbackPhase,
+    isPlaying,
+    isLoadingChapter,
+    audioDuration,
+    audioCurrentTime,
+    seekNudge,
+    isScrubbing,
+    sleepTimerSeconds,
+    stopAfterChapter,
+    autoplayBlocked,
+    playbackSnapshot,
+    currentIntroDurSec,
+    lastPlaybackError,
+    handleManualPlay,
+    handleManualPause,
+    handleManualStop,
+    handleNextChapter,
+    handlePrevChapter,
+    handleNextChapterRef,
+    handleJumpToOffset,
+    handleSeekByDelta,
+    handleScrubStart,
+    handleScrubMove,
+    handleScrubEnd,
+    handleScrubEndOffset,
+    loadChapterSession,
+    commitProgressUpdate,
+    setCurrentIntroDurSec,
+    setSleepTimerSeconds,
+    setStopAfterChapter,
+  } = usePlayback({
+    stateRef,
+    setState,
+    pushNotice,
+    effectiveMobileMode,
+    isAuthorized,
+    playbackAdapter,
+    markDirty,
+    handleManualScrub,
+    handleChapterEnd,
+    handleSkip,
+    chapterSessionRef,
+    chapterTextCacheRef,
+    ensureChapterContentLoaded,
+    getEffectivePlaybackSpeed,
+    isOnline,
+    setActiveCueMap,
+    setActiveParagraphMap,
+    setCueMeta,
+    pendingCueFallbackRef,
+    activeSpeakTextRef,
+    cueIntegrityRef,
+    cueDurationRef,
+    isInIntroRef,
+    onSyncMeta: handleCueSyncUpdate,
+  });
 
-  const loadChapterSession = useCallback(async (targetChapterId: string, reason: 'user' | 'auto') => {
-    const session = ++chapterSessionRef.current;
-    const s = stateRef.current;
-    const book = s.books.find(b => b.id === s.activeBookId);
-    if (!book) return;
-    const chapter = book.chapters.find(c => c.id === targetChapterId);
-    if (!chapter) return;
+  const highlightDebugData = useMemo(() => ({
+    positionMs: Math.floor(audioCurrentTime * 1000),
+    durationMs: Math.floor(audioDuration * 1000),
+    cueIndex: highlightEnabled ? activeCueIndex : null,
+    cueCount: activeCueMap?.cues?.length ?? 0,
+    paragraphIndex: highlightEnabled ? activeParagraphIndex : null,
+    paragraphCount: activeParagraphMap?.paragraphs?.length ?? 0,
+    mode: "paragraph",
+    isPlaying,
+  }), [
+    audioCurrentTime,
+    audioDuration,
+    highlightEnabled,
+    activeCueIndex,
+    activeParagraphIndex,
+    activeCueMap,
+    activeParagraphMap,
+    isPlaying,
+  ]);
 
-    updatePhase('LOADING_TEXT');
-    trace('chapter:load:start', { targetChapterId, reason, session });
-
-    speechController.safeStop(); 
-    setAutoplayBlocked(false);
-
-    const content = await ensureChapterContentLoaded(book.id, chapter.id, session);
-    
-    if (session !== chapterSessionRef.current) return;
-
-    const chapterCacheKey = `${book.id}:${chapter.id}`;
-    const cached = chapterTextCacheRef.current.get(chapterCacheKey);
-    const stateContent =
-      typeof chapter.content === "string" && chapter.content.length > 0 ? chapter.content : null;
-    const effectiveContent =
-      (typeof content === "string" && content.length > 0 ? content : null) ??
-      (cached && cached.length > 0 ? cached : null) ??
-      stateContent;
-
-    if (!effectiveContent) {
-        pushNotice({ message: "Unable to load chapter text. Keeping previous content.", type: 'info', ms: 4000 });
-        updatePhase('READY');
-        return;
-    }
-
-    chapterTextCacheRef.current.set(chapterCacheKey, effectiveContent);
-
-    setState(p => ({ 
-        ...p, 
-        books: p.books.map(b => b.id === book.id ? { ...b, currentChapterId: targetChapterId } : b),
-        currentOffsetChars: 0 
-    }));
-    setActiveCueMap(null);
-    setCueMeta(null);
-    pendingCueFallbackRef.current = null;
-    setAudioCurrentTime(0);
-    setAudioDuration(0);
-    setPlaybackSnapshot(null);
-
-    updatePhase('LOADING_AUDIO');
-    
-    const uiMode = s.readerSettings?.uiMode ?? "auto";
-    const voice = book.settings.defaultVoiceId || 'en-US-Standard-C';
-    const allRules = [...s.globalRules, ...book.rules];
-    const isMarkdown =
-      chapter.contentFormat === "markdown" ||
-      (chapter.filename ?? "").toLowerCase().endsWith(".md");
-    const textToSpeak = buildSpeakTextFromContent(
-      effectiveContent,
-      isMarkdown,
-      allRules,
-      !!s.readerSettings?.reflowLineBreaks
-    );
-
-    try {
-      let paragraphMap = await getParagraphMap(chapter.id);
-      if (!paragraphMap || !paragraphMap.paragraphs || paragraphMap.paragraphs.length === 0) {
-        paragraphMap = buildParagraphMap(textToSpeak, chapter.id);
-        await saveParagraphMap(chapter.id, paragraphMap);
-        console.log("[Highlight] paragraph map generated", {
-          chapterId: chapter.id,
-          paragraphCount: paragraphMap.paragraphs.length,
-        });
-      }
-      setActiveParagraphMap(paragraphMap);
-    } catch (e) {
-      console.warn("[Highlight] paragraph map generation failed", e);
-      setActiveParagraphMap(null);
-    }
-
-    const speakIntro = s.readerSettings?.speakChapterIntro !== false;
-    const introTitle = (chapter.title || "").trim();
-    const rawIntro = introTitle.length > 0
-      ? `Chapter ${chapter.index}. ${introTitle}. `
-      : `Chapter ${chapter.index}. `;
-    const introText = buildSpeakTextFromContent(
-      rawIntro,
-      false,
-      allRules,
-      !!s.readerSettings?.reflowLineBreaks
-    );
-    const prefixLen = getEffectivePrefixLen(chapter, introText.length);
-    activeSpeakTextRef.current = { chapterId: chapter.id, text: textToSpeak, prefixLen };
-    cueIntegrityRef.current = { chapterId: chapter.id, driftCount: 0, lastRebuildAt: 0, lastNoticeAt: 0 };
-    cueDurationRef.current = { chapterId: chapter.id, lastDurationMs: 0, lastRebuildAt: 0 };
-    const { chunkMap: normalizedChunkMap, introMsFromChunk } = normalizeChunkMapForChapter(
-      chapter.audioChunkMap,
-      textToSpeak.length,
-      prefixLen
-    );
-    const introMs = computeIntroMs({
-      audioIntroDurSec: chapter.audioIntroDurSec,
-      audioPrefixLen: prefixLen,
-      textLen: textToSpeak.length,
-      introMsFromChunk,
-    });
-    const introSec = introMs / 1000;
-    setCurrentIntroDurSec(introSec);
-    
-    const audioCacheKey = generateAudioKey(introText + textToSpeak, voice, 1.0);
-    let audioBlob = await getAudioFromCache(audioCacheKey);
-    const driveAudioId = chapter.cloudAudioFileId || chapter.audioDriveId;
-
-    if (!audioBlob && driveAudioId && isAuthorized) {
-        try { 
-            audioBlob = await fetchDriveBinary(driveAudioId); 
-            if (audioBlob) await saveAudioToCache(audioCacheKey, audioBlob); 
-        } catch(e) {}
-    }
-
-    if (session !== chapterSessionRef.current) return;
-
-    const isNativePlatform = Capacitor.isNativePlatform?.() ?? false;
-    const shouldUseLocalAudio = isNativePlatform || effectiveMobileMode;
-    const effectiveSpeed = getEffectivePlaybackSpeed();
-
-    let playbackUrl: string | null = null;
-    if (isNativePlatform) {
-        playbackUrl = await resolveChapterAudioLocalPath(chapter.id);
-        if (!playbackUrl && audioBlob && audioBlob.size > 0) {
-            playbackUrl = (await persistChapterAudio(chapter.id, audioBlob, uiMode)) ?? null;
-        }
-    } else {
-        const localPlaybackUrl = shouldUseLocalAudio ? await resolveChapterAudioUrl(chapter.id, uiMode) : null;
-        playbackUrl = localPlaybackUrl ?? null;
-        if (!playbackUrl && audioBlob && audioBlob.size > 0) {
-            playbackUrl = URL.createObjectURL(audioBlob);
-        }
-        if (shouldUseLocalAudio && audioBlob) {
-            await persistChapterAudio(chapter.id, audioBlob, uiMode);
-        }
-    }
-
-    if (!playbackUrl) {
-        pushNotice({ message: "Audio not found. Try generating it.", type: 'info', ms: 3000 });
-        updatePhase('READY');
-        setIsPlaying(false);
-        return;
-    }
-
-    speechController.setContext({ bookId: book.id, chapterId: chapter.id });
-    speechController.updateMetadata(textToSpeak.length, introSec, normalizedChunkMap);
-
-    // Load or build cue map
-    try {
-      const existingCue = await getCueMap(chapter.id);
-      let cueToUse: CueMap | null = existingCue;
-      const existingIntro = existingCue?.introOffsetMs ?? 0;
-      const maxExistingEnd = existingCue?.cues?.length
-        ? Math.max(...existingCue.cues.map((c) => c.endChar))
-        : 0;
-      const needsRebuild =
-        !existingCue ||
-        !existingCue.cues?.length ||
-        maxExistingEnd > textToSpeak.length + 2 ||
-        (introMs > 0 && Math.abs(existingIntro - introMs) > 500) ||
-        (introMs === 0 && existingIntro > 0);
-
-      if (needsRebuild) {
-        let builtCue: CueMap | null = null;
-        if (normalizedChunkMap.length > 0) {
-          builtCue = cueMapFromChunkMap(chapter.id, normalizedChunkMap, introMs);
-        } else if (textToSpeak.length > 0 && audioDuration > 0) {
-          builtCue = generateFallbackCueMap({
-            chapterId: chapter.id,
-            text: textToSpeak,
-            durationMs: Math.floor(audioDuration * 1000),
-            introOffsetMs: introMs,
-          });
-        } else if (textToSpeak.length > 0) {
-          pendingCueFallbackRef.current = { chapterId: chapter.id, text: textToSpeak, prefixLen };
-        }
-        if (builtCue) {
-          await saveCueMap(chapter.id, builtCue);
-          cueToUse = builtCue;
-          pendingCueFallbackRef.current = null;
-        }
-      } else {
-        pendingCueFallbackRef.current = null;
-      }
-
-      if (cueToUse) {
-        setActiveCueMap(cueToUse);
-        setCueMeta({ method: cueToUse.method, count: cueToUse.cues.length });
-        console.log("[Highlight] cue map loaded", {
-          chapterId: chapter.id,
-          cueCount: cueToUse.cues.length,
-          method: cueToUse.method,
-          durationMs: audioDuration > 0 ? Math.floor(audioDuration * 1000) : undefined,
-        });
-      }
-    } catch (e) {
-      console.warn("Cue map load/build failed", e);
-    }
-
-    let mobileQueue: PlaybackItem[] | undefined;
-    if (shouldUseLocalAudio) {
-        const mediaArtist = book.title || undefined;
-        const mediaAlbum = book.title || undefined;
-        const artworkUrl =
-          typeof book.coverImage === "string" && book.coverImage && !book.coverImage.startsWith("data:")
-            ? book.coverImage
-            : undefined;
-        const sorted = normalizeChapterOrder(book.chapters || []);
-        const currentIdx = sorted.findIndex(c => c.id === chapter.id);
-        const queueItems: PlaybackItem[] = [
-          { id: chapter.id, url: playbackUrl, title: chapter.title, artist: mediaArtist, album: mediaAlbum, artworkUrl }
-        ];
-        const maxQueue = 5;
-        for (let i = currentIdx + 1; i < sorted.length && queueItems.length < maxQueue; i++) {
-          const next = sorted[i];
-          if (next.isCompleted) continue;
-          let nextUrl = isNativePlatform
-            ? await resolveChapterAudioLocalPath(next.id)
-            : await resolveChapterAudioUrl(next.id, uiMode);
-          if (!nextUrl) {
-            let nextBlob: Blob | null = null;
-            if (next.audioSignature) {
-              nextBlob = await getAudioFromCache(next.audioSignature);
-            }
-            const nextDriveAudioId = next.cloudAudioFileId || next.audioDriveId;
-            if (!nextBlob && nextDriveAudioId && isAuthorized) {
-              try {
-                nextBlob = await fetchDriveBinary(nextDriveAudioId);
-              } catch (e) {
-                nextBlob = null;
-              }
-            }
-            if (nextBlob && nextBlob.size > 0) {
-              if (isNativePlatform) {
-                nextUrl = (await persistChapterAudio(next.id, nextBlob, uiMode)) ?? null;
-              } else {
-                nextUrl = URL.createObjectURL(nextBlob);
-                if (shouldUseLocalAudio) {
-                  await persistChapterAudio(next.id, nextBlob, uiMode);
-                }
-              }
-            }
-          }
-          if (nextUrl) {
-            queueItems.push({ id: next.id, url: nextUrl, title: next.title, artist: mediaArtist, album: mediaAlbum, artworkUrl });
-          }
-        }
-        mobileQueue = queueItems.length > 0 ? queueItems : undefined;
-    }
-        
-    let startSec = 0;
-    if (!chapter.isCompleted) {
-        if (typeof chapter.progressSec === "number" && Number.isFinite(chapter.progressSec)) {
-            startSec = Math.max(0, chapter.progressSec);
-        } else if (chapter.progress && chapter.durationSec && chapter.progress < 0.99) {
-            startSec = chapter.durationSec * chapter.progress;
-        }
-    }
-        
-    if (!isFinite(startSec) || startSec < 0) startSec = 0;
-    if (!speakIntro && introSec > 0 && startSec < introSec - 0.05) {
-        startSec = introSec;
-    }
-        
-    try {
-        await speechController.loadAndPlayDriveFile(
-            '', 'LOCAL_ID', textToSpeak.length, introSec, normalizedChunkMap, 
-            startSec, 
-            effectiveSpeed, 
-            () => {
-                if (session === chapterSessionRef.current) {
-                    updatePhase('ENDING_SETTLE');
-                    const meta = speechController.getMetadata();
-                    const durationSec =
-                      meta.duration > 0
-                        ? meta.duration
-                        : audioDuration || chapter.durationSec || 0;
-                    const totalChars = textToSpeak.length;
-                    handleChapterEnd(chapter.id, totalChars, totalChars, {
-                      timeSec: durationSec,
-                      durationSec,
-                    });
-                    setTimeout(() => {
-                        if (session === chapterSessionRef.current) {
-                            handleNextChapterRef.current(true); 
-                        }
-                    }, 300);
-                }
-            }, 
-            null, playbackUrl, 
-            () => {
-                if (session === chapterSessionRef.current) {
-                    if (!speakIntro) {
-                       updatePhase('PLAYING_BODY');
-                       isInIntroRef.current = false;
-                    } else if (startSec > 1) {
-                       updatePhase('PLAYING_BODY');
-                       isInIntroRef.current = false;
-                    } else {
-                       updatePhase('PLAYING_INTRO'); 
-                       isInIntroRef.current = true; 
-                    }
-                }
-            },
-            undefined,
-            mobileQueue,
-            0
-        );
-    } catch (e: any) {
-        if (session !== chapterSessionRef.current) return;
-        console.warn("audio:load:failed", e);
-        setIsPlaying(false);
-        setAutoplayBlocked(false);
-        updatePhase('READY');
-        const msg = !isOnline
-          ? "Offline: audio could not load. Try again once you’re online."
-          : `Audio load failed${e?.message ? `: ${e.message}` : ''}`;
-        pushNotice({ message: msg, type: 'error', ms: 3500 });
-        return;
-    }
-
-    if (session !== chapterSessionRef.current) return;
-
-    if (effectiveMobileMode && reason === 'auto') {
-       const timeSinceGesture = Date.now() - lastGestureAt.current;
-       if (!gestureArmedRef.current || timeSinceGesture > 60000) { 
-          setAutoplayBlocked(true);
-          setIsPlaying(false);
-          updatePhase('READY');
-          return;
-       }
-    }
-
-    try {
-        const result = await speechController.safePlay();
-        if (result === 'blocked') {
-            setAutoplayBlocked(true);
-            setIsPlaying(false);
-            updatePhase('READY');
-        } else {
-            setAutoplayBlocked(false);
-            setIsPlaying(true);
-            updatePhase('PLAYING_BODY');
-            speechController.setPlaybackRate(effectiveSpeed);
-        }
-    } catch (e: any) {
-        setAutoplayBlocked(true);
-        setIsPlaying(false);
-        updatePhase('READY');
-    }
-
-  }, [audioDuration, ensureChapterContentLoaded, effectiveMobileMode, getEffectivePlaybackSpeed, handleChapterEnd, isAuthorized, isOnline, pushNotice, updatePhase]);
-
-  const handlePlaybackItemChanged = useCallback((nextId: string | null, prevId: string | null) => {
-    if (!nextId) return;
-    if (isUserScrubbingRef.current || seekTxnRef.current.inFlight) return;
-    const s = stateRef.current;
-    const book = s.books.find(b => b.id === s.activeBookId);
-    if (!book) return;
-
-    if (book.currentChapterId === nextId) return;
-    if (itemChangeInFlightRef.current === nextId) return;
-    itemChangeInFlightRef.current = nextId;
-    loadChapterSession(nextId, 'auto').finally(() => {
-      if (itemChangeInFlightRef.current === nextId) {
-        itemChangeInFlightRef.current = null;
-      }
-    });
-  }, [loadChapterSession]);
-
-  useEffect(() => {
-    speechController.setItemChangedCallback(handlePlaybackItemChanged);
-    return () => speechController.setItemChangedCallback(null);
-  }, [handlePlaybackItemChanged]);
+  const handleResetChapterProgress = (bid: string, cid: string) => {
+    commitProgressUpdate(bid, cid, { currentTime: 0, duration: 0, charOffset: 0, completed: false }, "reset", true, true, true);
+    pushNotice({ message: "Reset", type: 'info', ms: 1000 });
+  };
 
   const handleSmartOpenChapter = (id: string) => {
     const s = stateRef.current;
@@ -3658,170 +2070,6 @@ const App: React.FC = () => {
     }
   }, [audioDuration]);
 
-  const base64ToBlob = (base64: string, mimeType: string) => {
-    const cleaned = base64.replace(/^data:.*;base64,/, "");
-    const byteChars = atob(cleaned);
-    const byteNumbers = new Array(byteChars.length);
-    for (let i = 0; i < byteChars.length; i++) {
-      byteNumbers[i] = byteChars.charCodeAt(i);
-    }
-    const byteArray = new Uint8Array(byteNumbers);
-    return new Blob([byteArray], { type: mimeType });
-  };
-
-  const blobToDataUrl = (blob: Blob): Promise<string> =>
-    new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result ?? ""));
-      reader.onerror = () => reject(new Error("Failed to read blob"));
-      reader.readAsDataURL(blob);
-    });
-
-  const readLocalAudioBlob = useCallback(async (chapterId: string) => {
-    const record = await getChapterAudioPath(chapterId);
-    if (!record?.localPath) return null;
-    try {
-      const res = await Filesystem.readFile({ path: record.localPath });
-      if (res.data instanceof Blob) return res.data;
-      return base64ToBlob(res.data, 'audio/mpeg');
-    } catch {
-      try {
-        const res = await Filesystem.readFile({ path: `${appConfig.paths.audioDir}/${chapterId}.mp3`, directory: Directory.Data });
-        if (res.data instanceof Blob) return res.data;
-        return base64ToBlob(res.data, 'audio/mpeg');
-      } catch {
-        return null;
-      }
-    }
-  }, []);
-
-  const resolveLocalPathForUpload = useCallback(async (chapterId: string, fallbackPath?: string) => {
-    const record = await getChapterAudioPath(chapterId);
-    if (record?.localPath) return record.localPath;
-    if (fallbackPath && (fallbackPath.startsWith("/") || fallbackPath.startsWith("file://"))) {
-      return fallbackPath;
-    }
-    return null;
-  }, []);
-
-  const kickUploadQueue = useCallback(async () => {
-    try {
-      if (jobRunnerAvailable) {
-        await JobRunner.kickUploadQueue();
-      }
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  const uploadChapterNow = useCallback(async (bookId: string, chapterId: string) => {
-    const book = state.books.find((b) => b.id === bookId);
-    if (!book || !book.driveFolderId) throw new Error("Drive folder not set");
-    const chapter = book.chapters.find((c) => c.id === chapterId);
-    if (!chapter) throw new Error("Chapter not found");
-    const blob = await readLocalAudioBlob(chapterId);
-    if (!blob) throw new Error("Local audio not found");
-    const filename = buildMp3Name(bookId, chapterId);
-    const cloudAudioFileId = await uploadToDrive(
-      book.driveFolderId,
-      filename,
-      blob,
-      chapter.cloudAudioFileId,
-      "audio/mpeg"
-    );
-    const updated: Chapter = {
-      ...chapter,
-      cloudAudioFileId,
-      audioDriveId: cloudAudioFileId,
-      audioStatus: AudioStatus.READY,
-      updatedAt: Date.now(),
-    };
-    await libraryUpsertChapterMeta(bookId, updated);
-    setState((prev) => ({
-      ...prev,
-      books: prev.books.map((b) =>
-        b.id === bookId
-          ? { ...b, chapters: b.chapters.map((c) => (c.id === chapterId ? updated : c)) }
-          : b
-      ),
-    }));
-    return true;
-  }, [readLocalAudioBlob, state.books]);
-
-  const handleQueueChapterUpload = useCallback(async (chapterId: string) => {
-    const book = state.books.find((b) => b.id === state.activeBookId);
-    if (!book) return;
-    const chapter = book.chapters.find((c) => c.id === chapterId);
-    if (!chapter) return;
-    try {
-      await uploadChapterNow(book.id, chapterId);
-      pushNotice({ message: "Chapter uploaded", type: "success" });
-      await refreshUploadQueueCount();
-      await refreshUploadQueueList();
-      return;
-    } catch (e: any) {
-      const localPath = await resolveLocalPathForUpload(chapterId, chapter.audioSignature);
-      if (!localPath) {
-        pushNotice({ message: "Local audio not found for upload", type: "error" });
-        return;
-      }
-      const ok = await enqueueChapterUpload(book.id, chapterId, localPath);
-      if (ok) {
-        pushNotice({ message: "Upload queued (will retry)", type: "info" });
-        await kickUploadQueue();
-        if (computeMobileMode(state.readerSettings.uiMode)) {
-          await enqueueUploadJob(state.readerSettings.uiMode);
-        }
-        await refreshUploadQueueCount();
-        await refreshUploadQueueList();
-      } else {
-        pushNotice({ message: `Upload failed: ${String(e?.message ?? e)}`, type: "error" });
-      }
-    }
-  }, [enqueueChapterUpload, state.activeBookId, state.books, pushNotice, refreshUploadQueueCount, refreshUploadQueueList, resolveLocalPathForUpload, uploadChapterNow, kickUploadQueue]);
-
-  const handleUploadAllChapters = useCallback(async () => {
-    setIsUploadingAll(true);
-    try {
-      const book = state.books.find((b) => b.id === state.activeBookId);
-      if (!book) return;
-      let queued = 0;
-      let uploaded = 0;
-      for (const ch of book.chapters) {
-        try {
-          await uploadChapterNow(book.id, ch.id);
-          uploaded += 1;
-        } catch (e: any) {
-          const localPath = await resolveLocalPathForUpload(ch.id, ch.audioSignature);
-          if (!localPath) continue;
-          const ok = await enqueueChapterUpload(book.id, ch.id, localPath);
-          if (ok) queued += 1;
-        }
-      }
-      if (uploaded) {
-        pushNotice({ message: `Uploaded ${uploaded} chapters`, type: "success" });
-      }
-      if (queued) {
-        pushNotice({ message: `Queued ${queued} uploads (will retry)`, type: "info" });
-      }
-      if (queued) {
-        await kickUploadQueue();
-      }
-      await refreshUploadQueueCount();
-      await refreshUploadQueueList();
-    } finally {
-      setIsUploadingAll(false);
-    }
-  }, [enqueueChapterUpload, state.activeBookId, state.books, pushNotice, refreshUploadQueueCount, refreshUploadQueueList, resolveLocalPathForUpload, uploadChapterNow, kickUploadQueue]);
-
-  const handleDismissQueuedUpload = useCallback(async (id: string) => {
-    const ok = await removeQueuedUpload(id);
-    if (ok) {
-      await refreshUploadQueueCount();
-      await refreshUploadQueueList();
-    }
-  }, [refreshUploadQueueCount, refreshUploadQueueList]);
-
   const handleToggleDownloadedChapters = useCallback(() => {
     setShowDownloadedChapters((prev) => !prev);
   }, []);
@@ -3979,459 +2227,7 @@ const App: React.FC = () => {
 
   const uploadedChapterCount = downloadedChapters.length;
 
-  const handleManualPlay = () => {
-    gestureArmedRef.current = true;
-    lastGestureAt.current = Date.now();
-    manualStopRef.current = false;
-    sleepStopRef.current = false;
-    const effectiveSpeed = getEffectivePlaybackSpeed();
-    speechController.setPlaybackRate(effectiveSpeed);
-
-    const s = stateRef.current;
-    const book = s.books.find(b => b.id === s.activeBookId);
-    const chapterId = book?.currentChapterId;
-    if (chapterId && !speechController.hasAudioSource) {
-        loadChapterSession(chapterId, 'user');
-        return;
-    }
-
-    speechController.safePlay().then(res => {
-        if (res === 'blocked') {
-            setAutoplayBlocked(true);
-            setIsPlaying(false);
-        } else {
-            setAutoplayBlocked(false);
-            setIsPlaying(true);
-            updatePhase('PLAYING_BODY');
-        }
-    }).catch(() => {
-        if (chapterId) {
-            loadChapterSession(chapterId, 'user');
-            return;
-        }
-        setAutoplayBlocked(false);
-        setIsPlaying(false);
-        updatePhase('READY');
-    });
-  };
-
-  const handleNextChapter = useCallback((autoTrigger = false) => {
-    if (autoTrigger && isUserScrubbingRef.current) return;
-    if (seekTxnRef.current.inFlight) return;
-    const s = stateRef.current;
-    const book = s.books.find(b => b.id === s.activeBookId);
-    if (!book || !book.currentChapterId) return;
-    const sorted = normalizeChapterOrder(book.chapters || []);
-    const idx = sorted.findIndex(c => c.id === book.currentChapterId);
-    const normalizeVolumeName = (chapter: Chapter | undefined): string | null => {
-      const name = typeof (chapter as any)?.volumeName === "string" ? String((chapter as any).volumeName).trim() : "";
-      if (!name) return null;
-      if (name.toLowerCase() === "ungrouped") return null;
-      return name;
-    };
-    if (!autoTrigger) {
-      const meta = speechController.getMetadata();
-      const chapterId = meta.chapterId ?? book.currentChapterId;
-      if (chapterId) {
-        const input = resolveProgressInput(chapterId, meta);
-        handleSkip(chapterId, input.index, input.total, undefined, {
-          timeSec: input.timeSec,
-          durationSec: input.durationSec,
-        });
-      }
-    }
-
-    if (autoTrigger && (stopAfterChapter || manualStopRef.current || sleepStopRef.current)) {
-      setIsPlaying(false);
-      updatePhase('IDLE');
-      if (stopAfterChapter) {
-        pushNotice({ message: "Stopped after chapter", type: "info" });
-      }
-      return;
-    }
-     
-    if (idx >= 0 && idx < sorted.length - 1) {
-      if (autoTrigger) {
-        const nextIncomplete = sorted.slice(idx + 1).find(c => !c.isCompleted);
-        if (!nextIncomplete) {
-          setIsPlaying(false);
-          updatePhase('IDLE');
-          pushNotice({ message: "End of book", type: 'success', ms: 3000 });
-          return;
-        }
-        const currentVol = normalizeVolumeName(sorted[idx]);
-        const nextVol = normalizeVolumeName(nextIncomplete);
-        const base = `Next: Chapter ${nextIncomplete.index}`;
-        pushNotice({
-          message: currentVol && nextVol && currentVol !== nextVol ? `Moving onto ${nextVol} - ${base}` : base,
-          type: 'info',
-        });
-        loadChapterSession(nextIncomplete.id, 'auto');
-        return;
-      }
-      const next = sorted[idx + 1];
-      const currentVol = normalizeVolumeName(sorted[idx]);
-      const nextVol = normalizeVolumeName(next);
-      const base = `Next: Chapter ${next.index}`;
-      pushNotice({
-        message: currentVol && nextVol && currentVol !== nextVol ? `Moving onto ${nextVol} - ${base}` : base,
-        type: 'info',
-      });
-      loadChapterSession(next.id, 'user');
-    } else {
-      setIsPlaying(false);
-      updatePhase('IDLE');
-      pushNotice({ message: "End of book", type: 'success', ms: 3000 });
-    }
-  }, [handleSkip, loadChapterSession, pushNotice, resolveProgressInput, stopAfterChapter, updatePhase]);
-
-  useEffect(() => { handleNextChapterRef.current = handleNextChapter; }, [handleNextChapter]);
-
-  const handlePrevChapter = useCallback(() => {
-    const s = stateRef.current;
-    const book = s.books.find(b => b.id === s.activeBookId);
-    if (!book || !book.currentChapterId) return;
-    const sorted = normalizeChapterOrder(book.chapters || []);
-    const idx = sorted.findIndex(c => c.id === book.currentChapterId);
-    if (idx > 0) {
-      const meta = speechController.getMetadata();
-      const chapterId = meta.chapterId ?? book.currentChapterId;
-      if (chapterId) {
-        const input = resolveProgressInput(chapterId, meta);
-        handleSkip(chapterId, input.index, input.total, undefined, {
-          timeSec: input.timeSec,
-          durationSec: input.durationSec,
-        });
-      }
-      const prev = sorted[idx - 1];
-      loadChapterSession(prev.id, 'user');
-    }
-  }, [handleSkip, loadChapterSession, resolveProgressInput]);
-
-  const handleManualPause = () => { 
-      speechController.pause(); 
-      setIsPlaying(false); 
-      updatePhase('IDLE'); 
-      
-      const s = stateRef.current;
-      if (s.activeBookId && s.books) {
-         const b = s.books.find(bk => bk.id === s.activeBookId);
-         if (b) {
-            const meta = speechController.getMetadata();
-            const chapterId = meta.chapterId ?? b.currentChapterId;
-            if (chapterId) {
-              commitProgressUpdate(b.id, chapterId, meta, "pause", false, true);
-            }
-         }
-      }
-  };
-  
-  const handleSleepTimerPause = useCallback(() => {
-    sleepStopRef.current = true;
-    speechController.pause();
-    setIsPlaying(false);
-    updatePhase('IDLE');
-
-    const s = stateRef.current;
-    if (s.activeBookId && s.books) {
-      const b = s.books.find(bk => bk.id === s.activeBookId);
-      if (b) {
-        const meta = speechController.getMetadata();
-        const chapterId = meta.chapterId ?? b.currentChapterId;
-        if (chapterId) {
-          commitProgressUpdate(b.id, chapterId, meta, "pause", false, true);
-        }
-      }
-    }
-  }, [commitProgressUpdate, updatePhase]);
-
-  const handleManualStop = () => {
-    manualStopRef.current = true;
-    speechController.stop();
-    setIsPlaying(false);
-    updatePhase('IDLE');
-  };
-
-  const waitForMs = (ms: number) =>
-    new Promise<void>((resolve) => {
-      window.setTimeout(() => resolve(), ms);
-    });
-
-  const confirmSeekLanding = useCallback(async (targetMs: number, seekId: number) => {
-    const adapter = playbackAdapter ?? speechController.getPlaybackAdapter();
-    if (!adapter) return false;
-    for (let i = 0; i < 20; i += 1) {
-      if (seekTxnRef.current.id !== seekId) return false;
-      const state = adapter.getState();
-      const positionMs = Number.isFinite(state.positionMs)
-        ? state.positionMs
-        : Math.floor((state.currentTime || 0) * 1000);
-      if (Math.abs(positionMs - targetMs) <= 350) {
-        return true;
-      }
-      await waitForMs(50);
-    }
-    return false;
-  }, [playbackAdapter]);
-
-  const performSeekToMs = useCallback(async (targetMs: number, reason: string) => {
-    if (!Number.isFinite(targetMs)) return false;
-    if (targetMs < 0) targetMs = 0;
-
-    if (isUserScrubbingRef.current && reason !== "user_scrub") {
-      return false;
-    }
-
-    const adapter = playbackAdapter ?? speechController.getPlaybackAdapter();
-    if (!adapter) return false;
-
-    const seekId = ++seekIdRef.current;
-    seekTxnRef.current = { id: seekId, inFlight: true, targetMs, reason };
-
-    updatePhase('SEEKING');
-
-    try {
-      await speechController.seekTo(targetMs / 1000);
-    } catch (e: any) {
-      traceError("seek:failed", e);
-    }
-
-    let landed = await confirmSeekLanding(targetMs, seekId);
-
-    if (!landed && seekTxnRef.current.id === seekId && !(adapter instanceof DesktopPlaybackAdapter)) {
-      try {
-        await adapter.play();
-      } catch {}
-      await waitForMs(50);
-      try {
-        await adapter.seek(targetMs);
-      } catch {}
-      landed = await confirmSeekLanding(targetMs, seekId);
-    }
-
-    if (seekTxnRef.current.id !== seekId) return false;
-    seekTxnRef.current.inFlight = false;
-    speechController.emitSyncTick();
-    return landed;
-  }, [confirmSeekLanding, playbackAdapter, updatePhase]);
-
-  const resumePlaybackAfterSeek = useCallback(async (shouldResume: boolean) => {
-    if (!shouldResume) {
-      setIsPlaying(false);
-      updatePhase('READY');
-      return false;
-    }
-    try {
-      const res = await speechController.safePlay();
-      if (res === 'blocked') {
-        setAutoplayBlocked(true);
-        setIsPlaying(false);
-        updatePhase('READY');
-        return false;
-      }
-      setAutoplayBlocked(false);
-      setIsPlaying(true);
-      updatePhase('PLAYING_BODY');
-      return true;
-    } catch {
-      setAutoplayBlocked(true);
-      setIsPlaying(false);
-      updatePhase('READY');
-      return false;
-    }
-  }, [updatePhase]);
-  
-  const handleSeekByDelta = (delta: number) => {
-    const wasPlaying = isPlayingRef.current;
-    const t = speechController.getCurrentTime() + delta;
-    const targetMs = Math.round(t * 1000);
-    void (async () => {
-      if (wasPlaying) {
-        speechController.pause();
-        setIsPlaying(false);
-      }
-      const landed = await performSeekToMs(targetMs, "seek_delta");
-      if (landed) {
-        const meta = speechController.getMetadata();
-        const s = stateRef.current;
-        const book = s.activeBookId ? s.books.find(b => b.id === s.activeBookId) : null;
-        const chapterId = meta.chapterId ?? book?.currentChapterId ?? null;
-        if (chapterId) {
-          const input = resolveProgressInput(chapterId, meta, { timeSec: targetMs / 1000 });
-          handleManualScrub(chapterId, input.index, input.total, {
-            timeSec: input.timeSec,
-            durationSec: input.durationSec,
-          });
-        }
-        setSeekNudge((n) => n + 1);
-      }
-      await resumePlaybackAfterSeek(wasPlaying);
-    })();
-  };
-  
-  const handleJumpToOffset = useCallback(async (offset: number) => {
-    const targetSec = speechController.getTimeForOffset(offset);
-    if (targetSec == null) return;
-    const wasPlaying = isPlayingRef.current;
-    const targetMs = Math.round(targetSec * 1000);
-    if (wasPlaying) {
-      speechController.pause();
-      setIsPlaying(false);
-    }
-    const landed = await performSeekToMs(targetMs, "jump_offset");
-    if (landed) {
-      const meta = speechController.getMetadata();
-      const s = stateRef.current;
-      const book = s.activeBookId ? s.books.find(b => b.id === s.activeBookId) : null;
-      const chapterId = meta.chapterId ?? book?.currentChapterId ?? null;
-      if (chapterId) {
-        const input = resolveProgressInput(chapterId, meta, {
-          timeSec: targetSec,
-          charOffset: offset,
-        });
-        handleManualScrub(chapterId, input.index, input.total, {
-          timeSec: input.timeSec,
-          durationSec: input.durationSec,
-        });
-      }
-      setSeekNudge((n) => n + 1);
-    }
-    await resumePlaybackAfterSeek(wasPlaying);
-  }, [handleManualScrub, performSeekToMs, resolveProgressInput, resumePlaybackAfterSeek]);
-  
-  const handleSeekCommit = useCallback(async (targetMs: number) => {
-    isScrubbingRef.current = false;
-    setIsScrubbing(false);
-    const wasPlaying = resumeAfterScrubRef.current;
-    resumeAfterScrubRef.current = false;
-    wasPlayingBeforeScrubRef.current = false;
-    let landed = false;
-    try {
-      landed = await performSeekToMs(targetMs, "user_scrub");
-      if (landed) {
-        const meta = speechController.getMetadata();
-        const s = stateRef.current;
-        const book = s.activeBookId ? s.books.find(b => b.id === s.activeBookId) : null;
-        const chapterId = meta.chapterId ?? book?.currentChapterId ?? null;
-        if (chapterId) {
-          const input = resolveProgressInput(chapterId, meta, { timeSec: targetMs / 1000 });
-          handleManualScrub(chapterId, input.index, input.total, {
-            timeSec: input.timeSec,
-            durationSec: input.durationSec,
-          });
-        }
-        setSeekNudge((n) => n + 1);
-      }
-    } finally {
-      isUserScrubbingRef.current = false;
-    }
-    await resumePlaybackAfterSeek(wasPlaying);
-  }, [handleManualScrub, performSeekToMs, resolveProgressInput, resumePlaybackAfterSeek]);
-
-  const handleSeekOffsetCommit = useCallback(async (offset: number) => {
-    isScrubbingRef.current = false;
-    setIsScrubbing(false);
-    const wasPlaying = resumeAfterScrubRef.current;
-    resumeAfterScrubRef.current = false;
-    wasPlayingBeforeScrubRef.current = false;
-    const targetSec = speechController.getTimeForOffset(offset);
-    if (targetSec == null) {
-      isUserScrubbingRef.current = false;
-      await resumePlaybackAfterSeek(wasPlaying);
-      return;
-    }
-    const targetMs = Math.round(targetSec * 1000);
-    let landed = false;
-    try {
-      landed = await performSeekToMs(targetMs, "user_scrub");
-      if (landed) {
-        const meta = speechController.getMetadata();
-        const s = stateRef.current;
-        const book = s.activeBookId ? s.books.find(b => b.id === s.activeBookId) : null;
-        const chapterId = meta.chapterId ?? book?.currentChapterId ?? null;
-        if (chapterId) {
-          const input = resolveProgressInput(chapterId, meta, {
-            timeSec: targetSec,
-            charOffset: offset,
-          });
-          handleManualScrub(chapterId, input.index, input.total, {
-            timeSec: input.timeSec,
-            durationSec: input.durationSec,
-          });
-        }
-        setSeekNudge((n) => n + 1);
-      }
-    } finally {
-      isUserScrubbingRef.current = false;
-    }
-    await resumePlaybackAfterSeek(wasPlaying);
-  }, [handleManualScrub, performSeekToMs, resolveProgressInput, resumePlaybackAfterSeek]);
-
-  const clearSleepTimerInterval = useCallback(() => {
-    if (sleepTimerIntervalRef.current) {
-      clearInterval(sleepTimerIntervalRef.current);
-      sleepTimerIntervalRef.current = null;
-    }
-  }, []);
-
-  useEffect(() => {
-    if (sleepTimerSeconds == null) {
-      clearSleepTimerInterval();
-      sleepTimerEndsAtRef.current = null;
-      sleepTimerRemainingRef.current = null;
-      return;
-    }
-
-    if (!isPlaying) {
-      if (sleepTimerEndsAtRef.current != null) {
-        sleepTimerRemainingRef.current = Math.max(0, sleepTimerEndsAtRef.current - Date.now());
-      } else if (sleepTimerRemainingRef.current == null) {
-        sleepTimerRemainingRef.current = sleepTimerSeconds * 1000;
-      }
-      clearSleepTimerInterval();
-      return;
-    }
-
-    const remainingMs = sleepTimerRemainingRef.current ?? sleepTimerSeconds * 1000;
-    sleepTimerEndsAtRef.current = Date.now() + remainingMs;
-    clearSleepTimerInterval();
-    sleepTimerIntervalRef.current = setInterval(() => {
-      const endsAt = sleepTimerEndsAtRef.current;
-      if (!endsAt) return;
-      if (Date.now() >= endsAt) {
-        clearSleepTimerInterval();
-        sleepTimerEndsAtRef.current = null;
-        sleepTimerRemainingRef.current = null;
-        setSleepTimerSeconds(null);
-        handleSleepTimerPause();
-      }
-    }, 500);
-
-    return () => clearSleepTimerInterval();
-  }, [sleepTimerSeconds, isPlaying, clearSleepTimerInterval, handleSleepTimerPause]);
-
-  const handleScrubStart = useCallback(() => {
-    isScrubbingRef.current = true;
-    setIsScrubbing(true);
-    isUserScrubbingRef.current = true;
-    wasPlayingBeforeScrubRef.current = isPlayingRef.current;
-    resumeAfterScrubRef.current = isPlayingRef.current;
-    if (resumeAfterScrubRef.current) {
-      speechController.pause();
-    }
-    setIsPlaying(false);
-    updatePhase('SCRUBBING');
-  }, [updatePhase]);
-
-  const handleScrubMove = useCallback((time: number) => {
-    scrubPreviewSecRef.current = time;
-  }, []);
-
   const handleAddBook = async (title: string, backend: StorageBackend, directoryHandle?: any, driveFolderId?: string, driveFolderName?: string) => {
-      if (__ANDROID_ONLY__ && backend !== StorageBackend.DRIVE) {
-        pushNotice({ message: "Android-only build supports Drive books only.", type: "error", ms: 0 });
-        return;
-      }
       const newBook: Book = {
           id: driveFolderId || crypto.randomUUID(),
           title,
@@ -5566,6 +3362,20 @@ const App: React.FC = () => {
       ? "bg-[#efe6d5] text-[#3c2f25]"
       : "bg-white text-slate-900";
 
+  const diagnosticsNode = (
+    <div className="fixed top-20 right-4 z-[1000] p-4 bg-black/80 backdrop-blur-md text-white text-[10px] font-mono rounded-xl shadow-2xl border border-white/10 pointer-events-none opacity-80">
+      <div className="flex items-center gap-2 mb-2 border-b border-white/20 pb-1">
+        <Terminal className="w-3 h-3 text-indigo-400" />
+        <span className="font-bold">Playback Diagnostics {effectiveMobileMode ? '(Mobile)' : ''}</span>
+      </div>
+      <div>Phase: <span className="text-emerald-400">{playbackPhase}</span></div>
+      <div>Session: {chapterSessionRef.current}</div>
+      <div>Audio Time: {audioCurrentTime.toFixed(2)}s</div>
+      <div>Duration: {audioDuration.toFixed(2)}s</div>
+      <div>Blocked: {autoplayBlocked ? 'YES' : 'NO'}</div>
+    </div>
+  );
+
   if (launchStage === "splash") {
     return (
       <div className={`min-h-screen flex items-center justify-center ${shellThemeClass}`}>
@@ -5614,75 +3424,27 @@ const App: React.FC = () => {
   }
 
   return (
-    <>
-      <div className="flex flex-col h-screen overflow-hidden font-sans transition-colors duration-500 bg-theme text-theme">
-      
-      {isLinkModalOpen && <LinkCloudModal />}
-
-      {state.showDiagnostics && (
-        <div className="fixed top-20 right-4 z-[1000] p-4 bg-black/80 backdrop-blur-md text-white text-[10px] font-mono rounded-xl shadow-2xl border border-white/10 pointer-events-none opacity-80">
-          <div className="flex items-center gap-2 mb-2 border-b border-white/20 pb-1">
-            <Terminal className="w-3 h-3 text-indigo-400" />
-            <span className="font-bold">Playback Diagnostics {effectiveMobileMode ? '(Mobile)' : ''}</span>
-          </div>
-          <div>Phase: <span className="text-emerald-400">{playbackPhase}</span></div>
-          <div>Session: {chapterSessionRef.current}</div>
-          <div>Audio Time: {audioCurrentTime.toFixed(2)}s</div>
-          <div>Duration: {audioDuration.toFixed(2)}s</div>
-          <div>Gesture Armed: {gestureArmedRef.current ? 'YES' : 'NO'}</div>
-          <div>Blocked: {autoplayBlocked ? 'YES' : 'NO'}</div>
-        </div>
-      )}
-
-      {toast && (
-        <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[100] animate-in fade-in slide-in-from-bottom-4">
-           <div className={`px-6 py-3 rounded-2xl shadow-2xl font-black text-xs uppercase tracking-widest flex items-center gap-3 ${toast.type === 'error' ? 'bg-red-500 text-white' : toast.type === 'success' ? 'bg-emerald-500 text-white' : 'bg-slate-900 text-white'}`}>
-             {toast.type === 'error' ? <AlertCircle className="w-4 h-4" /> : toast.type === 'success' ? <Cloud className="w-4 h-4" /> : <Loader2 className="w-4 h-4 animate-spin" />}
-             {toast.message}
-           </div>
-        </div>
-      )}
-
-      <header className={`h-16 border-b flex items-center justify-between px-4 lg:px-8 z-10 sticky top-0 transition-colors ${state.theme === Theme.DARK ? 'border-slate-800 bg-slate-900/80 backdrop-blur-md' : state.theme === Theme.SEPIA ? 'border-[#d8ccb6] bg-[#efe6d5]/90 backdrop-blur-md' : 'border-black/5 bg-white/90 backdrop-blur-md'}`}>
-        <div className="flex items-center gap-4">
-          {activeTab === 'reader' && (
-            <button onClick={() => setIsChapterSidebarOpen(true)} className="flex items-center gap-2 px-3 py-2 bg-black/5 rounded-xl text-[10px] font-black uppercase tracking-widest lg:hidden hover:bg-black/10">
-              <List className="w-4 h-4" /> <span className="hidden xs:inline">Chapters</span>
-            </button>
-          )}
-          <nav className="flex items-center gap-4 sm:gap-6 overflow-x-auto no-scrollbar">
-            <button onClick={handleLibraryNavClick} className={`flex items-center gap-2 h-16 border-b-2 font-black uppercase text-[10px] tracking-widest flex-shrink-0 ${activeTab === 'library' || activeTab === 'collection' ? 'border-indigo-600 text-indigo-600' : 'border-transparent opacity-60'}`}><LibraryIcon className="w-4 h-4" /> <span className="hidden sm:inline">Library</span></button>
-            <button onClick={() => setActiveTab('rules')} className={`flex items-center gap-2 h-16 border-b-2 font-black uppercase text-[10px] tracking-widest flex-shrink-0 ${activeTab === 'rules' ? 'border-indigo-600 text-indigo-600' : 'border-transparent opacity-60'}`}><Zap className="w-4 h-4" /> <span className="hidden sm:inline">Rules</span></button>
-            <button onClick={() => setActiveTab('settings')} className={`flex items-center gap-2 h-16 border-b-2 font-black uppercase text-[10px] tracking-widest flex-shrink-0 ${activeTab === 'settings' ? 'border-indigo-600 text-indigo-600' : 'border-transparent opacity-60'}`}><SettingsIcon className="w-4 h-4" /> <span className="hidden sm:inline">Settings</span></button>
-          </nav>
-        </div>
-        <div className="flex items-center gap-2 sm:gap-4">
-          {authState.status === 'signing_in' ? (
-             <span className="flex items-center gap-2 px-3 py-2 bg-black/5 rounded-xl text-[10px] font-black uppercase tracking-widest"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Signing In...</span>
-          ) : authState.status === 'expired' || !isAuthorized ? (
-            <button onClick={handleReconnectDrive} className="flex items-center gap-2 px-3 py-2 bg-amber-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-amber-700 transition-all shadow-md"><LogIn className="w-3.5 h-3.5" /> <span className="hidden xs:inline">Reconnect Drive</span></button>
-          ) : (
-            <div className="flex flex-col items-end gap-1">
-              <button onClick={() => handleSync(true)} disabled={isSyncing} className={`flex items-center gap-2 px-3 py-2 bg-indigo-600/10 text-indigo-600 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-600/20 transition-all ${isSyncing ? 'animate-pulse' : ''}`}><RefreshCw className="w-3.5 h-3.5" /> <span className="hidden xs:inline">Sync</span></button>
-            </div>
-          )}
-          <button onClick={() => handleSaveState(true, false)} className={`p-2.5 rounded-xl bg-indigo-600/10 text-indigo-600 hover:bg-indigo-600/20 transition-all ${isDirty ? 'ring-2 ring-indigo-600 animate-pulse' : ''}`} title="Manual Cloud Save"><Save className="w-4 h-4" /></button>
-        </div>
-      </header>
-
-      <div className="flex-1 min-h-0 overflow-hidden relative flex">
-        {activeTab === 'reader' && (isLoadingChapter || playbackPhase === 'LOADING_TEXT' || playbackPhase === 'LOADING_AUDIO') && (
-            <div className="absolute inset-0 flex items-center justify-center bg-inherit z-[70]">
-                <div className="flex flex-col items-center gap-3">
-                    <Loader2 className="w-10 h-10 text-indigo-600 animate-spin" />
-                    <span className="text-[10px] font-black uppercase tracking-widest opacity-60">
-                        {playbackPhase === 'LOADING_TEXT' ? 'Loading Text...' : 'Loading Audio...'}
-                    </span>
-                </div>
-            </div>
-        )}
+    <AppShell
+      theme={state.theme}
+      activeTab={activeTab}
+      authStatus={authState.status}
+      isAuthorized={isAuthorized}
+      isSyncing={isSyncing}
+      isDirty={isDirty}
+      isLoadingChapter={isLoadingChapter}
+      playbackPhase={playbackPhase}
+      showDiagnostics={state.showDiagnostics}
+      diagnosticsNode={diagnosticsNode}
+      linkModal={isLinkModalOpen ? <LinkCloudModal /> : null}
+      onOpenSidebar={() => setIsChapterSidebarOpen(true)}
+      onLibraryNavClick={handleLibraryNavClick}
+      onSetTab={setActiveTab}
+      onReconnectDrive={handleReconnectDrive}
+      onSync={() => handleSync(true)}
+      onSaveState={() => handleSaveState(true, false)}
+    >
         
-        {isSyncing && !toast && (
+        {isSyncing && (
           <div className="fixed top-20 right-4 z-[80] animate-in slide-in-from-right duration-300">
              <div className="bg-indigo-600 text-white px-4 py-2 rounded-xl shadow-2xl flex items-center gap-3 font-black text-[10px] uppercase tracking-widest">
                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Syncing...
@@ -5708,17 +3470,90 @@ const App: React.FC = () => {
         )}
         
         {activeTab === 'reader' && activeBook && (
-          <aside className="hidden lg:block w-72 border-r border-black/5 bg-black/5 overflow-y-auto">
-             <ChapterSidebar 
-               book={activeBook} theme={state.theme} onSelectChapter={handleSmartOpenChapter} 
-               onClose={() => {}} isDrawer={false}
-               isMobile={computeMobileMode(state.readerSettings.uiMode)}
-               playbackSnapshot={playbackSnapshot}
-               onLoadMoreChapters={() => void loadMoreChapters(activeBook.id, false)}
-               hasMoreChapters={chapterPagingByBook[activeBook.id]?.hasMore ?? true}
-               isLoadingMoreChapters={chapterPagingByBook[activeBook.id]?.loading ?? false}
-             />
-          </aside>
+          <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+            <div className="flex-1 min-w-0 min-h-0 flex overflow-hidden">
+              <aside className="hidden lg:block w-72 border-r border-black/5 bg-black/5 overflow-y-auto flex-shrink-0">
+                <ChapterSidebar 
+                  book={activeBook} theme={state.theme} onSelectChapter={handleSmartOpenChapter} 
+                  onClose={() => {}} isDrawer={false}
+                  isMobile={computeMobileMode(state.readerSettings.uiMode)}
+                  playbackSnapshot={playbackSnapshot}
+                  onLoadMoreChapters={() => void loadMoreChapters(activeBook.id, false)}
+                  hasMoreChapters={chapterPagingByBook[activeBook.id]?.hasMore ?? true}
+                  isLoadingMoreChapters={chapterPagingByBook[activeBook.id]?.loading ?? false}
+                />
+              </aside>
+              <div className="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col">
+                {activeBook && activeChapterMetadata && (
+                  <Reader 
+                    chapter={activeChapterMetadata} rules={[...state.globalRules, ...activeBook.rules]} theme={state.theme}
+                    chapterText={activeChapterText}
+                    speechText={activeSpeechText}
+                    readerBlocks={activeReaderModel.blocks}
+                    activeCueIndex={highlightEnabled ? activeCueIndex : null}
+                    activeCueRange={highlightEnabled ? normalizedActiveCueRange : null}
+                    activeParagraphIndex={highlightEnabled ? activeParagraphIndex : null}
+                    paragraphMap={activeParagraphMap}
+                    highlightReady={isCueReady}
+                    highlightEnabled={highlightEnabled}
+                    highlightDebugData={highlightDebugData}
+                    cueMeta={cueMeta || undefined}
+                    onRegenerateCueMap={handleRegenerateCueMap}
+                    debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset}
+                    onBackToCollection={handleReaderBack} onAddChapter={() => setIsAddChapterOpen(true)}
+                    onOpenAttachments={handleOpenAttachments}
+                    readerSettings={state.readerSettings}
+                    initialScrollTop={readerInitialScrollTop}
+                    onScrollPositionChange={handleReaderScroll}
+                    isMobile={effectiveMobileMode}
+                    isScrubbing={isScrubbing}
+                    seekNudge={seekNudge}
+                  />
+                )}
+              </div>
+            </div>
+            <div className="flex-shrink-0">
+              <Player 
+                isPlaying={isPlaying} onPlay={() => handleManualPlay()} onPause={handleManualPause} onStop={handleManualStop}
+                onNext={() => handleNextChapterRef.current(false)} onPrev={handlePrevChapter} onSeek={handleSeekByDelta}
+                speed={effectivePlaybackSpeedForUi}
+                onSpeedChange={s => {
+                  if (activeBook?.settings.useBookSettings) {
+                    setState(p => ({
+                      ...p,
+                      books: p.books.map(b => b.id === activeBook.id
+                        ? { ...b, settings: { ...b.settings, playbackSpeed: s } }
+                        : b
+                    )
+                    }));
+                  } else {
+                    setState(p => ({ ...p, playbackSpeed: s }));
+                  }
+                  speechController.getPlaybackAdapter().setSpeed(s);
+                  speechController.setPlaybackRate(s);
+                }}
+                selectedVoice={state.selectedVoiceName || ''} onVoiceChange={() => {}}
+                theme={state.theme} onThemeChange={t => setState(p => ({ ...p, theme: t }))}
+                readerSettings={state.readerSettings}
+                onUpdateReaderSettings={patch => setState(p => ({ ...p, readerSettings: { ...p.readerSettings, ...patch } }))}
+                progressChars={state.currentOffsetChars} totalLengthChars={activeSpeechText.length} wordCount={activeChapterMetadata?.wordCount || 0}
+                onSeekToOffset={handleJumpToOffset}
+                sleepTimer={sleepTimerSeconds} onSetSleepTimer={setSleepTimerSeconds}
+                stopAfterChapter={stopAfterChapter} onSetStopAfterChapter={setStopAfterChapter}
+                useBookSettings={activeBook?.settings.useBookSettings || false}
+                onSetUseBookSettings={v => { if(activeBook) setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, useBookSettings: v } } : b) })); }}
+                playbackCurrentTime={audioCurrentTime} playbackDuration={audioDuration} isFetching={playbackPhase === 'LOADING_AUDIO' || playbackPhase === 'SEEKING' || playbackPhase === 'LOADING_TEXT'}
+                onSeekToTime={handleScrubEnd} 
+                autoplayBlocked={autoplayBlocked}
+                onScrubStart={handleScrubStart}
+                onScrubMove={handleScrubMove}
+                onScrubEnd={handleScrubEnd}
+                onScrubEndOffset={handleScrubEndOffset}
+                isMobile={effectiveMobileMode}
+                debugMode={state.debugMode}
+              />
+            </div>
+          </div>
         )}
 
         {isChapterSidebarOpen && activeBook && (
@@ -5738,6 +3573,7 @@ const App: React.FC = () => {
           </div>
         )}
 
+        {activeTab !== 'reader' && (
         <div
           className="flex-1 min-w-0 min-h-0 h-full overflow-y-hidden"
           onTouchStart={handleTabSwipeStart}
@@ -6166,33 +4002,6 @@ const App: React.FC = () => {
             </Suspense>
           )}
 
-           {activeTab === 'reader' && activeBook && activeChapterMetadata && (
-             <Reader 
-               chapter={activeChapterMetadata} rules={[...state.globalRules, ...activeBook.rules]} theme={state.theme}
-               chapterText={activeChapterText}
-               speechText={activeSpeechText}
-               readerBlocks={activeReaderModel.blocks}
-               activeCueIndex={highlightEnabled ? activeCueIndex : null}
-               activeCueRange={highlightEnabled ? normalizedActiveCueRange : null}
-               activeParagraphIndex={highlightEnabled ? activeParagraphIndex : null}
-               paragraphMap={activeParagraphMap}
-               highlightReady={isCueReady}
-               highlightEnabled={highlightEnabled}
-               highlightDebugData={highlightDebugData}
-              cueMeta={cueMeta || undefined}
-              onRegenerateCueMap={handleRegenerateCueMap}
-              debugMode={state.debugMode} onToggleDebug={() => setState(p => ({ ...p, debugMode: !p.debugMode }))} onJumpToOffset={handleJumpToOffset}
-              onBackToCollection={handleReaderBack} onAddChapter={() => setIsAddChapterOpen(true)}
-              onOpenAttachments={handleOpenAttachments}
-              readerSettings={state.readerSettings}
-              initialScrollTop={readerInitialScrollTop}
-              onScrollPositionChange={handleReaderScroll}
-              isMobile={effectiveMobileMode}
-              isScrubbing={isScrubbing}
-              seekNudge={seekNudge}
-            />
-          )}
-
           {activeTab === 'rules' && (
             <Suspense fallback={<div className="p-6 text-xs font-black uppercase tracking-widest opacity-60 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading rules...</div>}>
               <LazyRuleManager 
@@ -6299,50 +4108,7 @@ const App: React.FC = () => {
             </Suspense>
           )}
         </div>
-      </div>
-
-      {activeTab === 'reader' && (
-        <Player 
-          isPlaying={isPlaying} onPlay={() => handleManualPlay()} onPause={handleManualPause} onStop={handleManualStop}
-          onNext={() => handleNextChapterRef.current(false)} onPrev={handlePrevChapter} onSeek={handleSeekByDelta}
-          speed={effectivePlaybackSpeedForUi}
-          onSpeedChange={s => {
-            if (activeBook?.settings.useBookSettings) {
-              setState(p => ({
-                ...p,
-                books: p.books.map(b => b.id === activeBook.id
-                  ? { ...b, settings: { ...b.settings, playbackSpeed: s } }
-                  : b
-                )
-              }));
-            } else {
-              setState(p => ({ ...p, playbackSpeed: s }));
-            }
-            speechController.getPlaybackAdapter().setSpeed(s);
-            speechController.setPlaybackRate(s);
-          }}
-          selectedVoice={state.selectedVoiceName || ''} onVoiceChange={() => {}}
-          theme={state.theme} onThemeChange={t => setState(p => ({ ...p, theme: t }))}
-          readerSettings={state.readerSettings}
-          onUpdateReaderSettings={patch => setState(p => ({ ...p, readerSettings: { ...p.readerSettings, ...patch } }))}
-          progressChars={state.currentOffsetChars} totalLengthChars={activeSpeechText.length} wordCount={activeChapterMetadata?.wordCount || 0}
-          onSeekToOffset={handleJumpToOffset}
-          sleepTimer={sleepTimerSeconds} onSetSleepTimer={setSleepTimerSeconds}
-          stopAfterChapter={stopAfterChapter} onSetStopAfterChapter={setStopAfterChapter}
-          useBookSettings={activeBook?.settings.useBookSettings || false}
-          onSetUseBookSettings={v => { if(activeBook) setState(p => ({ ...p, books: p.books.map(b => b.id === activeBook.id ? { ...b, settings: { ...b.settings, useBookSettings: v } } : b) })); }}
-          playbackCurrentTime={audioCurrentTime} playbackDuration={audioDuration} isFetching={playbackPhase === 'LOADING_AUDIO' || playbackPhase === 'SEEKING' || playbackPhase === 'LOADING_TEXT'}
-          onSeekToTime={handleSeekCommit} 
-          autoplayBlocked={autoplayBlocked}
-          onScrubStart={handleScrubStart}
-          onScrubMove={handleScrubMove}
-          onScrubEnd={handleSeekCommit}
-          onScrubEndOffset={handleSeekOffsetCommit}
-          isMobile={effectiveMobileMode}
-          debugMode={state.debugMode}
-        />
-      )}
-      </div>
+        )}
       {showUploadQueue && (
       <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 p-4">
         <div className="w-full max-w-3xl bg-slate-950 text-white rounded-3xl p-6 space-y-4 shadow-2xl">
@@ -6490,8 +4256,9 @@ const App: React.FC = () => {
           </div>
         </div>
       )}
-    </>
+    </AppShell>
   );
 };
 
+export { handleAndroidBackPriority };
 export default App;

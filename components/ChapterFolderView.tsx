@@ -1,9 +1,16 @@
 import React, { useMemo, useState, useEffect, useCallback, useRef, useTransition } from 'react';
 import { VariableSizeList, type ListChildComponentProps } from "react-window";
 import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile, Rule, UiMode, JobRecord } from '../types';
-import { LayoutGrid, AlignJustify, Eye, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, CloudOff, AlertTriangle, X, RotateCcw, ChevronLeft, Image as ImageIcon, Search, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Sparkles, CheckSquare, Repeat2, MoreVertical, GripVertical, FolderSync } from 'lucide-react';
+import { Eye, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, CloudOff, AlertTriangle, X, RotateCcw, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Sparkles, MoreVertical, GripVertical, FolderSync } from 'lucide-react';
+import BookTopBar from "./book/BookTopBar";
+import SelectionBar from "./book/SelectionBar";
+import BookHero from "./book/BookHero";
+import BulkActionDock from "./book/BulkActionDock";
+import ChapterList from "./book/ChapterList";
+import ChapterGrid from "./book/ChapterGrid";
 import { hasAudioInCache } from '../services/audioCache';
-import { useChapterSelection } from "../hooks/useChapterSelection";
+import { useNotifySimple } from "../hooks/useNotify";
+import { useBookState } from "../src/features/library/BookState";
 import { useSelectionGesture } from "../hooks/useSelectionGesture";
 import { getChapterAudioPath } from '../services/chapterAudioStore';
 import {
@@ -251,24 +258,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [legacyGroups, setLegacyGroups] = useState<LegacyGroup[]>([]);
   const [unlinkedNewFormatFiles, setUnlinkedNewFormatFiles] = useState<StrayFile[]>([]);
 
-  const [notice, setNotice] = useState<{ message: string; kind: 'info' | 'success' | 'error' } | null>(null);
-  const noticeTimerRef = useRef<number | null>(null);
-
-  const pushNotice = useCallback((message: string, kind: 'info' | 'success' | 'error' = 'info', durationMs: number = 3000) => {
-    setNotice({ message, kind });
-
-    if (noticeTimerRef.current) {
-      window.clearTimeout(noticeTimerRef.current);
-      noticeTimerRef.current = null;
-    }
-
-    if (durationMs > 0) {
-      noticeTimerRef.current = window.setTimeout(() => {
-        setNotice(null);
-        noticeTimerRef.current = null;
-      }, durationMs);
-    }
-  }, []);
+  const pushNotice = useNotifySimple();
 
   const [showFixModal, setShowFixModal] = useState(false);
   const [isFixing, setIsFixing] = useState(false);
@@ -354,7 +344,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const stickyHeaderBg = 'glass-header';
   const accentButtonClass = `btn-secondary`;
   const primaryActionClass = `btn-primary`;
-  const selectionRowClass = isDark ? "bg-indigo-600/20" : "bg-indigo-600/10";
+  const selectionRowClass = isDark ? "bg-indigo-500/30 ring-1 ring-indigo-400/50" : "bg-indigo-500/20 ring-1 ring-indigo-500/40";
   const isMobileInterface = computeMobileMode(uiMode);
   // Allow background-capable flows (WorkManager / native plugin) when we're in mobile mode.
   const enableBackgroundJobs = isMobileInterface;
@@ -384,79 +374,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       return <div ref={ref} className={className} style={{ ...style, boxSizing: "border-box" }} {...rest} />;
     });
   }, []);
-
-  const chapters = useMemo(
-    () => normalizeChapterOrder(book.chapters || []),
-    [book.chapters]
-  );
-  const filteredChapters = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return chapters;
-    return chapters.filter((chapter) => {
-      const title = `${chapter.title || ""}`.toLowerCase();
-      const filename = `${chapter.filename || ""}`.toLowerCase();
-      const idx = `${chapter.index || getChapterSortOrder(chapter) || ""}`;
-      return title.includes(q) || filename.includes(q) || idx.includes(q);
-    });
-  }, [chapters, searchQuery]);
-
-  const volumeSections = useMemo(() => {
-    const grouped = new Map<string, Chapter[]>();
-    const ungrouped: Chapter[] = [];
-    for (const ch of filteredChapters) {
-      const volumeName =
-        typeof (ch as any).volumeName === "string" ? String((ch as any).volumeName).trim() : "";
-      if (!volumeName) {
-        ungrouped.push(ch);
-        continue;
-      }
-      const list = grouped.get(volumeName) || [];
-      list.push(ch);
-      grouped.set(volumeName, list);
-    }
-
-    const volumes = Array.from(grouped.entries()).map(([volumeName, items]) => {
-      const m = volumeName.match(/^(book|volume)\s*(\d+)/i);
-      const volumeNumber = m ? parseInt(m[2], 10) : null;
-      const sorted = normalizeChapterOrder(items);
-      return { volumeName, volumeNumber: Number.isFinite(volumeNumber) ? volumeNumber : null, chapters: sorted };
-    });
-
-    const explicitOrder = Array.isArray(book.settings?.volumeOrder)
-      ? book.settings.volumeOrder
-          .filter((name): name is string => typeof name === "string" && name.trim().length > 0)
-          .map((name) => name.trim())
-      : [];
-    const explicitOrderMap = new Map<string, number>();
-    explicitOrder.forEach((name, idx) => explicitOrderMap.set(name, idx));
-
-    const NONE = 1_000_000_000;
-    volumes.sort((a, b) => {
-      const explicitA = explicitOrderMap.has(a.volumeName) ? explicitOrderMap.get(a.volumeName)! : NONE;
-      const explicitB = explicitOrderMap.has(b.volumeName) ? explicitOrderMap.get(b.volumeName)! : NONE;
-      if (explicitA !== explicitB) return explicitA - explicitB;
-      const aN = a.volumeNumber ?? NONE;
-      const bN = b.volumeNumber ?? NONE;
-      if (aN !== bN) return aN - bN;
-      return a.volumeName.localeCompare(b.volumeName, undefined, { numeric: true });
-    });
-
-    return {
-      volumes,
-      ungrouped: normalizeChapterOrder(ungrouped),
-    };
-  }, [filteredChapters, book.settings?.volumeOrder]);
-
-  const visibleChapters = useMemo(() => {
-    const rows: Chapter[] = [];
-    for (const group of volumeSections.volumes) {
-      if (collapsedVolumes[group.volumeName]) continue;
-      rows.push(...group.chapters);
-    }
-    rows.push(...volumeSections.ungrouped);
-    return rows;
-  }, [volumeSections, collapsedVolumes]);
-
+  const { derived, selection } = useBookState({
+    book,
+    searchQuery,
+    collapsedVolumes,
+    selectionEnabled: book.settings?.enableSelectionMode !== false,
+  });
+  const { chapters, volumeSections, visibleChapters } = derived;
   const {
     selectionMode,
     selectedIds,
@@ -468,10 +392,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     selectAll: handleSelectAllVisible,
     invert: handleInvertVisibleSelection,
     clear: clearSelection,
-  } = useChapterSelection(
-    () => visibleChapters.map((chapter) => chapter.id),
-    book.settings?.enableSelectionMode !== false
-  );
+  } = selection;
 
   const closeSelectionMode = useCallback(() => {
     clearSelection();
@@ -1079,18 +1000,18 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   );
   const syncBadge = useMemo(() => {
     if (book.backend !== StorageBackend.DRIVE) {
-      return { backendLabel: "LOCAL", statusLabel: "LOCAL", tone: "slate" as const };
+      return { backendLabel: "LOCAL", statusLabel: "LOCAL", tone: "slate" } as const;
     }
     if (hasInFlightBookJobs || uploadQueueCount > 0 || isUploadingAll || isCheckingDrive || isFixing || isRegeneratingAudio) {
-      return { backendLabel: "DRIVE", statusLabel: "SYNCING", tone: "indigo" as const };
+      return { backendLabel: "DRIVE", statusLabel: "SYNCING", tone: "indigo" } as const;
     }
     if (hasPausedBookJobs) {
-      return { backendLabel: "DRIVE", statusLabel: "PAUSED", tone: "amber" as const };
+      return { backendLabel: "DRIVE", statusLabel: "PAUSED", tone: "amber" } as const;
     }
     if (isDirty) {
-      return { backendLabel: "DRIVE", statusLabel: "NOT SYNCED", tone: "amber" as const };
+      return { backendLabel: "DRIVE", statusLabel: "NOT SYNCED", tone: "amber" } as const;
     }
-    return { backendLabel: "DRIVE", statusLabel: "SYNCED", tone: "emerald" as const };
+    return { backendLabel: "DRIVE", statusLabel: "SYNCED", tone: "emerald" } as const;
   }, [
     book.backend,
     hasInFlightBookJobs,
@@ -1796,6 +1717,45 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
   }, [book.backend, handleCheckDriveIntegrity, handleCheckLocalIntegrity, pushNotice, lastScan]);
 
+  const handleToggleOrganize = useCallback(() => {
+    if (book.settings?.enableOrganizeMode === false) {
+      pushNotice("Organize mode disabled in Book Settings.", "info");
+      return;
+    }
+    setIsOrganizeMode((v) => !v);
+    clearSelection();
+  }, [book.settings?.enableOrganizeMode, clearSelection, pushNotice]);
+
+  const handleOpenSettingsFromMenu = useCallback(() => {
+    setShowBookOverflow(false);
+    setShowBookSettings(true);
+  }, []);
+
+  const handleMenuToggleOrganize = useCallback(() => {
+    setShowBookOverflow(false);
+    handleToggleOrganize();
+  }, [handleToggleOrganize]);
+
+  const handleMenuCheck = useCallback(() => {
+    setShowBookOverflow(false);
+    void handleCheckIntegrity();
+  }, [handleCheckIntegrity]);
+
+  const handleMenuReindex = useCallback(() => {
+    setShowBookOverflow(false);
+    void handleReindexChapters();
+  }, [handleReindexChapters]);
+
+  const handleMenuFix = useCallback(() => {
+    setShowBookOverflow(false);
+    setShowFixModal(true);
+  }, []);
+
+  const handleMenuAddVolume = useCallback(() => {
+    setShowBookOverflow(false);
+    void handleAddVolume();
+  }, [handleAddVolume]);
+
   const generateAudio = async (
     chapter: Chapter,
     voiceIdOverride?: string,
@@ -2291,6 +2251,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     (chapter: Chapter, event?: React.MouseEvent) => {
       if (isOrganizeMode) return;
       if (selectionMode) {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
         if (event?.shiftKey) {
           toggleChapterSelection(chapter.id, { range: true, additive: true });
         } else {
@@ -2524,23 +2486,53 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const MobileChapterMenu = ({ chapterId }: { chapterId: string }) => {
     const ch = chapters.find(c => c.id === chapterId);
+    const [editTitle, setEditTitle] = useState(false);
+    const [editValue, setEditValue] = useState("");
     if (!ch) return null;
+    const handleStartEdit = () => {
+      setEditValue(String(ch.title ?? "").trim() || "");
+      setEditTitle(true);
+    };
+    const handleSaveEdit = () => {
+      if (editValue.trim() !== String(ch.title ?? "").trim()) {
+        onUpdateChapterTitle(ch.id, editValue.trim());
+      }
+      setEditTitle(false);
+      setMobileMenuId(null);
+    };
     return (
-      <div className="fixed inset-0 z-[110] flex items-end sm:items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setMobileMenuId(null)}>
+      <div className="fixed inset-0 z-[110] flex items-end sm:items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => { setMobileMenuId(null); setEditTitle(false); }}>
         <div className={`w-full max-w-sm rounded-[2rem] shadow-2xl p-6 overflow-hidden animate-in slide-in-from-bottom-4 duration-200 ${isDark ? 'bg-slate-900 border border-white/10' : 'bg-white'}`} onClick={e => e.stopPropagation()}>
            <div className="flex justify-between items-center mb-6">
               <h3 className="text-sm font-black uppercase tracking-widest opacity-60">Chapter Options</h3>
-              <button onClick={() => setMobileMenuId(null)} className="p-2 opacity-40"><X className="w-5 h-5" /></button>
+              <button onClick={() => { setMobileMenuId(null); setEditTitle(false); }} className="p-2 opacity-40"><X className="w-5 h-5" /></button>
            </div>
            <div className="space-y-2">
-              <button
-                onClick={() => { setMobileMenuId(null); setEditingChapterId(ch.id); setTempTitle(ch.title); }}
-                title="Edit title"
-                className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}
-              >
-                <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg"><Edit2 className="w-4 h-4" /></div>
-                Edit Title
-              </button>
+              {editTitle ? (
+                <div className="space-y-3" onClick={e => e.stopPropagation()}>
+                  <input
+                    autoFocus
+                    type="text"
+                    value={editValue}
+                    onChange={e => setEditValue(e.target.value)}
+                    onKeyDown={e => { if (e.key === "Enter") handleSaveEdit(); if (e.key === "Escape") { setEditTitle(false); setMobileMenuId(null); } }}
+                    className={`w-full px-4 py-3 rounded-xl border text-sm font-bold ${isDark ? "bg-slate-800 border-slate-600 text-white" : "bg-white border-black/10 text-black"}`}
+                  />
+                  <div className="flex gap-2">
+                    <button onClick={handleSaveEdit} className="flex-1 py-3 rounded-xl bg-indigo-600 text-white font-black uppercase text-[10px] tracking-widest">Save</button>
+                    <button onClick={() => { setEditTitle(false); setMobileMenuId(null); }} className="flex-1 py-3 rounded-xl border border-black/10 font-black uppercase text-[10px] tracking-widest opacity-60">Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  onClick={handleStartEdit}
+                  title="Edit title"
+                  className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}
+                >
+                  <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg"><Edit2 className="w-4 h-4" /></div>
+                  Edit Title
+                </button>
+              )}
            </div>
         </div>
       </div>
@@ -2765,13 +2757,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           {displayIndex}
         </div>
         <div className="font-black text-xs line-clamp-2 leading-tight">{displayTitle}</div>
-        <div className="mt-auto">
+        <div className="mt-auto pt-2">
           <div className={`h-0.5 w-full rounded-full overflow-hidden ${isDark ? "bg-slate-700" : "bg-black/5"}`}>
             <div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${percent}%` }} />
           </div>
           <div className="text-[8px] font-black uppercase mt-1">{percent}%</div>
         </div>
-        <div className="absolute bottom-2 right-2">
+        <div className="absolute top-3 right-3">
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -3326,322 +3318,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const generateCount = planPreview.generationIds.length;
   const cleanupCount = planPreview.safeToCleanup ? planPreview.cleanup.length : 0;
 
-  const BookTopBar = () => (
-    <div className="p-3 flex items-center justify-between gap-3">
-      <button
-        onClick={onBackToLibrary}
-        className={`${tapTarget} flex items-center justify-center rounded-xl bg-black/5 hover:bg-black/10`}
-        title="Back"
-      >
-        <ChevronLeft className="w-4 h-4" />
-      </button>
-      <div className="flex-1 min-w-0 text-center font-black text-sm truncate" aria-label={book.title} />
-      <div className="flex items-center gap-1.5">
-        <button
-          onClick={() => setShowSearchBar((v) => !v)}
-          className={`${tapTarget} flex items-center justify-center rounded-xl bg-black/5 hover:bg-black/10`}
-          title="Search"
-        >
-          <Search className="w-4 h-4" />
-        </button>
-        <button
-          onClick={() => setShowBookSettings(true)}
-          className={`${tapTarget} flex items-center justify-center rounded-xl bg-black/5 hover:bg-black/10`}
-          title="Book settings"
-        >
-          <Wrench className="w-4 h-4" />
-        </button>
-        <div className="flex items-center gap-1 p-1 rounded-xl bg-black/5">
-          <button
-            onClick={() => startViewModeTransition(() => setViewMode("sections"))}
-            className={`p-1.5 rounded-lg transition-all ${
-              viewMode === "sections" ? "bg-white shadow-sm text-indigo-600" : "opacity-40"
-            }`}
-            title="Sections"
-          >
-            <AlignJustify className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={() => startViewModeTransition(() => setViewMode("grid"))}
-            className={`p-1.5 rounded-lg transition-all ${
-              viewMode === "grid" ? "bg-white shadow-sm text-indigo-600" : "opacity-40"
-            }`}
-            title="Grid"
-          >
-            <LayoutGrid className="w-3.5 h-3.5" />
-          </button>
-        </div>
-        <div className="relative">
-          <button
-            onClick={() => setShowBookOverflow((v) => !v)}
-            className={`${tapTarget} flex items-center justify-center rounded-xl bg-black/5 hover:bg-black/10`}
-            title="More"
-          >
-            <MoreVertical className="w-4 h-4" />
-          </button>
-          {showBookOverflow ? (
-            <div
-              className={`absolute right-0 mt-2 w-56 rounded-2xl border shadow-2xl p-2 z-[60] ${
-                isDark ? "bg-slate-900 border-white/10" : "bg-white border-black/10"
-              }`}
-            >
-              <button
-                onClick={() => {
-                  setShowBookOverflow(false);
-                  setShowBookSettings(true);
-                }}
-                className="w-full text-left px-3 py-2 rounded-xl text-xs font-black hover:bg-black/5"
-              >
-                Book Settings
-              </button>
-              <button
-                onClick={() => {
-                  setShowBookOverflow(false);
-                  if (book.settings?.enableOrganizeMode === false) {
-                    pushNotice("Organize mode disabled in Book Settings.", "info");
-                    return;
-                  }
-                  setIsOrganizeMode((v) => !v);
-                  clearSelection();
-                }}
-                className="w-full text-left px-3 py-2 rounded-xl text-xs font-black hover:bg-black/5"
-              >
-                {isOrganizeMode ? "Done Organizing" : "Organize"}
-              </button>
-              <button
-                onClick={() => {
-                  setShowBookOverflow(false);
-                  void handleCheckIntegrity();
-                }}
-                className="w-full text-left px-3 py-2 rounded-xl text-xs font-black hover:bg-black/5"
-              >
-                Check
-              </button>
-              <button
-                onClick={() => {
-                  setShowBookOverflow(false);
-                  void handleReindexChapters();
-                }}
-                className="w-full text-left px-3 py-2 rounded-xl text-xs font-black hover:bg-black/5"
-              >
-                Reindex
-              </button>
-              <button
-                onClick={() => {
-                  setShowBookOverflow(false);
-                  setShowFixModal(true);
-                }}
-                disabled={!hasIssues}
-                className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black ${
-                  hasIssues ? "hover:bg-black/5" : "opacity-40 cursor-not-allowed"
-                }`}
-              >
-                Fix
-              </button>
-              {isOrganizeMode ? (
-                <button
-                  onClick={() => {
-                    setShowBookOverflow(false);
-                    void handleAddVolume();
-                  }}
-                  className="w-full text-left px-3 py-2 rounded-xl text-xs font-black hover:bg-black/5"
-                >
-                  Add Volume
-                </button>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
-      </div>
-    </div>
-  );
-
-  const SelectionTopBar = () => (
-    <div className="p-3 flex items-center justify-between gap-3">
-      <button
-        onClick={closeSelectionMode}
-        className={`${tapTarget} flex items-center justify-center rounded-xl bg-black/5 hover:bg-black/10`}
-        title="Close selection"
-      >
-        <X className="w-4 h-4" />
-      </button>
-      <div className="font-black text-xs uppercase tracking-widest">{selectedIds.size} selected</div>
-      <div className="flex items-center gap-1">
-        <button
-          onClick={() => handleSelectAllVisible(visibleChapters.map((chapter) => chapter.id))}
-          className={`${tapTarget} flex items-center justify-center rounded-xl bg-black/5 hover:bg-black/10`}
-          title="Select all visible"
-        >
-          <CheckSquare className="w-4 h-4" />
-        </button>
-        <button
-          onClick={() => handleInvertVisibleSelection(visibleChapters.map((chapter) => chapter.id))}
-          className={`${tapTarget} flex items-center justify-center rounded-xl bg-black/5 hover:bg-black/10`}
-          title="Invert selection"
-        >
-          <Repeat2 className="w-4 h-4" />
-        </button>
-        <div className="relative">
-          <button
-            onClick={() => setShowSelectionOverflow((v) => !v)}
-            className={`${tapTarget} flex items-center justify-center rounded-xl bg-black/5 hover:bg-black/10`}
-            title="More"
-          >
-            <MoreVertical className="w-4 h-4" />
-          </button>
-          {showSelectionOverflow ? (
-            <div
-              className={`absolute right-0 mt-2 w-44 rounded-2xl border shadow-2xl p-2 z-[60] ${
-                isDark ? "bg-slate-900 border-white/10" : "bg-white border-black/10"
-              }`}
-            >
-              <button
-                onClick={() => {
-                  setShowSelectionOverflow(false);
-                  void handleBulkAssignVolume();
-                }}
-                disabled={!selectedIds.size}
-                className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black ${
-                  selectedIds.size ? "hover:bg-black/5" : "opacity-40 cursor-not-allowed"
-                }`}
-              >
-                Assign Volume
-              </button>
-            </div>
-          ) : null}
-        </div>
-      </div>
-    </div>
-  );
-
-  const BookHero = () => (
-    <div ref={coverCardRef} className="p-4 sm:p-5 bg-transparent border-0 shadow-none">
-      <div ref={coverRowRef} className="flex items-start gap-4">
-        <div
-          ref={coverImageRef}
-          className="w-14 sm:w-16 aspect-[2/3] rounded-2xl overflow-hidden shadow-2xl flex-shrink-0 bg-indigo-600/10 flex items-center justify-center"
-        >
-          {book.coverImage ? (
-            <img src={book.coverImage} className="w-full h-full object-cover" alt={book.title} />
-          ) : (
-            <ImageIcon className="w-6 h-6 opacity-20" />
-          )}
-        </div>
-        <div className="flex-1 min-w-0">
-          <h1 className="font-black tracking-tight text-lg sm:text-2xl line-clamp-2 heading-font">{book.title}</h1>
-          <div className="mt-1 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest opacity-70">
-            <span>{syncBadge.backendLabel}</span>
-            <span
-              className={`inline-flex items-center gap-1 ${
-                syncBadge.tone === "emerald"
-                  ? "text-emerald-500"
-                  : syncBadge.tone === "amber"
-                    ? "text-amber-500"
-                    : syncBadge.tone === "indigo"
-                      ? "text-indigo-500"
-                      : "text-slate-500"
-              }`}
-            >
-              {syncBadge.statusLabel === "SYNCING" ? (
-                <Loader2 className="w-3 h-3 animate-spin" />
-              ) : syncBadge.statusLabel === "PAUSED" ? (
-                <AlertCircle className="w-3 h-3" />
-              ) : syncBadge.statusLabel === "NOT SYNCED" ? (
-                <CloudOff className="w-3 h-3" />
-              ) : syncBadge.statusLabel === "SYNCED" ? (
-                <Cloud className="w-3 h-3" />
-              ) : (
-                <FolderSync className="w-3 h-3" />
-              )}
-              {syncBadge.statusLabel === "NOT SYNCED"
-                ? "Not synced"
-                : syncBadge.statusLabel === "SYNCING"
-                  ? "Syncing"
-                  : syncBadge.statusLabel === "PAUSED"
-                    ? "Paused"
-                    : syncBadge.statusLabel === "SYNCED"
-                      ? "Synced"
-                      : "Local"}
-            </span>
-            {lastSavedAt ? <span>• Last saved {new Date(lastSavedAt).toLocaleTimeString()}</span> : null}
-          </div>
-          <div ref={coverMetaRef} className="mt-1 text-[10px] font-black uppercase tracking-widest opacity-50">
-            {(book.chapterCount ?? book.chapters.length)} chapters
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-
   const ChaptersSectionHeader = ({ style }: { style?: React.CSSProperties }) => (
     <div style={style} className="px-2 text-[10px] font-black uppercase tracking-widest opacity-60">
       Chapters
-    </div>
-  );
-
-  const BulkActionDock = () => (
-    <div
-      className={`fixed bottom-0 left-0 right-0 z-50 border-t px-3 pt-2 pb-[calc(env(safe-area-inset-bottom)+12px)] ${
-        isDark ? "bg-slate-950/80 border-slate-700 backdrop-blur" : "bg-white/90 border-black/10 backdrop-blur"
-      }`}
-    >
-      <div className="grid grid-cols-5 gap-2">
-        <button
-          onClick={() => void handleBulkUpload()}
-          disabled={!selectedIds.size || !canBulkUpload}
-          className={`px-2 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${
-            selectedIds.size && canBulkUpload ? "bg-black/5 hover:bg-black/10" : "opacity-40 bg-black/5 cursor-not-allowed"
-          }`}
-        >
-          <Cloud className="w-4 h-4 mx-auto mb-1" />
-          Upload
-        </button>
-        <button
-          onClick={() => void handleBulkRegenerateAudio()}
-          disabled={!selectedIds.size}
-          className={`px-2 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${
-            selectedIds.size ? "bg-black/5 hover:bg-black/10" : "opacity-40 bg-black/5 cursor-not-allowed"
-          }`}
-        >
-          <Headphones className="w-4 h-4 mx-auto mb-1" />
-          Regen Audio
-        </button>
-        <button
-          onClick={() => void handleBulkMarkCompleted()}
-          disabled={!selectedIds.size}
-          className={`px-2 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${
-            selectedIds.size ? "bg-black/5 hover:bg-black/10" : "opacity-40 bg-black/5 cursor-not-allowed"
-          }`}
-        >
-          <Check className="w-4 h-4 mx-auto mb-1" />
-          Done
-        </button>
-        <button
-          onClick={() => void handleBulkResetProgress()}
-          disabled={!selectedIds.size}
-          className={`px-2 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${
-            selectedIds.size ? "bg-black/5 hover:bg-black/10" : "opacity-40 bg-black/5 cursor-not-allowed"
-          }`}
-        >
-          <RotateCcw className="w-4 h-4 mx-auto mb-1" />
-          Reset
-        </button>
-        <button
-          onClick={() => void handleBulkDelete()}
-          disabled={!selectedIds.size}
-          className={`px-2 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${
-            selectedIds.size ? "bg-red-500/10 text-red-600 hover:bg-red-500/20" : "opacity-40 bg-black/5 cursor-not-allowed"
-          }`}
-        >
-          <Trash2 className="w-4 h-4 mx-auto mb-1" />
-          Delete
-        </button>
-      </div>
-      {bulkActionProgress ? (
-        <div className="mt-2 text-[10px] font-black uppercase tracking-widest opacity-70 text-center">
-          {bulkActionProgress.label} {bulkActionProgress.current} of {bulkActionProgress.total}
-        </div>
-      ) : null}
     </div>
   );
 
@@ -3715,10 +3394,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             </div>
 
             <div className="space-y-3">
-              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Organize</div>
+              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Selection & Organize</div>
               {[
                 { key: "enableSelectionMode", label: "Enable Selection Mode", value: book.settings?.enableSelectionMode !== false },
-                { key: "enableOrganizeMode", label: "Enable Organize Mode", value: book.settings?.enableOrganizeMode !== false },
                 { key: "allowDragReorderChapters", label: "Drag Reorder Chapters", value: book.settings?.allowDragReorderChapters !== false },
                 { key: "allowDragMoveToVolume", label: "Drag Move To Volume", value: book.settings?.allowDragMoveToVolume !== false },
                 { key: "allowDragReorderVolumes", label: "Drag Reorder Volumes", value: book.settings?.allowDragReorderVolumes !== false },
@@ -4000,7 +3678,45 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       )}
 
       <div className={`sticky top-0 z-50 transition-all duration-300 ${stickyHeaderBg}`}>
-        {selectionMode ? <SelectionTopBar /> : <BookTopBar />}
+        {selectionMode ? (
+          <SelectionBar
+            tapTarget={tapTarget}
+            selectedCount={selectedIds.size}
+            onClose={closeSelectionMode}
+            onSelectAll={() => handleSelectAllVisible(visibleChapters.map((chapter) => chapter.id))}
+            onInvert={() => handleInvertVisibleSelection(visibleChapters.map((chapter) => chapter.id))}
+            showOverflow={showSelectionOverflow}
+            onToggleOverflow={() => setShowSelectionOverflow((v) => !v)}
+            onAssignVolume={() => {
+              setShowSelectionOverflow(false);
+              void handleBulkAssignVolume();
+            }}
+            canAssign={!!selectedIds.size}
+            isDark={isDark}
+          />
+        ) : (
+          <BookTopBar
+            title={book.title}
+            tapTarget={tapTarget}
+            viewMode={viewMode}
+            onBack={onBackToLibrary}
+            onToggleSearch={() => setShowSearchBar((v) => !v)}
+            onOpenSettings={() => setShowBookSettings(true)}
+            onSetViewMode={(mode) => startViewModeTransition(() => setViewMode(mode))}
+            showOverflow={showBookOverflow}
+            onToggleOverflow={() => setShowBookOverflow((v) => !v)}
+            onOpenSettingsFromMenu={handleOpenSettingsFromMenu}
+            onToggleOrganize={handleMenuToggleOrganize}
+            isOrganizeMode={isOrganizeMode}
+            onCheck={handleMenuCheck}
+            onReindex={handleMenuReindex}
+            onFix={handleMenuFix}
+            onAddVolume={handleMenuAddVolume}
+            showAddVolume={isOrganizeMode}
+            hasIssues={hasIssues}
+            isDark={isDark}
+          />
+        )}
         {!selectionMode && showSearchBar ? (
           <div className="px-4 sm:px-6 pb-3">
             <input
@@ -4015,25 +3731,17 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       {!selectionMode ? (
         <div className={`${screenPad} pt-4 pb-2`}>
-          <BookHero />
+          <BookHero
+            book={book}
+            syncBadge={syncBadge}
+            lastSavedAt={lastSavedAt}
+            coverCardRef={coverCardRef}
+            coverRowRef={coverRowRef}
+            coverImageRef={coverImageRef}
+            coverMetaRef={coverMetaRef}
+          />
         </div>
       ) : null}
-
-      {notice && (
-        <div className="px-4 sm:px-6">
-          <div
-            className={`mt-3 px-4 py-3 rounded-2xl text-xs font-black tracking-tight ${
-              notice.kind === 'error'
-                ? 'bg-red-600/15 text-red-200 border border-red-500/30'
-                : notice.kind === 'success'
-                ? 'bg-emerald-500/15 text-emerald-200 border border-emerald-500/30'
-                : 'bg-[color:var(--tvx-accent)]/10 text-[color:var(--tvx-accent)] border border-[color:var(--tvx-accent)]/30'
-            }`}
-          >
-            {notice.message}
-          </div>
-        </div>
-      )}
 
       {bgGenProgress && (
         <div className="px-4 sm:px-6 mt-3">
@@ -4054,7 +3762,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           chapters.length === 0 ? (
             <div className="p-12 text-center text-xs font-black opacity-30 uppercase">No chapters found</div>
           ) : (
-            viewMode === "sections" ? renderDetailsViewVirtualized() : renderGridViewVirtualized()
+            viewMode === "sections" ? (
+              <ChapterList>{renderDetailsViewVirtualized()}</ChapterList>
+            ) : (
+              <ChapterGrid>{renderGridViewVirtualized()}</ChapterGrid>
+            )
           )
         ) : (
           <div
@@ -4065,7 +3777,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             {chapters.length === 0 ? (
               <div className="p-12 text-center text-xs font-black opacity-30 uppercase">No chapters found</div>
             ) : (
-              viewMode === "sections" ? renderDetailsView() : renderGridView()
+              viewMode === "sections" ? (
+                <ChapterList>{renderDetailsView()}</ChapterList>
+              ) : (
+                <ChapterGrid>{renderGridView()}</ChapterGrid>
+              )
             )}
           </div>
         )}
@@ -4082,7 +3798,16 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       ) : null}
 
       {selectionMode ? (
-        <BulkActionDock />
+        <BulkActionDock
+          isDark={isDark}
+          canBulkUpload={canBulkUpload}
+          selectedCount={selectedIds.size}
+          onUpload={() => void handleBulkUpload()}
+          onRegen={() => void handleBulkRegenerateAudio()}
+          onDone={() => void handleBulkMarkCompleted()}
+          onReset={() => void handleBulkResetProgress()}
+          onDelete={() => void handleBulkDelete()}
+        />
       ) : null}
     </div>
   );
