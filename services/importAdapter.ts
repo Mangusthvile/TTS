@@ -24,6 +24,9 @@ class DesktopImportAdapter implements ImportAdapter {
             accept: {
               'text/plain': ['.txt'],
               'text/markdown': ['.md'],
+              'application/json': ['.json'],
+              'application/zip': ['.zip'],
+              'application/x-zip-compressed': ['.zip'],
             },
           },
         ],
@@ -42,7 +45,7 @@ class DesktopImportAdapter implements ImportAdapter {
     return new Promise<PickedFile[]>((resolve) => {
       const input = document.createElement('input');
       input.type = 'file';
-      input.accept = '.txt,.md';
+      input.accept = '.txt,.md,.json,.zip';
       input.multiple = true;
       input.style.display = 'none';
       document.body.appendChild(input);
@@ -140,7 +143,7 @@ class MobileImportAdapter implements ImportAdapter {
     }
     const res = await picker.pickFiles({
       multiple: true,
-      types: ['text/plain', 'text/markdown'],
+      types: ['text/plain', 'text/markdown', 'application/json', 'application/zip', 'application/x-zip-compressed'],
     });
     const files = res?.files || [];
     return files.map((f: any) => ({

@@ -117,6 +117,26 @@
     border: 1px solid var(--tvx-border);
     border-radius: 16px;
   }
+  .tvx-selected {
+    background: color-mix(in srgb, var(--tvx-accent) 22%, var(--tvx-card)) !important;
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tvx-accent) 55%, transparent);
+  }
+  .tvx-check {
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--tvx-border) 90%, transparent);
+    background: color-mix(in srgb, var(--tvx-surface-2) 65%, transparent);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+  }
+  .tvx-check[data-checked="true"] {
+    background: var(--tvx-accent);
+    border-color: var(--tvx-accent);
+    color: white;
+  }
 }
 
 body, button, input, select, textarea {

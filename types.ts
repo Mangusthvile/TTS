@@ -203,6 +203,11 @@ export interface Chapter {
   updatedAt?: number;
 }
 
+export type ChapterIndexConflict = {
+  index: number;
+  chapterIds: string[];
+};
+
 export interface BookSettings {
   playbackSpeed?: number;
   selectedVoiceName?: string;
@@ -286,6 +291,7 @@ export interface ScanResult {
   missingAudioIds: string[];
   strayFiles: StrayFile[];
   duplicates: { chapterId: string, type: 'audio' | 'text', keepId: string, removeIds: string[] }[];
+  indexConflicts?: ChapterIndexConflict[];
   totalChecked: number;
   expectedChapters?: number;
   missingTextCount?: number;

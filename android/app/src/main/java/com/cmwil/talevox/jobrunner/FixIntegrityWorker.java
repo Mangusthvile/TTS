@@ -54,6 +54,7 @@ public class FixIntegrityWorker extends Worker {
     private static final String OPENAI_MODEL = "gpt-4o-mini-tts-2025-12-15";
     private static final int MAX_UPLOAD_RETRIES = 5;
     private static final String CHANNEL_ID = JobNotificationChannels.CHANNEL_JOBS_ID;
+    private final Map<String, String> driveFolderCache = new HashMap<>();
 
     public FixIntegrityWorker(@NonNull Context context, @NonNull WorkerParameters params) {
         super(context, params);
@@ -149,12 +150,23 @@ public class FixIntegrityWorker extends Worker {
 
             List<DriveFile> rootFiles = listFilesInFolder(accessToken, driveFolderId);
             List<DriveFile> allFiles = new ArrayList<>(rootFiles);
+            List<DriveFile> folderQueue = new ArrayList<>();
+            Set<String> skipNestedFolders = new HashSet<>();
+            skipNestedFolders.add("attachments");
+            skipNestedFolders.add("trash");
 
             for (DriveFile f : rootFiles) {
-                if (f.isFolder) {
-                    if ("meta".equals(f.name) || "text".equals(f.name) || "audio".equals(f.name) || "trash".equals(f.name)) {
-                        allFiles.addAll(listFilesInFolder(accessToken, f.id));
-                    }
+                if (f.isFolder) folderQueue.add(f);
+            }
+
+            for (int folderIdx = 0; folderIdx < folderQueue.size(); folderIdx++) {
+                DriveFile folder = folderQueue.get(folderIdx);
+                String folderName = folder.name != null ? folder.name.trim().toLowerCase() : "";
+                if (skipNestedFolders.contains(folderName)) continue;
+                List<DriveFile> nestedFiles = listFilesInFolder(accessToken, folder.id);
+                for (DriveFile nested : nestedFiles) {
+                    allFiles.add(nested);
+                    if (nested.isFolder) folderQueue.add(nested);
                 }
             }
 
@@ -172,6 +184,7 @@ public class FixIntegrityWorker extends Worker {
                 c.chapterId = ch.optString("chapterId", null);
                 c.idx = ch.optInt("idx", 0);
                 c.title = ch.optString("title", "");
+                c.volumeName = normalizeVolumeName(ch.optString("volumeName", null));
                 c.textName = ch.optString("textName", "c_" + c.chapterId + ".txt");
                 c.audioName = ch.optString("audioName", "c_" + c.chapterId + ".mp3");
                 JSONObject legacy = ch.optJSONObject("legacy");
@@ -246,7 +259,8 @@ public class FixIntegrityWorker extends Worker {
                 if (isStopped()) return handleCanceled(jobId, progressJson);
                 DriveFile legacy = pickNewest(filesByName.get(conv.sourceName));
                 if (legacy != null) {
-                    copyDriveFile(accessToken, legacy.id, driveFolderId, conv.targetName);
+                    String targetFolderId = resolveChapterDriveFolder(accessToken, driveFolderId, bookId, conv.chapterId, null);
+                    copyDriveFile(accessToken, legacy.id, targetFolderId, conv.targetName);
                 }
                 completed++;
                 progressJson.put("completed", completed);
@@ -289,7 +303,8 @@ public class FixIntegrityWorker extends Worker {
                 byte[] mp3 = synthesizeMp3(processed, voiceConfig, speakingRate);
                 String filePath = saveMp3ToFile(chapterId, mp3);
 
-                String uploadedId = uploadToDriveWithRetry(accessToken, driveFolderId, inv.audioName, "audio/mpeg", mp3);
+                String targetFolderId = resolveChapterDriveFolder(accessToken, driveFolderId, bookId, chapterId, inv.volumeName);
+                String uploadedId = uploadToDriveWithRetry(accessToken, targetFolderId, inv.audioName, "audio/mpeg", mp3);
                 updateChapterAudioStatus(bookId, chapterId, "ready", filePath, uploadedId);
 
                 completed++;
@@ -423,13 +438,124 @@ public class FixIntegrityWorker extends Worker {
         }
     }
 
+    private String normalizeVolumeName(String raw) {
+        if (raw == null) return null;
+        String trimmed = raw.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private String loadChapterVolumeName(String bookId, String chapterId) {
+        SQLiteDatabase db = getDb();
+        try {
+            if (bookId != null && !bookId.isEmpty()) {
+                Cursor cursor = db.query(
+                    "chapters",
+                    new String[]{"volumeName"},
+                    "id = ? AND bookId = ?",
+                    new String[]{chapterId, bookId},
+                    null,
+                    null,
+                    null
+                );
+                try {
+                    if (cursor.moveToFirst()) {
+                        return normalizeVolumeName(cursor.getString(cursor.getColumnIndexOrThrow("volumeName")));
+                    }
+                } finally {
+                    cursor.close();
+                }
+            }
+
+            Cursor cursor = db.query(
+                "chapters",
+                new String[]{"volumeName"},
+                "id = ?",
+                new String[]{chapterId},
+                null,
+                null,
+                null
+            );
+            try {
+                if (cursor.moveToFirst()) {
+                    return normalizeVolumeName(cursor.getString(cursor.getColumnIndexOrThrow("volumeName")));
+                }
+            } finally {
+                cursor.close();
+            }
+        } catch (Exception ignored) {
+            return null;
+        }
+        return null;
+    }
+
+    private String resolveChapterDriveFolder(
+        String accessToken,
+        String driveFolderId,
+        String bookId,
+        String chapterId,
+        String inventoryVolumeName
+    ) {
+        String volumeName = normalizeVolumeName(loadChapterVolumeName(bookId, chapterId));
+        if (volumeName == null) volumeName = normalizeVolumeName(inventoryVolumeName);
+        if (volumeName == null) return driveFolderId;
+        try {
+            return resolveOrCreateVolumeFolder(accessToken, driveFolderId, volumeName);
+        } catch (Exception e) {
+            Log.w("FixIntegrityWorker", "resolveChapterDriveFolder fallback to root: " + e.getMessage());
+            return driveFolderId;
+        }
+    }
+
+    private String resolveOrCreateVolumeFolder(String accessToken, String rootId, String volumeName) throws Exception {
+        if (volumeName == null || volumeName.isEmpty()) return rootId;
+        String cacheKey = rootId + "::" + volumeName.toLowerCase();
+        String cached = driveFolderCache.get(cacheKey);
+        if (cached != null && !cached.isEmpty()) return cached;
+        DriveFolder folder = findSubfolder(accessToken, rootId, volumeName);
+        String folderId = folder != null ? folder.id : createSubfolder(accessToken, rootId, volumeName);
+        if (folderId == null || folderId.isEmpty()) return rootId;
+        driveFolderCache.put(cacheKey, folderId);
+        return folderId;
+    }
+
     private DriveFolder findSubfolder(String accessToken, String rootId, String name) throws Exception {
         String q = "'" + rootId + "' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false and name = '" + name.replace("'", "\\'") + "'";
         List<DriveFile> files = listFiles(accessToken, q);
         for (DriveFile f : files) {
-            if (name.equals(f.name)) return new DriveFolder(f.id, f.name);
+            if (f.name != null && f.name.equalsIgnoreCase(name)) return new DriveFolder(f.id, f.name);
         }
         return null;
+    }
+
+    private String createSubfolder(String accessToken, String rootId, String name) throws Exception {
+        JSONObject body = new JSONObject();
+        body.put("name", name);
+        body.put("mimeType", "application/vnd.google-apps.folder");
+        JSONArray parents = new JSONArray();
+        parents.put(rootId);
+        body.put("parents", parents);
+
+        byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+        URL url = new URL("https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id,name");
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setDoOutput(true);
+        conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+        conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+        conn.setFixedLengthStreamingMode(bytes.length);
+        try (OutputStream os = conn.getOutputStream()) {
+            os.write(bytes);
+        }
+
+        int code = conn.getResponseCode();
+        if (code < 200 || code >= 300) {
+            throw new Exception("Drive folder create failed: " + code);
+        }
+        String raw = new String(readAllBytes(conn.getInputStream()), StandardCharsets.UTF_8);
+        JSONObject out = new JSONObject(raw);
+        String id = out.optString("id", null);
+        if (id == null || id.isEmpty()) throw new Exception("Drive folder create returned no id");
+        return id;
     }
 
     private DriveFile findFileInFolder(String accessToken, String folderId, String filename) throws Exception {
@@ -1033,6 +1159,7 @@ public class FixIntegrityWorker extends Worker {
         String chapterId;
         int idx;
         String title;
+        String volumeName;
         String textName;
         String audioName;
         String legacyTextName;

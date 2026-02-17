@@ -2,13 +2,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { Capacitor } from "@capacitor/core";
-import { HighlightMode } from "../types";
 import type {
   Book,
   Chapter,
   StorageBackend,
   AudioStatus,
-  BookSettings,
   Rule,
   CueMap,
   ParagraphMap,
@@ -45,6 +43,7 @@ import {
 } from "./libraryIdb";
 import type { SQLiteDBConnection } from "@capacitor-community/sqlite";
 import { getChapterSortOrder, normalizeChapterOrder } from "./chapterOrderingService";
+import { DEFAULT_BOOK_SETTINGS, normalizeBookSettings } from "../src/features/library/bookSettings";
 
 let initPromise: Promise<void> | null = null;
 const DB_NAME = appConfig.db.name;
@@ -113,7 +112,6 @@ function safeParseJson<T>(jsonStr: any, fallback: T): T {
 }
 
 function ensureBookDefaults(b: Partial<Book> & { id: string; title: string; backend: StorageBackend }): Book {
-  const rawSettings = (b.settings ?? {}) as BookSettings;
   return {
     id: b.id,
     title: b.title,
@@ -123,17 +121,7 @@ function ensureBookDefaults(b: Partial<Book> & { id: string; title: string; back
     driveFolderId: b.driveFolderId,
     driveFolderName: b.driveFolderName,
     currentChapterId: b.currentChapterId,
-    settings: {
-      useBookSettings: rawSettings.useBookSettings ?? false,
-      highlightMode: rawSettings.highlightMode ?? HighlightMode.SENTENCE,
-      playbackSpeed: rawSettings.playbackSpeed,
-      selectedVoiceName: rawSettings.selectedVoiceName,
-      defaultVoiceId: rawSettings.defaultVoiceId,
-      autoGenerateAudioOnAdd:
-        typeof rawSettings.autoGenerateAudioOnAdd === "boolean"
-          ? rawSettings.autoGenerateAudioOnAdd
-          : true,
-    },
+    settings: normalizeBookSettings(b.settings),
     rules: b.rules ?? [],
     chapters: b.chapters ?? [],
     chapterCount: (b as any).chapterCount ?? 0,
@@ -187,11 +175,7 @@ export async function listBooks(): Promise<Book[]> {
       driveFolderId: r.driveFolderId ?? undefined,
       driveFolderName: r.driveFolderName ?? undefined,
       currentChapterId: r.currentChapterId ?? undefined,
-      settings: safeParseJson(r.settingsJson, {
-        useBookSettings: false,
-        highlightMode: HighlightMode.SENTENCE,
-        autoGenerateAudioOnAdd: true,
-      }),
+      settings: safeParseJson(r.settingsJson, DEFAULT_BOOK_SETTINGS),
       rules: safeParseJson(r.rulesJson, []),
       chapters: [],
       chapterCount: Number(r.chapterCount ?? 0),
@@ -209,13 +193,7 @@ export async function upsertBook(book: Book): Promise<void> {
   }
 
   const db = await mustSqliteDb();
-  const settingsJson = JSON.stringify(
-    book.settings ?? {
-      useBookSettings: false,
-      highlightMode: HighlightMode.SENTENCE,
-      autoGenerateAudioOnAdd: true,
-    }
-  );
+  const settingsJson = JSON.stringify(normalizeBookSettings(book.settings));
   const rulesJson = JSON.stringify(book.rules ?? []);
   const updatedAt = book.updatedAt ?? Date.now();
 

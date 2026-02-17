@@ -116,6 +116,8 @@ const Settings: React.FC<SettingsProps> = ({
   const [selectedDriveBackupId, setSelectedDriveBackupId] = useState<string>("");
   const [activeTab, setActiveTab] = useState<'general' | 'jobs'>('general');
   const [jobBusy, setJobBusy] = useState(false);
+  const [isJobsDiagnosticsOpen, setIsJobsDiagnosticsOpen] = useState(false);
+  const [isSystemDiagnosticsOpen, setIsSystemDiagnosticsOpen] = useState(false);
   const [recentLogs, setRecentLogs] = useState(() => getLogBuffer(20));
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({
     appearance: true,
@@ -1003,8 +1005,17 @@ const Settings: React.FC<SettingsProps> = ({
 
             <div className="mt-6 space-y-3">
               <div className={`p-3 rounded-xl border ${isDark ? 'border-slate-800 bg-slate-950/40' : 'border-black/5 bg-white'}`}>
-                <div className="text-xs font-black mb-2">Jobs Diagnostics</div>
-              <div className="text-[10px] font-mono space-y-1">
+                <button
+                  onClick={() => setIsJobsDiagnosticsOpen((v) => !v)}
+                  className="w-full flex items-center justify-between text-left"
+                  title={isJobsDiagnosticsOpen ? "Collapse Jobs Diagnostics" : "Expand Jobs Diagnostics"}
+                >
+                  <div className="text-xs font-black">Jobs Diagnostics</div>
+                  {isJobsDiagnosticsOpen ? <ChevronUp className="w-4 h-4 opacity-70" /> : <ChevronDown className="w-4 h-4 opacity-70" />}
+                </button>
+                {isJobsDiagnosticsOpen ? (
+                <>
+                <div className="text-[10px] font-mono space-y-1">
                 <div>InterfaceMode: {settings.uiMode}</div>
                 <div>Platform: {platform}</div>
                 <div>Android Build: {androidVersion}</div>
@@ -1037,9 +1048,20 @@ const Settings: React.FC<SettingsProps> = ({
                   })}
                   {sortedJobs.length === 0 && <div>No jobs</div>}
                 </div>
+                </>
+                ) : null}
               </div>
               <div className={`p-3 rounded-xl border ${isDark ? 'border-slate-800 bg-slate-950/40' : 'border-black/5 bg-white'}`}>
-                <div className="text-xs font-black mb-2">System Diagnostics</div>
+                <button
+                  onClick={() => setIsSystemDiagnosticsOpen((v) => !v)}
+                  className="w-full flex items-center justify-between text-left"
+                  title={isSystemDiagnosticsOpen ? "Collapse System Diagnostics" : "Expand System Diagnostics"}
+                >
+                  <div className="text-xs font-black">System Diagnostics</div>
+                  {isSystemDiagnosticsOpen ? <ChevronUp className="w-4 h-4 opacity-70" /> : <ChevronDown className="w-4 h-4 opacity-70" />}
+                </button>
+                {isSystemDiagnosticsOpen ? (
+                <>
                 {diag ? (
                   <div className="text-[10px] font-mono space-y-1 break-all">
                     <div>SQLite: cached={String(diag.sqlite.cached)} open={String(diag.sqlite.isOpen)} pending={String(diag.sqlite.pending)} hasConn={String(diag.sqlite.hasConnection)}</div>
@@ -1093,6 +1115,8 @@ const Settings: React.FC<SettingsProps> = ({
                     </button>
                   )}
                 </div>
+                </>
+                ) : null}
               </div>
               {sortedJobs.length === 0 && (
                 <div className="text-xs font-bold opacity-50">No jobs yet.</div>

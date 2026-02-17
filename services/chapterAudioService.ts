@@ -4,6 +4,7 @@ import { synthesizeChunk } from "./cloudTtsService";
 import { generateAudioKey, saveAudioToCache } from "./audioCache";
 import { persistChapterAudio } from "./audioStorage";
 import { buildMp3Name, uploadToDrive } from "./driveService";
+import { ensureChapterDriveStorageFolder } from "./driveChapterFolders";
 import { upsertChapterMeta as libraryUpsertChapterMeta, loadChapterText as libraryLoadChapterText } from "./libraryStore";
 
 type GenerateAndPersistChapterAudioArgs = {
@@ -100,8 +101,9 @@ export async function generateAndPersistChapterAudio(
     !!book.driveFolderId &&
     isAuthorized
   ) {
+    const driveFolderId = await ensureChapterDriveStorageFolder(book.driveFolderId, chapter);
     cloudAudioFileId = await uploadToDrive(
-      book.driveFolderId,
+      driveFolderId,
       buildMp3Name(book.id, chapter.id),
       audioBlob,
       chapter.cloudAudioFileId,

@@ -41,7 +41,12 @@ const makeBook = (): Book => ({
   },
 });
 
-const renderView = async (opts?: { isDirty?: boolean; book?: Book; onRegisterBackHandler?: (handler: (() => boolean) | null) => void }) => {
+const renderView = async (opts?: {
+  isDirty?: boolean;
+  book?: Book;
+  onRegisterBackHandler?: (handler: (() => boolean) | null) => void;
+  onUpdateChapter?: (chapter: Chapter) => void;
+}) => {
   const book = opts?.book ?? makeBook();
   const rendered = render(
     <ChapterFolderView
@@ -67,11 +72,12 @@ const renderView = async (opts?: { isDirty?: boolean; book?: Book; onRegisterBac
       isUploadingAll={false}
       onUpdateChapterTitle={vi.fn()}
       onDeleteChapter={vi.fn()}
-      onUpdateChapter={vi.fn()}
+      onUpdateChapter={opts?.onUpdateChapter ?? vi.fn()}
       onUpdateBookSettings={vi.fn()}
       onBackToLibrary={vi.fn()}
       onResetChapterProgress={vi.fn()}
       isDirty={opts?.isDirty}
+      isSyncing={false}
       onRegisterBackHandler={opts?.onRegisterBackHandler}
     />
   );
@@ -79,6 +85,11 @@ const renderView = async (opts?: { isDirty?: boolean; book?: Book; onRegisterBac
     await Promise.resolve();
   });
   return rendered;
+};
+
+const openBookSettings = () => {
+  fireEvent.click(screen.getByTitle("More"));
+  fireEvent.click(screen.getByText("Book Settings"));
 };
 
 const triggerLongPress = async (target: Element, options?: { pointerId?: number; startX?: number; startY?: number; moveX?: number; moveY?: number; holdMs?: number }) => {
@@ -248,6 +259,28 @@ describe("ChapterFolderView chapter UX", () => {
     }
   });
 
+  it("keeps picked chapter active after organize hold and allows destination tap reorder", async () => {
+    vi.useFakeTimers();
+    const onUpdateChapter = vi.fn();
+    try {
+      await renderView({ onUpdateChapter });
+      fireEvent.click(screen.getByTitle("Organize"));
+
+      const source = screen.getByText("Volume Chapter").closest("[data-chapter-id='c-1']") as HTMLElement;
+      await triggerLongPress(source, { pointerId: 31, holdMs: 320 });
+
+      const target = screen.getByText("Ungrouped Chapter").closest("[data-chapter-id='c-2']") as HTMLElement;
+      fireEvent.click(target);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(onUpdateChapter).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shows only Edit Title in chapter overflow menu", async () => {
     await renderView();
 
@@ -260,7 +293,7 @@ describe("ChapterFolderView chapter UX", () => {
   it("renders a scrollable book settings modal with a visible close button", async () => {
     await renderView();
 
-    fireEvent.click(screen.getByTitle("Book settings"));
+    openBookSettings();
 
     expect(screen.getByTestId("book-settings-modal")).toBeInTheDocument();
     expect(screen.getByTestId("book-settings-scroll")).toBeInTheDocument();
@@ -289,7 +322,7 @@ describe("ChapterFolderView chapter UX", () => {
     });
     expect(screen.queryByText(/selected$/i)).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByTitle("Book settings"));
+    openBookSettings();
     expect(screen.getByTestId("book-settings-modal")).toBeInTheDocument();
     await act(async () => {
       expect(getLatestHandler()()).toBe(true);

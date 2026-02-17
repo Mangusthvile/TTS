@@ -5,9 +5,10 @@ import Library from './src/features/library/Library';
 import Reader from './src/features/reader/Reader';
 import Player from './src/features/reader/Player';
 import ChapterSidebar from './src/features/library/ChapterSidebar';
-import { speechController } from './services/speechService';
+import { speechController, PROGRESS_STORE_KEY } from './services/speechService';
 import { type PlaybackAdapter } from './services/playbackAdapter';
-import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, moveFileToTrash, openFolderPicker, listFilesSortedByModified, resolveFolderIdByName, listSaveFileCandidates, createDriveFolder, listFoldersInFolder, findTaleVoxRoots } from './services/driveService';
+import { fetchDriveFile, fetchDriveBinary, uploadToDrive, buildMp3Name, listFilesInFolder, findFileSync, buildTextName, ensureRootStructure, ensureBookFolder, moveFile, moveFileToTrash, openFolderPicker, listFilesSortedByModified, resolveFolderIdByName, listSaveFileCandidates, createDriveFolder, listFoldersInFolder, findTaleVoxRoots, getDriveFileParentIds } from './services/driveService';
+import { ensureChapterDriveStorageFolder, findChapterDriveStorageFolder, listVolumeFolders } from "./services/driveChapterFolders";
 import type { InventoryManifest } from "./services/bookManifests";
 import { initDriveAuth, getValidDriveToken, clearStoredToken, isTokenValid, ensureValidToken } from './services/driveAuth';
 import { authManager, AuthState } from './services/authManager';
@@ -57,7 +58,13 @@ import {
   normalizeChunkMapForChapter,
   computeIntroMs,
 } from './utils/chapterBookUtils';
-import { readProgressStore, writeProgressStore, normalizeProgressStore, type ProgressStorePayload } from './services/progressStore';
+import {
+  readProgressStore,
+  writeProgressStore,
+  normalizeProgressStore,
+  type ProgressStoreEntry,
+  type ProgressStorePayload,
+} from './services/progressStore';
 import { DEFAULT_BOOK_SETTINGS, normalizeBookSettings } from './src/features/library/bookSettings';
 import { handleAndroidBackPriority } from './src/app/androidBack';
 import {
@@ -122,6 +129,45 @@ const LazyExtractor = React.lazy(() => import('./src/features/library/Extractor'
 const LazyChapterFolderView = React.lazy(() => import('./src/features/library/ChapterFolderView'));
 const LazyRuleManager = React.lazy(() => import('./src/features/rules/RuleManager'));
 const LazySettings = React.lazy(() => import('./src/features/settings/Settings'));
+
+const RESERVED_DRIVE_BOOK_FOLDER_NAMES = new Set([
+  "meta",
+  "attachments",
+  "trash",
+  "text",
+  "audio",
+]);
+
+const pushVolumeName = (
+  target: string[],
+  seen: Set<string>,
+  value: unknown,
+  skipReserved = false
+) => {
+  if (typeof value !== "string") return;
+  const trimmed = value.trim();
+  if (!trimmed) return;
+  const key = trimmed.toLowerCase();
+  if (skipReserved && RESERVED_DRIVE_BOOK_FOLDER_NAMES.has(key)) return;
+  if (seen.has(key)) return;
+  seen.add(key);
+  target.push(trimmed);
+};
+
+const buildVolumeOrderFromDriveSync = (
+  existingOrder: unknown,
+  driveFolderNames: string[],
+  chapters: Array<Pick<Chapter, "volumeName">>
+): string[] => {
+  const next: string[] = [];
+  const seen = new Set<string>();
+  if (Array.isArray(existingOrder)) {
+    existingOrder.forEach((name) => pushVolumeName(next, seen, name));
+  }
+  driveFolderNames.forEach((name) => pushVolumeName(next, seen, name, true));
+  chapters.forEach((chapter) => pushVolumeName(next, seen, (chapter as any).volumeName));
+  return next;
+};
 
 
 const App: React.FC = () => {
@@ -319,6 +365,7 @@ const App: React.FC = () => {
   const lastNonReaderTabRef = useRef<'library' | 'collection' | 'rules' | 'settings'>('library');
   const [readerInitialScrollTop, setReaderInitialScrollTop] = useState<number | null>(null);
   const [isAddChapterOpen, setIsAddChapterOpen] = useState(false);
+  const [addChapterVolumeNames, setAddChapterVolumeNames] = useState<string[]>([]);
   const [isChapterSidebarOpen, setIsChapterSidebarOpen] = useState(false);
   const {
     chapterPagingByBook,
@@ -456,8 +503,9 @@ const App: React.FC = () => {
     const blob = await readLocalAudioBlob(chapterId);
     if (!blob) throw new Error("Local audio not found");
     const filename = buildMp3Name(bookId, chapterId);
+    const targetFolderId = await ensureChapterDriveStorageFolder(book.driveFolderId, chapter);
     const cloudAudioFileId = await uploadToDrive(
-      book.driveFolderId,
+      targetFolderId,
       filename,
       blob,
       chapter.cloudAudioFileId,
@@ -814,6 +862,52 @@ const App: React.FC = () => {
   }, [state.activeBookId, state.books, state.readerSettings.uiMode]);
 
   const activeBook = useMemo(() => state.books.find(b => b.id === state.activeBookId), [state.books, state.activeBookId]);
+  useEffect(() => {
+    let cancelled = false;
+    const loadAddChapterVolumes = async () => {
+      if (!isAddChapterOpen || !activeBook) {
+        if (!cancelled) setAddChapterVolumeNames([]);
+        return;
+      }
+
+      const ordered: string[] = [];
+      const seen = new Set<string>();
+      const pushName = (value: unknown) => {
+        if (typeof value !== "string") return;
+        const trimmed = value.trim();
+        if (!trimmed) return;
+        const key = trimmed.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        ordered.push(trimmed);
+      };
+
+      (activeBook.settings?.volumeOrder || []).forEach(pushName);
+      (activeBook.chapters || []).forEach((chapter) => pushName((chapter as any).volumeName));
+
+      if (activeBook.backend === StorageBackend.DRIVE && activeBook.driveFolderId && isAuthorized) {
+        try {
+          const driveFolders = await listVolumeFolders(activeBook.driveFolderId);
+          driveFolders.forEach((folder) => pushName(folder.name));
+        } catch (e) {
+          console.warn("[Extractor] Failed to load Drive volumes", e);
+        }
+      }
+
+      if (!cancelled) {
+        setAddChapterVolumeNames(ordered);
+      }
+    };
+
+    void loadAddChapterVolumes();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeBook,
+    isAddChapterOpen,
+    isAuthorized,
+  ]);
   const effectivePlaybackSpeedForUi =
     activeBook?.settings.useBookSettings && activeBook.settings.playbackSpeed
       ? activeBook.settings.playbackSpeed
@@ -1097,6 +1191,130 @@ const App: React.FC = () => {
     readProgressStore();
   }, []);
 
+  const loadAllChapterMeta = useCallback(async (bookId: string): Promise<Chapter[]> => {
+    const all: Chapter[] = [];
+    let after: number | null = -1;
+    for (;;) {
+      const page = await libraryListChaptersPage(bookId, after, 500);
+      all.push(...page.chapters);
+      if (page.nextAfterIndex == null) break;
+      after = page.nextAfterIndex;
+    }
+    return normalizeChapterOrder(all);
+  }, []);
+
+  const mergeProgressEntryIntoChapter = useCallback(
+    (chapter: Chapter, progressEntry?: ProgressStoreEntry): Chapter => {
+      if (!progressEntry) return normalizeChapterProgress(chapter);
+
+      const chapterUpdatedAt =
+        typeof chapter.updatedAt === "number" && Number.isFinite(chapter.updatedAt)
+          ? chapter.updatedAt
+          : 0;
+      const entryUpdatedAt =
+        typeof progressEntry.updatedAt === "number" && Number.isFinite(progressEntry.updatedAt)
+          ? progressEntry.updatedAt
+          : chapterUpdatedAt + 1;
+      const entryPercent =
+        typeof progressEntry.percent === "number" && Number.isFinite(progressEntry.percent)
+          ? Math.max(0, Math.min(1, progressEntry.percent))
+          : undefined;
+      const entryTimeSec =
+        typeof progressEntry.timeSec === "number" && Number.isFinite(progressEntry.timeSec)
+          ? Math.max(0, progressEntry.timeSec)
+          : undefined;
+      const entryDurationSec =
+        typeof progressEntry.durationSec === "number" &&
+        Number.isFinite(progressEntry.durationSec)
+          ? Math.max(0, progressEntry.durationSec)
+          : undefined;
+
+      let preferEntry = entryUpdatedAt >= chapterUpdatedAt;
+      if (
+        !preferEntry &&
+        typeof entryPercent === "number" &&
+        entryPercent > (chapter.progress ?? 0) + 0.001
+      ) {
+        preferEntry = true;
+      }
+      if (!preferEntry && progressEntry.completed === true && !chapter.isCompleted) {
+        preferEntry = true;
+      }
+      if (!preferEntry) {
+        return normalizeChapterProgress(chapter);
+      }
+
+      const textLength =
+        typeof chapter.textLength === "number" && chapter.textLength > 0
+          ? chapter.textLength
+          : typeof chapter.content === "string" && chapter.content.length > 0
+            ? chapter.content.length
+            : 0;
+      const progressCharsFromPercent =
+        typeof entryPercent === "number" && textLength > 0
+          ? Math.round(entryPercent * textLength)
+          : chapter.progressChars;
+
+      return normalizeChapterProgress({
+        ...chapter,
+        progress: typeof entryPercent === "number" ? entryPercent : chapter.progress,
+        progressSec: entryTimeSec ?? chapter.progressSec,
+        durationSec: entryDurationSec ?? chapter.durationSec,
+        progressChars:
+          typeof progressCharsFromPercent === "number" && Number.isFinite(progressCharsFromPercent)
+            ? Math.max(0, progressCharsFromPercent)
+            : chapter.progressChars,
+        isCompleted:
+          typeof progressEntry.completed === "boolean"
+            ? progressEntry.completed
+            : chapter.isCompleted,
+        updatedAt: Math.max(chapterUpdatedAt, entryUpdatedAt),
+      });
+    },
+    []
+  );
+
+  const buildSnapshotState = useCallback(
+    async (sourceState: AppState, progressStorePayload: ProgressStorePayload): Promise<AppState> => {
+      const books = await Promise.all(
+        sourceState.books.map(async (book) => {
+          const persistedChapters = await loadAllChapterMeta(book.id);
+          const chapterById = new Map<string, Chapter>();
+
+          for (const chapter of persistedChapters) {
+            chapterById.set(chapter.id, chapter);
+          }
+          for (const chapter of book.chapters || []) {
+            const existing = chapterById.get(chapter.id);
+            chapterById.set(chapter.id, existing ? { ...existing, ...chapter } : chapter);
+          }
+
+          const progressByChapter = progressStorePayload.books?.[book.id] ?? {};
+          const mergedChapters = orderChaptersForDisplay(
+            Array.from(chapterById.values()).map((chapter) =>
+              mergeProgressEntryIntoChapter(chapter, progressByChapter[chapter.id])
+            )
+          );
+
+          return {
+            ...book,
+            chapters: mergedChapters,
+            chapterCount:
+              typeof book.chapterCount === "number"
+                ? Math.max(book.chapterCount, mergedChapters.length)
+                : mergedChapters.length,
+          };
+        })
+      );
+
+      return {
+        ...sourceState,
+        books,
+      };
+    },
+    [loadAllChapterMeta, mergeProgressEntryIntoChapter]
+  );
+
   const markDirty = useCallback(() => {
     setIsDirty(true);
     updateDiagnostics({ isDirty: true, dirtySince: Date.now() });
@@ -1304,10 +1522,14 @@ const App: React.FC = () => {
     document.documentElement.style.setProperty('--highlight-color', state.readerSettings.highlightColor);
   }, [state.readerSettings.highlightColor]);
 
-  const handleSaveState = useCallback(async (force = false, silent = false) => {
+  const handleSaveState = useCallback(async (force = false, silent = false): Promise<boolean> => {
       const s = stateRef.current;
-      if (!s.driveRootFolderId) return;
-      if (!force && !isDirty) return;
+      if (!s.driveRootFolderId) return false;
+      if (!force && !isDirty) return false;
+
+      if (!silent) {
+        pushNotice({ message: "Saving...", type: "info", ms: 1200 });
+      }
 
       try {
           const preferencesRaw = localStorage.getItem(PREFS_KEY);
@@ -1320,13 +1542,14 @@ const App: React.FC = () => {
             readerProgress = {};
           }
           const progressStorePayload = readProgressStore();
+          const snapshotState = force ? await buildSnapshotState(stateRef.current, progressStorePayload) : s;
           const attachmentLists = await Promise.all(
-            s.books.map((book) => libraryListBookAttachments(book.id).catch(() => []))
+            snapshotState.books.map((book) => libraryListBookAttachments(book.id).catch(() => []))
           );
           const attachments = attachmentLists.flat();
 
           const snapshot = buildFullSnapshot({
-            state: s,
+            state: snapshotState,
             preferences,
             readerProgress,
             legacyProgressStore: (progressStorePayload as unknown as Record<string, unknown>) || {},
@@ -1337,8 +1560,8 @@ const App: React.FC = () => {
           });
 
           const saveRes = await saveToDrive({
-            rootFolderId: s.driveRootFolderId,
-            savesFolderId: s.driveSubfolders?.savesId,
+            rootFolderId: snapshotState.driveRootFolderId || s.driveRootFolderId,
+            savesFolderId: snapshotState.driveSubfolders?.savesId || s.driveSubfolders?.savesId,
             snapshot,
           });
 
@@ -1361,6 +1584,7 @@ const App: React.FC = () => {
             lastCloudSaveTrigger: force ? "manual" : "auto",
           });
           setIsDirty(false);
+          return true;
       } catch (e: any) {
           if (!silent) pushNotice({ message: "Save Failed: " + e.message, type: 'error' });
           updateDiagnostics({
@@ -1368,8 +1592,9 @@ const App: React.FC = () => {
             lastCloudSaveTrigger: force ? "manual" : "auto",
           });
           console.error(e);
+          return false;
       }
-  }, [activeChapterMetadata?.id, activeTab, isDirty, jobs, pushNotice, updateDiagnostics]);
+  }, [activeChapterMetadata?.id, activeTab, buildSnapshotState, isDirty, jobs, pushNotice, updateDiagnostics]);
 
   useEffect(() => {
     if (!state.driveRootFolderId) return;
@@ -1568,11 +1793,18 @@ const App: React.FC = () => {
              chapter.filename ||
              buildTextName(book.id, chapter.id, chapter.contentFormat === "markdown" ? "markdown" : "text");
            const audioName = buildMp3Name(book.id, chapter.id);
-           
-           const [textId, audioId] = await Promise.all([
-               findFileSync(textName, book.driveFolderId),
-               findFileSync(audioName, book.driveFolderId)
+           const volumeFolderId = await findChapterDriveStorageFolder(book.driveFolderId, chapter);
+           const searchFolders =
+             volumeFolderId && volumeFolderId !== book.driveFolderId
+               ? [volumeFolderId, book.driveFolderId]
+               : [book.driveFolderId];
+
+           const [textCandidates, audioCandidates] = await Promise.all([
+             Promise.all(searchFolders.map((folderId) => findFileSync(textName, folderId))),
+             Promise.all(searchFolders.map((folderId) => findFileSync(audioName, folderId))),
            ]);
+           const textId = textCandidates.find((id) => !!id) || null;
+           const audioId = audioCandidates.find((id) => !!id) || null;
            
            if (textId !== chapter.cloudTextFileId || audioId !== chapter.cloudAudioFileId) {
                 setState(p => ({
@@ -1855,7 +2087,92 @@ const App: React.FC = () => {
     } catch (e: any) {
       console.warn("[TaleVox][Library] chapter update failed", e);
     }
-  }, [markDirty]);
+
+    const normalizeVolumeName = (value: unknown) =>
+      typeof value === "string" && value.trim().length ? value.trim() : "";
+    const previousVolumeName = normalizeVolumeName((existing as any)?.volumeName);
+    const nextVolumeName = normalizeVolumeName((merged as any)?.volumeName);
+    const volumeChanged = previousVolumeName !== nextVolumeName;
+
+    if (
+      existing &&
+      volumeChanged &&
+      book.backend === StorageBackend.DRIVE &&
+      !!book.driveFolderId &&
+      isAuthorized
+    ) {
+      try {
+        const targetFolderId = await ensureChapterDriveStorageFolder(book.driveFolderId, merged);
+        const fileIds = Array.from(
+          new Set(
+            [
+              merged.cloudTextFileId,
+              merged.cloudAudioFileId,
+              (merged as any).audioDriveId,
+              existing.cloudTextFileId,
+              existing.cloudAudioFileId,
+              (existing as any).audioDriveId,
+            ].filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+          )
+        );
+
+        for (const fileId of fileIds) {
+          try {
+            const parentIds = await getDriveFileParentIds(fileId);
+            if (parentIds.includes(targetFolderId)) continue;
+
+            let moved = false;
+            for (const parentId of parentIds) {
+              if (!parentId || parentId === targetFolderId) continue;
+              try {
+                await moveFile(fileId, parentId, targetFolderId);
+                moved = true;
+                break;
+              } catch {
+                // Continue trying other known parents.
+              }
+            }
+
+            if (!moved && parentIds.length === 0 && targetFolderId !== book.driveFolderId) {
+              try {
+                await moveFile(fileId, book.driveFolderId, targetFolderId);
+                moved = true;
+              } catch {
+                // Fall through to warning below.
+              }
+            }
+
+            if (!moved) {
+              console.warn("[Drive] unable to move chapter file after volume change", {
+                bookId: book.id,
+                chapterId: merged.id,
+                fileId,
+                fromVolume: previousVolumeName || "(unassigned)",
+                toVolume: nextVolumeName || "(unassigned)",
+                targetFolderId,
+                parentIds,
+              });
+            }
+          } catch (e) {
+            console.warn("[Drive] chapter file parent lookup failed", {
+              bookId: book.id,
+              chapterId: merged.id,
+              fileId,
+              error: e,
+            });
+          }
+        }
+      } catch (e) {
+        console.warn("[Drive] volume folder move failed", {
+          bookId: book.id,
+          chapterId: merged.id,
+          fromVolume: previousVolumeName || "(unassigned)",
+          toVolume: nextVolumeName || "(unassigned)",
+          error: e,
+        });
+      }
+    }
+  }, [isAuthorized, markDirty]);
 
   const handleDeleteChapter = useCallback(async (chapterId: string) => {
     const s = stateRef.current;
@@ -2260,10 +2577,58 @@ const App: React.FC = () => {
       const book = s.books.find(b => b.id === s.activeBookId);
       if (!book) return;
       const chapterId = crypto.randomUUID();
-      const nextSortOrder = computeNextSortOrder(book.chapters || []);
-      const safeIndex = nextSortOrder;
+      const allChaptersForOrder = await loadAllChapterMeta(book.id).catch(() => book.chapters || []);
+      const usedSortOrder = new Set<number>(
+        allChaptersForOrder
+          .map((chapter) => getChapterSortOrder(chapter))
+          .filter((value) => Number.isFinite(value) && value > 0)
+      );
+      const parsedRequestedIndex =
+        typeof data?.index === "string" ? Number.parseInt(data.index, 10) : Number(data?.index);
+      let safeIndex =
+        Number.isFinite(parsedRequestedIndex) && parsedRequestedIndex > 0
+          ? Math.floor(parsedRequestedIndex)
+          : computeNextSortOrder(allChaptersForOrder);
+      while (usedSortOrder.has(safeIndex)) {
+        safeIndex += 1;
+      }
+      const nextSortOrder = safeIndex;
       const safeTitle = normalizeChapterTitle(data.title, `Chapter ${safeIndex}`);
       const contentFormat: "text" | "markdown" = data.contentFormat === "markdown" ? "markdown" : "text";
+      const stripLeadingTitleLine = (content: string, title: string): string => {
+        const rawContent = String(content ?? "");
+        const rawTitle = String(title ?? "").trim();
+        if (!rawContent.trim() || !rawTitle) return rawContent;
+
+        const normalize = (value: string) =>
+          value
+            .trim()
+            .replace(/^#+\s*/, "")
+            .replace(/^[\"'“”‘’]+|[\"'“”‘’]+$/g, "")
+            .replace(/\s+/g, " ")
+            .toLowerCase();
+
+        const lines = rawContent.replace(/\r\n/g, "\n").split("\n");
+        let firstContentLine = -1;
+        for (let i = 0; i < lines.length; i += 1) {
+          if (lines[i].trim().length > 0) {
+            firstContentLine = i;
+            break;
+          }
+        }
+        if (firstContentLine === -1) return rawContent;
+
+        const firstLine = lines[firstContentLine].replace(/^[-*]\s+/, "");
+        if (normalize(firstLine) !== normalize(rawTitle)) return rawContent;
+
+        lines.splice(firstContentLine, 1);
+        if (firstContentLine < lines.length && lines[firstContentLine].trim().length === 0) {
+          lines.splice(firstContentLine, 1);
+        }
+        const candidate = lines.join("\n");
+        return candidate.trim().length > 0 ? candidate : rawContent;
+      };
+      const chapterContent = stripLeadingTitleLine(data.content, safeTitle);
       const volumeName =
         typeof data.volumeName === "string" && data.volumeName.trim().length
           ? data.volumeName.trim()
@@ -2277,12 +2642,18 @@ const App: React.FC = () => {
           index: safeIndex,
           sortOrder: nextSortOrder,
           title: safeTitle,
-          content: data.content,
+          sourceUrl:
+            typeof data.sourceUrl === "string" && data.sourceUrl.trim().length
+              ? data.sourceUrl.trim()
+              : typeof data.url === "string" && data.url.trim().length
+                ? data.url.trim()
+                : undefined,
+          content: chapterContent,
           contentFormat,
           volumeName,
           volumeLocalChapter,
           wordCount: 0,
-          textLength: data.content.length,
+          textLength: chapterContent.length,
           filename: buildTextName(book.id, chapterId, contentFormat),
           progress: 0,
           progressChars: 0,
@@ -2290,10 +2661,14 @@ const App: React.FC = () => {
           updatedAt: Date.now()
       };
       if (book.driveFolderId && isAuthorized) {
-          try { newChapter.cloudTextFileId = await uploadToDrive(book.driveFolderId, newChapter.filename, data.content); newChapter.hasTextOnDrive = true; } catch {}
+          try {
+            const targetFolderId = await ensureChapterDriveStorageFolder(book.driveFolderId, newChapter);
+            newChapter.cloudTextFileId = await uploadToDrive(targetFolderId, newChapter.filename, chapterContent);
+            newChapter.hasTextOnDrive = true;
+          } catch {}
       }
       await libraryUpsertChapterMeta(book.id, { ...newChapter, content: undefined });
-      await librarySaveChapterText(book.id, newChapter.id, data.content);
+      await librarySaveChapterText(book.id, newChapter.id, chapterContent);
       setState(p => ({
         ...p,
         books: p.books.map(b => {
@@ -2310,7 +2685,9 @@ const App: React.FC = () => {
       if (book.backend === StorageBackend.DRIVE && book.driveFolderId && isAuthorized) {
         void syncBookInventoryToDrive(book);
       }
-      const shouldAutoGenerateAudio = book.settings?.autoGenerateAudioOnAdd !== false;
+      const isBulkImport = data?.url === "bulk-import";
+      const shouldAutoGenerateAudio =
+        !isBulkImport && book.settings?.autoGenerateAudioOnAdd !== false;
       const shouldAutoUploadAudio =
         book.backend === StorageBackend.DRIVE &&
         !!book.driveFolderId &&
@@ -2358,7 +2735,7 @@ const App: React.FC = () => {
               uiMode: stateRef.current.readerSettings.uiMode,
               isAuthorized,
               uploadToCloud: shouldAutoUploadAudio,
-              loadChapterText: async () => data.content,
+              loadChapterText: async () => chapterContent,
               onChapterUpdated: async (updated) => {
                 updateChapterInState(updated);
               },
@@ -2379,24 +2756,21 @@ const App: React.FC = () => {
           }
         })();
       }
-      if (!data.keepOpen) setIsAddChapterOpen(false); else pushNotice({ message: "Added", type: 'success', ms: 1000 });
+      if (!data.keepOpen) {
+        setIsAddChapterOpen(false);
+      } else if (!isBulkImport) {
+        pushNotice({ message: "Added", type: 'success', ms: 1000 });
+      }
   };
 
   const handleSelectRoot = async () => {
       setIsLinkModalOpen(true);
   };
 
-  const listAllChapterMeta = useCallback(async (bookId: string): Promise<Chapter[]> => {
-    const all: Chapter[] = [];
-    let after: number | null = -1;
-    for (;;) {
-      const page = await libraryListChaptersPage(bookId, after, 500);
-      all.push(...page.chapters);
-      if (page.nextAfterIndex == null) break;
-      after = page.nextAfterIndex;
-    }
-    return normalizeChapterOrder(all);
-  }, []);
+  const listAllChapterMeta = useCallback(
+    async (bookId: string): Promise<Chapter[]> => loadAllChapterMeta(bookId),
+    [loadAllChapterMeta]
+  );
 
   const repairOverwrittenChapterIndices = useCallback(async () => {
     const books = stateRef.current.books;
@@ -2570,6 +2944,44 @@ const App: React.FC = () => {
          for (const db of driveBooks) {
              if (isCancelled()) return;
              const files = await listFilesInFolder(db.id);
+             const rootFolders = files.filter(
+               (f) => f.mimeType === "application/vnd.google-apps.folder"
+             );
+             const driveVolumeFolderNames = rootFolders
+               .map((folder) => folder.name.trim())
+               .filter((folderName) => {
+                 const key = folderName.toLowerCase();
+                 return folderName.length > 0 && !RESERVED_DRIVE_BOOK_FOLDER_NAMES.has(key);
+               });
+             const chapterScanFiles = [...files];
+             const chapterFileVolumeHints = new Map<string, string>();
+             const skipNestedFolders = new Set(["meta", "attachments", "trash"]);
+             let nestedFolderCounter = 0;
+             for (const folder of rootFolders) {
+               if (isCancelled()) return;
+               if (nestedFolderCounter % 5 === 0) {
+                 await yieldToUi();
+               }
+               nestedFolderCounter += 1;
+               const folderName = folder.name.trim();
+               const folderKey = folderName.toLowerCase();
+               if (!folderKey || skipNestedFolders.has(folderKey)) continue;
+               try {
+                 const nestedFiles = await listFilesInFolder(folder.id);
+                 for (const nested of nestedFiles) {
+                   chapterScanFiles.push(nested);
+                   if (
+                     nested.mimeType !== "application/vnd.google-apps.folder" &&
+                     folderKey !== "text" &&
+                     folderKey !== "audio"
+                   ) {
+                     chapterFileVolumeHints.set(nested.id, folderName);
+                   }
+                 }
+               } catch (e) {
+                 console.warn("Drive nested folder scan failed", folder.name, e);
+               }
+             }
              const existingBookIdx = updatedBooks.findIndex(b => b.driveFolderId === db.id);
              let driveCoverImage: string | undefined;
              const existingCover =
@@ -2755,7 +3167,9 @@ const App: React.FC = () => {
              }
              
              let fileCounter = 0;
-             for (const f of files) {
+             const latestTextByChapterId = new Map<string, number>();
+             const latestAudioByChapterId = new Map<string, number>();
+             for (const f of chapterScanFiles) {
                  if (isCancelled()) return;
                  if (fileCounter % 40 === 0) {
                    await yieldToUi();
@@ -2776,6 +3190,7 @@ const App: React.FC = () => {
                      if (!chaptersMap.has(id)) {
                          const existing = existingMetaById.get(id);
                          const invMeta = inventoryById.get(id);
+                         const hintedVolumeName = chapterFileVolumeHints.get(f.id);
                          const invIdx = invMeta?.idx != null && invMeta.idx > 0 ? invMeta.idx : null;
                          const existingIdx = existing?.index != null && existing.index > 0 ? existing.index : null;
                          const fallbackIdx = fallbackOrder.get(id) ?? 0;
@@ -2798,7 +3213,10 @@ const App: React.FC = () => {
                               fallbackIdx,
                             title,
                             filename: existing?.filename ?? '',
-                            volumeName: (invMeta as any)?.volumeName ?? (existing as any)?.volumeName,
+                            volumeName:
+                              (invMeta as any)?.volumeName ??
+                              (existing as any)?.volumeName ??
+                              hintedVolumeName,
                             volumeLocalChapter:
                               (invMeta as any)?.volumeLocalChapter != null
                                 ? Number((invMeta as any).volumeLocalChapter)
@@ -2815,12 +3233,23 @@ const App: React.FC = () => {
                          chaptersMap.set(id, base);
                      }
                      const ch = chaptersMap.get(id)!;
+                     const modifiedAt = Date.parse(f.modifiedTime || "") || 0;
+                     const hintedVolumeName = chapterFileVolumeHints.get(f.id);
+                     if (!ch.volumeName && hintedVolumeName) {
+                       ch.volumeName = hintedVolumeName;
+                     }
                       if (ext === 'txt' || ext === 'md') {
+                          const prevModified = latestTextByChapterId.get(id) ?? -1;
+                          if (modifiedAt < prevModified) continue;
+                          latestTextByChapterId.set(id, modifiedAt);
                           ch.cloudTextFileId = f.id;
                           ch.filename = f.name;
                           ch.contentFormat = ext === "md" ? "markdown" : "text";
                           ch.hasTextOnDrive = true;
                       } else {
+                          const prevModified = latestAudioByChapterId.get(id) ?? -1;
+                          if (modifiedAt < prevModified) continue;
+                          latestAudioByChapterId.set(id, modifiedAt);
                           ch.cloudAudioFileId = f.id;
                           ch.audioStatus = AudioStatus.READY;
                       }
@@ -2891,47 +3320,76 @@ const App: React.FC = () => {
                          ec.id === dc.id || ec.cloudTextFileId === dc.cloudTextFileId
                      );
                      
-                     if (existingChIdx !== -1) {
-                          const existing = mergedChapters[existingChIdx];
-                          const isPlaceholderTitle = !dc.title || dc.title === 'Imported Chapter';
-                          const isPlaceholderIndex = !(typeof dc.index === 'number' && dc.index > 0);
-                          let merged: Chapter = {
-                              ...existing,
-                              ...dc,
-                              sortOrder: getChapterSortOrder(dc),
-                              title: isPlaceholderTitle ? existing.title : dc.title,
-                              index: isPlaceholderIndex ? existing.index : dc.index,
-                              filename: isPlaceholderTitle && existing.filename ? existing.filename : dc.filename,
-                              progress: existing.progress,
-                              progressSec: existing.progressSec,
-                              isCompleted: existing.isCompleted
-                          };
-                          merged = preserveChapterContent(existing, merged, "driveSync");
-                          mergedChapters[existingChIdx] = merged;
+                      if (existingChIdx !== -1) {
+                           const existing = mergedChapters[existingChIdx];
+                           const isPlaceholderTitle = !dc.title || dc.title === 'Imported Chapter';
+                           const isPlaceholderIndex = !(typeof dc.index === 'number' && dc.index > 0);
+                           const normalizedIncomingVolumeName =
+                             typeof (dc as any).volumeName === "string" && (dc as any).volumeName.trim().length
+                               ? (dc as any).volumeName.trim()
+                               : undefined;
+                           const normalizedExistingVolumeName =
+                             typeof (existing as any).volumeName === "string" && (existing as any).volumeName.trim().length
+                               ? (existing as any).volumeName.trim()
+                               : undefined;
+                           const normalizedIncomingVolumeLocalChapter =
+                             Number.isFinite((dc as any).volumeLocalChapter) && Number((dc as any).volumeLocalChapter) > 0
+                               ? Number((dc as any).volumeLocalChapter)
+                               : undefined;
+                           const normalizedExistingVolumeLocalChapter =
+                             Number.isFinite((existing as any).volumeLocalChapter) && Number((existing as any).volumeLocalChapter) > 0
+                               ? Number((existing as any).volumeLocalChapter)
+                               : undefined;
+                           let merged: Chapter = {
+                               ...existing,
+                               ...dc,
+                               sortOrder: getChapterSortOrder(dc),
+                               title: isPlaceholderTitle ? existing.title : dc.title,
+                               index: isPlaceholderIndex ? existing.index : dc.index,
+                               filename: isPlaceholderTitle && existing.filename ? existing.filename : dc.filename,
+                               volumeName: normalizedIncomingVolumeName ?? normalizedExistingVolumeName,
+                               volumeLocalChapter:
+                                 normalizedIncomingVolumeLocalChapter ?? normalizedExistingVolumeLocalChapter,
+                               progress: existing.progress,
+                               progressSec: existing.progressSec,
+                               isCompleted: existing.isCompleted
+                           };
+                           merged = preserveChapterContent(existing, merged, "driveSync");
+                           mergedChapters[existingChIdx] = merged;
                       } else {
-                          mergedChapters.push(dc);
+                         mergedChapters.push(dc);
                       }
                  }
+                 const volumeOrder = buildVolumeOrderFromDriveSync(
+                   existingBook.settings?.volumeOrder,
+                   driveVolumeFolderNames,
+                   mergedChapters
+                 );
                  updatedBooks[existingBookIdx] = {
                    ...existingBook,
                    coverImage: existingBook.coverImage ?? driveCoverImage,
                    chapters: orderChaptersForDisplay(mergedChapters),
+                   settings: normalizeBookSettings({
+                     ...existingBook.settings,
+                     volumeOrder,
+                   }),
                    chapterCount:
                      typeof existingBook.chapterCount === "number"
                        ? Math.max(existingBook.chapterCount, mergedChapters.length)
                        : mergedChapters.length,
                  };
              } else {
+                 const volumeOrder = buildVolumeOrderFromDriveSync([], driveVolumeFolderNames, driveChapters);
                  updatedBooks.push({
                      id: db.id,
                      title: db.name,
                      backend: StorageBackend.DRIVE,
                      driveFolderId: db.id,
                      driveFolderName: db.name,
-                     coverImage: driveCoverImage,
+                 coverImage: driveCoverImage,
                  chapters: orderChaptersForDisplay(driveChapters),
                  rules: [],
-                 settings: normalizeBookSettings(),
+                 settings: normalizeBookSettings({ ...DEFAULT_BOOK_SETTINGS, volumeOrder }),
                  updatedAt: Date.now()
              });
              }
@@ -2966,11 +3424,33 @@ const App: React.FC = () => {
              }
          }
          if (isCancelled()) return;
-         setState(p => ({
-           ...p,
-           books: updatedBooks.map((book) => normalizeBookChapters(book)),
-           driveSubfolders: { booksId, savesId, trashId },
-         }));
+         setState((p) => {
+           const latestBookById = new Map(p.books.map((book) => [book.id, book] as const));
+           const mergedBooks = updatedBooks.map((book) => {
+             const latest = latestBookById.get(book.id);
+             const latestVolumeOrder = latest?.settings?.volumeOrder;
+             const syncVolumeOrder = book.settings?.volumeOrder;
+             const mergedVolumeOrder = buildVolumeOrderFromDriveSync(
+               latestVolumeOrder,
+               Array.isArray(syncVolumeOrder) ? syncVolumeOrder : [],
+               book.chapters
+             );
+             const mergedSettings = normalizeBookSettings({
+               ...book.settings,
+               ...latest?.settings,
+               volumeOrder: mergedVolumeOrder,
+             });
+             return normalizeBookChapters({
+               ...book,
+               settings: mergedSettings,
+             });
+           });
+           return {
+             ...p,
+             books: mergedBooks,
+             driveSubfolders: { booksId, savesId, trashId },
+           };
+         });
          updateDiagnostics({ lastSyncSuccessAt: Date.now(), lastSyncError: undefined });
          const activeId = stateRef.current.activeBookId;
          if (activeId) {
@@ -2988,7 +3468,88 @@ const App: React.FC = () => {
       }
   };
 
+  const restoreLatestSnapshotBeforeSync = useCallback(async (): Promise<boolean> => {
+    const currentState = stateRef.current;
+    if (!currentState.driveRootFolderId || !isAuthorized || !isOnline) return false;
+
+    try {
+      const restoreResult = await restoreFromDriveIfAvailable({
+        rootFolderId: currentState.driveRootFolderId,
+        lastSnapshotCreatedAt: readLocalSnapshotMeta().lastSnapshotCreatedAt,
+      });
+      if (!restoreResult.restored) return false;
+
+      const attachmentLists = await Promise.all(
+        currentState.books.map((book) => libraryListBookAttachments(book.id).catch(() => []))
+      );
+      const merged = applyFullSnapshot({
+        snapshot: restoreResult.snapshot,
+        currentState,
+        currentAttachments: attachmentLists.flat(),
+        currentJobs: jobs,
+      });
+
+      try {
+        if (restoreResult.snapshot.readerProgress) {
+          safeSetLocalStorage(
+            "talevox_reader_progress",
+            JSON.stringify(restoreResult.snapshot.readerProgress)
+          );
+        }
+        if (restoreResult.snapshot.legacyProgressStore) {
+          safeSetLocalStorage(
+            PROGRESS_STORE_KEY,
+            JSON.stringify(restoreResult.snapshot.legacyProgressStore)
+          );
+        }
+      } catch {}
+
+      for (const restoredBook of merged.state.books) {
+        await libraryUpsertBook({
+          ...restoredBook,
+          chapters: [],
+          directoryHandle: undefined,
+        });
+        if (restoredBook.chapters.length > 0) {
+          await libraryBulkUpsertChapters(
+            restoredBook.id,
+            restoredBook.chapters.map((chapter) => ({
+              chapter: { ...chapter, content: undefined },
+              content: typeof chapter.content === "string" ? chapter.content : null,
+            }))
+          );
+        }
+      }
+
+      if (merged.attachments.length) {
+        const attachmentsByBook = new Map<string, BookAttachment[]>();
+        for (const attachment of merged.attachments) {
+          const list = attachmentsByBook.get(attachment.bookId) || [];
+          list.push(attachment);
+          attachmentsByBook.set(attachment.bookId, list);
+        }
+        for (const [bookId, items] of attachmentsByBook.entries()) {
+          await libraryBulkUpsertBookAttachments(bookId, items);
+        }
+      }
+
+      setState(merged.state);
+      stateRef.current = merged.state;
+      setJobs(merged.jobs);
+      setIsDirty(false);
+      return true;
+    } catch (e) {
+      console.warn("[Sync] pre-sync snapshot restore failed", e);
+      return false;
+    }
+  }, [isAuthorized, isOnline, jobs, setJobs]);
+
   const handleSync = async (manual = false) => {
+      if (manual) {
+        await restoreLatestSnapshotBeforeSync();
+      }
+      const saved = await handleSaveState(true, false);
+      if (!saved) return;
       await performFullDriveSync(manual);
   };
   performFullDriveSyncRef.current = performFullDriveSync;
@@ -3458,11 +4019,15 @@ const App: React.FC = () => {
               <Suspense fallback={<div className="p-6 text-xs font-black uppercase tracking-widest opacity-60 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading import tools...</div>}>
                 <LazyExtractor 
                   onChapterExtracted={handleChapterExtracted} 
-                  suggestedIndex={computeNextSortOrder(activeBook?.chapters || [])}
+                  suggestedIndex={Math.max(
+                    computeNextSortOrder(activeBook?.chapters || []),
+                    Number(activeBook?.chapterCount || 0) + 1
+                  )}
                   theme={state.theme} 
                   uiMode={state.readerSettings.uiMode}
                   defaultVoiceId={activeBook?.settings.defaultVoiceId} 
                   existingChapters={activeBook?.chapters || []}
+                  existingVolumeNames={addChapterVolumeNames}
                 />
               </Suspense>
             </div>
@@ -3584,6 +4149,15 @@ const App: React.FC = () => {
               books={state.books} activeBookId={state.activeBookId}
               onSelectBook={id => {
                 setState(p => ({ ...p, activeBookId: id }));
+                updateNavContext({
+                  bookId: id,
+                  collectionScrollTop: 0,
+                  chapterId: undefined,
+                  chapterIndex: undefined,
+                  scrollTop: 0,
+                  lastViewType: "collection",
+                  lastNonReaderViewType: "collection",
+                });
                 setActiveTab('collection');
                 void loadMoreChapters(id, true);
               }} 
@@ -3608,12 +4182,17 @@ const App: React.FC = () => {
                 onUpdateBook={handleUpdateBookMeta}
                 onDeleteBook={(id) => { handleDeleteBookMeta(id); setActiveTab('library'); }}
                 onUpdateBookSettings={s => {
+                  const currentBook =
+                    stateRef.current.books.find((book) => book.id === activeBook.id) ?? activeBook;
                   const updatedBook = {
-                    ...activeBook,
-                    settings: normalizeBookSettings({ ...activeBook.settings, ...s }),
+                    ...currentBook,
+                    settings: normalizeBookSettings({ ...currentBook.settings, ...s }),
                   };
-                  setState(p => {
-                    const next = { ...p, books: p.books.map(b => b.id === activeBook.id ? updatedBook : b) };
+                  setState((p) => {
+                    const next = {
+                      ...p,
+                      books: p.books.map((book) => (book.id === activeBook.id ? updatedBook : book)),
+                    };
                     if (s.defaultVoiceId) {
                       next.selectedVoiceName = s.defaultVoiceId;
                     }
@@ -3636,23 +4215,12 @@ const App: React.FC = () => {
                 onRetryJob={handleRetryJob}
                 onRefreshJobs={refreshJobs}
                 isDirty={isDirty}
+                isSyncing={isSyncing}
                 onRegisterBackHandler={registerChapterBackHandler}
                 lastSavedAt={state.lastSavedAt}
-                restoreScrollTop={
-                  navContextRef.current?.bookId === activeBook.id
-                    ? navContextRef.current?.collectionScrollTop ?? null
-                    : null
-                }
-                restoreChapterId={
-                  navContextRef.current?.bookId === activeBook.id
-                    ? navContextRef.current?.chapterId ?? null
-                    : null
-                }
-                restoreChapterIndex={
-                  navContextRef.current?.bookId === activeBook.id
-                    ? navContextRef.current?.chapterIndex ?? null
-                    : null
-                }
+                restoreScrollTop={0}
+                restoreChapterId={null}
+                restoreChapterIndex={null}
                 onScrollPositionChange={handleCollectionScroll}
                 onQueueGenerateJob={async (chapterIds: string[], voiceId?: string) => {
                 if (stateRef.current.backupInProgress) {

@@ -1,5 +1,5 @@
 import React from "react";
-import { Cloud, RotateCcw, Trash2, Check, RefreshCw } from "lucide-react";
+import { Cloud, RotateCcw, Trash2, Check, RefreshCw, FolderInput } from "lucide-react";
 
 type Props = {
   isDark: boolean;
@@ -7,6 +7,7 @@ type Props = {
   selectedCount: number;
   onUpload: () => void;
   onRegen: () => void;
+  onAssignVolume: () => void;
   onDone: () => void;
   onReset: () => void;
   onDelete: () => void;
@@ -18,6 +19,7 @@ const BulkActionDock: React.FC<Props> = ({
   selectedCount,
   onUpload,
   onRegen,
+  onAssignVolume,
   onDone,
   onReset,
   onDelete,
@@ -28,7 +30,7 @@ const BulkActionDock: React.FC<Props> = ({
         isDark ? "bg-slate-950/80 border-slate-700 backdrop-blur" : "bg-white/90 border-black/10 backdrop-blur"
       }`}
     >
-      <div className="grid grid-cols-5 gap-2">
+      <div className="grid grid-cols-3 gap-2">
         <button
           onClick={onUpload}
           disabled={!selectedCount || !canBulkUpload}
@@ -48,6 +50,16 @@ const BulkActionDock: React.FC<Props> = ({
         >
           <RotateCcw className="w-4 h-4 mx-auto mb-1" />
           Regen Audio
+        </button>
+        <button
+          onClick={onAssignVolume}
+          disabled={!selectedCount}
+          className={`px-2 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${
+            selectedCount ? "bg-black/5 hover:bg-black/10" : "opacity-40 bg-black/5 cursor-not-allowed"
+          }`}
+        >
+          <FolderInput className="w-4 h-4 mx-auto mb-1" />
+          Volume
         </button>
         <button
           onClick={onDone}

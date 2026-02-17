@@ -37,11 +37,14 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
 import java.util.regex.Matcher;
 import java.util.UUID;
@@ -56,6 +59,7 @@ public class GenerateAudioWorker extends Worker {
     private static final String OPENAI_MODEL = "gpt-4o-mini-tts-2025-12-15";
     private static final int MAX_UPLOAD_RETRIES = 5;
     private static final String CHANNEL_ID = JobNotificationChannels.CHANNEL_JOBS_ID;
+    private final Map<String, String> driveFolderCache = new HashMap<>();
 
     private static class VoiceConfig {
         String provider;
@@ -201,13 +205,14 @@ public class GenerateAudioWorker extends Worker {
                 String uploadError = null;
                 String uploadedId = null;
                 String accessToken = loadDriveAccessToken();
-                String booksFolderId = loadDriveBooksFolderId();
-                if (accessToken != null && booksFolderId != null) {
+                if (accessToken != null && driveFolderId != null && !driveFolderId.isEmpty()) {
                     try {
+                        String targetFolderId =
+                            resolveChapterDriveFolder(accessToken, driveFolderId, effectiveBookId, chapterId);
                         String filename = "c_" + chapterId + ".mp3";
                         uploadedId = uploadToDriveWithRetry(
                             accessToken,
-                            booksFolderId,
+                            targetFolderId,
                             filename,
                             "audio/mpeg",
                             mp3
@@ -560,6 +565,145 @@ public class GenerateAudioWorker extends Worker {
         }
 
         return null;
+    }
+
+    private String normalizeVolumeName(String raw) {
+        if (raw == null) return null;
+        String trimmed = raw.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private String loadChapterVolumeName(String bookId, String chapterId) {
+        SQLiteDatabase db = getDb();
+        try {
+            if (bookId != null && !bookId.isEmpty()) {
+                Cursor cursor = db.query(
+                    "chapters",
+                    new String[]{"volumeName"},
+                    "id = ? AND bookId = ?",
+                    new String[]{chapterId, bookId},
+                    null,
+                    null,
+                    null
+                );
+                try {
+                    if (cursor.moveToFirst()) {
+                        return normalizeVolumeName(cursor.getString(cursor.getColumnIndexOrThrow("volumeName")));
+                    }
+                } finally {
+                    cursor.close();
+                }
+            }
+
+            Cursor cursor = db.query(
+                "chapters",
+                new String[]{"volumeName"},
+                "id = ?",
+                new String[]{chapterId},
+                null,
+                null,
+                null
+            );
+            try {
+                if (cursor.moveToFirst()) {
+                    return normalizeVolumeName(cursor.getString(cursor.getColumnIndexOrThrow("volumeName")));
+                }
+            } finally {
+                cursor.close();
+            }
+        } catch (Exception ignored) {
+            return null;
+        }
+        return null;
+    }
+
+    private String resolveChapterDriveFolder(String accessToken, String driveFolderId, String bookId, String chapterId) {
+        if (driveFolderId == null || driveFolderId.isEmpty()) return driveFolderId;
+        String volumeName = loadChapterVolumeName(bookId, chapterId);
+        if (volumeName == null) return driveFolderId;
+        try {
+            return resolveOrCreateVolumeFolder(accessToken, driveFolderId, volumeName);
+        } catch (Exception e) {
+            Log.w("GenerateAudioWorker", "resolveChapterDriveFolder fallback to root: " + e.getMessage());
+            return driveFolderId;
+        }
+    }
+
+    private String resolveOrCreateVolumeFolder(String accessToken, String rootFolderId, String volumeName) throws Exception {
+        if (volumeName == null || volumeName.isEmpty()) return rootFolderId;
+        String cacheKey = rootFolderId + "::" + volumeName.toLowerCase();
+        String cached = driveFolderCache.get(cacheKey);
+        if (cached != null && !cached.isEmpty()) return cached;
+        String existing = findSubfolderId(accessToken, rootFolderId, volumeName);
+        String resolved = existing != null ? existing : createSubfolder(accessToken, rootFolderId, volumeName);
+        if (resolved == null || resolved.isEmpty()) return rootFolderId;
+        driveFolderCache.put(cacheKey, resolved);
+        return resolved;
+    }
+
+    private String findSubfolderId(String accessToken, String rootFolderId, String folderName) throws Exception {
+        String escaped = folderName.replace("'", "\\'");
+        String query = "'" + rootFolderId + "' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false and name = '" + escaped + "'";
+        String encodedQ = URLEncoder.encode(query, "UTF-8");
+        URL url = new URL(
+            "https://www.googleapis.com/drive/v3/files?q=" + encodedQ +
+                "&fields=files(id,name)&pageSize=10&supportsAllDrives=true&includeItemsFromAllDrives=true"
+        );
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("GET");
+        conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+        conn.setRequestProperty("Accept", "application/json");
+        int code = conn.getResponseCode();
+        if (code < 200 || code >= 300) {
+            throw new Exception("Drive subfolder lookup failed: " + code);
+        }
+        byte[] bytes = readAllBytes(conn.getInputStream());
+        JSONObject data = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+        JSONArray files = data.optJSONArray("files");
+        if (files == null) return null;
+        for (int i = 0; i < files.length(); i++) {
+            JSONObject file = files.optJSONObject(i);
+            if (file == null) continue;
+            String id = file.optString("id", null);
+            String name = file.optString("name", "");
+            if (id != null && !id.isEmpty() && name.equalsIgnoreCase(folderName)) {
+                return id;
+            }
+        }
+        return null;
+    }
+
+    private String createSubfolder(String accessToken, String rootFolderId, String folderName) throws Exception {
+        JSONObject body = new JSONObject();
+        body.put("name", folderName);
+        body.put("mimeType", "application/vnd.google-apps.folder");
+        JSONArray parents = new JSONArray();
+        parents.put(rootFolderId);
+        body.put("parents", parents);
+
+        URL url = new URL("https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id,name");
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setDoOutput(true);
+        conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+        conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+        byte[] payload = body.toString().getBytes(StandardCharsets.UTF_8);
+        conn.setFixedLengthStreamingMode(payload.length);
+        try (OutputStream os = conn.getOutputStream()) {
+            os.write(payload);
+        }
+
+        int code = conn.getResponseCode();
+        if (code < 200 || code >= 300) {
+            throw new Exception("Drive subfolder create failed: " + code);
+        }
+        byte[] bytes = readAllBytes(conn.getInputStream());
+        JSONObject data = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+        String id = data.optString("id", null);
+        if (id == null || id.isEmpty()) {
+            throw new Exception("Drive subfolder create returned no id");
+        }
+        return id;
     }
 
     private String readTextFromPath(String path) {
@@ -973,35 +1117,6 @@ public class GenerateAudioWorker extends Worker {
             long expiresAt = session.optLong("expiresAt", 0);
             if (expiresAt > 0 && System.currentTimeMillis() > expiresAt) return null;
             return token;
-        } catch (JSONException e) {
-            return null;
-        }
-    }
-
-    private String loadDriveBooksFolderId() {
-        SQLiteDatabase db = getDb();
-        Cursor c = db.query(
-            "kv",
-            new String[]{"json"},
-            "key = ?",
-            new String[]{"app_state"},
-            null,
-            null,
-            null
-        );
-        if (!c.moveToFirst()) {
-            c.close();
-            return null;
-        }
-        String raw = c.getString(c.getColumnIndexOrThrow("json"));
-        c.close();
-        try {
-            JSONObject state = new JSONObject(raw);
-            JSONObject sub = state.optJSONObject("driveSubfolders");
-            if (sub == null) return null;
-            String booksId = sub.optString("booksId", null);
-            if (booksId == null || booksId.isEmpty()) return null;
-            return booksId;
         } catch (JSONException e) {
             return null;
         }

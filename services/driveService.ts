@@ -51,6 +51,17 @@ export async function moveFile(fileId: string, currentParentId: string, newParen
   if (!response.ok) throw new Error("MOVE_FAILED");
 }
 
+export async function getDriveFileParentIds(fileId: string): Promise<string[]> {
+  if (!fileId) return [];
+  const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(
+    fileId
+  )}?fields=id,parents&supportsAllDrives=true`;
+  const response = await driveFetchWithRetry("getDriveFileParentIds", url);
+  if (!response.ok) throw new Error(`GET_PARENTS_FAILED: ${response.status}`);
+  const data = await response.json().catch(() => ({} as any));
+  return Array.isArray(data?.parents) ? data.parents.filter((id: unknown) => typeof id === "string") : [];
+}
+
 // Send a Drive file to the user's trash (true trash), NOT your app "_trash" folder.
 export async function moveFileToTrash(fileId: string): Promise<void> {
   if (!fileId) return;

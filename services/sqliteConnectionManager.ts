@@ -310,6 +310,26 @@ export async function getSqliteDb(
 }
 
 export async function closeSqliteDb(name: string): Promise<void> {
+  // Intentionally do not close the connection to allow pooling/reuse.
+  // The 'dbCache' map acts as our connection pool.
+  // Only explicitly close if forcing a reset.
+  const db = dbCache.get(name);
+  if (db) {
+    // Just verify it's still usable, if not remove from cache
+    try {
+      const isConnected = await safeIsConnection(name);
+      if (!isConnected) {
+        dbCache.delete(name);
+        dbMeta.delete(name);
+        dbReady.delete(name);
+      }
+    } catch {
+      // ignore
+    }
+  }
+}
+
+export async function forceCloseSqliteDb(name: string): Promise<void> {
   const db = dbCache.get(name);
   if (db) {
     try {

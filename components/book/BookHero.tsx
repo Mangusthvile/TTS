@@ -1,5 +1,5 @@
 import React from "react";
-import { AlertCircle, Cloud, CloudOff, FolderSync, Image as ImageIcon, Loader2 } from "lucide-react";
+import { Image as ImageIcon, AlertCircle, Cloud, CloudOff, FolderSync, Loader2 } from "lucide-react";
 import type { Book } from "../../types";
 
 type SyncBadge = {
@@ -18,7 +18,41 @@ type Props = {
   coverMetaRef: React.RefObject<HTMLDivElement | null>;
 };
 
-const BookHero: React.FC<Props> = ({ book, syncBadge, lastSavedAt, coverCardRef, coverRowRef, coverImageRef, coverMetaRef }) => {
+const syncLabelToText = (label: SyncBadge["statusLabel"]) => {
+  if (label === "NOT SYNCED") return "Not synced";
+  if (label === "SYNCING") return "Syncing";
+  if (label === "PAUSED") return "Paused";
+  if (label === "SYNCED") return "Synced";
+  return "Local";
+};
+
+const syncLabelToIcon = (label: SyncBadge["statusLabel"]) => {
+  if (label === "SYNCING") return <Loader2 className="w-3 h-3 animate-spin" />;
+  if (label === "PAUSED") return <AlertCircle className="w-3 h-3" />;
+  if (label === "NOT SYNCED") return <CloudOff className="w-3 h-3" />;
+  if (label === "SYNCED") return <Cloud className="w-3 h-3" />;
+  return <FolderSync className="w-3 h-3" />;
+};
+
+const lastSavedLabel = (timestamp?: number) =>
+  timestamp
+    ? new Date(timestamp).toLocaleTimeString()
+    : "not available yet";
+
+const BookHero: React.FC<Props> = ({
+  book,
+  syncBadge,
+  lastSavedAt,
+  coverCardRef,
+  coverRowRef,
+  coverImageRef,
+  coverMetaRef,
+}) => {
+  const backendLabel = book.backend === "drive" ? "Drive" : "Local";
+  const syncText = syncLabelToText(syncBadge.statusLabel);
+  const syncIcon = syncLabelToIcon(syncBadge.statusLabel);
+  const chapterCount = book.chapterCount ?? book.chapters.length;
+
   return (
     <div ref={coverCardRef} className="p-4 sm:p-5 bg-transparent border-0 shadow-none">
       <div ref={coverRowRef} className="flex items-start gap-4">
@@ -32,48 +66,20 @@ const BookHero: React.FC<Props> = ({ book, syncBadge, lastSavedAt, coverCardRef,
             <ImageIcon className="w-6 h-6 opacity-20" />
           )}
         </div>
-        <div className="flex-1 min-w-0 flex flex-col gap-1">
-          <h1 className="font-black tracking-tight text-xl sm:text-3xl line-clamp-2 heading-font">{book.title}</h1>
-          <div className="text-[10px] font-black uppercase tracking-widest opacity-70">{syncBadge.backendLabel}</div>
-          <div
-            className={`inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-widest w-fit ${
-              syncBadge.tone === "emerald"
-                ? "text-emerald-500"
-                : syncBadge.tone === "amber"
-                  ? "text-amber-500"
-                  : syncBadge.tone === "indigo"
-                    ? "text-indigo-500"
-                    : "text-slate-500"
-            }`}
-          >
-            {syncBadge.statusLabel === "SYNCING" ? (
-              <Loader2 className="w-3 h-3 animate-spin" />
-            ) : syncBadge.statusLabel === "PAUSED" ? (
-              <AlertCircle className="w-3 h-3" />
-            ) : syncBadge.statusLabel === "NOT SYNCED" ? (
-              <CloudOff className="w-3 h-3" />
-            ) : syncBadge.statusLabel === "SYNCED" ? (
-              <Cloud className="w-3 h-3" />
-            ) : (
-              <FolderSync className="w-3 h-3" />
-            )}
-            {syncBadge.statusLabel === "NOT SYNCED"
-              ? "Not synced"
-              : syncBadge.statusLabel === "SYNCING"
-                ? "Syncing"
-                : syncBadge.statusLabel === "PAUSED"
-                  ? "Paused"
-                  : syncBadge.statusLabel === "SYNCED"
-                    ? "Synced"
-                    : "Local"}
+        <div className="flex-1 min-w-0">
+          <div className="text-xl sm:text-3xl font-black leading-tight line-clamp-2 heading-font">
+            {book.title}
           </div>
-          {lastSavedAt ? (
-            <div className="text-[10px] font-black uppercase tracking-widest opacity-60">
-              Last saved {new Date(lastSavedAt).toLocaleTimeString()}
+          <div ref={coverMetaRef} className="mt-2 flex flex-col gap-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="chip">{backendLabel}</span>
+              <span className="chip inline-flex items-center gap-1 whitespace-nowrap">
+                {syncIcon}
+                {syncText}
+              </span>
             </div>
-          ) : null}
-          <div ref={coverMetaRef} className="text-[10px] font-black uppercase tracking-widest opacity-50">
-            {(book.chapterCount ?? book.chapters.length)} chapters
+            <div className="text-[11px] opacity-80">Last saved {lastSavedLabel(lastSavedAt)}</div>
+            <div className="text-[11px] opacity-80">{chapterCount} chapters</div>
           </div>
         </div>
       </div>

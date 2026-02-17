@@ -350,7 +350,7 @@ export class MobilePlaybackAdapter implements PlaybackAdapter {
           } catch {
             // ignore transient errors
           }
-        }, 250);
+        }, 1000); // Relaxed from 250ms to 1s to reduce bridge traffic
       }
     } else if (this.pollTimer != null) {
       clearInterval(this.pollTimer);

@@ -65,9 +65,25 @@ const collapseInlineWhitespace = (input: string) =>
 const cleanInlineMarkdown = (input: string) =>
   collapseInlineWhitespace(
     stripHtmlTags(
-      stripEmphasisMarkers(stripInlineCodeMarkers(convertLinks(convertImages(input))))
+      stripEmphasisMarkers(
+        stripInlineCodeMarkers(convertLinks(convertImages(normalizeHtmlLineBreaks(input))))
+      )
     )
   );
+
+const cleanTableCellMarkdown = (input: string) =>
+  normalizeHtmlLineBreaks(input)
+    .split("\n")
+    .map((line) =>
+      collapseInlineWhitespace(
+        stripHtmlTags(
+          stripEmphasisMarkers(stripInlineCodeMarkers(convertLinks(convertImages(line))))
+        )
+      )
+    )
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 
 const parseTableRow = (line: string) => {
   const trimmed = line.trim();
@@ -126,7 +142,9 @@ const parsePlainTextBlocks = (rawText: string): RenderBlock[] => {
 };
 
 const parseMarkdownBlocks = (rawText: string): RenderBlock[] => {
-  const text = normalizeNewlines(stripZeroWidth(normalizeHtmlLineBreaks(rawText || "")));
+  // Keep <br> markers intact during table detection; converting them to real newlines
+  // before parsing can split a single markdown table row into multiple blocks.
+  const text = normalizeNewlines(stripZeroWidth(rawText || ""));
   const lines = text.split("\n");
   const blocks: RenderBlock[] = [];
   let i = 0;
@@ -181,7 +199,7 @@ const parseMarkdownBlocks = (rawText: string): RenderBlock[] => {
         id: makeBlockId(),
         type: "table",
         headers: headerCells.map((c) => cleanInlineMarkdown(c)),
-        rows: rows.map((row) => row.map((c) => cleanInlineMarkdown(c))),
+        rows: rows.map((row) => row.map((c) => cleanTableCellMarkdown(c))),
         startIndex: -1,
         endIndex: -1,
       });

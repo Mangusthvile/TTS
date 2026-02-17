@@ -66,6 +66,30 @@ export function useBookState(params: Params) {
           .filter((name): name is string => typeof name === "string" && name.trim().length > 0)
           .map((name) => name.trim())
       : [];
+    const includeEmptyVolumes = searchQuery.trim().length === 0;
+    if (includeEmptyVolumes) {
+      for (const volumeName of explicitOrder) {
+        if (grouped.has(volumeName)) continue;
+        const m = volumeName.match(/^(book|volume)\s*(\d+)/i);
+        const volumeNumber = m ? parseInt(m[2], 10) : null;
+        volumes.push({
+          volumeName,
+          volumeNumber: Number.isFinite(volumeNumber) ? volumeNumber : null,
+          chapters: [],
+        });
+      }
+      for (const [volumeName] of Object.entries(collapsedVolumes || {})) {
+        const normalized = volumeName.trim();
+        if (!normalized || grouped.has(normalized) || volumes.some((v) => v.volumeName === normalized)) continue;
+        const m = normalized.match(/^(book|volume)\s*(\d+)/i);
+        const volumeNumber = m ? parseInt(m[2], 10) : null;
+        volumes.push({
+          volumeName: normalized,
+          volumeNumber: Number.isFinite(volumeNumber) ? volumeNumber : null,
+          chapters: [],
+        });
+      }
+    }
     const explicitOrderMap = new Map<string, number>();
     explicitOrder.forEach((name, idx) => explicitOrderMap.set(name, idx));
 
@@ -84,7 +108,7 @@ export function useBookState(params: Params) {
       volumes,
       ungrouped: normalizeChapterOrder(ungrouped),
     };
-  }, [filteredChapters, book.settings?.volumeOrder]);
+  }, [filteredChapters, book.settings?.volumeOrder, collapsedVolumes, searchQuery]);
 
   const visibleChapters = useMemo(() => {
     const rows: Chapter[] = [];

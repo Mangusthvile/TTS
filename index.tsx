@@ -15,7 +15,7 @@ declare const __APP_VERSION__: string;
 
 // Prefer Vite-injected version; fallback only if somehow missing.
 window.__APP_VERSION__ =
-  (typeof __APP_VERSION__ !== "undefined" && __APP_VERSION__) || "2.10.37";
+  (typeof __APP_VERSION__ !== "undefined" && __APP_VERSION__) || "3.0.16";
 
 // Install global trace listeners immediately
 installGlobalTraceHandlers();

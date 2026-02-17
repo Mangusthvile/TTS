@@ -3,7 +3,6 @@ package com.cmwil.talevox;
 import android.content.Intent;
 import android.util.Log;
 import android.os.Bundle;
-import android.os.Build;
 
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.Plugin;
@@ -14,6 +13,9 @@ import com.cmwil.talevox.notifications.JobNotificationChannels;
 
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import android.content.pm.PackageManager;
 
 import android.Manifest;
@@ -28,7 +30,31 @@ public class MainActivity extends BridgeActivity implements ModifiedMainActivity
     registerPlugin(JobRunnerPlugin.class);
     registerPlugin(NativePlayerPlugin.class);
     super.onCreate(savedInstanceState);
+    applyImmersiveMode();
     JobNotificationChannels.ensureChannels(getApplicationContext());
+  }
+
+  @Override
+  public void onResume() {
+    super.onResume();
+    applyImmersiveMode();
+  }
+
+  @Override
+  public void onWindowFocusChanged(boolean hasFocus) {
+    super.onWindowFocusChanged(hasFocus);
+    if (hasFocus) {
+      applyImmersiveMode();
+    }
+  }
+
+  private void applyImmersiveMode() {
+    if (getWindow() == null) return;
+    WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+    WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+    if (controller == null) return;
+    controller.hide(WindowInsetsCompat.Type.statusBars() | WindowInsetsCompat.Type.navigationBars());
+    controller.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
   }
 
   @Override

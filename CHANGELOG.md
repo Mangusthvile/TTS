@@ -1,5 +1,84 @@
 # TaleVox TTS Changelog
 
+## 3.0.16
+- Volume order changes in chapter view now persist reliably and no longer revert after sync runs.
+- Native book loading now preserves full book settings (including `volumeOrder`) so custom volume order survives app restart.
+- Book settings updates now merge against the latest in-memory book state to avoid stale overwrites during concurrent syncs.
+
+## 3.0.15
+- Drive sync now preserves existing chapter `volumeName`/`volumeLocalChapter` when a partial Drive refresh lacks volume metadata, preventing chapters from popping out of their assigned volume.
+- Android Generate Audio jobs now upload chapter MP3 files into the correct book/volume folder (using chapter volume assignment) instead of the global Books folder.
+- Android Fix Integrity now scans nested book subfolders recursively and writes restored/generated chapter files into each chapter's assigned volume folder.
+
+## 3.0.14
+- Drive integrity scan now walks nested subfolders recursively, so `Check/Fix` sees chapter files stored deeper than one folder level.
+- `Check/Fix` now defaults to safe recovery (`Convert Legacy` on, `Generate Audio` off, `Cleanup` off) to prevent accidental mass TTS retries and cleanup noise.
+- Background `Fix` queue is now limited to audio-only jobs; conversion/cleanup runs inline with the recursive scan path for consistent folder handling.
+- Multi-select now supports batch move to a volume (or Unassigned) through a proper volume picker modal and a dedicated `Volume` action in the bulk dock.
+
+## 3.0.13
+- Smart Upload now includes volume options from saved volume order plus live Drive subfolders, so all existing volumes are selectable (not only currently loaded chapter volumes).
+- Bulk chapter import now runs sequentially with an in-app upload progress bar and best-effort background notification pings at start/finish.
+- Chapter import indexing now uses full book metadata and requested manifest indices safely, preventing duplicate/rolled-back chapter numbers during large uploads.
+- Bulk imports no longer auto-trigger per-chapter audio generation, reducing repeated Cloud TTS 500 spam during large chapter uploads.
+
+## 3.0.12
+- Drive sync now seeds `volumeOrder` from existing Drive subfolders, so empty volumes still appear in chapter view after reload/sync.
+- Existing volume order now merges saved order + Drive folders + chapter metadata to prevent volume headers disappearing.
+- App version text now reads from `package.json` at build time, so Settings always shows the current release version.
+
+## 3.0.11
+- Smart Upload now reads `talevox_manifest.json` from normal file batches (not just ZIP imports).
+- Manifest titles/source URLs/chapter indices are applied to matching chapter files during preview/import.
+- Import picker now accepts `.json` so manifest files can be selected alongside chapter files.
+
+## 3.0.10
+- Smart Upload preview rows are now mobile-friendly (no off-screen volume selector overflow).
+- Added bulk volume assignment in Smart Upload: choose one folder and apply it to all chapters at once.
+- Individual chapter volume selectors remain editable after bulk assign for per-chapter overrides.
+
+## 3.0.9
+- Creating a volume in chapter view now also creates the matching Drive subfolder for Drive-backed books.
+- Moving a chapter between volumes now moves its Drive text/audio files into the destination volume folder (or back to book root when unassigned).
+- Added Drive parent lookup helper to support reliable file moves across volume folder changes.
+
+## 3.0.8
+- Drive books now place chapter text/audio uploads into per-volume subfolders (using the chapter's assigned volume name).
+- Drive sync/integrity scans now include chapter files found inside book subfolders so volume-stored files are recognized.
+- Smart Upload now accepts `.zip` batches and reads `talevox_manifest.json` (chapter index/title/source URL) when present.
+
+## 3.0.7
+- Fixed wrench-mode long-press move on mobile so the initial release tap no longer cancels the picked chapter/volume.
+- Hold-to-pick now reliably keeps the item active, then tap destination reorders/moves as expected.
+
+## 3.0.6
+- Organize (wrench) mode now supports mobile long-press move flow: hold a chapter/volume to pick it, then tap destination to reorder/move.
+- Added visual picked-state highlight for held chapter/volume targets and ungroup drop zones.
+- Android/back handling now cancels the active organize move before other back actions.
+
+## 3.0.5
+- Chapter view FAB now opens a create menu with `New chapter` (opens chapter popup) and `New volume`.
+- Added support for empty volumes in chapter view, so user-created volumes appear even before they contain chapters.
+- Back button now closes the chapter create menu before exiting selection/collection view.
+
+## 3.0.4
+- Save/Sync now builds cloud snapshots from full chapter metadata (not only currently paged chapters) so progress for every chapter is included.
+- Snapshot save now merges per-chapter progress from `talevox_progress_store` into chapter metadata before upload to keep progress values in sync.
+- Manual Sync now checks for a newer Drive snapshot first and merges it locally before uploading, preventing stale progress from overwriting newer cloud progress.
+
+## 3.0.3
+- Fixed markdown table parsing for one-column rows that contain `<br>` tags so rows no longer split into stray paragraphs in Reader view.
+- Preserved `<br>` line breaks inside markdown table cells so long stat-card entries render fully inside the table.
+- Added a parser regression test to lock this behavior for future markdown uploads.
+
+## 3.0.2
+- Book header hero metadata now lives in one stacked block (title, Drive + sync chips, last saved, chapter count) instead of repeated cards.
+- Sync badge now reacts to active syncing, flips to Syncing during manual sync, and settles back to Synced after completion.
+- Grid chapter cards use the slightly larger title font/line-height so the text matches the refreshed sketch.
+
+## 3.0.0
+- Stepped into the 3.x cycle and prepared the repo for the upcoming modular refactor.
+
 ## 2.10.37
 - Added TachiyomiSY-inspired screen state modules for Library, Book, and Reader.
 - Refactored core UI into smaller Book/Library/Reader components for stability.

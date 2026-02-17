@@ -7,7 +7,6 @@ type Props = {
   viewMode: "sections" | "grid";
   onBack: () => void;
   onToggleSearch: () => void;
-  onOpenSettings: () => void;
   onSetViewMode: (mode: "sections" | "grid") => void;
   showOverflow: boolean;
   onToggleOverflow: () => void;
@@ -29,7 +28,6 @@ const BookTopBar: React.FC<Props> = ({
   viewMode,
   onBack,
   onToggleSearch,
-  onOpenSettings,
   onSetViewMode,
   showOverflow,
   onToggleOverflow,
