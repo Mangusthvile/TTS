@@ -13,7 +13,11 @@ const LibraryTopBar: React.FC<Props> = ({ title, headerIconColor, textPrimary, o
     <div className="px-6 sm:px-10 pt-10 sm:pt-12 flex items-center justify-between flex-shrink-0">
       <div className="flex items-center gap-3">
         <BookOpen className={`w-7 h-7 sm:w-8 sm:h-8 ${headerIconColor}`} />
-        <h2 className={`text-3xl sm:text-4xl font-black tracking-tight heading-font ${textPrimary}`}>{title}</h2>
+        <h2
+          className={`text-3xl sm:text-4xl font-black tracking-tight heading-font ${textPrimary}`}
+        >
+          {title}
+        </h2>
       </div>
 
       <button

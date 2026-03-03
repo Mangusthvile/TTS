@@ -11,9 +11,10 @@ android {
         applicationId "com.cmwil.talevox"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 37
-        versionName "3.0.16"
+        versionCode 40
+        versionName "3.0.23"
         buildConfigField "String", "OPENAI_API_KEY", "\"${openaiApiKey}\""
+        buildConfigField 'String', 'TTS_API_KEY', '"talevox-tts-secure-key-2026"'
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

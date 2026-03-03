@@ -1,6 +1,6 @@
-import React, { useEffect, useRef, useMemo, useState } from 'react';
-import { Chapter, Rule, Theme, ReaderSettings, ParagraphMap } from '../types';
-import { ArrowDownCircle } from 'lucide-react';
+import React, { useEffect, useRef, useMemo, useState } from "react";
+import { Chapter, Rule, Theme, ReaderSettings, ParagraphMap } from "../types";
+import { ArrowDownCircle } from "lucide-react";
 import { useReaderState } from "../src/features/reader/ReaderState";
 import ReaderTopBar from "./reader/ReaderTopBar";
 import ReaderToolbar from "./reader/ReaderToolbar";
@@ -44,10 +44,11 @@ interface ReaderProps {
   isScrubbing?: boolean;
   seekNudge?: number;
   readerBlocks?: RenderBlock[];
+  contentLoading?: boolean;
 }
 
 function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
-  const cleaned = hex.replace('#', '').trim();
+  const cleaned = hex.replace("#", "").trim();
   if (cleaned.length === 3) {
     const r = parseInt(cleaned[0] + cleaned[0], 16);
     const g = parseInt(cleaned[1] + cleaned[1], 16);
@@ -71,9 +72,9 @@ function rgbaFromHex(hex: string, alpha: number): string {
 
 function readableTextColor(hex: string): string {
   const rgb = hexToRgb(hex);
-  if (!rgb) return '#ffffff';
+  if (!rgb) return "#ffffff";
   const luminance = (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255;
-  return luminance > 0.6 ? '#111827' : '#ffffff';
+  return luminance > 0.6 ? "#111827" : "#ffffff";
 }
 
 const Reader: React.FC<ReaderProps> = ({
@@ -103,7 +104,8 @@ const Reader: React.FC<ReaderProps> = ({
   isMobile,
   isScrubbing = false,
   seekNudge = 0,
-  readerBlocks
+  readerBlocks,
+  contentLoading = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const lastRestoreKeyRef = useRef<string | null>(null);
@@ -115,11 +117,12 @@ const Reader: React.FC<ReaderProps> = ({
     }
     if (!chapter) return { blocks: [], speakText: "" };
     const baseText =
-      typeof chapterText === "string" && chapterText.length > 0 ? chapterText : (chapter.content ?? "");
+      typeof chapterText === "string" && chapterText.length > 0
+        ? chapterText
+        : (chapter.content ?? "");
     const chapterFilename = chapter.filename ?? "";
     const isMarkdown =
-      chapter.contentFormat === "markdown" ||
-      chapterFilename.toLowerCase().endsWith(".md");
+      chapter.contentFormat === "markdown" || chapterFilename.toLowerCase().endsWith(".md");
     return buildReaderModel(baseText, isMarkdown, rules, !!readerSettings.reflowLineBreaks);
   }, [readerBlocks, speechText, chapter, chapterText, rules, readerSettings.reflowLineBreaks]);
 
@@ -140,15 +143,15 @@ const Reader: React.FC<ReaderProps> = ({
   });
 
   const themeTokens = useMemo(() => {
-    const strong = readerSettings.highlightColor || '#4f46e5';
+    const strong = readerSettings.highlightColor || "#4f46e5";
     const strongText = readableTextColor(strong);
     const weak = rgbaFromHex(strong, theme === Theme.DARK ? 0.25 : 0.18);
     return {
       highlightStrong: strong,
       highlightStrongText: strongText,
       highlightWeak: weak,
-      text: theme === Theme.DARK ? '#e2e8f0' : theme === Theme.SEPIA ? '#3c2f25' : '#111827',
-      muted: theme === Theme.DARK ? '#94a3b8' : '#6b7280',
+      text: theme === Theme.DARK ? "#e2e8f0" : theme === Theme.SEPIA ? "#3c2f25" : "#111827",
+      muted: theme === Theme.DARK ? "#94a3b8" : "#6b7280",
     };
   }, [readerSettings.highlightColor, theme]);
 
@@ -157,18 +160,26 @@ const Reader: React.FC<ReaderProps> = ({
     fontSize: `clamp(18px, 4.5vw, ${readerSettings.fontSizePx}px)`,
     lineHeight: readerSettings.lineHeight,
     color: themeTokens.text,
-    ['--highlight-strong' as any]: themeTokens.highlightStrong,
-    ['--highlight-weak' as any]: themeTokens.highlightWeak,
-    ['--highlight-strong-text' as any]: themeTokens.highlightStrongText,
+    ["--highlight-strong" as any]: themeTokens.highlightStrong,
+    ["--highlight-weak" as any]: themeTokens.highlightWeak,
+    ["--highlight-strong-text" as any]: themeTokens.highlightStrongText,
   };
 
   const spacerClassName =
-    readerSettings.paragraphSpacing === 0 ? 'h-0' :
-    readerSettings.paragraphSpacing === 1 ? 'h-2' :
-    readerSettings.paragraphSpacing === 2 ? 'h-6' :
-    'h-10';
+    readerSettings.paragraphSpacing === 0
+      ? "h-0"
+      : readerSettings.paragraphSpacing === 1
+        ? "h-2"
+        : readerSettings.paragraphSpacing === 2
+          ? "h-6"
+          : "h-10";
 
-  const fadeColor = theme === Theme.DARK ? 'from-[#0a0f1e]' : theme === Theme.SEPIA ? 'from-[#f4ead8]' : 'from-[#f6f7fb]';
+  const fadeColor =
+    theme === Theme.DARK
+      ? "from-[#0a0f1e]"
+      : theme === Theme.SEPIA
+        ? "from-[#f4ead8]"
+        : "from-[#f6f7fb]";
   useEffect(() => {
     if (!debugMode && !readerSettings.highlightDebugOverlay) return;
     if (!highlightEnabled || !highlightReady) {
@@ -217,7 +228,7 @@ const Reader: React.FC<ReaderProps> = ({
   };
 
   const handleBack = () => {
-    console.log('[TaleVox][Reader] back_to_collection');
+    console.log("[TaleVox][Reader] back_to_collection");
     if (onBackToCollection) onBackToCollection();
   };
 
@@ -227,10 +238,10 @@ const Reader: React.FC<ReaderProps> = ({
     const range = selection.getRangeAt(0);
     const container = range.startContainer;
     const anchor =
-      (container as Element)?.closest?.('[data-base]') ??
-      (container as any)?.parentElement?.closest?.('[data-base]');
+      (container as Element)?.closest?.("[data-base]") ??
+      (container as any)?.parentElement?.closest?.("[data-base]");
     if (!anchor) return;
-    const baseOffset = parseInt((anchor as HTMLElement).dataset.base || '0', 10);
+    const baseOffset = parseInt((anchor as HTMLElement).dataset.base || "0", 10);
     const globalOffset = baseOffset + range.startOffset;
     onJumpToOffset(globalOffset);
     selection.removeAllRanges();
@@ -241,25 +252,34 @@ const Reader: React.FC<ReaderProps> = ({
 
   return (
     <div className="relative flex-1 flex flex-col min-h-0 overflow-hidden touch-manipulation text-theme ui-font">
-      <div className={`absolute top-0 left-0 right-0 h-16 lg:h-24 z-10 pointer-events-none bg-gradient-to-b ${fadeColor} to-transparent`} />
+      <div
+        className={`absolute top-0 left-0 right-0 h-16 lg:h-24 z-10 pointer-events-none bg-gradient-to-b ${fadeColor} to-transparent`}
+      />
       {showHighlightOverlay && highlightDebugData && (
         <div
           className={`absolute bottom-5 right-5 z-20 rounded-xl border px-3 py-2 text-[10px] font-mono shadow-xl ${
             theme === Theme.DARK
-              ? 'bg-slate-900/90 border-slate-700 text-slate-100'
+              ? "bg-slate-900/90 border-slate-700 text-slate-100"
               : theme === Theme.SEPIA
-                ? 'bg-[#f7efdf]/95 border-[#d8ccb6] text-[#3b2f21]'
-                : 'bg-white/90 border-black/10 text-slate-900'
+                ? "bg-[#f7efdf]/95 border-[#d8ccb6] text-[#3b2f21]"
+                : "bg-white/90 border-black/10 text-slate-900"
           }`}
         >
-          <div>pos: {Math.floor(highlightDebugData.positionMs)}ms / {Math.floor(highlightDebugData.durationMs)}ms</div>
-          <div>cue: {highlightDebugData.cueIndex ?? '--'} / {highlightDebugData.cueCount}</div>
-          <div>para: {highlightDebugData.paragraphIndex ?? '--'} / {highlightDebugData.paragraphCount}</div>
+          <div>
+            pos: {Math.floor(highlightDebugData.positionMs)}ms /{" "}
+            {Math.floor(highlightDebugData.durationMs)}ms
+          </div>
+          <div>
+            cue: {highlightDebugData.cueIndex ?? "--"} / {highlightDebugData.cueCount}
+          </div>
+          <div>
+            para: {highlightDebugData.paragraphIndex ?? "--"} / {highlightDebugData.paragraphCount}
+          </div>
           <div>mode: {highlightDebugData.mode}</div>
-          <div>playing: {highlightDebugData.isPlaying ? 'yes' : 'no'}</div>
-          <div>follow: {readerSettings.followHighlight ? 'on' : 'off'}</div>
-          <div>autoLock: {isUserScrolling ? 'yes' : 'no'}</div>
-          <div>cueTarget: {cueTargetFound == null ? 'n/a' : cueTargetFound ? 'yes' : 'no'}</div>
+          <div>playing: {highlightDebugData.isPlaying ? "yes" : "no"}</div>
+          <div>follow: {readerSettings.followHighlight ? "on" : "off"}</div>
+          <div>autoLock: {isUserScrolling ? "yes" : "no"}</div>
+          <div>cueTarget: {cueTargetFound == null ? "n/a" : cueTargetFound ? "yes" : "no"}</div>
         </div>
       )}
 
@@ -304,15 +324,20 @@ const Reader: React.FC<ReaderProps> = ({
         containerStyles={containerStyles}
         spacerClassName={spacerClassName}
         blocks={blocks}
-        activeCueRange={effectiveHighlightEnabled && highlightReady ? activeCueRange ?? null : null}
+        activeCueRange={
+          effectiveHighlightEnabled && highlightReady ? (activeCueRange ?? null) : null
+        }
         autoFollow={autoFollowEnabled}
         isScrubbing={isScrubbing}
         followNudge={seekNudge + resumeNudge}
         onUserScrollingChange={setIsUserScrolling}
         theme={theme}
         followHighlight={readerSettings.followHighlight}
+        contentLoading={contentLoading}
       />
-      <div className={`absolute bottom-0 left-0 right-0 h-24 lg:h-32 z-10 pointer-events-none bg-gradient-to-t ${fadeColor} to-transparent`} />
+      <div
+        className={`absolute bottom-0 left-0 right-0 h-24 lg:h-32 z-10 pointer-events-none bg-gradient-to-t ${fadeColor} to-transparent`}
+      />
     </div>
   );
 };

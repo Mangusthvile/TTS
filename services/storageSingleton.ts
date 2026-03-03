@@ -22,7 +22,11 @@ export async function initStorage(): Promise<StorageDriver> {
       res = await d.init();
     } catch (err: any) {
       const msg = String(err?.message ?? err).toLowerCase();
-      if (msg.includes("connection") || msg.includes("not opened") || msg.includes("does not exist")) {
+      if (
+        msg.includes("connection") ||
+        msg.includes("not opened") ||
+        msg.includes("does not exist")
+      ) {
         try {
           await d.close();
         } catch {
@@ -53,9 +57,7 @@ export async function initStorage(): Promise<StorageDriver> {
 
 export function getStorage(): StorageDriver {
   if (!driver) {
-    throw new Error(
-      "Storage not initialized. Call initStorage() once at app startup."
-    );
+    throw new Error("Storage not initialized. Call initStorage() once at app startup.");
   }
   return driver;
 }

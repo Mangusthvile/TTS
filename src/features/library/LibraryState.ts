@@ -26,7 +26,12 @@ export type LibraryActions = {
   startAdd: () => void;
   cancelAdd: () => void;
   setTitle: (title: string) => void;
-  addWithBackend: (backend: StorageBackend, handle?: any, driveFolderId?: string, driveFolderName?: string) => Promise<void>;
+  addWithBackend: (
+    backend: StorageBackend,
+    handle?: any,
+    driveFolderId?: string,
+    driveFolderName?: string
+  ) => Promise<void>;
   startDriveAdd: () => Promise<void>;
 };
 
@@ -41,7 +46,12 @@ export function useLibraryState(params: Params): { state: LibraryState; actions:
   }, [books]);
 
   const addWithBackend = useCallback(
-    async (backend: StorageBackend, handle?: any, driveFolderId?: string, driveFolderName?: string) => {
+    async (
+      backend: StorageBackend,
+      handle?: any,
+      driveFolderId?: string,
+      driveFolderName?: string
+    ) => {
       if (!newTitle.trim()) return;
       setIsProcessingAdd(true);
       try {

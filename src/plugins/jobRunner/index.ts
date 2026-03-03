@@ -19,23 +19,46 @@ export type JobRunnerPayload = {
   driveFolderId?: string;
   chapterTextPaths?: Record<string, string>;
   correlationId?: string;
+  /** Chapters per WorkManager batch (3–7). Default 5. */
+  batchSize?: number;
 };
 
 export interface JobRunnerPlugin {
   enqueueGenerateAudio: (options: { payload: JobRunnerPayload }) => Promise<{ jobId: string }>;
-  enqueueFixIntegrity: (options: { payload: { bookId: string; driveFolderId?: string; options?: { genAudio?: boolean; cleanupStrays?: boolean; convertLegacy?: boolean }; voice?: JobRunnerVoice; settings?: JobRunnerSettings } }) => Promise<{ jobId: string }>;
-  enqueueUploadJob: (options?: { constraints?: { wifiOnly?: boolean; requiresCharging?: boolean } }) => Promise<{ jobId: string }>;
-  ensureUploadQueueJob: (options?: { constraints?: { wifiOnly?: boolean; requiresCharging?: boolean } }) => Promise<{ jobId: string | null }>;
+  enqueueGenerateBookAudio: (options: {
+    payload: JobRunnerPayload;
+  }) => Promise<{ jobId: string }>;
+  enqueueFixIntegrity: (options: {
+    payload: {
+      bookId: string;
+      driveFolderId?: string;
+      options?: { genAudio?: boolean; cleanupStrays?: boolean; convertLegacy?: boolean };
+      voice?: JobRunnerVoice;
+      settings?: JobRunnerSettings;
+    };
+  }) => Promise<{ jobId: string }>;
+  enqueueUploadJob: (options?: {
+    constraints?: { wifiOnly?: boolean; requiresCharging?: boolean };
+  }) => Promise<{ jobId: string }>;
+  ensureUploadQueueJob: (options?: {
+    constraints?: { wifiOnly?: boolean; requiresCharging?: boolean };
+  }) => Promise<{ jobId: string | null }>;
   setUploadQueuePaused: (options: { paused: boolean }) => Promise<void>;
   getUploadQueuePaused: () => Promise<{ paused: boolean }>;
-  checkNotificationPermission: () => Promise<{ supported: boolean; granted: boolean; enabled: boolean }>;
+  checkNotificationPermission: () => Promise<{
+    supported: boolean;
+    granted: boolean;
+    enabled: boolean;
+  }>;
   requestNotificationPermission: () => Promise<{ granted: boolean }>;
   openNotificationSettings: () => Promise<void>;
   sendTestNotification: () => Promise<void>;
   cancelJob: (options: { jobId: string }) => Promise<void>;
   retryJob: (options: { jobId: string }) => Promise<{ jobId: string }>;
   forceStartJob: (options: { jobId: string }) => Promise<void>;
-  getWorkInfo: (options: { jobId: string }) => Promise<{ workInfo?: { state: string; runAttemptCount: number } }>;
+  getWorkInfo: (options: {
+    jobId: string;
+  }) => Promise<{ workInfo?: { state: string; runAttemptCount: number } }>;
   deleteJob: (options: { jobId: string }) => Promise<void>;
   clearJobs: (options: { statuses: string[] }) => Promise<void>;
   getJob: (options: { jobId: string }) => Promise<{ job: JobRecord | null }>;

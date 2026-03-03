@@ -1,10 +1,7 @@
 
 package com.cmwil.talevox.jobrunner;
 
-import android.content.ContentValues;
 import android.content.Context;
-import android.database.sqlite.SQLiteDatabase;
-import android.database.Cursor;
 import android.util.Base64;
 import android.util.Log;
 
@@ -43,16 +40,30 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.regex.Matcher;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.Callable;
 
 public class FixIntegrityWorker extends Worker {
-    private static final String DB_NAME = "talevox_db";
-    private static final String DB_FILE = DB_NAME + "SQLite.db";
     private static final String DEFAULT_ENDPOINT = "https://talevox-tts-762195576430.us-south1.run.app";
     private static final int MAX_TTS_BYTES = 4500;
     private static final int MAX_OPENAI_BYTES = 3000;
     private static final String OPENAI_ENDPOINT = "https://api.openai.com/v1/audio/speech";
     private static final String OPENAI_MODEL = "gpt-4o-mini-tts-2025-12-15";
+    private static final long TOKEN_EXPIRY_GRACE_MS = 5 * 60 * 1000; // 5 min grace past expiresAt
+    private static final int TOKEN_WAIT_ATTEMPTS = 4;
+    private static final long TOKEN_WAIT_INTERVAL_MS = 300;
     private static final int MAX_UPLOAD_RETRIES = 5;
+    /** Number of TTS retries (in addition to the initial attempt). */
+    private static final int TTS_MAX_RETRIES = 5;
+    /** Exponential backoff delays in ms for TTS retries (2s, 4s, 8s, 16s, 32s). */
+    private static final long[] TTS_BACKOFFS_MS = new long[] { 2000, 4000, 8000, 16000, 32000 };
+    /** Extra initial delay for 429 rate-limit responses before the first retry. */
+    private static final long TTS_INITIAL_429_DELAY_MS = 10_000;
+    /** Consecutive retryable (429/5xx) TTS failures before pausing the job as a service outage. */
+    private static final int TTS_OUTAGE_THRESHOLD = 3;
+    private static final int TTS_ERROR_BODY_MAX_LEN = 500;
+    /** Maximum folder depth when traversing Drive folder tree; deeper folders are skipped to avoid API explosion. */
+    private static final int MAX_FOLDER_DEPTH = 5;
     private static final String CHANNEL_ID = JobNotificationChannels.CHANNEL_JOBS_ID;
     private final Map<String, String> driveFolderCache = new HashMap<>();
 
@@ -100,12 +111,12 @@ public class FixIntegrityWorker extends Worker {
         }
 
         try {
-            JobRow job = loadJob(jobId);
-            if (job == null) {
+            JobRunnerPlugin.JobPayloadResult jobResult = JobRunnerPlugin.getJobPayloadSync(jobId);
+            if (jobResult == null) {
                 return failJob(jobId, "Job not found", null);
             }
 
-            JSONObject payload = job.payloadJson;
+            JSONObject payload = jobResult.payloadJson;
             if (payload == null) {
                 return failJob(jobId, "Missing payload", null);
             }
@@ -121,52 +132,63 @@ public class FixIntegrityWorker extends Worker {
                 return failJob(jobId, "Missing bookId or driveFolderId", null);
             }
 
-            String accessToken = loadDriveAccessToken();
-            if (accessToken == null) {
-                return failJob(jobId, "Missing Drive access token", null);
+            AtomicReference<String> tokenRef = new AtomicReference<>(waitForDriveAccessToken());
+            if (tokenRef.get() == null) {
+                if (getRunAttemptCount() >= 4) {
+                    return failJob(jobId, "Missing Drive access token. Reconnect Drive and retry.", null);
+                }
+                return retryForMissingDriveToken(jobId, jobResult.progressJson);
             }
 
-            JSONObject progressJson = job.progressJson != null ? job.progressJson : new JSONObject();
+            JSONObject progressJson = jobResult.progressJson != null ? jobResult.progressJson : new JSONObject();
             progressJson.put("startedAt", System.currentTimeMillis());
-            updateJobProgress(jobId, "running", progressJson, null);
+            JobRunnerPlugin.updateJobProgressSync(jobId, "running", progressJson, null);
             updateForeground(jobId, progressJson);
 
-            DriveFolder metaFolder = findSubfolder(accessToken, driveFolderId, "meta");
+            DriveFolder metaFolder = runWithDriveAuth(tokenRef, () -> findSubfolder(tokenRef.get(), driveFolderId, "meta"));
             if (metaFolder == null) {
                 return failJob(jobId, "Meta folder not found", progressJson);
             }
 
-            DriveFile inventoryFile = findFileInFolder(accessToken, metaFolder.id, "inventory.json");
+            DriveFile inventoryFile = runWithDriveAuth(tokenRef, () -> findFileInFolder(tokenRef.get(), metaFolder.id, "inventory.json"));
             if (inventoryFile == null) {
                 return failJob(jobId, "inventory.json not found", progressJson);
             }
 
-            String inventoryRaw = downloadDriveFile(accessToken, inventoryFile.id);
+            String inventoryRaw = runWithDriveAuth(tokenRef, () -> downloadDriveFile(tokenRef.get(), inventoryFile.id));
             JSONObject inventory = new JSONObject(inventoryRaw);
             JSONArray chapters = inventory.optJSONArray("chapters");
             if (chapters == null) {
                 return failJob(jobId, "inventory.json missing chapters", progressJson);
             }
 
-            List<DriveFile> rootFiles = listFilesInFolder(accessToken, driveFolderId);
+            List<DriveFile> rootFiles = runWithDriveAuth(tokenRef, () -> listFilesInFolder(tokenRef.get(), driveFolderId));
             List<DriveFile> allFiles = new ArrayList<>(rootFiles);
             List<DriveFile> folderQueue = new ArrayList<>();
+            List<Integer> folderDepth = new ArrayList<>();
             Set<String> skipNestedFolders = new HashSet<>();
             skipNestedFolders.add("attachments");
             skipNestedFolders.add("trash");
 
             for (DriveFile f : rootFiles) {
-                if (f.isFolder) folderQueue.add(f);
+                if (f.isFolder) {
+                    folderQueue.add(f);
+                    folderDepth.add(0);
+                }
             }
 
             for (int folderIdx = 0; folderIdx < folderQueue.size(); folderIdx++) {
                 DriveFile folder = folderQueue.get(folderIdx);
+                int currentDepth = folderDepth.get(folderIdx);
                 String folderName = folder.name != null ? folder.name.trim().toLowerCase() : "";
                 if (skipNestedFolders.contains(folderName)) continue;
-                List<DriveFile> nestedFiles = listFilesInFolder(accessToken, folder.id);
+                List<DriveFile> nestedFiles = runWithDriveAuth(tokenRef, () -> listFilesInFolder(tokenRef.get(), folder.id));
                 for (DriveFile nested : nestedFiles) {
                     allFiles.add(nested);
-                    if (nested.isFolder) folderQueue.add(nested);
+                    if (nested.isFolder && currentDepth + 1 < MAX_FOLDER_DEPTH) {
+                        folderQueue.add(nested);
+                        folderDepth.add(currentDepth + 1);
+                    }
                 }
             }
 
@@ -248,10 +270,15 @@ public class FixIntegrityWorker extends Worker {
             int totalSteps = conversions.size() + generationIds.size() + cleanupFiles.size();
             progressJson.put("total", totalSteps);
             progressJson.put("completed", 0);
-            updateJobProgress(jobId, "running", progressJson, null);
+            JobRunnerPlugin.updateJobProgressSync(jobId, "running", progressJson, null);
             updateForeground(jobId, progressJson);
 
-            List<Rule> rules = loadRulesForBook(bookId);
+            List<String> allChapterIdsForVolume = new ArrayList<>();
+            for (Conversion conv : conversions) allChapterIdsForVolume.add(conv.chapterId);
+            allChapterIdsForVolume.addAll(generationIds);
+            Map<String, String> volumeNamesMap = JobRunnerPlugin.getChapterVolumeNamesSync(bookId, allChapterIdsForVolume);
+
+            List<Rule> rules = parseRulesArray(JobRunnerPlugin.getRulesForBookSync(bookId));
 
             int completed = 0;
 
@@ -259,13 +286,16 @@ public class FixIntegrityWorker extends Worker {
                 if (isStopped()) return handleCanceled(jobId, progressJson);
                 DriveFile legacy = pickNewest(filesByName.get(conv.sourceName));
                 if (legacy != null) {
-                    String targetFolderId = resolveChapterDriveFolder(accessToken, driveFolderId, bookId, conv.chapterId, null);
-                    copyDriveFile(accessToken, legacy.id, targetFolderId, conv.targetName);
+                    String targetFolderId = runWithDriveAuth(tokenRef, () -> resolveChapterDriveFolder(tokenRef.get(), driveFolderId, bookId, conv.chapterId, null, volumeNamesMap));
+                    runWithDriveAuth(tokenRef, () -> {
+                        copyDriveFile(tokenRef.get(), legacy.id, targetFolderId, conv.targetName);
+                        return null;
+                    });
                 }
                 completed++;
                 progressJson.put("completed", completed);
                 progressJson.put("currentChapterId", conv.chapterId);
-                updateJobProgress(jobId, "running", progressJson, null);
+                JobRunnerPlugin.updateJobProgressSync(jobId, "running", progressJson, null);
                 emitProgress(jobId, "running", progressJson);
                 updateForeground(jobId, progressJson);
             }
@@ -273,169 +303,177 @@ public class FixIntegrityWorker extends Worker {
             for (String chapterId : generationIds) {
                 if (isStopped()) return handleCanceled(jobId, progressJson);
                 progressJson.put("currentChapterId", chapterId);
-                updateJobProgress(jobId, "running", progressJson, null);
+                JobRunnerPlugin.updateJobProgressSync(jobId, "running", progressJson, null);
                 emitProgress(jobId, "running", progressJson);
                 updateForeground(jobId, progressJson);
 
                 InventoryChapter inv = findInv(invChapters, chapterId);
                 if (inv == null) continue;
 
-                DriveFile textFile = pickNewest(filesByName.get(inv.textName));
-                if (textFile == null) continue;
+                try {
+                    DriveFile textFile = pickNewest(filesByName.get(inv.textName));
+                    if (textFile == null) continue;
 
-                String content = downloadDriveFile(accessToken, textFile.id);
-                boolean isMarkdown = inv.textName != null && inv.textName.toLowerCase().endsWith(".md");
-                String speechInput = isMarkdown ? MarkdownSpeechSanitizer.sanitize(content) : content;
-                if (isDebuggable() && isMarkdown) {
-                    Log.d("FixIntegrityWorker", "markdown_sanitize chapterId=" + chapterId + " origLen=" + (content != null ? content.length() : 0) + " speechLen=" + (speechInput != null ? speechInput.length() : 0));
+                    String content = runWithDriveAuth(tokenRef, () -> downloadDriveFile(tokenRef.get(), textFile.id));
+                    boolean isMarkdown = inv.textName != null && inv.textName.toLowerCase().endsWith(".md");
+                    String speechInput = isMarkdown ? MarkdownSpeechSanitizer.sanitize(content) : content;
+                    if (isDebuggable() && isMarkdown) {
+                        Log.d("FixIntegrityWorker", "markdown_sanitize chapterId=" + chapterId + " origLen=" + (content != null ? content.length() : 0) + " speechLen=" + (speechInput != null ? speechInput.length() : 0));
+                    }
+                    String processed = applyRules(speechInput, rules);
+                    VoiceConfig voiceConfig = resolveVoice(payload.optJSONObject("voice"));
+
+                    double speakingRate = 1.0;
+                    JSONObject settings = payload.optJSONObject("settings");
+                    if (settings != null && settings.has("playbackSpeed")) {
+                        speakingRate = settings.optDouble("playbackSpeed", 1.0);
+                    } else if (settings != null && settings.has("speakingRate")) {
+                        speakingRate = settings.optDouble("speakingRate", 1.0);
+                    }
+
+                    byte[] mp3 = synthesizeMp3(processed, voiceConfig, speakingRate);
+                    String filePath = saveMp3ToFile(chapterId, mp3);
+
+                    String targetFolderId = runWithDriveAuth(
+                        tokenRef,
+                        () -> resolveChapterDriveFolder(tokenRef.get(), driveFolderId, bookId, chapterId, inv.volumeName, volumeNamesMap)
+                    );
+                    String uploadedId = runWithDriveAuth(
+                        tokenRef,
+                        () -> uploadToDriveWithRetry(tokenRef.get(), targetFolderId, inv.audioName, "audio/mpeg", mp3)
+                    );
+                    JobRunnerPlugin.updateChapterAudioStatusSync(bookId, chapterId, "ready", filePath, uploadedId);
+                } catch (Exception e) {
+                    String msg = e.getMessage() != null ? e.getMessage() : "TTS error";
+                    Log.e("FixIntegrityWorker", "TTS/generate failed for chapter " + chapterId + ": " + msg, e);
+
+                    int code = extractStatusCode(msg);
+                    // Drive token expired: pause job so user can reconnect and retry (no point continuing)
+                    if (code == 401 || (msg != null && (msg.contains("401") || msg.contains("Drive authentication expired")))) {
+                        return pauseForDriveAuthExpired(jobId, progressJson, msg);
+                    }
+                    // 429 and 5xx are retryable/outage-style; count toward pause-after-repeated-failures
+                    if (code == 429 || code == 500 || code == 502 || code == 503 || code == 504) {
+                        int outageCount = progressJson.optInt("ttsOutageCount", 0) + 1;
+                        progressJson.put("ttsOutageCount", outageCount);
+                        progressJson.put("lastError", msg);
+                        if (outageCount > TTS_OUTAGE_THRESHOLD) {
+                            return pauseForTtsOutage(jobId, progressJson, code, msg);
+                        }
+                    } else {
+                        // Non-outage error: treat as a per-chapter failure and continue.
+                        progressJson.put("ttsOutageCount", 0);
+                        progressJson.put("failedCount", progressJson.optInt("failedCount", 0) + 1);
+                        progressJson.put("lastError", msg);
+                        try {
+                            JobRunnerPlugin.updateChapterAudioStatusSync(bookId, chapterId, "failed", null, null);
+                        } catch (Exception ignored) {}
+                    }
                 }
-                String processed = applyRules(speechInput, rules);
-                VoiceConfig voiceConfig = resolveVoice(payload.optJSONObject("voice"));
-
-                double speakingRate = 1.0;
-                JSONObject settings = payload.optJSONObject("settings");
-                if (settings != null && settings.has("playbackSpeed")) {
-                    speakingRate = settings.optDouble("playbackSpeed", 1.0);
-                } else if (settings != null && settings.has("speakingRate")) {
-                    speakingRate = settings.optDouble("speakingRate", 1.0);
-                }
-
-                byte[] mp3 = synthesizeMp3(processed, voiceConfig, speakingRate);
-                String filePath = saveMp3ToFile(chapterId, mp3);
-
-                String targetFolderId = resolveChapterDriveFolder(accessToken, driveFolderId, bookId, chapterId, inv.volumeName);
-                String uploadedId = uploadToDriveWithRetry(accessToken, targetFolderId, inv.audioName, "audio/mpeg", mp3);
-                updateChapterAudioStatus(bookId, chapterId, "ready", filePath, uploadedId);
 
                 completed++;
                 progressJson.put("completed", completed);
-                updateJobProgress(jobId, "running", progressJson, null);
+                JobRunnerPlugin.updateJobProgressSync(jobId, "running", progressJson, null);
                 emitProgress(jobId, "running", progressJson);
                 updateForeground(jobId, progressJson);
             }
 
             for (DriveFile stray : cleanupFiles) {
                 if (isStopped()) return handleCanceled(jobId, progressJson);
-                moveFileToTrash(accessToken, stray.id);
+                runWithDriveAuth(tokenRef, () -> {
+                    moveFileToTrash(tokenRef.get(), stray.id);
+                    return null;
+                });
                 completed++;
                 progressJson.put("completed", completed);
-                updateJobProgress(jobId, "running", progressJson, null);
+                JobRunnerPlugin.updateJobProgressSync(jobId, "running", progressJson, null);
                 emitProgress(jobId, "running", progressJson);
                 updateForeground(jobId, progressJson);
             }
 
             progressJson.put("finishedAt", System.currentTimeMillis());
             progressJson.put("currentChapterId", JSONObject.NULL);
-            updateJobProgress(jobId, "completed", progressJson, null);
+            JobRunnerPlugin.updateJobProgressSync(jobId, "completed", progressJson, null);
             emitFinished(jobId, "completed", progressJson, null);
             showFinishedNotification(jobId, "Integrity fix complete");
             return Result.success();
         } catch (Exception e) {
-            return failJob(jobId, e.getMessage(), null);
+            String msg = e.getMessage() != null ? e.getMessage() : "";
+            JSONObject progressJsonInCatch = null;
+            try {
+                JobRunnerPlugin.JobPayloadResult r = JobRunnerPlugin.getJobPayloadSync(jobId);
+                if (r != null) progressJsonInCatch = r.progressJson;
+            } catch (Exception ignored) {}
+            if (msg.contains("401") || msg.contains("Drive authentication expired")) {
+                return pauseForDriveAuthExpired(jobId, progressJsonInCatch, msg);
+            }
+            return failJob(jobId, msg, progressJsonInCatch);
         }
     }
     private Result handleCanceled(String jobId, JSONObject progressJson) throws JSONException {
         progressJson.put("currentChapterId", JSONObject.NULL);
-        updateJobProgress(jobId, "canceled", progressJson, null);
+        JobRunnerPlugin.updateJobProgressSync(jobId, "canceled", progressJson, null);
         emitFinished(jobId, "canceled", progressJson, null);
         showFinishedNotification(jobId, "Integrity fix canceled");
         return Result.failure();
     }
 
-    private SQLiteDatabase getDb() {
-        Context ctx = getApplicationContext();
-        SQLiteDatabase db = ctx.openOrCreateDatabase(DB_FILE, Context.MODE_PRIVATE, null);
-        db.execSQL(
-            "CREATE TABLE IF NOT EXISTS jobs (" +
-            "jobId TEXT PRIMARY KEY," +
-            "type TEXT," +
-            "status TEXT," +
-            "payloadJson TEXT," +
-            "progressJson TEXT," +
-            "error TEXT," +
-            "createdAt INTEGER," +
-            "updatedAt INTEGER" +
-            ")"
-        );
-        return db;
+    private String waitForDriveAccessToken() {
+        String token = JobRunnerPlugin.getDriveAccessTokenSync();
+        if (token != null) return token;
+        for (int i = 0; i < TOKEN_WAIT_ATTEMPTS; i++) {
+            try {
+                Thread.sleep(TOKEN_WAIT_INTERVAL_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+            }
+            token = JobRunnerPlugin.getDriveAccessTokenSync();
+            if (token != null) return token;
+        }
+        return null;
     }
 
-    private JobRow loadJob(String jobId) {
-        SQLiteDatabase db = getDb();
-        Cursor cursor = db.query(
-            "jobs",
-            new String[]{"jobId", "payloadJson", "progressJson"},
-            "jobId = ?",
-            new String[]{jobId},
-            null,
-            null,
-            null
-        );
-        if (!cursor.moveToFirst()) {
-            cursor.close();
-            return null;
-        }
-        String payloadStr = cursor.getString(cursor.getColumnIndexOrThrow("payloadJson"));
-        String progressStr = cursor.getString(cursor.getColumnIndexOrThrow("progressJson"));
-        cursor.close();
-
+    /** Runs a Drive operation; on 401 re-reads token via plugin and retries once. */
+    private <T> T runWithDriveAuth(AtomicReference<String> tokenRef, Callable<T> call) throws Exception {
         try {
-            JSONObject payload = payloadStr != null ? new JSONObject(payloadStr) : null;
-            JSONObject progress = progressStr != null ? new JSONObject(progressStr) : null;
-            return new JobRow(jobId, payload, progress);
-        } catch (JSONException e) {
-            return null;
+            return call.call();
+        } catch (Exception e) {
+            String msg = e.getMessage();
+            if (msg != null && msg.contains("401")) {
+                Log.w("FixIntegrityWorker", "Drive 401, re-reading token and retrying");
+                String newToken = JobRunnerPlugin.getDriveAccessTokenSync();
+                if (newToken != null) {
+                    tokenRef.set(newToken);
+                    return call.call();
+                }
+                throw new Exception("Drive authentication expired (401). Reconnect Drive in the app and retry the job.", e);
+            }
+            throw e;
         }
     }
 
-    private void updateJobProgress(String jobId, String status, JSONObject progressJson, String error) {
-        SQLiteDatabase db = getDb();
-        ContentValues values = new ContentValues();
-        values.put("status", status);
-        values.put("error", error);
-        values.put("updatedAt", System.currentTimeMillis());
-        if (progressJson != null) {
-            values.put("progressJson", progressJson.toString());
-        }
-        db.update("jobs", values, "jobId = ?", new String[]{jobId});
-    }
+    private String extractAccessToken(JSONObject session) {
+        String token = session.optString("accessToken", null);
+        if (token == null || token.isEmpty()) token = session.optString("access_token", null);
 
-    private void updateStatus(String jobId, String status, String error) {
-        SQLiteDatabase db = getDb();
-        ContentValues values = new ContentValues();
-        values.put("status", status);
-        values.put("error", error);
-        values.put("updatedAt", System.currentTimeMillis());
-        db.update("jobs", values, "jobId = ?", new String[]{jobId});
-    }
+        if (token == null || token.isEmpty()) {
+            JSONObject auth = session.optJSONObject("authentication");
+            if (auth != null) {
+                token = auth.optString("accessToken", null);
+                if (token == null || token.isEmpty()) token = auth.optString("access_token", null);
+            }
+        }
 
-    private String loadDriveAccessToken() {
-        SQLiteDatabase db = getDb();
-        Cursor c = db.query(
-            "kv",
-            new String[]{"json"},
-            "key = ?",
-            new String[]{"auth_session"},
-            null,
-            null,
-            null
-        );
-        if (!c.moveToFirst()) {
-            c.close();
-            return null;
+        Object tokenObj = session.opt("accessToken");
+        if ((token == null || token.isEmpty()) && tokenObj instanceof JSONObject) {
+            JSONObject accessTokenObj = (JSONObject) tokenObj;
+            token = accessTokenObj.optString("token", null);
+            if (token == null || token.isEmpty()) token = accessTokenObj.optString("accessToken", null);
+            if (token == null || token.isEmpty()) token = accessTokenObj.optString("access_token", null);
         }
-        String raw = c.getString(c.getColumnIndexOrThrow("json"));
-        c.close();
-        try {
-            JSONObject session = new JSONObject(raw);
-            String token = session.optString("accessToken", null);
-            if (token == null || token.isEmpty()) return null;
-            long expiresAt = session.optLong("expiresAt", 0);
-            if (expiresAt > 0 && System.currentTimeMillis() > expiresAt) return null;
-            return token;
-        } catch (JSONException e) {
-            return null;
-        }
+
+        return (token == null || token.isEmpty()) ? null : token;
     }
 
     private String normalizeVolumeName(String raw) {
@@ -444,58 +482,16 @@ public class FixIntegrityWorker extends Worker {
         return trimmed.isEmpty() ? null : trimmed;
     }
 
-    private String loadChapterVolumeName(String bookId, String chapterId) {
-        SQLiteDatabase db = getDb();
-        try {
-            if (bookId != null && !bookId.isEmpty()) {
-                Cursor cursor = db.query(
-                    "chapters",
-                    new String[]{"volumeName"},
-                    "id = ? AND bookId = ?",
-                    new String[]{chapterId, bookId},
-                    null,
-                    null,
-                    null
-                );
-                try {
-                    if (cursor.moveToFirst()) {
-                        return normalizeVolumeName(cursor.getString(cursor.getColumnIndexOrThrow("volumeName")));
-                    }
-                } finally {
-                    cursor.close();
-                }
-            }
-
-            Cursor cursor = db.query(
-                "chapters",
-                new String[]{"volumeName"},
-                "id = ?",
-                new String[]{chapterId},
-                null,
-                null,
-                null
-            );
-            try {
-                if (cursor.moveToFirst()) {
-                    return normalizeVolumeName(cursor.getString(cursor.getColumnIndexOrThrow("volumeName")));
-                }
-            } finally {
-                cursor.close();
-            }
-        } catch (Exception ignored) {
-            return null;
-        }
-        return null;
-    }
-
     private String resolveChapterDriveFolder(
         String accessToken,
         String driveFolderId,
         String bookId,
         String chapterId,
-        String inventoryVolumeName
+        String inventoryVolumeName,
+        Map<String, String> volumeNamesMap
     ) {
-        String volumeName = normalizeVolumeName(loadChapterVolumeName(bookId, chapterId));
+        String volumeName = null;
+        if (volumeNamesMap != null) volumeName = normalizeVolumeName(volumeNamesMap.get(chapterId));
         if (volumeName == null) volumeName = normalizeVolumeName(inventoryVolumeName);
         if (volumeName == null) return driveFolderId;
         try {
@@ -538,24 +534,28 @@ public class FixIntegrityWorker extends Worker {
         byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
         URL url = new URL("https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id,name");
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Authorization", "Bearer " + accessToken);
-        conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-        conn.setFixedLengthStreamingMode(bytes.length);
-        try (OutputStream os = conn.getOutputStream()) {
-            os.write(bytes);
-        }
+        try {
+            conn.setRequestMethod("POST");
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+            conn.setFixedLengthStreamingMode(bytes.length);
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(bytes);
+            }
 
-        int code = conn.getResponseCode();
-        if (code < 200 || code >= 300) {
-            throw new Exception("Drive folder create failed: " + code);
+            int code = conn.getResponseCode();
+            if (code < 200 || code >= 300) {
+                throw new Exception("Drive folder create failed: " + code);
+            }
+            String raw = new String(readAllBytes(conn.getInputStream()), StandardCharsets.UTF_8);
+            JSONObject out = new JSONObject(raw);
+            String id = out.optString("id", null);
+            if (id == null || id.isEmpty()) throw new Exception("Drive folder create returned no id");
+            return id;
+        } finally {
+            conn.disconnect();
         }
-        String raw = new String(readAllBytes(conn.getInputStream()), StandardCharsets.UTF_8);
-        JSONObject out = new JSONObject(raw);
-        String id = out.optString("id", null);
-        if (id == null || id.isEmpty()) throw new Exception("Drive folder create returned no id");
-        return id;
     }
 
     private DriveFile findFileInFolder(String accessToken, String folderId, String filename) throws Exception {
@@ -579,26 +579,30 @@ public class FixIntegrityWorker extends Worker {
             if (pageToken != null) url += "&pageToken=" + encode(pageToken);
 
             HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-            conn.setRequestProperty("Authorization", "Bearer " + accessToken);
-            conn.setRequestProperty("Accept", "application/json");
-            int code = conn.getResponseCode();
-            String body = new String(readAllBytes(code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream()), StandardCharsets.UTF_8);
-            if (code < 200 || code >= 300) throw new Exception("Drive list failed: " + code);
+            try {
+                conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+                conn.setRequestProperty("Accept", "application/json");
+                int code = conn.getResponseCode();
+                String body = new String(readAllBytes(code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream()), StandardCharsets.UTF_8);
+                if (code < 200 || code >= 300) throw new Exception("Drive list failed: " + code);
 
-            JSONObject json = new JSONObject(body);
-            JSONArray files = json.optJSONArray("files");
-            if (files != null) {
-                for (int i = 0; i < files.length(); i++) {
-                    JSONObject f = files.getJSONObject(i);
-                    String id = f.optString("id", null);
-                    String name = f.optString("name", null);
-                    String mime = f.optString("mimeType", "");
-                    String modified = f.optString("modifiedTime", "");
-                    boolean isFolder = "application/vnd.google-apps.folder".equals(mime);
-                    out.add(new DriveFile(id, name, mime, modified, isFolder));
+                JSONObject json = new JSONObject(body);
+                JSONArray files = json.optJSONArray("files");
+                if (files != null) {
+                    for (int i = 0; i < files.length(); i++) {
+                        JSONObject f = files.getJSONObject(i);
+                        String id = f.optString("id", null);
+                        String name = f.optString("name", null);
+                        String mime = f.optString("mimeType", "");
+                        String modified = f.optString("modifiedTime", "");
+                        boolean isFolder = "application/vnd.google-apps.folder".equals(mime);
+                        out.add(new DriveFile(id, name, mime, modified, isFolder));
+                    }
                 }
+                pageToken = json.optString("nextPageToken", null);
+            } finally {
+                conn.disconnect();
             }
-            pageToken = json.optString("nextPageToken", null);
         } while (pageToken != null && !pageToken.isEmpty());
 
         return out;
@@ -607,48 +611,60 @@ public class FixIntegrityWorker extends Worker {
     private String downloadDriveFile(String accessToken, String fileId) throws Exception {
         String url = "https://www.googleapis.com/drive/v3/files/" + fileId + "?alt=media&supportsAllDrives=true";
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setRequestProperty("Authorization", "Bearer " + accessToken);
-        int code = conn.getResponseCode();
-        byte[] bytes = readAllBytes(code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream());
-        if (code < 200 || code >= 300) throw new Exception("Drive download failed: " + code);
-        return new String(bytes, StandardCharsets.UTF_8);
+        try {
+            conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+            int code = conn.getResponseCode();
+            byte[] bytes = readAllBytes(code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream());
+            if (code < 200 || code >= 300) throw new Exception("Drive download failed: " + code);
+            return new String(bytes, StandardCharsets.UTF_8);
+        } finally {
+            conn.disconnect();
+        }
     }
 
     private void moveFileToTrash(String accessToken, String fileId) throws Exception {
         String url = "https://www.googleapis.com/drive/v3/files/" + fileId + "?supportsAllDrives=true";
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setRequestMethod("PATCH");
-        conn.setRequestProperty("Authorization", "Bearer " + accessToken);
-        conn.setRequestProperty("Content-Type", "application/json");
-        conn.setDoOutput(true);
-        byte[] body = "{\"trashed\":true}".getBytes(StandardCharsets.UTF_8);
-        OutputStream os = conn.getOutputStream();
-        os.write(body);
-        os.flush();
-        os.close();
-        int code = conn.getResponseCode();
-        if (code < 200 || code >= 300) throw new Exception("Trash failed: " + code);
+        try {
+            conn.setRequestMethod("PATCH");
+            conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setDoOutput(true);
+            byte[] body = "{\"trashed\":true}".getBytes(StandardCharsets.UTF_8);
+            OutputStream os = conn.getOutputStream();
+            os.write(body);
+            os.flush();
+            os.close();
+            int code = conn.getResponseCode();
+            if (code < 200 || code >= 300) throw new Exception("Trash failed: " + code);
+        } finally {
+            conn.disconnect();
+        }
     }
 
     private void copyDriveFile(String accessToken, String sourceFileId, String destFolderId, String newName) throws Exception {
         String url = "https://www.googleapis.com/drive/v3/files/" + sourceFileId + "/copy?supportsAllDrives=true";
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setRequestMethod("POST");
-        conn.setRequestProperty("Authorization", "Bearer " + accessToken);
-        conn.setRequestProperty("Content-Type", "application/json");
-        conn.setDoOutput(true);
-        JSONObject body = new JSONObject();
-        body.put("name", newName);
-        JSONArray parents = new JSONArray();
-        parents.put(destFolderId);
-        body.put("parents", parents);
-        OutputStream os = conn.getOutputStream();
-        os.write(body.toString().getBytes(StandardCharsets.UTF_8));
-        os.flush();
-        os.close();
-        int code = conn.getResponseCode();
-        if (code < 200 || code >= 300) {
-            throw new Exception("Drive copy failed: " + code);
+        try {
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setDoOutput(true);
+            JSONObject body = new JSONObject();
+            body.put("name", newName);
+            JSONArray parents = new JSONArray();
+            parents.put(destFolderId);
+            body.put("parents", parents);
+            OutputStream os = conn.getOutputStream();
+            os.write(body.toString().getBytes(StandardCharsets.UTF_8));
+            os.flush();
+            os.close();
+            int code = conn.getResponseCode();
+            if (code < 200 || code >= 300) {
+                throw new Exception("Drive copy failed: " + code);
+            }
+        } finally {
+            conn.disconnect();
         }
     }
 
@@ -708,28 +724,32 @@ public class FixIntegrityWorker extends Worker {
 
         URL url = new URL("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&supportsAllDrives=true");
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setConnectTimeout(20000);
-        conn.setReadTimeout(60000);
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Authorization", "Bearer " + accessToken);
-        conn.setRequestProperty("Content-Type", "multipart/related; boundary=" + boundary);
+        try {
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(20000);
+            conn.setReadTimeout(60000);
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+            conn.setRequestProperty("Content-Type", "multipart/related; boundary=" + boundary);
 
-        OutputStream os = conn.getOutputStream();
-        os.write(body.toByteArray());
-        os.flush();
-        os.close();
+            OutputStream os = conn.getOutputStream();
+            os.write(body.toByteArray());
+            os.flush();
+            os.close();
 
-        int code = conn.getResponseCode();
-        byte[] bytes = readAllBytes(code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream());
-        if (code == 429 || code == 500 || code == 502 || code == 503 || code == 504) {
-            throw new RetryableUploadException("Drive upload retryable: " + code);
+            int code = conn.getResponseCode();
+            byte[] bytes = readAllBytes(code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream());
+            if (code == 429 || code == 500 || code == 502 || code == 503 || code == 504) {
+                throw new RetryableUploadException("Drive upload retryable: " + code);
+            }
+            if (code < 200 || code >= 300) {
+                throw new Exception("Drive upload failed: " + code);
+            }
+            JSONObject json = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+            return json.optString("id", null);
+        } finally {
+            conn.disconnect();
         }
-        if (code < 200 || code >= 300) {
-            throw new Exception("Drive upload failed: " + code);
-        }
-        JSONObject json = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
-        return json.optString("id", null);
     }
     private byte[] synthesizeMp3(String text, VoiceConfig voiceConfig, double speakingRate) throws Exception {
         int maxBytes = "openai".equals(voiceConfig.provider) ? MAX_OPENAI_BYTES : MAX_TTS_BYTES;
@@ -738,8 +758,8 @@ public class FixIntegrityWorker extends Worker {
         boolean first = true;
         for (String chunk : chunks) {
             byte[] bytes = "openai".equals(voiceConfig.provider)
-                ? postOpenAiTts(chunk, voiceConfig.id, speakingRate)
-                : postTts(chunk, voiceConfig.id, speakingRate);
+                ? postOpenAiTtsWithRetry(chunk, voiceConfig.id, speakingRate)
+                : postTtsWithRetry(chunk, voiceConfig.id, speakingRate);
             if (!first) bytes = stripId3(bytes);
             out.write(bytes);
             first = false;
@@ -750,11 +770,13 @@ public class FixIntegrityWorker extends Worker {
     private byte[] postTts(String text, String voiceId, double speakingRate) throws Exception {
         URL url = new URL(DEFAULT_ENDPOINT);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        try {
         conn.setRequestMethod("POST");
         conn.setConnectTimeout(20000);
         conn.setReadTimeout(60000);
         conn.setDoOutput(true);
         conn.setRequestProperty("Content-Type", "application/json");
+        conn.setRequestProperty("x-api-key", BuildConfig.TTS_API_KEY);
 
         JSONObject payload = new JSONObject();
         payload.put("text", text);
@@ -774,7 +796,12 @@ public class FixIntegrityWorker extends Worker {
         String contentType = conn.getHeaderField("Content-Type");
 
         if (code < 200 || code >= 300) {
-            throw new Exception("Cloud TTS Failed: " + code);
+            String errBody = new String(bytes, StandardCharsets.UTF_8);
+            if (errBody.length() > TTS_ERROR_BODY_MAX_LEN) {
+                errBody = errBody.substring(0, TTS_ERROR_BODY_MAX_LEN) + "...";
+            }
+            Log.e("FixIntegrityWorker", "Cloud TTS failed: " + code + " body: " + errBody);
+            throw new Exception("Cloud TTS Failed: " + code + " " + errBody);
         }
 
         if (contentType != null && contentType.startsWith("audio/")) {
@@ -789,6 +816,89 @@ public class FixIntegrityWorker extends Worker {
             throw new Exception("TTS response missing base64 audio");
         }
         return Base64.decode(b64, Base64.DEFAULT);
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    private int extractStatusCode(String message) {
+        if (message == null) return -1;
+        try {
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\b(\\d{3})\\b").matcher(message);
+            if (m.find()) {
+                return Integer.parseInt(m.group(1));
+            }
+        } catch (Exception ignored) {}
+        return -1;
+    }
+
+    private byte[] postTtsWithRetry(String text, String voiceId, double speakingRate) throws Exception {
+        Exception last = null;
+        // attempt = 0 is the initial call, 1..TTS_MAX_RETRIES are retries
+        for (int attempt = 0; attempt <= TTS_MAX_RETRIES; attempt++) {
+            try {
+                return postTts(text, voiceId, speakingRate);
+            } catch (Exception e) {
+                last = e;
+                String msg = e.getMessage() != null ? e.getMessage() : "";
+                int code = extractStatusCode(msg);
+                // 429 = rate limit; 500, 502, 503, 504 = server/transient errors (often succeed on retry)
+                boolean retryable = (code == 429 || code == 500 || code == 502 || code == 503 || code == 504);
+                if (!retryable || attempt >= TTS_MAX_RETRIES) {
+                    break;
+                }
+
+                long delayMs;
+                if (code == 429 && attempt == 0) {
+                    delayMs = TTS_INITIAL_429_DELAY_MS;
+                } else {
+                    int idx = Math.min(attempt - (code == 429 ? 0 : 0), TTS_BACKOFFS_MS.length - 1);
+                    delayMs = TTS_BACKOFFS_MS[idx];
+                }
+
+                Log.w(
+                    "FixIntegrityWorker",
+                    "Cloud TTS attempt " + (attempt + 1) + " failed with " + code + " (retryable), retrying in " + delayMs + " ms",
+                    e
+                );
+                Thread.sleep(delayMs);
+            }
+        }
+        throw last != null ? last : new Exception("Cloud TTS failed after " + (TTS_MAX_RETRIES + 1) + " attempts");
+    }
+
+    private byte[] postOpenAiTtsWithRetry(String text, String voiceId, double speakingRate) throws Exception {
+        Exception last = null;
+        for (int attempt = 0; attempt <= TTS_MAX_RETRIES; attempt++) {
+            try {
+                return postOpenAiTts(text, voiceId, speakingRate);
+            } catch (Exception e) {
+                last = e;
+                String msg = e.getMessage() != null ? e.getMessage() : "";
+                int code = extractStatusCode(msg);
+                // 429 = rate limit; 500, 502, 503, 504 = server/transient errors
+                boolean retryable = (code == 429 || code == 500 || code == 502 || code == 503 || code == 504);
+                if (!retryable || attempt >= TTS_MAX_RETRIES) {
+                    break;
+                }
+
+                long delayMs;
+                if (code == 429 && attempt == 0) {
+                    delayMs = TTS_INITIAL_429_DELAY_MS;
+                } else {
+                    int idx = Math.min(attempt - (code == 429 ? 0 : 0), TTS_BACKOFFS_MS.length - 1);
+                    delayMs = TTS_BACKOFFS_MS[idx];
+                }
+
+                Log.w(
+                    "FixIntegrityWorker",
+                    "OpenAI TTS attempt " + (attempt + 1) + " failed with " + code + " (retryable), retrying in " + delayMs + " ms",
+                    e
+                );
+                Thread.sleep(delayMs);
+            }
+        }
+        throw last != null ? last : new Exception("OpenAI TTS failed after " + (TTS_MAX_RETRIES + 1) + " attempts");
     }
 
     private byte[] postOpenAiTts(String text, String voiceId, double speakingRate) throws Exception {
@@ -798,36 +908,40 @@ public class FixIntegrityWorker extends Worker {
         }
         URL url = new URL(OPENAI_ENDPOINT);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setConnectTimeout(20000);
-        conn.setReadTimeout(60000);
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Content-Type", "application/json");
-        conn.setRequestProperty("Authorization", "Bearer " + apiKey);
+        try {
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(20000);
+            conn.setReadTimeout(60000);
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("Authorization", "Bearer " + apiKey);
 
-        double speed = Math.max(0.5, Math.min(2.0, speakingRate));
+            double speed = Math.max(0.5, Math.min(2.0, speakingRate));
 
-        JSONObject payload = new JSONObject();
-        payload.put("model", OPENAI_MODEL);
-        payload.put("voice", voiceId);
-        payload.put("input", text);
-        payload.put("response_format", "mp3");
-        payload.put("speed", speed);
+            JSONObject payload = new JSONObject();
+            payload.put("model", OPENAI_MODEL);
+            payload.put("voice", voiceId);
+            payload.put("input", text);
+            payload.put("response_format", "mp3");
+            payload.put("speed", speed);
 
-        byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
-        OutputStream os = conn.getOutputStream();
-        os.write(body);
-        os.flush();
-        os.close();
+            byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
+            OutputStream os = conn.getOutputStream();
+            os.write(body);
+            os.flush();
+            os.close();
 
-        int code = conn.getResponseCode();
-        InputStream stream = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
-        byte[] bytes = readAllBytes(stream);
-        if (code < 200 || code >= 300) {
-            String errText = new String(bytes, StandardCharsets.UTF_8);
-            throw new Exception("OpenAI TTS Failed: " + code + " " + errText);
+            int code = conn.getResponseCode();
+            InputStream stream = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
+            byte[] bytes = readAllBytes(stream);
+            if (code < 200 || code >= 300) {
+                String errText = new String(bytes, StandardCharsets.UTF_8);
+                throw new Exception("OpenAI TTS Failed: " + code + " " + errText);
+            }
+            return bytes;
+        } finally {
+            conn.disconnect();
         }
-        return bytes;
     }
 
     private byte[] stripId3(byte[] bytes) {
@@ -939,55 +1053,6 @@ public class FixIntegrityWorker extends Worker {
         return out.getAbsolutePath();
     }
 
-    private List<Rule> loadRulesForBook(String bookId) {
-        List<Rule> rules = new ArrayList<>();
-        SQLiteDatabase db = getDb();
-
-        Cursor cursor = db.query(
-            "books",
-            new String[]{"rulesJson"},
-            "id = ?",
-            new String[]{bookId},
-            null,
-            null,
-            null
-        );
-        if (cursor.moveToFirst()) {
-            String rulesStr = cursor.getString(cursor.getColumnIndexOrThrow("rulesJson"));
-            rules.addAll(parseRulesArray(rulesStr));
-        }
-        cursor.close();
-
-        Cursor c2 = db.query(
-            "kv",
-            new String[]{"json"},
-            "key = ?",
-            new String[]{"app_state"},
-            null,
-            null,
-            null
-        );
-        if (c2.moveToFirst()) {
-            String appStateStr = c2.getString(c2.getColumnIndexOrThrow("json"));
-            try {
-                JSONObject appState = new JSONObject(appStateStr);
-                JSONArray globalRules = appState.optJSONArray("globalRules");
-                if (globalRules != null) {
-                    rules.addAll(parseRulesArray(globalRules.toString()));
-                }
-            } catch (JSONException ignored) {}
-        }
-        c2.close();
-
-        Collections.sort(rules, new Comparator<Rule>() {
-            @Override
-            public int compare(Rule a, Rule b) {
-                return Integer.compare(b.priority, a.priority);
-            }
-        });
-        return rules;
-    }
-
     private List<Rule> parseRulesArray(String rawJson) {
         List<Rule> rules = new ArrayList<>();
         if (rawJson == null || rawJson.isEmpty()) return rules;
@@ -1031,19 +1096,6 @@ public class FixIntegrityWorker extends Worker {
             processed = regex.matcher(processed).replaceAll(Matcher.quoteReplacement(replacement));
         }
         return processed;
-    }
-
-    private void updateChapterAudioStatus(String bookId, String chapterId, String status, String filePath, String cloudAudioFileId) {
-        SQLiteDatabase db = getDb();
-        ContentValues values = new ContentValues();
-        values.put("audioStatus", status);
-        values.put("audioSignature", filePath);
-        if (cloudAudioFileId != null) {
-            values.put("cloudAudioFileId", cloudAudioFileId);
-            values.put("audioDriveId", cloudAudioFileId);
-        }
-        values.put("updatedAt", System.currentTimeMillis());
-        db.update("chapters", values, "id = ? AND bookId = ?", new String[]{chapterId, bookId});
     }
 
     private DriveFile pickNewest(List<DriveFile> files) {
@@ -1095,9 +1147,9 @@ public class FixIntegrityWorker extends Worker {
         int total = progressJson != null ? progressJson.optInt("total", 0) : 0;
         int completed = progressJson != null ? progressJson.optInt("completed", 0) : 0;
         String currentChapterId = progressJson != null ? progressJson.optString("currentChapterId", "") : "";
-        String text = total > 0 ? ("Step " + Math.min(completed + 1, total) + " of " + total) : "";
+        String text = total > 0 ? ("Step " + Math.min(completed + 1, total) + " of " + total) : "Scanning...";
         if (currentChapterId != null && !currentChapterId.isEmpty()) {
-            text = text.isEmpty() ? currentChapterId : (text + " · " + currentChapterId);
+            text = text.isEmpty() ? currentChapterId : (text + " - " + currentChapterId);
         }
         Notification notification = JobNotificationHelper.buildProgress(
             getApplicationContext(),
@@ -1143,12 +1195,58 @@ public class FixIntegrityWorker extends Worker {
     }
 
     private Result failJob(String jobId, String message, JSONObject progressJson) {
-        updateStatus(jobId, "failed", message);
         JSONObject progress = progressJson != null ? progressJson : new JSONObject();
         try { progress.put("error", message); } catch (JSONException ignored) {}
+        JobRunnerPlugin.updateJobProgressSync(jobId, "failed", progress, message);
         emitFinished(jobId, "failed", progress, message);
         showFinishedNotification(jobId, "Integrity fix failed");
         return Result.failure();
+    }
+
+    private Result pauseForTtsOutage(String jobId, JSONObject progressJson, int statusCode, String rawMessage) {
+        String userMessage = "Audio generation paused \u2014 TTS service temporarily unavailable. Will retry automatically.";
+        String detailed = rawMessage != null ? rawMessage : ("TTS service outage (" + statusCode + ")");
+        JSONObject progress = progressJson != null ? progressJson : new JSONObject();
+        try {
+            progress.put("error", userMessage);
+            progress.put("ttsOutageStatusCode", statusCode);
+        } catch (JSONException ignored) {}
+        JobRunnerPlugin.updateJobProgressSync(jobId, "paused_service_outage", progress, detailed);
+        emitFinished(jobId, "paused_service_outage", progress, detailed);
+        showFinishedNotification(jobId, userMessage);
+        return Result.success();
+    }
+
+    /** Pause job when Drive token expired (401); user must reconnect and retry. */
+    private Result pauseForDriveAuthExpired(String jobId, JSONObject progressJson, String rawMessage) {
+        String userMessage = "Drive authentication expired. Reconnect Drive in the app and retry the job.";
+        JSONObject progress = progressJson != null ? progressJson : new JSONObject();
+        try {
+            progress.put("error", userMessage);
+        } catch (JSONException ignored) {}
+        JobRunnerPlugin.updateJobProgressSync(jobId, "paused_auth_expired", progress, rawMessage != null ? rawMessage : userMessage);
+        emitFinished(jobId, "paused_auth_expired", progress, userMessage);
+        showFinishedNotification(jobId, userMessage);
+        return Result.success();
+    }
+
+    private Result retryForMissingDriveToken(String jobId, JSONObject progressJson) {
+        JSONObject progress = progressJson != null ? progressJson : new JSONObject();
+        try {
+            progress.put("waitingForAuth", true);
+            progress.put("error", "Waiting for Drive access token");
+            progress.put("retryAttempt", getRunAttemptCount() + 1);
+            progress.put("currentChapterId", JSONObject.NULL);
+        } catch (JSONException ignored) {}
+        JobRunnerPlugin.updateJobProgressSync(jobId, "queued", progress, null);
+        emitProgress(jobId, "queued", progress);
+        showProgressNotification(jobId, progress);
+        return Result.retry();
+    }
+
+    @Override
+    public void onStopped() {
+        super.onStopped();
     }
 
     private boolean isDebuggable() {
@@ -1217,17 +1315,6 @@ public class FixIntegrityWorker extends Worker {
     private static class RetryableUploadException extends Exception {
         RetryableUploadException(String message) {
             super(message);
-        }
-    }
-
-    private static class JobRow {
-        String jobId;
-        JSONObject payloadJson;
-        JSONObject progressJson;
-        JobRow(String jobId, JSONObject payloadJson, JSONObject progressJson) {
-            this.jobId = jobId;
-            this.payloadJson = payloadJson;
-            this.progressJson = progressJson;
         }
     }
 }

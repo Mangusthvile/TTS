@@ -55,13 +55,6 @@ function makeState(): AppState {
     autoSaveInterval: 30,
     globalRules: [],
     showDiagnostics: false,
-    backupSettings: {
-      autoBackupToDrive: false,
-      autoBackupToDevice: false,
-      backupIntervalMin: 30,
-      keepDriveBackups: 10,
-      keepLocalBackups: 10,
-    },
   };
 }
 
@@ -117,5 +110,32 @@ describe("saveRestoreService.applyFullSnapshot", () => {
     expect(book.chapters.find((c) => c.id === "ch-1")?.title).toBe("New title");
     expect(book.chapters.find((c) => c.id === "ch-local")?.title).toBe("Local only");
     expect(book.settings.autoGenerateAudioOnAdd).toBe(true);
+  });
+
+  it("preserves playbackSpeed from snapshot preferences", () => {
+    const currentState = makeState();
+    expect(currentState.playbackSpeed).toBe(1);
+
+    const snapshot: FullSnapshotV1 = {
+      schemaVersion: 1,
+      createdAt: 2000,
+      appVersion: "test",
+      preferences: { playbackSpeed: 1.5 },
+      readerProgress: {},
+      globalRules: [],
+      books: currentState.books,
+      chapters: [],
+      attachments: [],
+      jobs: [],
+    };
+
+    const merged = applyFullSnapshot({
+      snapshot,
+      currentState,
+      currentAttachments: [],
+      currentJobs: [],
+    });
+
+    expect(merged.state.playbackSpeed).toBe(1.5);
   });
 });

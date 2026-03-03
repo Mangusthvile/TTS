@@ -1,11 +1,16 @@
-import { Rule, RuleType, AudioChunkMetadata, PlaybackMetadata } from '../types';
+import { Rule, RuleType, AudioChunkMetadata, PlaybackMetadata } from "../types";
 import { getDriveAudioObjectUrl, revokeObjectUrl } from "../services/driveService";
 import { persistChapterAudio, resolveChapterAudioLocalPath } from "./audioStorage";
-import { trace, traceError } from '../utils/trace';
-import { isMobileMode } from '../utils/platform';
-import { Capacitor } from '@capacitor/core';
-import { DesktopPlaybackAdapter, MobilePlaybackAdapter, PlaybackAdapter, PlaybackItem } from './playbackAdapter';
-import { NativePlayer } from './nativePlayer';
+import { trace, traceError } from "../utils/trace";
+import { isMobileMode } from "../utils/platform";
+import { Capacitor } from "@capacitor/core";
+import {
+  DesktopPlaybackAdapter,
+  MobilePlaybackAdapter,
+  PlaybackAdapter,
+  PlaybackItem,
+} from "./playbackAdapter";
+import { NativePlayer } from "./nativePlayer";
 import { applyRules } from "./speechRules";
 
 // Phase 2 local-first progress (SQLite-backed on Android via StorageDriver)
@@ -41,12 +46,12 @@ function isSpeechSpeaking(): boolean {
   return !!(ss && (ss as any).speaking);
 }
 
-export const PROGRESS_STORE_KEY = 'talevox_progress_store';
+export const PROGRESS_STORE_KEY = "talevox_progress_store";
 export const PROGRESS_STORE_LEGACY_KEYS = [
-  'talevox_progress_v4',
-  'talevox_progress_v3',
-  'talevox_progress_v2',
-  'talevox_progress_v1',
+  "talevox_progress_v4",
+  "talevox_progress_v3",
+  "talevox_progress_v2",
+  "talevox_progress_v1",
 ];
 
 export { applyRules };
@@ -65,7 +70,8 @@ class SpeechController {
   private onEndCallback: (() => void) | null = null;
   private onPlayStartCallback: (() => void) | null = null;
   private syncCallback: ((meta: PlaybackMetadata & { completed?: boolean }) => void) | null = null;
-  private itemChangedCallback: ((nextId: string | null, prevId: string | null) => void) | null = null;
+  private itemChangedCallback: ((nextId: string | null, prevId: string | null) => void) | null =
+    null;
   private onFetchStateChange: ((isFetching: boolean) => void) | null = null;
 
   private sessionToken: number = 0;
@@ -87,9 +93,13 @@ class SpeechController {
 
   // Highlight buffer to account for synthesis pauses and speech pacing
   private readonly HIGHLIGHT_DELAY_SEC = 0;
-  private readonly CUE_PREFIX = 'talevox_cuemap_';
+  private readonly CUE_PREFIX = "talevox_cuemap_";
+  private readonly CUE_INDEX_KEY = "talevox_cuemap_index";
+  private readonly CUE_MAX_STORED = 20;
 
-  // Local progress commit guard (extra protection; commitProgressLocal also throttles)
+  // Local progress commit: throttle timeupdate-driven writes to avoid SQLite flooding on Android (5s min between commits).
+  // Pause/ended/visibility use forceBypassThrottle so we still save immediately on stop.
+  private static readonly PROGRESS_COMMIT_THROTTLE_MS = 5000;
   private lastLocalCommitAt = 0;
   private lastLoadFailed = false;
 
@@ -102,8 +112,34 @@ class SpeechController {
       if (!raw) return null;
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) return parsed as AudioChunkMetadata[];
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     return null;
+  }
+
+  /** Maintain an LRU index of stored cue maps and evict oldest beyond CUE_MAX_STORED. */
+  private pruneCueMaps(savedChapterId: string): void {
+    try {
+      const raw = localStorage.getItem(this.CUE_INDEX_KEY);
+      let index: string[] = [];
+      try {
+        index = raw ? (JSON.parse(raw) as string[]) : [];
+      } catch {
+        index = [];
+      }
+      // Move current to end (most recently used)
+      index = index.filter((id) => id !== savedChapterId);
+      index.push(savedChapterId);
+      // Evict oldest entries beyond the cap
+      while (index.length > this.CUE_MAX_STORED) {
+        const oldest = index.shift();
+        if (oldest) localStorage.removeItem(`${this.CUE_PREFIX}${oldest}`);
+      }
+      localStorage.setItem(this.CUE_INDEX_KEY, JSON.stringify(index));
+    } catch {
+      /* ignore quota errors */
+    }
   }
 
   constructor() {
@@ -120,6 +156,10 @@ class SpeechController {
   }
 
   public setPlaybackAdapter(adapter: PlaybackAdapter) {
+    const previous = this.adapter;
+    if (previous instanceof MobilePlaybackAdapter) {
+      void previous.destroy();
+    }
     this.adapter = adapter;
     if (adapter instanceof DesktopPlaybackAdapter) {
       this.audio = adapter.getAudioElement();
@@ -137,7 +177,7 @@ class SpeechController {
     const hasNativeAdapter = !(this.adapter instanceof DesktopPlaybackAdapter);
     if (this.isMobileOptimized === isMobile && wantsNative === hasNativeAdapter) return;
     this.isMobileOptimized = isMobile;
-    trace('speech:mode_changed', { isMobile });
+    trace("speech:mode_changed", { isMobile });
 
     if (wantsNative) {
       if (!hasNativeAdapter) {
@@ -157,11 +197,15 @@ class SpeechController {
     this.syncCallback = cb;
   }
 
-  public setItemChangedCallback(cb: ((nextId: string | null, prevId: string | null) => void) | null) {
+  public setItemChangedCallback(
+    cb: ((nextId: string | null, prevId: string | null) => void) | null
+  ) {
     this.itemChangedCallback = cb;
   }
 
-  public setFetchStateListener(cb: (isFetching: boolean) => void) { this.onFetchStateChange = cb; }
+  public setFetchStateListener(cb: (isFetching: boolean) => void) {
+    this.onFetchStateChange = cb;
+  }
 
   public updateMetadata(textLen: number, introDurSec: number, chunkMap: AudioChunkMetadata[]) {
     this.currentTextLength = textLen;
@@ -171,7 +215,10 @@ class SpeechController {
     if (ctx?.chapterId && chunkMap && chunkMap.length > 0) {
       try {
         localStorage.setItem(`talevox_cuemap_${ctx.chapterId}`, JSON.stringify(chunkMap));
-      } catch { /* ignore storage errors */ }
+        this.pruneCueMaps(ctx.chapterId);
+      } catch {
+        /* ignore storage errors */
+      }
     }
     this.renderedOffset = 0;
     this.targetOffset = 0;
@@ -181,11 +228,13 @@ class SpeechController {
     this.context = ctx;
   }
 
-  get currentContext() { return this.context; }
+  get currentContext() {
+    return this.context;
+  }
   get hasAudioSource() {
     if (this.lastLoadFailed) return false;
     if (this.adapter instanceof DesktopPlaybackAdapter) {
-      return !!this.audio.src && this.audio.src !== '' && this.audio.src !== window.location.href;
+      return !!this.audio.src && this.audio.src !== "" && this.audio.src !== window.location.href;
     }
     const state = this.adapter.getState();
     return !!state.currentItemId;
@@ -198,7 +247,7 @@ class SpeechController {
       duration: this.audio.duration,
       charOffset: Math.floor(this.renderedOffset),
       textLength: this.currentTextLength,
-      chapterId: this.context?.chapterId ?? state.currentItemId ?? null
+      chapterId: this.context?.chapterId ?? state.currentItemId ?? null,
     };
   }
 
@@ -210,20 +259,30 @@ class SpeechController {
     return this.context?.chapterId ?? null;
   }
 
-  private commitLocalProgress(completed: boolean, reason: string) {
+  private commitLocalProgress(completed: boolean, reason: string, forceBypassThrottle = false) {
     const chapterId = this.getActiveChapterId();
     const bookId = this.context?.bookId ?? null;
     if (!chapterId) {
       // Only surface missing context for resume/save paths that should never run without a chapter.
-      if (reason === "resume_seeked" || reason === "saveProgress" || reason === "saveProgress:completed") {
-        traceError("progress:commit_local:no_context", new Error(`No context.chapterId for reason=${reason}`));
+      if (
+        reason === "resume_seeked" ||
+        reason === "saveProgress" ||
+        reason === "saveProgress:completed"
+      ) {
+        traceError(
+          "progress:commit_local:no_context",
+          new Error(`No context.chapterId for reason=${reason}`)
+        );
       }
       return;
     }
 
-    // Guard against super-spam (commitProgressLocal already throttles per chapter too)
     const now = Date.now();
-    if (now - this.lastLocalCommitAt < 500) return;
+    if (
+      !forceBypassThrottle &&
+      now - this.lastLocalCommitAt < SpeechController.PROGRESS_COMMIT_THROTTLE_MS
+    )
+      return;
     this.lastLocalCommitAt = now;
 
     const { currentTime, duration } = this.getCurrentTimeAndDuration();
@@ -238,7 +297,7 @@ class SpeechController {
       isComplete: completed ? true : undefined,
     });
 
-    trace('progress:commit_local', { reason, chapterId, t, dur, completed });
+    trace("progress:commit_local", { reason, chapterId, t, dur, completed });
   }
 
   // Ensure we flush progress when app backgrounds / tab hidden
@@ -269,14 +328,28 @@ class SpeechController {
 
   private setupAudioListeners() {
     if (!this.audioEventsBound) {
-      const events = ['loadstart', 'loadedmetadata', 'canplay', 'canplaythrough', 'play', 'playing', 'pause', 'waiting', 'stalled', 'ended', 'error', 'abort', 'emptied'];
+      const events = [
+        "loadstart",
+        "loadedmetadata",
+        "canplay",
+        "canplaythrough",
+        "play",
+        "playing",
+        "pause",
+        "waiting",
+        "stalled",
+        "ended",
+        "error",
+        "abort",
+        "emptied",
+      ];
 
-      this.audio.addEventListener('seeking', () => {
-        trace('audio:event:seeking', { t: this.audio.currentTime });
+      this.audio.addEventListener("seeking", () => {
+        trace("audio:event:seeking", { t: this.audio.currentTime });
       });
 
-      this.audio.addEventListener('seeked', () => {
-        trace('audio:event:seeked', { t: this.audio.currentTime });
+      this.audio.addEventListener("seeked", () => {
+        trace("audio:event:seeked", { t: this.audio.currentTime });
         this.lastKnownTime = this.audio.currentTime || this.lastKnownTime;
 
         // Snap smoothing instantly
@@ -288,9 +361,9 @@ class SpeechController {
         this.commitLocalProgress(false, "seeked");
       });
 
-      events.forEach(e => {
+      events.forEach((e) => {
         this.audio.addEventListener(e, () => {
-          if (e === 'error') {
+          if (e === "error") {
             traceError(`audio:event:${e}`, this.audio.error);
           }
         });
@@ -300,7 +373,7 @@ class SpeechController {
     }
 
     this.audio.onended = () => {
-      trace('audio:ended');
+      trace("audio:ended");
       this.lastKnownTime = this.audio.duration || this.lastKnownTime;
 
       // Force full progress visually
@@ -316,7 +389,7 @@ class SpeechController {
 
     this.audio.onplay = () => {
       const t = this.audio.currentTime;
-      trace('audio:onplay', { t });
+      trace("audio:onplay", { t });
 
       if (t > 0) this.lastKnownTime = t;
       this.applyRequestedSpeed();
@@ -330,7 +403,7 @@ class SpeechController {
 
     this.audio.onpause = () => {
       const t = this.audio.currentTime;
-      trace('audio:onpause', { t });
+      trace("audio:onpause", { t });
 
       this.lastKnownTime = t || this.lastKnownTime;
       this.emitSyncTick();
@@ -353,7 +426,7 @@ class SpeechController {
     };
 
     this.audio.onerror = () => {
-      traceError('audio:onerror', this.audio.error);
+      traceError("audio:onerror", this.audio.error);
       if (this.onFetchStateChange) this.onFetchStateChange(false);
     };
   }
@@ -392,7 +465,7 @@ class SpeechController {
       charOffset: offset,
       textLength: this.currentTextLength,
       chapterId,
-      completed
+      completed,
     });
   }
 
@@ -418,6 +491,13 @@ class SpeechController {
     this.commitLocalProgress(!!completed, completed ? "saveProgress:completed" : "saveProgress");
   }
 
+  /** Force commit current player position to progress store (e.g. before app background). Bypasses throttle. */
+  public forceFlushProgressForBackground(): void {
+    const state = this.adapter.getState();
+    const completed = state.duration > 0 && state.positionMs >= Math.max(0, state.durationMs - 500);
+    this.commitLocalProgress(completed, "forceFlushForBackground", true);
+  }
+
   private startSyncLoop() {
     this.stopSyncLoop();
 
@@ -430,13 +510,20 @@ class SpeechController {
   }
 
   private stopSyncLoop() {
-    if (this.rafId !== null) { cancelAnimationFrame(this.rafId); this.rafId = null; }
-    if (this.intervalId !== null) { clearInterval(this.intervalId); this.intervalId = null; }
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+    if (this.intervalId !== null) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
   }
 
   public getOffsetFromTime(t: number, dur?: number): number {
     const duration = dur || this.audio.duration || 0;
-    const effectiveIntroEnd = this.currentIntroDurSec > 0 ? (this.currentIntroDurSec + this.HIGHLIGHT_DELAY_SEC) : 0;
+    const effectiveIntroEnd =
+      this.currentIntroDurSec > 0 ? this.currentIntroDurSec + this.HIGHLIGHT_DELAY_SEC : 0;
 
     if (duration === 0 || t < effectiveIntroEnd) return 0;
 
@@ -452,14 +539,20 @@ class SpeechController {
         const scaledDur = chunk.durSec * scale;
         if (contentTime >= cumulativeTime && contentTime < cumulativeTime + scaledDur) {
           const ratio = (contentTime - cumulativeTime) / Math.max(0.001, scaledDur);
-          return Math.max(0, Math.floor(chunk.startChar + (chunk.endChar - chunk.startChar) * ratio));
+          return Math.max(
+            0,
+            Math.floor(chunk.startChar + (chunk.endChar - chunk.startChar) * ratio)
+          );
         }
         cumulativeTime += scaledDur;
       }
     }
 
     const contentPortion = Math.max(0.001, duration - effectiveIntroEnd);
-    return Math.max(0, Math.floor(this.currentTextLength * Math.min(1, contentTime / contentPortion)));
+    return Math.max(
+      0,
+      Math.floor(this.currentTextLength * Math.min(1, contentTime / contentPortion))
+    );
   }
 
   // ----------------------------
@@ -493,7 +586,12 @@ class SpeechController {
     });
   }
 
-  private waitForEvent(target: EventTarget, event: string, timeoutMs: number, tokenCheck?: () => boolean): Promise<void> {
+  private waitForEvent(
+    target: EventTarget,
+    event: string,
+    timeoutMs: number,
+    tokenCheck?: () => boolean
+  ): Promise<void> {
     return new Promise((resolve, reject) => {
       let timer: any;
       const handler = () => {
@@ -548,7 +646,7 @@ class SpeechController {
     const isCurrentSession = () => this.sessionToken === session;
 
     this.lastLoadFailed = false;
-    trace('audio:load:start', { fileId: fileId || localUrl, startTimeSec, session });
+    trace("audio:load:start", { fileId: fileId || localUrl, startTimeSec, session });
 
     this.requestedSpeed = playbackRate;
 
@@ -590,7 +688,7 @@ class SpeechController {
 
     try {
       const isNativeAdapter = !(this.adapter instanceof DesktopPlaybackAdapter);
-      const shouldFetchDrive = !!fileId && fileId !== 'LOCAL_ID';
+      const shouldFetchDrive = !!fileId && fileId !== "LOCAL_ID";
       let url = localUrl ?? null;
       let blobUrlToRevoke: string | null = null;
 
@@ -624,13 +722,13 @@ class SpeechController {
 
       if (!isCurrentSession()) {
         revokeObjectUrl(blobUrlToRevoke);
-        trace('audio:load:aborted', { reason: 'stale_session' });
+        trace("audio:load:aborted", { reason: "stale_session" });
         return;
       }
 
       this.currentBlobUrl = blobUrlToRevoke;
       if (this.adapter instanceof DesktopPlaybackAdapter) {
-        let desktopUrl = url || '';
+        let desktopUrl = url || "";
         if (
           typeof desktopUrl === "string" &&
           (desktopUrl.startsWith("file://") || desktopUrl.startsWith("content://")) &&
@@ -641,13 +739,13 @@ class SpeechController {
         this.audio.src = desktopUrl;
         this.audio.load();
 
-        await this.waitForEvent(this.audio, 'loadedmetadata', 8000, isCurrentSession);
+        await this.waitForEvent(this.audio, "loadedmetadata", 8000, isCurrentSession);
       } else {
         const queue = queueItems && queueItems.length > 0 ? queueItems : undefined;
         if (queue) {
           await this.adapter.loadQueue(queue, queueStartIndex ?? 0);
         } else {
-          await this.adapter.load({ id: fileId || 'local', url: url || '', title: '' });
+          await this.adapter.load({ id: fileId || "local", url: url || "", title: "" });
         }
       }
 
@@ -666,11 +764,11 @@ class SpeechController {
             // Prefer local resume unless caller explicitly asked for a different time
             if (resumeTime <= 0.01 || Math.abs(local.timeSec - resumeTime) > 2) {
               resumeTime = local.timeSec;
-              trace('audio:resume:local', { chapterId, resumeTime });
+              trace("audio:resume:local", { chapterId, resumeTime });
             }
           }
         } catch (e: any) {
-          traceError('audio:resume:local_failed', e);
+          traceError("audio:resume:local_failed", e);
         }
       }
 
@@ -679,7 +777,7 @@ class SpeechController {
       }
 
       if (resumeTime > 0) {
-        trace('audio:seeking', { resumeTime });
+        trace("audio:seeking", { resumeTime });
         if (this.adapter instanceof DesktopPlaybackAdapter) {
           this.audio.currentTime = resumeTime;
         } else {
@@ -691,7 +789,7 @@ class SpeechController {
         this.renderedOffset = this.targetOffset;
 
         if (this.adapter instanceof DesktopPlaybackAdapter) {
-          await this.waitForEvent(this.audio, 'seeked', 6000, isCurrentSession);
+          await this.waitForEvent(this.audio, "seeked", 6000, isCurrentSession);
         }
 
         // Persist resumed position locally (so it never snaps back)
@@ -712,26 +810,25 @@ class SpeechController {
       try {
         await this.adapter.play();
       } catch (e: any) {
-        if (e.name === 'NotAllowedError') {
-          throw new Error('Playback blocked');
+        if (e.name === "NotAllowedError") {
+          throw new Error("Playback blocked");
         }
         throw e;
       }
 
       this.applyRequestedSpeed();
-      trace('audio:load:success');
-
+      trace("audio:load:success");
     } catch (err: any) {
-      if (err.name === 'NotAllowedError' || err.message === 'Playback blocked') {
-        trace('audio:load:interaction_required');
+      if (err.name === "NotAllowedError" || err.message === "Playback blocked") {
+        trace("audio:load:interaction_required");
         throw err;
       }
-      if (err.message === 'Playback session preempted') {
-        trace('audio:load:preempted');
+      if (err.message === "Playback session preempted") {
+        trace("audio:load:preempted");
         return;
       }
       this.lastLoadFailed = true;
-      traceError('audio:load:failed', err);
+      traceError("audio:load:failed", err);
       this.audio.src = "";
       throw err;
     } finally {
@@ -743,16 +840,17 @@ class SpeechController {
   // Playback controls
   // ----------------------------
 
-  public async safePlay(): Promise<'playing' | 'blocked'> {
-    if (!this.audio.src && this.adapter instanceof DesktopPlaybackAdapter) throw new Error('No audio source');
+  public async safePlay(): Promise<"playing" | "blocked"> {
+    if (!this.audio.src && this.adapter instanceof DesktopPlaybackAdapter)
+      throw new Error("No audio source");
     try {
       await this.adapter.play();
       this.adapter.setSpeed(this.requestedSpeed);
       this.applyRequestedSpeed();
-      return 'playing';
+      return "playing";
     } catch (err: any) {
-      if (err.name === 'NotAllowedError') {
-        return 'blocked';
+      if (err.name === "NotAllowedError") {
+        return "blocked";
       }
       throw err;
     }
@@ -771,9 +869,9 @@ class SpeechController {
 
     if (!Number.isFinite(audio.duration) || audio.duration <= 0) {
       if (!audio.src) throw new Error("No audio source to seek");
-      trace('audio:seek:waiting_metadata', { nonce });
+      trace("audio:seek:waiting_metadata", { nonce });
       try {
-        await this.waitForAudioEvent('loadedmetadata', 6000, nonce);
+        await this.waitForAudioEvent("loadedmetadata", 6000, nonce);
       } catch (e) {
         if (nonce !== this.seekNonce) return;
         throw e;
@@ -785,7 +883,7 @@ class SpeechController {
     const dur = audio.duration;
     const clamped = Math.min(Math.max(targetSec, 0), Math.max(dur - 0.05, 0));
 
-    trace('audio:seek:start', { to: clamped, nonce });
+    trace("audio:seek:start", { to: clamped, nonce });
 
     audio.currentTime = clamped;
     this.lastKnownTime = clamped;
@@ -795,10 +893,13 @@ class SpeechController {
     this.emitSyncTick();
 
     try {
-      await this.waitForAudioEvent('seeked', 5000, nonce);
+      await this.waitForAudioEvent("seeked", 5000, nonce);
     } catch (e) {
       if (nonce !== this.seekNonce) return;
-      traceError('audio:seek:converge_failed_but_proceeding', { actual: audio.currentTime, target: clamped });
+      traceError("audio:seek:converge_failed_but_proceeding", {
+        actual: audio.currentTime,
+        target: clamped,
+      });
     }
 
     if (nonce !== this.seekNonce) return;
@@ -822,7 +923,7 @@ class SpeechController {
 
     let targetTime = 0;
     const effectiveIntroEnd =
-      this.currentIntroDurSec > 0 ? (this.currentIntroDurSec + this.HIGHLIGHT_DELAY_SEC) : 0;
+      this.currentIntroDurSec > 0 ? this.currentIntroDurSec + this.HIGHLIGHT_DELAY_SEC : 0;
 
     if (this.currentChunkMap && this.currentChunkMap.length > 0) {
       const mapTotalDur = this.currentChunkMap.reduce((acc, c) => acc + c.durSec, 0);
@@ -833,7 +934,7 @@ class SpeechController {
       for (const chunk of this.currentChunkMap) {
         if (offset >= chunk.startChar && offset <= chunk.endChar) {
           const ratio = (offset - chunk.startChar) / Math.max(1, chunk.endChar - chunk.startChar);
-          targetTime = effectiveIntroEnd + cumulativeTime + (ratio * chunk.durSec * scale);
+          targetTime = effectiveIntroEnd + cumulativeTime + ratio * chunk.durSec * scale;
           break;
         }
         cumulativeTime += chunk.durSec * scale;
@@ -841,8 +942,8 @@ class SpeechController {
     } else {
       targetTime =
         effectiveIntroEnd +
-        (Math.max(0, Math.min(1, offset / this.currentTextLength)) *
-          Math.max(0.001, duration - effectiveIntroEnd));
+        Math.max(0, Math.min(1, offset / this.currentTextLength)) *
+          Math.max(0.001, duration - effectiveIntroEnd);
     }
 
     return targetTime;
@@ -854,7 +955,14 @@ class SpeechController {
     await this.seekTo(targetTime);
   }
 
-  speak(text: string, voiceName: string | undefined, rate: number, offset: number, onEnd: () => void, isIntro: boolean = false) {
+  speak(
+    text: string,
+    voiceName: string | undefined,
+    rate: number,
+    offset: number,
+    onEnd: () => void,
+    isIntro: boolean = false
+  ) {
     this.audio.pause();
     this.stopSyncLoop();
     safeSpeechCancel();
@@ -885,7 +993,8 @@ class SpeechController {
 
   pause() {
     this.adapter.pause();
-    this.lastKnownTime = this.audio.currentTime || this.lastKnownTime;
+    const { currentTime } = this.getCurrentTimeAndDuration();
+    this.lastKnownTime = currentTime > 0 ? currentTime : this.lastKnownTime;
     this.emitSyncTick();
     this.commitLocalProgress(false, "pause(method)");
     safeSpeechPause();
@@ -897,14 +1006,14 @@ class SpeechController {
       if (this.audio.currentTime === 0 && this.lastKnownTime > 0) {
         this.audio.currentTime = this.lastKnownTime;
       }
-      Promise.resolve(this.adapter.play()).catch((err: unknown) => traceError('resume:error', err));
+      Promise.resolve(this.adapter.play()).catch((err: unknown) => traceError("resume:error", err));
       this.commitLocalProgress(false, "resume(method)");
     }
     safeSpeechResume();
   }
 
   stop() {
-    trace('audio:stop');
+    trace("audio:stop");
     this.commitLocalProgress(false, "stop");
 
     this.sessionToken++;
@@ -927,9 +1036,10 @@ class SpeechController {
   }
 
   safeStop() {
-    trace('audio:safeStop');
+    trace("audio:safeStop");
     this.commitLocalProgress(false, "safeStop");
 
+    this.adapter.pause();
     this.sessionToken++;
     this.seekNonce++;
     this.stopSyncLoop();
@@ -1008,4 +1118,3 @@ class SpeechController {
 }
 
 export const speechController = new SpeechController();
-

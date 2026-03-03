@@ -6,6 +6,7 @@ import {
   fixChapterOrdering,
   getChapterSortOrder,
   normalizeChapterOrder,
+  renumberChaptersSequentially,
 } from "../services/chapterOrderingService";
 
 let chapterSeed = 0;
@@ -74,6 +75,40 @@ describe("chapterOrderingService", () => {
       chapter({ id: "c", sortOrder: 2 }),
     ]);
     expect(next).toBe(10);
+  });
+
+  it("renumberChaptersSequentially preserves start index and renumbers after delete", () => {
+    const before = [
+      chapter({ id: "a", sortOrder: 1, index: 1 }),
+      chapter({ id: "b", sortOrder: 2, index: 2 }),
+      chapter({ id: "c", sortOrder: 3, index: 3 }),
+      chapter({ id: "d", sortOrder: 4, index: 4 }),
+    ];
+    const afterDelete = before.filter((c) => c.id !== "c");
+    const renumbered = renumberChaptersSequentially(afterDelete);
+    expect(renumbered.map((c) => c.sortOrder)).toEqual([1, 2, 3]);
+    expect(renumbered.map((c) => c.id)).toEqual(["a", "b", "d"]);
+  });
+
+  it("renumberChaptersSequentially preserves high start index (e.g. 3514)", () => {
+    const before = [
+      chapter({ id: "a", sortOrder: 3514, index: 3514 }),
+      chapter({ id: "b", sortOrder: 3515, index: 3515 }),
+      chapter({ id: "c", sortOrder: 3516, index: 3516 }),
+    ];
+    const afterDelete = before.filter((c) => c.id !== "b");
+    const renumbered = renumberChaptersSequentially(afterDelete);
+    expect(renumbered.map((c) => c.sortOrder)).toEqual([3514, 3515]);
+    expect(renumbered.map((c) => c.id)).toEqual(["a", "c"]);
+  });
+
+  it("derives display indices with duplicate fix (first keeps, next +1)", () => {
+    const display = deriveDisplayIndices([
+      chapter({ id: "a", sortOrder: 5, index: 5 }),
+      chapter({ id: "b", sortOrder: 5, index: 5 }),
+      chapter({ id: "c", sortOrder: 6, index: 6 }),
+    ]);
+    expect(display.map((c) => c.index)).toEqual([5, 6, 7]);
   });
 
   it("reindexes chapters sequentially and reports summary", async () => {

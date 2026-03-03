@@ -74,7 +74,8 @@ describe("sqliteConnectionManager", () => {
   });
 
   it("validates and imports sqlite json payload", async () => {
-    const { importSqliteJson, isSqliteJsonValid } = await import("../services/sqliteConnectionManager");
+    const { importSqliteJson, isSqliteJsonValid } =
+      await import("../services/sqliteConnectionManager");
     const input = JSON.stringify({ database: "talevox_db", version: 1 });
     await expect(isSqliteJsonValid(input)).resolves.toBe(true);
     await expect(importSqliteJson(input, "talevox_db", 1)).resolves.toBeUndefined();

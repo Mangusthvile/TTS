@@ -175,7 +175,11 @@ export async function saveDiagnosticsToFile(report: DiagnosticsReport): Promise<
   const name = `diag_${new Date(report.generatedAt).toISOString().replace(/[:.]/g, "-")}.json`;
   const path = `${appConfig.paths.diagnosticsDir}/${name}`;
   try {
-    await Filesystem.mkdir({ path: appConfig.paths.diagnosticsDir, directory: Directory.Data, recursive: true });
+    await Filesystem.mkdir({
+      path: appConfig.paths.diagnosticsDir,
+      directory: Directory.Data,
+      recursive: true,
+    });
   } catch {
     // ignore
   }

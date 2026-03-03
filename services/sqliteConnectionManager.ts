@@ -1,11 +1,7 @@
 // services/sqliteConnectionManager.ts
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import {
-  CapacitorSQLite,
-  SQLiteConnection,
-  SQLiteDBConnection,
-} from "@capacitor-community/sqlite";
+import { CapacitorSQLite, SQLiteConnection, SQLiteDBConnection } from "@capacitor-community/sqlite";
 import { getLogger } from "../utils/logger";
 import { DbNotOpenError } from "../utils/errors";
 
@@ -19,6 +15,39 @@ const readyLogged = new Set<string>();
 let consistencyChecked = false;
 let consistencyCheckPromise: Promise<void> | null = null;
 const log = getLogger("SQLite");
+
+/** Callbacks to run when DB corruption is detected (e.g. storage driver can clear its cached connection). */
+const onCorruptionListeners = new Set<(dbName: string) => void>();
+export function addCorruptionListener(fn: (dbName: string) => void): () => void {
+  onCorruptionListeners.add(fn);
+  return () => onCorruptionListeners.delete(fn);
+}
+
+/** After corruption we delete the DB; next getSqliteDb returns a fresh connection. This set marks DBs that need schema run on that connection. */
+const schemaNeededFor = new Set<string>();
+/** Optional schema runners (e.g. runSchemaOnConnection) so a fresh DB gets tables before any caller uses it. */
+const schemaRunners = new Map<string, (db: SQLiteDBConnection) => Promise<void>>();
+export function registerSchemaRunner(name: string, fn: (db: SQLiteDBConnection) => Promise<void>): void {
+  schemaRunners.set(name, fn);
+}
+
+/** Per-database queue so only one native operation runs at a time. Reduces Android SQLiteConnection leaks. */
+const opQueue = new Map<string, Promise<void>>();
+async function runSerialized<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  const prev = opQueue.get(name) ?? Promise.resolve();
+  const current = prev.then(
+    () => fn(),
+    () => fn()
+  );
+  opQueue.set(
+    name,
+    current.then(
+      () => {},
+      () => {}
+    )
+  );
+  return current;
+}
 
 function toBool(value: any): boolean {
   if (typeof value === "boolean") return value;
@@ -110,22 +139,24 @@ async function safeRetrieveConnection(name: string): Promise<SQLiteDBConnection 
   }
 }
 
+/**
+ * Consistency-first init (Phase 1.1): only retrieve when both native/JS state
+ * are consistent and the connection exists; otherwise create. Avoids zombie
+ * connection and "Connection already exists" after hard refresh.
+ */
 async function createOrRetrieveConnection(
   name: string,
   version: number,
   mode = "no-encryption"
 ): Promise<{ conn: SQLiteDBConnection; source: "created" | "retrieved" }> {
-  const hasConnection = await safeIsConnection(name);
-  if (hasConnection) {
+  const consistency = await checkConsistency();
+  const isConnected = await safeIsConnection(name);
+
+  if (consistency && isConnected) {
     const existing = await safeRetrieveConnection(name);
     if (existing) return { conn: existing, source: "retrieved" };
-    // Stale connection entry; try closing then recreate.
-    try {
-      await sqlite.closeConnection(name, false);
-    } catch {
-      // ignore
-    }
   }
+
   try {
     const conn = await sqlite.createConnection(name, false, mode, version, false);
     return { conn, source: "created" };
@@ -159,19 +190,13 @@ async function refreshConnection(
   return getSqliteDb(name, version, mode);
 }
 
-function wrapConnection(
-  db: SQLiteDBConnection,
-  name: string,
-  version: number,
-  mode: string
-): void {
+function wrapConnection(db: SQLiteDBConnection, name: string, version: number, mode: string): void {
   if ((db as any).__talevoxWrapped) return;
   const wrap = (key: "query" | "run" | "execute") => {
     const original = (db as any)[key]?.bind(db);
     if (!original) return;
     (db as any)[key] = async (...args: any[]) => {
-      const opened = await ensureDbOpen(db);
-      if (!opened) throw new Error("SQLite connection not opened");
+      // Optimistic path: skip pre-open check, let errors trigger recovery.
       try {
         return await original(...args);
       } catch (e: any) {
@@ -194,6 +219,60 @@ function wrapConnection(
           }
           throw e;
         }
+        if (msg.includes("malformed") || msg.includes("disk image") || msg.includes("corruption")) {
+          // Corrupt DB: evict cache, close connection, delete DB file so next getSqliteDb creates a fresh DB.
+          // Caller (e.g. storage driver) should clear its cached connection so next use gets a new one and runs migrations.
+          dbCache.delete(name);
+          dbMeta.delete(name);
+          dbReady.delete(name);
+          consistencyChecked = false;
+          onCorruptionListeners.forEach((fn) => {
+            try {
+              fn(name);
+            } catch {
+              // ignore
+            }
+          });
+          log.error("corruption/malformed DB detected, evicting cache and deleting DB file", {
+            dbName: name,
+          });
+          try {
+            await forceCloseSqliteDb(name);
+            const closeAll = (sqlite as any).closeAllConnections;
+            if (typeof closeAll === "function") {
+              await closeAll.call(sqlite);
+            }
+          } catch {
+            // ignore close errors
+          }
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          let deleted = false;
+          try {
+            await CapacitorSQLite.deleteDatabase({ database: name });
+            deleted = true;
+          } catch (delErr: any) {
+            log.warn("deleteDatabase first attempt failed, retrying after delay", {
+              dbName: name,
+              err: delErr?.message ?? delErr,
+            });
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            try {
+              await CapacitorSQLite.deleteDatabase({ database: name });
+              deleted = true;
+            } catch (retryErr: any) {
+              log.error("recovery after corrupt DB failed", {
+                dbName: name,
+                err: retryErr?.message ?? retryErr,
+              });
+            }
+          }
+          if (deleted) {
+            schemaNeededFor.add(name);
+            log.info("corrupt DB file deleted; next open will create a fresh database", {
+              dbName: name,
+            });
+          }
+        }
         throw e;
       }
     };
@@ -204,6 +283,21 @@ function wrapConnection(
   (db as any).__talevoxWrapped = true;
 }
 
+/**
+ * Call once at app startup (e.g. in bootstrap) so the DB connection is opened early
+ * and reused everywhere (singleton). Runs consistency check to recover zombie
+ * connections from previous runs. Using a single cached connection (dbCache) and
+ * serializing operations (runSerialized) reduces Android CloseGuard "close() not called"
+ * leaks that can contribute to DB corruption.
+ */
+export async function ensureAppDatabaseOpen(
+  name: string,
+  version: number,
+  mode = "no-encryption"
+): Promise<SQLiteDBConnection> {
+  return getSqliteDb(name, version, mode);
+}
+
 export async function getSqliteDb(
   name: string,
   version: number,
@@ -211,12 +305,10 @@ export async function getSqliteDb(
 ): Promise<SQLiteDBConnection> {
   const cached = dbCache.get(name);
   if (cached) {
-    const reopened = await safeOpenDb(cached);
-    if (reopened) {
-      wrapConnection(cached, name, version, mode);
-      return cached;
-    }
-    dbCache.delete(name);
+    // Fast path: return cached connection without extra open() call.
+    // The wrapped methods will recover on "not opened" errors if the connection drops.
+    wrapConnection(cached, name, version, mode);
+    return cached;
   }
   const pending = dbReady.get(name);
   if (pending) return pending;
@@ -275,6 +367,22 @@ export async function getSqliteDb(
         dbCache.set(name, conn);
         dbMeta.set(name, { version, mode });
 
+        if (schemaNeededFor.has(name)) {
+          const runner = schemaRunners.get(name);
+          if (runner) {
+            try {
+              await runner(conn);
+              log.info("schema run on fresh DB after corruption", { dbName: name });
+            } catch (schemaErr: any) {
+              log.error("schema run after corruption failed", {
+                dbName: name,
+                err: schemaErr?.message ?? schemaErr,
+              });
+            }
+          }
+          schemaNeededFor.delete(name);
+        }
+
         if (!readyLogged.has(name)) {
           console.log(`[TaleVox][SQLite] ${name} ready (${source})`);
           readyLogged.add(name);
@@ -298,9 +406,7 @@ export async function getSqliteDb(
         throw err;
       }
     }
-    throw lastError instanceof Error
-      ? lastError
-      : new DbNotOpenError(name, "open");
+    throw lastError instanceof Error ? lastError : new DbNotOpenError(name, "open");
   })().finally(() => {
     dbReady.delete(name);
   });
@@ -346,6 +452,7 @@ export async function forceCloseSqliteDb(name: string): Promise<void> {
   dbCache.delete(name);
   dbMeta.delete(name);
   dbReady.delete(name);
+  opQueue.delete(name);
 }
 
 export async function dbQuery(
@@ -357,30 +464,55 @@ export async function dbQuery(
   const db = await getSqliteDb(name, version);
   const opened = await ensureDbOpen(db);
   if (!opened) throw new Error(`SQLite ${name} not opened`);
-  return db.query(statement, values ?? []);
+  const trimmed = String(statement ?? "").trim().toLowerCase();
+  const readOnly =
+    trimmed.startsWith("select") || trimmed.startsWith("pragma") || trimmed.startsWith("with");
+  // IMPORTANT: On Android, using readonly=true for SELECTs reduces leaked SQLiteConnection warnings
+  // under high concurrency (e.g. rapid audio-path checks).
+  return runSerialized(name, () => (db as any).query(statement, values ?? [], readOnly));
 }
 
+/** Run a single statement. Use transaction: false to avoid Android connection leak when doing many separate runs. */
 export async function dbRun(
   name: string,
   version: number,
   statement: string,
-  values?: any[]
+  values?: any[],
+  options?: { transaction?: boolean }
 ): Promise<any> {
   const db = await getSqliteDb(name, version);
   const opened = await ensureDbOpen(db);
   if (!opened) throw new Error(`SQLite ${name} not opened`);
-  return db.run(statement, values ?? []);
+  const useTransaction = options?.transaction !== false;
+  return runSerialized(name, () => db.run(statement, values ?? [], useTransaction, "no", true));
+}
+
+/** Run multiple statements. Use transaction: false on Android to avoid connection leak; batch is still atomic per statement. */
+export async function dbExecuteSet(
+  name: string,
+  version: number,
+  set: Array<{ statement: string; values?: any[] }>,
+  options?: { transaction?: boolean }
+): Promise<any> {
+  if (set.length === 0) return { changes: { changes: 0 } };
+  const db = await getSqliteDb(name, version);
+  const opened = await ensureDbOpen(db);
+  if (!opened) throw new Error(`SQLite ${name} not opened`);
+  const useTransaction = options?.transaction !== false;
+  return runSerialized(name, () => db.executeSet(set, useTransaction, "no", true));
 }
 
 export async function dbExecute(
   name: string,
   version: number,
-  statement: string
+  statement: string,
+  options?: { transaction?: boolean }
 ): Promise<any> {
   const db = await getSqliteDb(name, version);
   const opened = await ensureDbOpen(db);
   if (!opened) throw new Error(`SQLite ${name} not opened`);
-  return db.execute(statement);
+  const useTransaction = options?.transaction !== false;
+  return runSerialized(name, () => db.execute(statement, useTransaction, true));
 }
 
 export async function getSqliteStatus(name: string): Promise<{

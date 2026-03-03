@@ -27,6 +27,46 @@ public final class MarkdownSpeechSanitizer {
     private static final Pattern ZERO_WIDTH = Pattern.compile("[\\u200B-\\u200D\\u2060]");
     private static final Pattern TABLE_SEPARATOR_CELL = Pattern.compile("^:?-{3,}:?$");
 
+    /** Remove blank lines between table rows (lines starting and ending with |) so GFM table parsing works. */
+    public static String collapseBlankLinesBetweenTableRows(String text) {
+        if (text == null) return "";
+        String[] lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n", -1);
+        StringBuilder out = new StringBuilder();
+        int i = 0;
+        while (i < lines.length) {
+            String line = lines[i];
+            if (!isTableRowLine(line)) {
+                out.append(line);
+                if (i < lines.length - 1) out.append("\n");
+                i++;
+                continue;
+            }
+            out.append(line);
+            i++;
+            while (i < lines.length) {
+                String next = lines[i];
+                if (next != null && next.trim().isEmpty()) {
+                    i++;
+                    continue;
+                }
+                if (isTableRowLine(next)) {
+                    out.append("\n").append(next);
+                    i++;
+                    continue;
+                }
+                break;
+            }
+            if (i < lines.length) out.append("\n");
+        }
+        return out.toString();
+    }
+
+    private static boolean isTableRowLine(String line) {
+        if (line == null) return false;
+        String t = line.trim();
+        return t.length() > 0 && t.startsWith("|") && t.endsWith("|");
+    }
+
     private MarkdownSpeechSanitizer() {}
 
     public static String sanitize(String markdown) {
@@ -37,6 +77,7 @@ public final class MarkdownSpeechSanitizer {
         text = ZERO_WIDTH.matcher(text).replaceAll("");
 
         text = FENCED_CODE_BLOCK.matcher(text).replaceAll("");
+        text = collapseBlankLinesBetweenTableRows(text);
         text = convertGfmTables(text);
 
         // Only normalize <br> after table conversion so we don't split table rows.
@@ -65,10 +106,19 @@ public final class MarkdownSpeechSanitizer {
         int i = 0;
         while (i < lines.length) {
             String line = lines[i];
-            String next = (i + 1) < lines.length ? lines[i + 1] : null;
             List<String> headerCells = parseTableRow(line);
 
-            if (headerCells == null || next == null || !isSeparatorRow(next)) {
+            if (headerCells == null) {
+                out.append(line);
+                if (i < lines.length - 1) out.append("\n");
+                i += 1;
+                continue;
+            }
+
+            int j = i + 1;
+            while (j < lines.length && (lines[j] == null || lines[j].trim().isEmpty())) j++;
+            String separatorLine = (j < lines.length) ? lines[j] : null;
+            if (separatorLine == null || !isSeparatorRow(separatorLine)) {
                 out.append(line);
                 if (i < lines.length - 1) out.append("\n");
                 i += 1;
@@ -79,7 +129,7 @@ public final class MarkdownSpeechSanitizer {
             for (String h : headerCells) headers.add(cleanInline(h));
 
             List<String> tableLines = new ArrayList<>();
-            i += 2; // skip header + separator
+            i = j + 1;
 
             while (i < lines.length) {
                 List<String> rowCells = parseTableRow(lines[i]);
@@ -124,9 +174,6 @@ public final class MarkdownSpeechSanitizer {
                 }
                 out.append("\n");
             }
-
-            // i now points at the first non-table-row line (or EOF); do not increment
-            // so the outer loop can process it normally.
         }
 
         return out.toString();
@@ -151,7 +198,8 @@ public final class MarkdownSpeechSanitizer {
         List<String> cells = parseTableRow(line);
         if (cells == null) return false;
         for (String c : cells) {
-            if (!TABLE_SEPARATOR_CELL.matcher(c).matches()) return false;
+            String normalized = c == null ? "" : c.trim().replaceAll("\\s+", "");
+            if (!normalized.isEmpty() && !TABLE_SEPARATOR_CELL.matcher(normalized).matches()) return false;
         }
         return true;
     }

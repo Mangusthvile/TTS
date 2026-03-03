@@ -19,7 +19,7 @@ export async function listQueuedUploads(limit?: number): Promise<DriveUploadQueu
   await initStorage();
   const storage = getStorage();
   const res = await storage.listQueuedUploads(limit);
-  const list = res.ok ? res.value ?? [] : [];
+  const list = res.ok ? (res.value ?? []) : [];
   return list.map(ensureDefaults);
 }
 
@@ -27,7 +27,7 @@ export async function countQueuedUploads(): Promise<number> {
   await initStorage();
   const storage = getStorage();
   const res = await storage.countQueuedUploads();
-  return res.ok ? res.value ?? 0 : 0;
+  return res.ok ? (res.value ?? 0) : 0;
 }
 
 export async function enqueueUpload(item: DriveUploadQueuedItem): Promise<boolean> {
@@ -41,14 +41,31 @@ export async function enqueueChapterUpload(
   bookId: string,
   chapterId: string,
   localPath: string,
-  opts?: { priority?: number; source?: UploadSource; manual?: boolean }
+  opts?: {
+    priority?: number;
+    source?: UploadSource;
+    manual?: boolean;
+    /** When true, skip duplicate check (caller already verified not in queue). */
+    skipDuplicateCheck?: boolean;
+  }
 ): Promise<boolean> {
-  const existing = await listQueuedUploads();
-  if (existing.some((item) => item.bookId === bookId && item.chapterId === chapterId)) return true;
+  if (!opts?.skipDuplicateCheck) {
+    await initStorage();
+    const storage = getStorage();
+    if (typeof storage.hasQueuedUpload === "function") {
+      const res = await storage.hasQueuedUpload(bookId, chapterId);
+      if (res.ok && res.value) return true;
+    } else {
+      const existing = await listQueuedUploads();
+      if (existing.some((item) => item.bookId === bookId && item.chapterId === chapterId))
+        return true;
+    }
+  }
   const now = Date.now();
-  const id = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
-    : `${chapterId}-${now}`;
+  const id =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${chapterId}-${now}`;
   const item: DriveUploadQueuedItem = {
     id,
     bookId,
@@ -68,7 +85,10 @@ export async function enqueueChapterUpload(
   return enqueueUpload(item);
 }
 
-export async function updateUploadItem(id: string, patch: Partial<DriveUploadQueuedItem>): Promise<boolean> {
+export async function updateUploadItem(
+  id: string,
+  patch: Partial<DriveUploadQueuedItem>
+): Promise<boolean> {
   await initStorage();
   const storage = getStorage();
   if (!storage.updateUploadItem) return false;
@@ -90,7 +110,11 @@ export async function markUploadUploading(id: string, nextAttemptAt: number): Pr
   return res.ok;
 }
 
-export async function markUploadFailed(id: string, error: string, nextAttemptAt: number): Promise<boolean> {
+export async function markUploadFailed(
+  id: string,
+  error: string,
+  nextAttemptAt: number
+): Promise<boolean> {
   await initStorage();
   const storage = getStorage();
   const res = await storage.markUploadFailed(id, error, nextAttemptAt);

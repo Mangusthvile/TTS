@@ -65,7 +65,9 @@ const Library: React.FC<Props> = ({
         <div className="px-6 sm:px-10 pt-6 flex-shrink-0">
           <div className={`p-6 rounded-[2rem] shadow-2xl ${panel}`}>
             <div className="space-y-2">
-              <label className={`text-[10px] font-black uppercase tracking-widest ${textMuted}`}>New Book Title</label>
+              <label className={`text-[10px] font-black uppercase tracking-widest ${textMuted}`}>
+                New Book Title
+              </label>
               <input
                 autoFocus
                 disabled={state.isProcessingAdd}
@@ -82,11 +84,11 @@ const Library: React.FC<Props> = ({
                 <button
                   disabled={state.isProcessingAdd}
                   onClick={() => actions.addWithBackend(StorageBackend.MEMORY)}
-                className={`p-4 rounded-2xl flex flex-col items-center gap-2 text-[10px] font-black uppercase transition-all ${optionCard}`}
-              >
-                <Database className="w-5 h-5 text-emerald-500" />
-                Memory
-              </button>
+                  className={`p-4 rounded-2xl flex flex-col items-center gap-2 text-[10px] font-black uppercase transition-all ${optionCard}`}
+                >
+                  <Database className="w-5 h-5 text-emerald-500" />
+                  Memory
+                </button>
               )}
 
               <button
@@ -115,7 +117,9 @@ const Library: React.FC<Props> = ({
                 }}
                 className={`p-4 rounded-2xl flex flex-col items-center gap-2 text-[10px] font-black uppercase transition-all ${optionCard}`}
               >
-                <Monitor className={`w-5 h-5 ${isDark ? "text-slate-300" : isSepia ? "text-[#3c2f25]" : "text-slate-600"}`} />
+                <Monitor
+                  className={`w-5 h-5 ${isDark ? "text-slate-300" : isSepia ? "text-[#3c2f25]" : "text-slate-600"}`}
+                />
                 Local
               </button>
             </div>
@@ -132,7 +136,12 @@ const Library: React.FC<Props> = ({
 
       {/* Books grid: matches desktop spacing and left alignment */}
       <div className="flex-1 min-w-0 overflow-y-auto px-6 sm:px-10 pt-10 pb-20">
-        <BookGrid books={state.sortedBooks} activeBookId={activeBookId} onSelectBook={onSelectBook} theme={theme} />
+        <BookGrid
+          books={state.sortedBooks}
+          activeBookId={activeBookId}
+          onSelectBook={onSelectBook}
+          theme={theme}
+        />
       </div>
     </div>
   );

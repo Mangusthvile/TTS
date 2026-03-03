@@ -1,9 +1,6 @@
 package com.cmwil.talevox.jobrunner;
 
-import android.content.ContentValues;
 import android.content.Context;
-import android.database.sqlite.SQLiteDatabase;
-import android.database.Cursor;
 import android.util.Base64;
 import android.util.Log;
 
@@ -17,6 +14,8 @@ import androidx.work.OneTimeWorkRequest;
 import androidx.work.WorkManager;
 import androidx.work.OutOfQuotaPolicy;
 import androidx.work.ExistingWorkPolicy;
+import androidx.work.Constraints;
+import androidx.work.NetworkType;
 import android.app.Notification;
 import android.app.NotificationManager;
 
@@ -42,16 +41,18 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 import java.util.regex.Matcher;
 import java.util.UUID;
 
 public class GenerateAudioWorker extends Worker {
-    private static final String DB_NAME = "talevox_db";
-    private static final String DB_FILE = DB_NAME + "SQLite.db";
+    private static final int DEFAULT_BATCH_SIZE = 5;
+    private static final int MIN_BATCH_SIZE = 3;
+    private static final int MAX_BATCH_SIZE = 7;
+    private static final long TOKEN_EXPIRY_GRACE_MS = 5 * 60 * 1000; // 5 min grace past expiresAt
     private static final String DEFAULT_ENDPOINT = "https://talevox-tts-762195576430.us-south1.run.app";
     private static final int MAX_TTS_BYTES = 4500;
     private static final int MAX_OPENAI_BYTES = 3000;
@@ -59,7 +60,10 @@ public class GenerateAudioWorker extends Worker {
     private static final String OPENAI_MODEL = "gpt-4o-mini-tts-2025-12-15";
     private static final int MAX_UPLOAD_RETRIES = 5;
     private static final String CHANNEL_ID = JobNotificationChannels.CHANNEL_JOBS_ID;
-    private final Map<String, String> driveFolderCache = new HashMap<>();
+    private static final int DRIVE_FOLDER_CACHE_MAX = 200;
+    private final Map<String, String> driveFolderCache = new ConcurrentHashMap<>();
+    /** Cache of compiled regex Pattern per (pattern, flags) to avoid recompiling in applyRules. */
+    private final Map<String, Pattern> rulePatternCache = new ConcurrentHashMap<>();
 
     private static class VoiceConfig {
         String provider;
@@ -103,14 +107,15 @@ public class GenerateAudioWorker extends Worker {
         if (jobId == null || jobId.isEmpty()) {
             return Result.failure();
         }
+        rulePatternCache.clear();
 
         try {
-            JobRow job = loadJob(jobId);
-            if (job == null) {
+            JobRunnerPlugin.JobPayloadResult jobResult = JobRunnerPlugin.getJobPayloadSync(jobId);
+            if (jobResult == null) {
                 return failJob(jobId, "Job not found", null);
             }
 
-            JSONObject payload = job.payloadJson;
+            JSONObject payload = jobResult.payloadJson;
             if (payload == null) {
                 return failJob(jobId, "Missing payload", null);
             }
@@ -122,9 +127,9 @@ public class GenerateAudioWorker extends Worker {
             if (bookId == null || chapterIds == null) {
                 return failJob(jobId, "Invalid payload", null);
             }
-            String resolvedBookId = resolveBookId(bookId);
+            String resolvedBookId = JobRunnerPlugin.resolveBookIdSync(bookId);
             if ((resolvedBookId == null || resolvedBookId.isEmpty()) && driveFolderId != null && !driveFolderId.isEmpty()) {
-                resolvedBookId = resolveBookId(driveFolderId);
+                resolvedBookId = JobRunnerPlugin.resolveBookIdSync(driveFolderId);
             }
             String effectiveBookId = (resolvedBookId != null && !resolvedBookId.isEmpty()) ? resolvedBookId : bookId;
 
@@ -138,7 +143,7 @@ public class GenerateAudioWorker extends Worker {
                 speakingRate = settings.optDouble("speakingRate", 1.0);
             }
 
-            JSONObject progressJson = job.progressJson != null ? job.progressJson : new JSONObject();
+            JSONObject progressJson = jobResult.progressJson != null ? jobResult.progressJson : new JSONObject();
             int completed = progressJson.optInt("completed", 0);
             int total = progressJson.optInt("total", chapterIds.length());
             if (total <= 0) total = chapterIds.length();
@@ -158,8 +163,17 @@ public class GenerateAudioWorker extends Worker {
             showProgressNotification(jobId, "Generating audio", progressJson);
 
             List<Rule> rules = resolvedBookId != null ? loadRulesForBook(resolvedBookId) : new ArrayList<>();
+            int batchSize = payload.optInt("batchSize", DEFAULT_BATCH_SIZE);
+            batchSize = Math.max(MIN_BATCH_SIZE, Math.min(MAX_BATCH_SIZE, batchSize));
+            int batchEnd = Math.min(completed + batchSize, chapterIds.length());
+            if (driveFolderId != null && !driveFolderId.isEmpty()) {
+                String token = JobRunnerPlugin.getDriveAccessTokenSync();
+                if (token == null) {
+                    Log.w("GenerateAudioWorker", "Drive token expired or missing at batch start; uploads will be deferred to queue");
+                }
+            }
 
-            for (int i = completed; i < chapterIds.length(); i++) {
+            for (int i = completed; i < batchEnd; i++) {
                 if (isStopped()) {
                     progressJson.put("currentChapterId", JSONObject.NULL);
                     updateJobProgress(jobId, "canceled", progressJson, null);
@@ -186,7 +200,7 @@ public class GenerateAudioWorker extends Worker {
                 if (content != null && !content.isEmpty()) {
                     Log.d("GenerateAudioWorker", "chapter_text from file path len=" + content.length());
                 } else {
-                    content = loadChapterText(effectiveBookId, chapterId);
+                    content = JobRunnerPlugin.getChapterTextSync(effectiveBookId, chapterId);
                 }
                 if (content == null || content.isEmpty()) {
                     String expected = payloadPath != null ? payloadPath : ("talevox/chapter_text/" + chapterId + ".txt");
@@ -204,19 +218,25 @@ public class GenerateAudioWorker extends Worker {
 
                 String uploadError = null;
                 String uploadedId = null;
-                String accessToken = loadDriveAccessToken();
+                String accessToken = JobRunnerPlugin.getDriveAccessTokenSync();
                 if (accessToken != null && driveFolderId != null && !driveFolderId.isEmpty()) {
                     try {
-                        String targetFolderId =
-                            resolveChapterDriveFolder(accessToken, driveFolderId, effectiveBookId, chapterId);
-                        String filename = "c_" + chapterId + ".mp3";
-                        uploadedId = uploadToDriveWithRetry(
-                            accessToken,
-                            targetFolderId,
-                            filename,
-                            "audio/mpeg",
-                            mp3
-                        );
+                        String existingFileId = JobRunnerPlugin.loadChapterDriveIdSync(effectiveBookId, chapterId);
+                        if (existingFileId != null && !existingFileId.isEmpty()) {
+                            uploadToDriveUpdateWithRetry(accessToken, existingFileId, "audio/mpeg", mp3);
+                            uploadedId = existingFileId;
+                        } else {
+                            String targetFolderId =
+                                resolveChapterDriveFolder(accessToken, driveFolderId, effectiveBookId, chapterId);
+                            String filename = "c_" + chapterId + ".mp3";
+                            uploadedId = uploadToDriveWithRetry(
+                                accessToken,
+                                targetFolderId,
+                                filename,
+                                "audio/mpeg",
+                                mp3
+                            );
+                        }
                     } catch (Exception e) {
                         uploadError = e.getMessage();
                     }
@@ -224,10 +244,10 @@ public class GenerateAudioWorker extends Worker {
                     uploadError = "UPLOAD_PENDING_MISSING_TOKEN_OR_FOLDER";
                 }
 
-                updateChapterAudioStatus(effectiveBookId, chapterId, "ready", filePath, uploadedId);
+                JobRunnerPlugin.updateChapterAudioStatusSync(effectiveBookId, chapterId, "ready", filePath, uploadedId);
                 if (uploadError != null || uploadedId == null) {
-                    enqueueUploadQueueItem(effectiveBookId, chapterId, filePath);
-                    ensureUploadQueueJob();
+                    JobRunnerPlugin.enqueueUploadQueueItemSync(effectiveBookId, chapterId, filePath);
+                    JobRunnerPlugin.ensureUploadQueueJobSync();
                 }
 
                 completed = i + 1;
@@ -247,252 +267,49 @@ public class GenerateAudioWorker extends Worker {
 
             progressJson.put("currentChapterId", JSONObject.NULL);
             progressJson.put("finishedAt", System.currentTimeMillis());
-            updateJobProgress(jobId, "completed", progressJson, null);
-            emitFinished(jobId, "completed", progressJson, null);
-            showFinishedNotification(jobId, "Audio generation complete");
-            setForegroundAsync(JobNotificationHelper.buildForegroundInfo(getApplicationContext(), jobId, "Audio generation complete", "", total, total, false, false));
-            JobRunnerPlugin.noteForegroundHeartbeat();
-            return Result.success();
+
+            if (completed < total) {
+                // More work to do, reschedule (expedited so next batch runs promptly)
+                updateJobProgress(jobId, "running", progressJson, null);
+
+                Constraints.Builder constraintsBuilder = new Constraints.Builder()
+                    .setRequiredNetworkType(total >= 100 ? NetworkType.UNMETERED : NetworkType.CONNECTED);
+                if (total >= 100) {
+                    constraintsBuilder.setRequiresCharging(true);
+                }
+
+                OneTimeWorkRequest nextRequest = new OneTimeWorkRequest.Builder(GenerateAudioWorker.class)
+                    .setInputData(getInputData())
+                    .setConstraints(constraintsBuilder.build())
+                    .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                    .build();
+                WorkManager.getInstance(getApplicationContext()).enqueue(nextRequest);
+                return Result.success();
+            } else {
+                updateJobProgress(jobId, "completed", progressJson, null);
+                emitFinished(jobId, "completed", progressJson, null);
+                showFinishedNotification(jobId, "Audio generation complete", total);
+                setForegroundAsync(JobNotificationHelper.buildForegroundInfo(getApplicationContext(), jobId, "Audio generation complete", total + " chapter" + (total == 1 ? "" : "s") + " completed", total, total, false, false));
+                JobRunnerPlugin.noteForegroundHeartbeat();
+                return Result.success();
+            }
         } catch (Throwable t) {
             return failJob(jobId, t != null ? t.getMessage() : "Unknown error", null);
         }
     }
 
-    private SQLiteDatabase getDb() {
-        Context ctx = getApplicationContext();
-        SQLiteDatabase db = ctx.openOrCreateDatabase(DB_FILE, Context.MODE_PRIVATE, null);
-        db.execSQL(
-            "CREATE TABLE IF NOT EXISTS jobs (" +
-            "jobId TEXT PRIMARY KEY," +
-            "type TEXT," +
-            "status TEXT," +
-            "payloadJson TEXT," +
-            "progressJson TEXT," +
-            "error TEXT," +
-            "createdAt INTEGER," +
-            "updatedAt INTEGER" +
-            ")"
-        );
-        db.execSQL(
-            "CREATE TABLE IF NOT EXISTS kv (" +
-            "key TEXT PRIMARY KEY," +
-            "json TEXT NOT NULL," +
-            "updatedAt INTEGER NOT NULL" +
-            ")"
-        );
-        db.execSQL(
-            "CREATE TABLE IF NOT EXISTS books (" +
-            "id TEXT PRIMARY KEY," +
-            "title TEXT," +
-            "author TEXT," +
-            "coverImage TEXT," +
-            "backend TEXT," +
-            "driveFolderId TEXT," +
-            "driveFolderName TEXT," +
-            "currentChapterId TEXT," +
-            "settingsJson TEXT," +
-            "rulesJson TEXT," +
-            "updatedAt INTEGER" +
-            ")"
-        );
-        db.execSQL(
-            "CREATE TABLE IF NOT EXISTS chapters (" +
-            "id TEXT PRIMARY KEY," +
-            "bookId TEXT," +
-            "idx INTEGER," +
-            "title TEXT," +
-            "filename TEXT," +
-            "sourceUrl TEXT," +
-            "cloudTextFileId TEXT," +
-            "cloudAudioFileId TEXT," +
-            "audioDriveId TEXT," +
-            "audioStatus TEXT," +
-            "audioSignature TEXT," +
-            "durationSec REAL," +
-            "textLength INTEGER," +
-            "wordCount INTEGER," +
-            "isFavorite INTEGER," +
-            "updatedAt INTEGER" +
-            ")"
-        );
-        db.execSQL(
-            "CREATE TABLE IF NOT EXISTS chapter_audio_files (" +
-            "chapterId TEXT PRIMARY KEY," +
-            "localPath TEXT," +
-            "sizeBytes INTEGER," +
-            "updatedAt INTEGER" +
-            ")"
-        );
-        db.execSQL(
-            "CREATE TABLE IF NOT EXISTS chapter_text (" +
-            "chapterId TEXT PRIMARY KEY," +
-            "bookId TEXT NOT NULL," +
-            "content TEXT," +
-            "localPath TEXT," +
-            "updatedAt INTEGER NOT NULL" +
-            ")"
-        );
-        try {
-            db.execSQL("ALTER TABLE chapter_text ADD COLUMN localPath TEXT");
-        } catch (Exception ignored) {}
-        return db;
-    }
-
-    private void updateStatus(String jobId, String status, String error) {
-        SQLiteDatabase db = getDb();
-        ContentValues values = new ContentValues();
-        values.put("status", status);
-        values.put("error", error);
-        values.put("updatedAt", System.currentTimeMillis());
-        db.update("jobs", values, "jobId = ?", new String[]{jobId});
-    }
-
-    private JobRow loadJob(String jobId) {
-        SQLiteDatabase db = getDb();
-        Cursor cursor = db.query(
-            "jobs",
-            new String[]{"jobId", "payloadJson", "progressJson"},
-            "jobId = ?",
-            new String[]{jobId},
-            null,
-            null,
-            null
-        );
-        if (!cursor.moveToFirst()) {
-            cursor.close();
-            return null;
-        }
-        String payloadStr = cursor.getString(cursor.getColumnIndexOrThrow("payloadJson"));
-        String progressStr = cursor.getString(cursor.getColumnIndexOrThrow("progressJson"));
-        cursor.close();
-
-        try {
-            JSONObject payload = payloadStr != null ? new JSONObject(payloadStr) : null;
-            JSONObject progress = progressStr != null ? new JSONObject(progressStr) : null;
-            return new JobRow(jobId, payload, progress);
-        } catch (JSONException e) {
-            return null;
-        }
-    }
-
     private void updateJobProgress(String jobId, String status, JSONObject progressJson, String error) {
-        SQLiteDatabase db = getDb();
-        ContentValues values = new ContentValues();
-        values.put("status", status);
-        values.put("error", error);
-        values.put("updatedAt", System.currentTimeMillis());
-        if (progressJson != null) {
-            values.put("progressJson", progressJson.toString());
-        }
-        db.update("jobs", values, "jobId = ?", new String[]{jobId});
+        JobRunnerPlugin.updateJobProgressSync(jobId, status, progressJson, error);
         try {
-            int total = progressJson != null ? progressJson.optInt("total", 0) : 0;
-            int completed = progressJson != null ? progressJson.optInt("completed", 0) : 0;
-            String currentChapterId = progressJson != null ? progressJson.optString("currentChapterId", null) : null;
-            Data data = new Data.Builder()
-                .putInt("total", total)
-                .putInt("completed", completed)
-                .putString("currentChapterId", currentChapterId)
-                .build();
-            setProgressAsync(data);
+            if (progressJson != null) {
+                Data data = new Data.Builder()
+                    .putInt("total", progressJson.optInt("total", 0))
+                    .putInt("completed", progressJson.optInt("completed", 0))
+                    .putString("currentChapterId", progressJson.optString("currentChapterId", null))
+                    .build();
+                setProgressAsync(data);
+            }
         } catch (Exception ignored) {}
-    }
-
-    private String loadChapterText(String bookId, String chapterId) {
-        SQLiteDatabase db = getDb();
-        Cursor cursor = db.query(
-            "chapter_text",
-            new String[]{"content", "localPath"},
-            "chapterId = ? AND bookId = ?",
-            new String[]{chapterId, bookId},
-            null,
-            null,
-            null
-        );
-        if (cursor.moveToFirst()) {
-            String content = cursor.getString(cursor.getColumnIndexOrThrow("content"));
-            String localPath = null;
-            try { localPath = cursor.getString(cursor.getColumnIndexOrThrow("localPath")); } catch (Exception ignored) {}
-            cursor.close();
-            Log.d("GenerateAudioWorker", "chapter_text hit bookId+chapterId len=" + (content != null ? content.length() : 0));
-            if ((content == null || content.isEmpty()) && localPath != null && !localPath.isEmpty()) {
-                String fromFile = readTextFromPath(localPath);
-                if (fromFile != null && !fromFile.isEmpty()) return fromFile;
-            }
-            if (content == null || content.isEmpty()) {
-                String fallbackPath = "talevox/chapter_text/" + chapterId + ".txt";
-                String fromFile = readTextFromPath(fallbackPath);
-                if (fromFile != null && !fromFile.isEmpty()) return fromFile;
-            }
-            return content;
-        }
-        cursor.close();
-
-        Cursor cursor2 = db.query(
-            "chapter_text",
-            new String[]{"content", "localPath"},
-            "chapterId = ?",
-            new String[]{chapterId},
-            null,
-            null,
-            null
-        );
-        if (cursor2.moveToFirst()) {
-            String content = cursor2.getString(cursor2.getColumnIndexOrThrow("content"));
-            String localPath = null;
-            try { localPath = cursor2.getString(cursor2.getColumnIndexOrThrow("localPath")); } catch (Exception ignored) {}
-            cursor2.close();
-            Log.d("GenerateAudioWorker", "chapter_text hit chapterId-only len=" + (content != null ? content.length() : 0));
-            if ((content == null || content.isEmpty()) && localPath != null && !localPath.isEmpty()) {
-                String fromFile = readTextFromPath(localPath);
-                if (fromFile != null && !fromFile.isEmpty()) return fromFile;
-            }
-            if (content == null || content.isEmpty()) {
-                String fallbackPath = "talevox/chapter_text/" + chapterId + ".txt";
-                String fromFile = readTextFromPath(fallbackPath);
-                if (fromFile != null && !fromFile.isEmpty()) return fromFile;
-            }
-            return content;
-        }
-        cursor2.close();
-        Log.d("GenerateAudioWorker", "chapter_text miss chapterId=" + chapterId);
-        return null;
-    }
-
-    private String resolveBookId(String inputBookId) {
-        SQLiteDatabase db = getDb();
-        Cursor c = db.query(
-            "books",
-            new String[]{"id"},
-            "id = ?",
-            new String[]{inputBookId},
-            null,
-            null,
-            null
-        );
-        if (c.moveToFirst()) {
-            String id = c.getString(c.getColumnIndexOrThrow("id"));
-            c.close();
-            return id;
-        }
-        c.close();
-
-        Cursor c2 = db.query(
-            "books",
-            new String[]{"id"},
-            "driveFolderId = ?",
-            new String[]{inputBookId},
-            null,
-            null,
-            null
-        );
-        if (c2.moveToFirst()) {
-            String id = c2.getString(c2.getColumnIndexOrThrow("id"));
-            c2.close();
-            return id;
-        }
-        c2.close();
-        return null;
     }
 
     private void addSkippedChapter(JSONObject progressJson, String chapterId) {
@@ -517,54 +334,12 @@ public class GenerateAudioWorker extends Worker {
 
     private boolean isMarkdownChapter(String bookId, String chapterId, String payloadPath) {
         if (payloadPath != null && payloadPath.toLowerCase().endsWith(".md")) return true;
-        String filename = loadChapterFilename(bookId, chapterId);
+        String filename = JobRunnerPlugin.getChapterFilenameSync(bookId, chapterId);
         return filename != null && filename.toLowerCase().endsWith(".md");
     }
 
     private boolean isDebuggable() {
         return (getApplicationContext().getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
-    }
-
-    private String loadChapterFilename(String bookId, String chapterId) {
-        SQLiteDatabase db = getDb();
-
-        if (bookId != null && !bookId.isEmpty()) {
-            Cursor cursor = db.query(
-                "chapters",
-                new String[]{"filename"},
-                "id = ? AND bookId = ?",
-                new String[]{chapterId, bookId},
-                null,
-                null,
-                null
-            );
-            try {
-                if (cursor.moveToFirst()) {
-                    return cursor.getString(cursor.getColumnIndexOrThrow("filename"));
-                }
-            } finally {
-                cursor.close();
-            }
-        }
-
-        Cursor cursor = db.query(
-            "chapters",
-            new String[]{"filename"},
-            "id = ?",
-            new String[]{chapterId},
-            null,
-            null,
-            null
-        );
-        try {
-            if (cursor.moveToFirst()) {
-                return cursor.getString(cursor.getColumnIndexOrThrow("filename"));
-            }
-        } finally {
-            cursor.close();
-        }
-
-        return null;
     }
 
     private String normalizeVolumeName(String raw) {
@@ -573,53 +348,12 @@ public class GenerateAudioWorker extends Worker {
         return trimmed.isEmpty() ? null : trimmed;
     }
 
-    private String loadChapterVolumeName(String bookId, String chapterId) {
-        SQLiteDatabase db = getDb();
-        try {
-            if (bookId != null && !bookId.isEmpty()) {
-                Cursor cursor = db.query(
-                    "chapters",
-                    new String[]{"volumeName"},
-                    "id = ? AND bookId = ?",
-                    new String[]{chapterId, bookId},
-                    null,
-                    null,
-                    null
-                );
-                try {
-                    if (cursor.moveToFirst()) {
-                        return normalizeVolumeName(cursor.getString(cursor.getColumnIndexOrThrow("volumeName")));
-                    }
-                } finally {
-                    cursor.close();
-                }
-            }
-
-            Cursor cursor = db.query(
-                "chapters",
-                new String[]{"volumeName"},
-                "id = ?",
-                new String[]{chapterId},
-                null,
-                null,
-                null
-            );
-            try {
-                if (cursor.moveToFirst()) {
-                    return normalizeVolumeName(cursor.getString(cursor.getColumnIndexOrThrow("volumeName")));
-                }
-            } finally {
-                cursor.close();
-            }
-        } catch (Exception ignored) {
-            return null;
-        }
-        return null;
-    }
-
     private String resolveChapterDriveFolder(String accessToken, String driveFolderId, String bookId, String chapterId) {
         if (driveFolderId == null || driveFolderId.isEmpty()) return driveFolderId;
-        String volumeName = loadChapterVolumeName(bookId, chapterId);
+        List<String> ids = new ArrayList<>();
+        ids.add(chapterId);
+        Map<String, String> map = JobRunnerPlugin.getChapterVolumeNamesSync(bookId, ids);
+        String volumeName = map != null ? map.get(chapterId) : null;
         if (volumeName == null) return driveFolderId;
         try {
             return resolveOrCreateVolumeFolder(accessToken, driveFolderId, volumeName);
@@ -637,6 +371,7 @@ public class GenerateAudioWorker extends Worker {
         String existing = findSubfolderId(accessToken, rootFolderId, volumeName);
         String resolved = existing != null ? existing : createSubfolder(accessToken, rootFolderId, volumeName);
         if (resolved == null || resolved.isEmpty()) return rootFolderId;
+        if (driveFolderCache.size() >= DRIVE_FOLDER_CACHE_MAX) driveFolderCache.clear();
         driveFolderCache.put(cacheKey, resolved);
         return resolved;
     }
@@ -650,27 +385,31 @@ public class GenerateAudioWorker extends Worker {
                 "&fields=files(id,name)&pageSize=10&supportsAllDrives=true&includeItemsFromAllDrives=true"
         );
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("GET");
-        conn.setRequestProperty("Authorization", "Bearer " + accessToken);
-        conn.setRequestProperty("Accept", "application/json");
-        int code = conn.getResponseCode();
-        if (code < 200 || code >= 300) {
-            throw new Exception("Drive subfolder lookup failed: " + code);
-        }
-        byte[] bytes = readAllBytes(conn.getInputStream());
-        JSONObject data = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
-        JSONArray files = data.optJSONArray("files");
-        if (files == null) return null;
-        for (int i = 0; i < files.length(); i++) {
-            JSONObject file = files.optJSONObject(i);
-            if (file == null) continue;
-            String id = file.optString("id", null);
-            String name = file.optString("name", "");
-            if (id != null && !id.isEmpty() && name.equalsIgnoreCase(folderName)) {
-                return id;
+        try {
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+            conn.setRequestProperty("Accept", "application/json");
+            int code = conn.getResponseCode();
+            if (code < 200 || code >= 300) {
+                throw new Exception("Drive subfolder lookup failed: " + code);
             }
+            byte[] bytes = readAllBytes(conn.getInputStream());
+            JSONObject data = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+            JSONArray files = data.optJSONArray("files");
+            if (files == null) return null;
+            for (int i = 0; i < files.length(); i++) {
+                JSONObject file = files.optJSONObject(i);
+                if (file == null) continue;
+                String id = file.optString("id", null);
+                String name = file.optString("name", "");
+                if (id != null && !id.isEmpty() && name.equalsIgnoreCase(folderName)) {
+                    return id;
+                }
+            }
+            return null;
+        } finally {
+            conn.disconnect();
         }
-        return null;
     }
 
     private String createSubfolder(String accessToken, String rootFolderId, String folderName) throws Exception {
@@ -683,27 +422,31 @@ public class GenerateAudioWorker extends Worker {
 
         URL url = new URL("https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id,name");
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Authorization", "Bearer " + accessToken);
-        conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-        byte[] payload = body.toString().getBytes(StandardCharsets.UTF_8);
-        conn.setFixedLengthStreamingMode(payload.length);
-        try (OutputStream os = conn.getOutputStream()) {
-            os.write(payload);
-        }
+        try {
+            conn.setRequestMethod("POST");
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+            byte[] payload = body.toString().getBytes(StandardCharsets.UTF_8);
+            conn.setFixedLengthStreamingMode(payload.length);
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(payload);
+            }
 
-        int code = conn.getResponseCode();
-        if (code < 200 || code >= 300) {
-            throw new Exception("Drive subfolder create failed: " + code);
+            int code = conn.getResponseCode();
+            if (code < 200 || code >= 300) {
+                throw new Exception("Drive subfolder create failed: " + code);
+            }
+            byte[] bytes = readAllBytes(conn.getInputStream());
+            JSONObject data = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+            String id = data.optString("id", null);
+            if (id == null || id.isEmpty()) {
+                throw new Exception("Drive subfolder create returned no id");
+            }
+            return id;
+        } finally {
+            conn.disconnect();
         }
-        byte[] bytes = readAllBytes(conn.getInputStream());
-        JSONObject data = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
-        String id = data.optString("id", null);
-        if (id == null || id.isEmpty()) {
-            throw new Exception("Drive subfolder create returned no id");
-        }
-        return id;
     }
 
     private String readTextFromPath(String path) {
@@ -733,83 +476,9 @@ public class GenerateAudioWorker extends Worker {
         }
     }
 
-    private void updateChapterAudioStatus(String bookId, String chapterId, String status, String filePath) {
-        SQLiteDatabase db = getDb();
-        ContentValues values = new ContentValues();
-        values.put("audioStatus", status);
-        values.put("audioSignature", filePath);
-        values.put("updatedAt", System.currentTimeMillis());
-        int updated = db.update("chapters", values, "id = ? AND bookId = ?", new String[]{chapterId, bookId});
-        if (updated == 0) {
-            db.update("chapters", values, "id = ?", new String[]{chapterId});
-        }
-    }
-
-    private void updateChapterAudioStatus(String bookId, String chapterId, String status, String filePath, String cloudAudioFileId) {
-        SQLiteDatabase db = getDb();
-        ContentValues values = new ContentValues();
-        values.put("audioStatus", status);
-        values.put("audioSignature", filePath);
-        if (cloudAudioFileId != null) {
-            values.put("cloudAudioFileId", cloudAudioFileId);
-            values.put("audioDriveId", cloudAudioFileId);
-        }
-        values.put("updatedAt", System.currentTimeMillis());
-        int updated = db.update("chapters", values, "id = ? AND bookId = ?", new String[]{chapterId, bookId});
-        if (updated == 0) {
-            db.update("chapters", values, "id = ?", new String[]{chapterId});
-        }
-    }
-
     private List<Rule> loadRulesForBook(String bookId) {
-        List<Rule> rules = new ArrayList<>();
-        SQLiteDatabase db = getDb();
-
-        // Book rules
-        Cursor cursor = db.query(
-            "books",
-            new String[]{"rulesJson"},
-            "id = ?",
-            new String[]{bookId},
-            null,
-            null,
-            null
-        );
-        if (cursor.moveToFirst()) {
-            String rulesStr = cursor.getString(cursor.getColumnIndexOrThrow("rulesJson"));
-            rules.addAll(parseRulesArray(rulesStr));
-        }
-        cursor.close();
-
-        // Global rules stored in app_state if available
-        Cursor c2 = db.query(
-            "kv",
-            new String[]{"json"},
-            "key = ?",
-            new String[]{"app_state"},
-            null,
-            null,
-            null
-        );
-        if (c2.moveToFirst()) {
-            String appStateStr = c2.getString(c2.getColumnIndexOrThrow("json"));
-            try {
-                JSONObject appState = new JSONObject(appStateStr);
-                JSONArray globalRules = appState.optJSONArray("globalRules");
-                if (globalRules != null) {
-                    rules.addAll(parseRulesArray(globalRules.toString()));
-                }
-            } catch (JSONException ignored) {}
-        }
-        c2.close();
-
-        Collections.sort(rules, new Comparator<Rule>() {
-            @Override
-            public int compare(Rule a, Rule b) {
-                return Integer.compare(b.priority, a.priority);
-            }
-        });
-        return rules;
+        String rulesJson = JobRunnerPlugin.getRulesForBookSync(bookId);
+        return parseRulesArray(rulesJson);
     }
 
     private List<Rule> parseRulesArray(String rawJson) {
@@ -850,7 +519,12 @@ public class GenerateAudioWorker extends Worker {
             int flags = 0;
             if (!rule.matchCase) flags |= Pattern.CASE_INSENSITIVE;
 
-            Pattern regex = Pattern.compile(pattern, flags);
+            String cacheKey = pattern + "\0" + flags;
+            Pattern regex = rulePatternCache.get(cacheKey);
+            if (regex == null) {
+                regex = Pattern.compile(pattern, flags);
+                rulePatternCache.put(cacheKey, regex);
+            }
             String replacement = "DELETE".equals(rule.ruleType) ? "" : (rule.speakAs != null ? rule.speakAs : "");
             processed = regex.matcher(processed).replaceAll(Matcher.quoteReplacement(replacement));
         }
@@ -883,6 +557,7 @@ public class GenerateAudioWorker extends Worker {
             progressJson.put("currentChapterProgress", chapterProgress);
             updateJobProgress(jobId, "running", progressJson, null);
             emitProgress(jobId, "running", progressJson);
+            JobRunnerPlugin.noteForegroundHeartbeat();
         }
         return out.toByteArray();
     }
@@ -890,46 +565,50 @@ public class GenerateAudioWorker extends Worker {
     private byte[] postTts(String text, String voiceId, double speakingRate) throws Exception {
         URL url = new URL(DEFAULT_ENDPOINT);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setConnectTimeout(20000);
-        conn.setReadTimeout(60000);
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Content-Type", "application/json");
+        try {
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(20000);
+            conn.setReadTimeout(60000);
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("x-api-key", BuildConfig.TTS_API_KEY);
 
-        JSONObject payload = new JSONObject();
-        payload.put("text", text);
-        payload.put("voiceName", voiceId);
-        payload.put("speakingRate", speakingRate);
-        payload.put("languageCode", "en-US");
+            JSONObject payload = new JSONObject();
+            payload.put("text", text);
+            payload.put("voiceName", voiceId);
+            payload.put("speakingRate", speakingRate);
+            payload.put("languageCode", "en-US");
 
-        byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
-        OutputStream os = conn.getOutputStream();
-        os.write(body);
-        os.flush();
-        os.close();
+            byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(body);
+            }
 
-        int code = conn.getResponseCode();
-        InputStream stream = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
-        byte[] bytes = readAllBytes(stream);
-        String contentType = conn.getHeaderField("Content-Type");
+            int code = conn.getResponseCode();
+            InputStream stream = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
+            byte[] bytes = readAllBytes(stream);
+            String contentType = conn.getHeaderField("Content-Type");
 
-        if (code < 200 || code >= 300) {
-            throw new Exception("Cloud TTS Failed: " + code);
+            if (code < 200 || code >= 300) {
+                throw new Exception("Cloud TTS Failed: " + code);
+            }
+
+            if (contentType != null && contentType.startsWith("audio/")) {
+                return bytes;
+            }
+
+            // Assume JSON with base64
+            JSONObject json = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+            String b64 = json.optString("mp3Base64", null);
+            if (b64 == null || b64.isEmpty()) b64 = json.optString("audioBase64", null);
+            if (b64 == null || b64.isEmpty()) b64 = json.optString("audioContent", null);
+            if (b64 == null || b64.isEmpty()) {
+                throw new Exception("TTS response missing base64 audio");
+            }
+            return Base64.decode(b64, Base64.DEFAULT);
+        } finally {
+            conn.disconnect();
         }
-
-        if (contentType != null && contentType.startsWith("audio/")) {
-            return bytes;
-        }
-
-        // Assume JSON with base64
-        JSONObject json = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
-        String b64 = json.optString("mp3Base64", null);
-        if (b64 == null || b64.isEmpty()) b64 = json.optString("audioBase64", null);
-        if (b64 == null || b64.isEmpty()) b64 = json.optString("audioContent", null);
-        if (b64 == null || b64.isEmpty()) {
-            throw new Exception("TTS response missing base64 audio");
-        }
-        return Base64.decode(b64, Base64.DEFAULT);
     }
 
     private byte[] postOpenAiTts(String text, String voiceId, double speakingRate) throws Exception {
@@ -939,36 +618,39 @@ public class GenerateAudioWorker extends Worker {
         }
         URL url = new URL(OPENAI_ENDPOINT);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setConnectTimeout(20000);
-        conn.setReadTimeout(60000);
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Content-Type", "application/json");
-        conn.setRequestProperty("Authorization", "Bearer " + apiKey);
+        try {
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(20000);
+            conn.setReadTimeout(60000);
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("Authorization", "Bearer " + apiKey);
 
-        double speed = Math.max(0.5, Math.min(2.0, speakingRate));
+            double speed = Math.max(0.5, Math.min(2.0, speakingRate));
 
-        JSONObject payload = new JSONObject();
-        payload.put("model", OPENAI_MODEL);
-        payload.put("voice", voiceId);
-        payload.put("input", text);
-        payload.put("response_format", "mp3");
-        payload.put("speed", speed);
+            JSONObject payload = new JSONObject();
+            payload.put("model", OPENAI_MODEL);
+            payload.put("voice", voiceId);
+            payload.put("input", text);
+            payload.put("response_format", "mp3");
+            payload.put("speed", speed);
 
-        byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
-        OutputStream os = conn.getOutputStream();
-        os.write(body);
-        os.flush();
-        os.close();
+            byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(body);
+            }
 
-        int code = conn.getResponseCode();
-        InputStream stream = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
-        byte[] bytes = readAllBytes(stream);
-        if (code < 200 || code >= 300) {
-            String errText = new String(bytes, StandardCharsets.UTF_8);
-            throw new Exception("OpenAI TTS Failed: " + code + " " + errText);
+            int code = conn.getResponseCode();
+            InputStream stream = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
+            byte[] bytes = readAllBytes(stream);
+            if (code < 200 || code >= 300) {
+                String errText = new String(bytes, StandardCharsets.UTF_8);
+                throw new Exception("OpenAI TTS Failed: " + code + " " + errText);
+            }
+            return bytes;
+        } finally {
+            conn.disconnect();
         }
-        return bytes;
     }
 
     private byte[] stripId3(byte[] bytes) {
@@ -1073,53 +755,37 @@ public class GenerateAudioWorker extends Worker {
         File dir = new File(getApplicationContext().getFilesDir(), "talevox/audio");
         if (!dir.exists()) dir.mkdirs();
         File out = new File(dir, chapterId + ".mp3");
+        if (out.exists()) {
+            if (!out.delete()) {
+                Log.w("GenerateAudioWorker", "Could not delete existing audio file for regen: " + out.getAbsolutePath());
+            }
+        }
         FileOutputStream fos = new FileOutputStream(out);
         fos.write(mp3);
         fos.flush();
         fos.close();
-        upsertChapterAudioPath(chapterId, out.getAbsolutePath(), mp3 != null ? mp3.length : 0);
+        JobRunnerPlugin.upsertChapterAudioPathSync(chapterId, out.getAbsolutePath(), mp3 != null ? mp3.length : 0);
         return out.getAbsolutePath();
     }
 
-    private void upsertChapterAudioPath(String chapterId, String localPath, int sizeBytes) {
-        try {
-            SQLiteDatabase db = getDb();
-            ContentValues values = new ContentValues();
-            values.put("chapterId", chapterId);
-            values.put("localPath", localPath);
-            values.put("sizeBytes", sizeBytes);
-            values.put("updatedAt", System.currentTimeMillis());
-            db.insertWithOnConflict("chapter_audio_files", null, values, SQLiteDatabase.CONFLICT_REPLACE);
-        } catch (Exception ignored) {}
-    }
-
-    private String loadDriveAccessToken() {
-        SQLiteDatabase db = getDb();
-        Cursor c = db.query(
-            "kv",
-            new String[]{"json"},
-            "key = ?",
-            new String[]{"auth_session"},
-            null,
-            null,
-            null
-        );
-        if (!c.moveToFirst()) {
-            c.close();
-            return null;
+    private String extractAccessToken(JSONObject session) {
+        String token = session.optString("accessToken", null);
+        if (token == null || token.isEmpty()) token = session.optString("access_token", null);
+        if (token == null || token.isEmpty()) {
+            JSONObject auth = session.optJSONObject("authentication");
+            if (auth != null) {
+                token = auth.optString("accessToken", null);
+                if (token == null || token.isEmpty()) token = auth.optString("access_token", null);
+            }
         }
-        String raw = c.getString(c.getColumnIndexOrThrow("json"));
-        c.close();
-        try {
-            JSONObject session = new JSONObject(raw);
-            String token = session.optString("accessToken", null);
-            if (token == null || token.isEmpty()) return null;
-            long expiresAt = session.optLong("expiresAt", 0);
-            if (expiresAt > 0 && System.currentTimeMillis() > expiresAt) return null;
-            return token;
-        } catch (JSONException e) {
-            return null;
+        Object tokenObj = session.opt("accessToken");
+        if ((token == null || token.isEmpty()) && tokenObj instanceof JSONObject) {
+            JSONObject accessTokenObj = (JSONObject) tokenObj;
+            token = accessTokenObj.optString("token", null);
+            if (token == null || token.isEmpty()) token = accessTokenObj.optString("accessToken", null);
+            if (token == null || token.isEmpty()) token = accessTokenObj.optString("access_token", null);
         }
+        return (token == null || token.isEmpty()) ? null : token;
     }
 
     private String uploadToDriveWithRetry(
@@ -1141,6 +807,52 @@ public class GenerateAudioWorker extends Worker {
                 Thread.sleep(delayMs + jitter);
                 delayMs = Math.min(delayMs * 2, 20000);
             }
+        }
+    }
+
+    private void uploadToDriveUpdateWithRetry(String accessToken, String fileId, String mimeType, byte[] content) throws Exception {
+        int attempt = 0;
+        long delayMs = 1000;
+        while (true) {
+            try {
+                uploadToDriveUpdate(accessToken, fileId, mimeType, content);
+                return;
+            } catch (RetryableUploadException e) {
+                attempt++;
+                if (attempt >= MAX_UPLOAD_RETRIES) throw e;
+                long jitter = (long) (Math.random() * delayMs);
+                Thread.sleep(delayMs + jitter);
+                delayMs = Math.min(delayMs * 2, 20000);
+            }
+        }
+    }
+
+    private void uploadToDriveUpdate(String accessToken, String fileId, String mimeType, byte[] content) throws Exception {
+        String encodedId = java.net.URLEncoder.encode(fileId, StandardCharsets.UTF_8.name());
+        URL url = new URL("https://www.googleapis.com/upload/drive/v3/files/" + encodedId + "?uploadType=media");
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        try {
+            conn.setRequestMethod("PATCH");
+            conn.setConnectTimeout(20000);
+            conn.setReadTimeout(60000);
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+            conn.setRequestProperty("Content-Type", mimeType);
+
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(content);
+            }
+
+            int code = conn.getResponseCode();
+            if (code == 429 || code == 500 || code == 502 || code == 503 || code == 504) {
+                throw new RetryableUploadException("Drive update retryable: " + code);
+            }
+            if (code < 200 || code >= 300) {
+                byte[] errBytes = readAllBytes(code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream());
+                throw new Exception("Drive update failed: " + code + " " + new String(errBytes, StandardCharsets.UTF_8));
+            }
+        } finally {
+            conn.disconnect();
         }
     }
 
@@ -1178,28 +890,31 @@ public class GenerateAudioWorker extends Worker {
 
         URL url = new URL("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&supportsAllDrives=true");
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setConnectTimeout(20000);
-        conn.setReadTimeout(60000);
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Authorization", "Bearer " + accessToken);
-        conn.setRequestProperty("Content-Type", "multipart/related; boundary=" + boundary);
+        try {
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(20000);
+            conn.setReadTimeout(60000);
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+            conn.setRequestProperty("Content-Type", "multipart/related; boundary=" + boundary);
 
-        OutputStream os = conn.getOutputStream();
-        os.write(body.toByteArray());
-        os.flush();
-        os.close();
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(body.toByteArray());
+            }
 
-        int code = conn.getResponseCode();
-        byte[] bytes = readAllBytes(code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream());
-        if (code == 429 || code == 500 || code == 502 || code == 503 || code == 504) {
-            throw new RetryableUploadException("Drive upload retryable: " + code);
+            int code = conn.getResponseCode();
+            byte[] bytes = readAllBytes(code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream());
+            if (code == 429 || code == 500 || code == 502 || code == 503 || code == 504) {
+                throw new RetryableUploadException("Drive upload retryable: " + code);
+            }
+            if (code < 200 || code >= 300) {
+                throw new Exception("Drive upload failed: " + code);
+            }
+            JSONObject json = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+            return json.optString("id", null);
+        } finally {
+            conn.disconnect();
         }
-        if (code < 200 || code >= 300) {
-            throw new Exception("Drive upload failed: " + code);
-        }
-        JSONObject json = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
-        return json.optString("id", null);
     }
 
     private void emitProgress(String jobId, String status, JSONObject progressJson) {
@@ -1219,79 +934,13 @@ public class GenerateAudioWorker extends Worker {
         JobRunnerPlugin.emitJobFinished(payload);
     }
 
-    private void enqueueUploadQueueItem(String bookId, String chapterId, String localPath) {
-        try {
-            SQLiteDatabase db = getDb();
-            String id = "q_" + chapterId;
-            long now = System.currentTimeMillis();
-            ContentValues values = new ContentValues();
-            values.put("id", id);
-            values.put("chapterId", chapterId);
-            values.put("bookId", bookId);
-            values.put("localPath", localPath);
-            values.put("status", "queued");
-            values.put("attempts", 0);
-            values.put("nextAttemptAt", now);
-            values.put("lastError", (String) null);
-            values.put("createdAt", now);
-            values.put("updatedAt", now);
-            values.put("priority", 0);
-            values.put("queuedAt", now);
-            values.put("source", "audio");
-            values.put("lastAttemptAt", 0);
-            values.put("manual", 0);
-            db.insertWithOnConflict("drive_upload_queue", null, values, SQLiteDatabase.CONFLICT_REPLACE);
-        } catch (Exception ignored) {}
-    }
-
-    private void ensureUploadQueueJob() {
-        try {
-            SQLiteDatabase db = getDb();
-            Cursor c2 = db.query("jobs", new String[]{"jobId"}, "type = ? AND status IN ('queued','running')", new String[]{"drive_upload_queue"}, null, null, null, "1");
-            if (c2.moveToFirst()) {
-                c2.close();
-                return;
-            }
-            c2.close();
-            String jobId = UUID.randomUUID().toString();
-            long now = System.currentTimeMillis();
-            int total = countPendingUploads();
-            JSONObject progress = new JSONObject();
-            progress.put("total", total);
-            progress.put("completed", 0);
-
-            ContentValues values = new ContentValues();
-            values.put("jobId", jobId);
-            values.put("type", "drive_upload_queue");
-            values.put("status", "queued");
-            values.put("payloadJson", (String) null);
-            values.put("progressJson", progress.toString());
-            values.put("error", (String) null);
-            values.put("createdAt", now);
-            values.put("updatedAt", now);
-            db.insertWithOnConflict("jobs", null, values, SQLiteDatabase.CONFLICT_REPLACE);
-
-            OneTimeWorkRequest request =
-                new OneTimeWorkRequest.Builder(DriveUploadWorker.class)
-                    .setInputData(new Data.Builder().putString("jobId", jobId).build())
-                    .build();
-            WorkManager.getInstance(getApplicationContext()).enqueue(request);
-
-            progress.put("workRequestId", request.getId().toString());
-            ContentValues update = new ContentValues();
-            update.put("progressJson", progress.toString());
-            update.put("updatedAt", System.currentTimeMillis());
-            db.update("jobs", update, "jobId = ?", new String[]{jobId});
-        } catch (Exception ignored) {}
-    }
-
     private void showProgressNotification(String jobId, String title, JSONObject progressJson) {
         NotificationManager nm = (NotificationManager) getApplicationContext().getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm == null) return;
         int total = progressJson != null ? progressJson.optInt("total", 0) : 0;
         int completed = progressJson != null ? progressJson.optInt("completed", 0) : 0;
         String currentChapterId = progressJson != null ? progressJson.optString("currentChapterId", "") : "";
-        String text = total > 0 ? ("Chapter " + Math.min(completed + 1, total) + " of " + total) : "";
+        String text = total > 0 ? ("Chapter " + Math.min(completed + 1, total) + " of " + total) : "Preparing…";
         if (currentChapterId != null && !currentChapterId.isEmpty()) text = text.isEmpty() ? currentChapterId : (text + " · " + currentChapterId);
         Notification notification = JobNotificationHelper.buildProgress(
             getApplicationContext(),
@@ -1306,52 +955,34 @@ public class GenerateAudioWorker extends Worker {
         nm.notify(JobNotificationHelper.getNotificationId(jobId), notification);
     }
 
-    private void showFinishedNotification(String jobId, String title) {
+    private void showFinishedNotification(String jobId, String title, int totalChapters) {
+        showFinishedNotification(jobId, title, totalChapters > 0 ? (totalChapters + " chapter" + (totalChapters == 1 ? "" : "s") + " completed") : "Done", true);
+    }
+
+    private void showFinishedNotification(String jobId, String title, String text, boolean success) {
         NotificationManager nm = (NotificationManager) getApplicationContext().getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm == null) return;
-
-        Notification notification = JobNotificationHelper.buildFinished(getApplicationContext(), jobId, title, "", true);
+        Notification notification = JobNotificationHelper.buildFinished(getApplicationContext(), jobId, title, text, success);
         nm.notify(JobNotificationHelper.getNotificationId(jobId), notification);
     }
 
     private Result failJob(String jobId, String message, JSONObject progressJson) {
-        try {
-            updateStatus(jobId, "failed", message);
-        } catch (Exception ignored) {}
         JSONObject progress = progressJson != null ? progressJson : new JSONObject();
         try { progress.put("error", message); } catch (JSONException ignored) {}
+        updateJobProgress(jobId, "failed", progress, message);
         try {
             emitFinished(jobId, "failed", progress, message);
         } catch (Exception ignored) {}
         try {
-            showFinishedNotification(jobId, "Audio generation failed");
+            String errText = (message != null && !message.trim().isEmpty()) ? message : "An error occurred";
+            showFinishedNotification(jobId, "Audio generation failed", errText, false);
         } catch (Exception ignored) {}
         try {
-            setForegroundAsync(JobNotificationHelper.buildForegroundInfo(getApplicationContext(), jobId, "Audio generation failed", "", 0, 0, true, false));
+            String errText = (message != null && !message.trim().isEmpty()) ? message : "An error occurred";
+            setForegroundAsync(JobNotificationHelper.buildForegroundInfo(getApplicationContext(), jobId, "Audio generation failed", errText, 0, 0, true, false));
         } catch (Exception ignored) {}
         JobRunnerPlugin.noteForegroundHeartbeat();
         return Result.failure();
-    }
-
-    private int countPendingUploads() {
-        SQLiteDatabase db = getDb();
-        Cursor cursor = db.rawQuery("SELECT COUNT(*) FROM drive_upload_queue WHERE status IN ('queued','failed','uploading')", null);
-        int total = 0;
-        if (cursor.moveToFirst()) total = cursor.getInt(0);
-        cursor.close();
-        return total;
-    }
-
-    private static class JobRow {
-        String jobId;
-        JSONObject payloadJson;
-        JSONObject progressJson;
-
-        JobRow(String jobId, JSONObject payloadJson, JSONObject progressJson) {
-            this.jobId = jobId;
-            this.payloadJson = payloadJson;
-            this.progressJson = progressJson;
-        }
     }
 
     private static class Rule {
@@ -1369,5 +1000,10 @@ public class GenerateAudioWorker extends Worker {
         RetryableUploadException(String message) {
             super(message);
         }
+    }
+
+    @Override
+    public void onStopped() {
+        super.onStopped();
     }
 }

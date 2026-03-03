@@ -18,6 +18,7 @@ type Props = {
   onUserScrollingChange: (v: boolean) => void;
   theme: Theme;
   followHighlight: boolean;
+  contentLoading?: boolean;
 };
 
 const ReaderContent: React.FC<Props> = ({
@@ -35,12 +36,13 @@ const ReaderContent: React.FC<Props> = ({
   onUserScrollingChange,
   theme,
   followHighlight,
+  contentLoading = false,
 }) => {
   return (
     <div
       ref={containerRef}
       onScroll={onScroll}
-      className={`flex-1 overflow-y-auto overscroll-contain touch-pan-y px-4 lg:px-12 py-12 lg:py-24 scrollbar-hide ${followHighlight ? '' : 'scroll-smooth'}`}
+      className={`flex-1 overflow-y-auto overscroll-contain touch-pan-y px-4 lg:px-12 py-12 lg:py-24 scrollbar-hide ${followHighlight ? "" : "scroll-smooth"}`}
       onDoubleClick={onDoubleClick}
     >
       <div
@@ -58,6 +60,7 @@ const ReaderContent: React.FC<Props> = ({
           onUserScrollingChange={onUserScrollingChange}
           theme={theme}
           spacerClassName={spacerClassName}
+          contentLoading={contentLoading}
         />
       </div>
     </div>

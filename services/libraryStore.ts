@@ -51,11 +51,22 @@ const DB_VERSION = appConfig.db.version;
 
 const CHAPTER_TEXT_CACHE_TTL_MS = appConfig.cache.chapterTextTtlMs;
 const CHAPTER_TEXT_NEGATIVE_TTL_MS = appConfig.cache.chapterTextNegativeTtlMs;
+const CHAPTER_TEXT_CACHE_MAX = 200;
+const CHAPTER_TEXT_INFLIGHT_TIMEOUT_MS = 60_000;
+
 const chapterTextCache = new Map<string, { value: string | null; ts: number }>();
-const chapterTextInFlight = new Map<string, Promise<string | null>>();
+const chapterTextInFlight = new Map<string, { promise: Promise<string | null>; addedAt: number }>();
 
 function chapterTextKey(bookId: string, chapterId: string): string {
   return `${bookId}:${chapterId}`;
+}
+
+function evictChapterTextCacheLru(): void {
+  while (chapterTextCache.size >= CHAPTER_TEXT_CACHE_MAX) {
+    const oldest = chapterTextCache.keys().next().value;
+    if (oldest === undefined) break;
+    chapterTextCache.delete(oldest);
+  }
 }
 
 function getCachedChapterText(key: string): string | null | undefined {
@@ -70,7 +81,18 @@ function getCachedChapterText(key: string): string | null | undefined {
 }
 
 function setCachedChapterText(key: string, value: string | null): void {
+  evictChapterTextCacheLru();
   chapterTextCache.set(key, { value, ts: Date.now() });
+}
+
+function getOrInvalidateInFlight(key: string): Promise<string | null> | undefined {
+  const entry = chapterTextInFlight.get(key);
+  if (!entry) return undefined;
+  if (Date.now() - entry.addedAt > CHAPTER_TEXT_INFLIGHT_TIMEOUT_MS) {
+    chapterTextInFlight.delete(key);
+    return undefined;
+  }
+  return entry.promise;
 }
 
 function clearCachedChapterTextForBook(bookId: string): void {
@@ -84,7 +106,9 @@ function clearCachedChapterTextForBook(bookId: string): void {
 
 function isNative(): boolean {
   try {
-    return typeof window !== "undefined" && !!(window as any).Capacitor && Capacitor.isNativePlatform();
+    return (
+      typeof window !== "undefined" && !!(window as any).Capacitor && Capacitor.isNativePlatform()
+    );
   } catch {
     return false;
   }
@@ -111,7 +135,9 @@ function safeParseJson<T>(jsonStr: any, fallback: T): T {
   }
 }
 
-function ensureBookDefaults(b: Partial<Book> & { id: string; title: string; backend: StorageBackend }): Book {
+function ensureBookDefaults(
+  b: Partial<Book> & { id: string; title: string; backend: StorageBackend }
+): Book {
   return {
     id: b.id,
     title: b.title,
@@ -254,9 +280,10 @@ export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promi
   const db = await mustSqliteDb();
   const updatedAt = chapter.updatedAt ?? Date.now();
   const sortOrder = getChapterSortOrder(chapter);
-  const legacyIndex = Number.isFinite(Number(chapter.index)) && Number(chapter.index) > 0
-    ? Number(chapter.index)
-    : sortOrder;
+  const legacyIndex =
+    Number.isFinite(Number(chapter.index)) && Number(chapter.index) > 0
+      ? Number(chapter.index)
+      : sortOrder;
 
   await db.run(
     `INSERT INTO chapters (
@@ -391,7 +418,11 @@ export async function deleteChapterTombstone(bookId: string, chapterId: string):
   ]);
 }
 
-export async function saveChapterText(bookId: string, chapterId: string, content: string): Promise<void> {
+export async function saveChapterText(
+  bookId: string,
+  chapterId: string,
+  content: string
+): Promise<void> {
   await ensureInit();
 
   if (!isNative()) {
@@ -421,7 +452,7 @@ export async function loadChapterText(bookId: string, chapterId: string): Promis
   const cached = getCachedChapterText(key);
   if (cached !== undefined) return cached;
 
-  const inflight = chapterTextInFlight.get(key);
+  const inflight = getOrInvalidateInFlight(key);
   if (inflight) return inflight;
 
   const task = (async () => {
@@ -473,7 +504,7 @@ export async function loadChapterText(bookId: string, chapterId: string): Promis
     chapterTextInFlight.delete(key);
   });
 
-  chapterTextInFlight.set(key, task);
+  chapterTextInFlight.set(key, { promise: task, addedAt: Date.now() });
   return task;
 }
 
@@ -492,7 +523,9 @@ async function nativeSaveChapterCueMap(chapterId: string, cueMap: CueMap): Promi
 
 async function nativeGetChapterCueMap(chapterId: string): Promise<CueMap | null> {
   const db = await mustSqliteDb();
-  const res = await db.query(`SELECT cueJson FROM chapter_cue_maps WHERE chapterId = ?`, [chapterId]);
+  const res = await db.query(`SELECT cueJson FROM chapter_cue_maps WHERE chapterId = ?`, [
+    chapterId,
+  ]);
   const row = (res.values?.[0] ?? null) as any;
   if (!row) return null;
   try {
@@ -508,7 +541,10 @@ async function nativeDeleteChapterCueMap(chapterId: string): Promise<void> {
 }
 
 // Paragraph maps
-async function nativeSaveChapterParagraphMap(chapterId: string, paragraphMap: ParagraphMap): Promise<void> {
+async function nativeSaveChapterParagraphMap(
+  chapterId: string,
+  paragraphMap: ParagraphMap
+): Promise<void> {
   const db = await mustSqliteDb();
   await db.run(
     `INSERT INTO chapter_paragraph_maps (chapterId, paragraphJson, updatedAt)
@@ -522,7 +558,10 @@ async function nativeSaveChapterParagraphMap(chapterId: string, paragraphMap: Pa
 
 async function nativeGetChapterParagraphMap(chapterId: string): Promise<ParagraphMap | null> {
   const db = await mustSqliteDb();
-  const res = await db.query(`SELECT paragraphJson FROM chapter_paragraph_maps WHERE chapterId = ?`, [chapterId]);
+  const res = await db.query(
+    `SELECT paragraphJson FROM chapter_paragraph_maps WHERE chapterId = ?`,
+    [chapterId]
+  );
   const row = (res.values?.[0] ?? null) as any;
   if (!row) return null;
   try {
@@ -555,7 +594,10 @@ export async function deleteChapterCueMap(chapterId: string): Promise<void> {
   return nativeDeleteChapterCueMap(chapterId);
 }
 
-export async function saveChapterParagraphMap(chapterId: string, paragraphMap: ParagraphMap): Promise<void> {
+export async function saveChapterParagraphMap(
+  chapterId: string,
+  paragraphMap: ParagraphMap
+): Promise<void> {
   await ensureInit();
   if (!isNative()) return idbSaveChapterParagraphMap(chapterId, paragraphMap);
   return nativeSaveChapterParagraphMap(chapterId, paragraphMap);
@@ -595,7 +637,7 @@ export async function listChaptersPage(
 
   params.push(limit);
 
-   const res = await db.query(
+  const res = await db.query(
     `SELECT id, idx as "index", COALESCE(sortOrder, idx) as "sortOrder", title, filename, sourceUrl, volumeName, volumeLocalChapter,
             cloudTextFileId, cloudAudioFileId, audioDriveId,
             audioStatus, audioSignature, durationSec, textLength, wordCount, isFavorite, updatedAt
@@ -611,42 +653,42 @@ export async function listChaptersPage(
   const fallbackBase = typeof afterIndex === "number" ? afterIndex : 0;
   const chapters: Chapter[] = rows.map((r, i) => {
     const rawSortOrder = Number(r.sortOrder ?? r.index ?? r.idx);
-    const normalizedSortOrder = Number.isFinite(rawSortOrder) && rawSortOrder > 0
-      ? Math.floor(rawSortOrder)
-      : fallbackBase + i + 1;
+    const normalizedSortOrder =
+      Number.isFinite(rawSortOrder) && rawSortOrder > 0
+        ? Math.floor(rawSortOrder)
+        : fallbackBase + i + 1;
     const rawIndex = Number(r.index ?? r.idx);
     const fallbackIndex = fallbackBase + i + 1;
     const index = Number.isFinite(rawIndex) && rawIndex > 0 ? Math.floor(rawIndex) : fallbackIndex;
     const rawTitle = typeof r.title === "string" ? r.title.trim() : "";
-    const title = rawTitle && !rawTitle.toLowerCase().startsWith("imported")
-      ? rawTitle
-      : `Chapter ${index}`;
+    const title =
+      rawTitle && !rawTitle.toLowerCase().startsWith("imported") ? rawTitle : `Chapter ${index}`;
     return {
       id: String(r.id),
       index,
       sortOrder: normalizedSortOrder,
       title,
-    filename: String(r.filename),
-    sourceUrl: r.sourceUrl ?? undefined,
-    volumeName: r.volumeName ?? undefined,
-    volumeLocalChapter:
-      r.volumeLocalChapter != null && Number.isFinite(Number(r.volumeLocalChapter))
-        ? Number(r.volumeLocalChapter)
-        : undefined,
+      filename: String(r.filename),
+      sourceUrl: r.sourceUrl ?? undefined,
+      volumeName: r.volumeName ?? undefined,
+      volumeLocalChapter:
+        r.volumeLocalChapter != null && Number.isFinite(Number(r.volumeLocalChapter))
+          ? Number(r.volumeLocalChapter)
+          : undefined,
 
-    wordCount: Number(r.wordCount ?? 0),
-    progress: 0,
-    progressChars: 0,
-    progressSec: r.progressSec != null ? Number(r.progressSec) : undefined,
-    durationSec: r.durationSec != null ? Number(r.durationSec) : undefined,
-    textLength: r.textLength != null ? Number(r.textLength) : undefined,
+      wordCount: Number(r.wordCount ?? 0),
+      progress: 0,
+      progressChars: 0,
+      progressSec: r.progressSec != null ? Number(r.progressSec) : undefined,
+      durationSec: r.durationSec != null ? Number(r.durationSec) : undefined,
+      textLength: r.textLength != null ? Number(r.textLength) : undefined,
 
-    isFavorite: r.isFavorite === 1 || r.isFavorite === true,
-    updatedAt: Number(r.updatedAt ?? Date.now()),
+      isFavorite: r.isFavorite === 1 || r.isFavorite === true,
+      updatedAt: Number(r.updatedAt ?? Date.now()),
 
-    cloudTextFileId: r.cloudTextFileId ?? undefined,
-    cloudAudioFileId: r.cloudAudioFileId ?? undefined,
-    audioDriveId: r.audioDriveId ?? undefined,
+      cloudTextFileId: r.cloudTextFileId ?? undefined,
+      cloudAudioFileId: r.cloudAudioFileId ?? undefined,
+      audioDriveId: r.audioDriveId ?? undefined,
       audioStatus: r.audioStatus ?? undefined,
       audioSignature: r.audioSignature ?? undefined,
     };
@@ -657,18 +699,22 @@ export async function listChaptersPage(
     ? getChapterSortOrder(orderedChapters[orderedChapters.length - 1])
     : null;
   let totalCount: number | undefined;
-  try {
-    const countRes = await db.query(
-      `SELECT COUNT(*) as total
-       FROM chapters
-       WHERE bookId = ?
-         AND id NOT IN (SELECT chapterId FROM chapter_tombstones WHERE bookId = ?)`,
-      [bookId, bookId]
-    );
-    const countRow = (countRes.values?.[0] ?? null) as any;
-    totalCount = countRow ? Number(countRow.total ?? 0) : 0;
-  } catch {
-    totalCount = undefined;
+  // Skip COUNT on subsequent pages; caller already has chapterCount from first page
+  const skipCount = typeof afterIndex === "number" && afterIndex >= 0;
+  if (!skipCount) {
+    try {
+      const countRes = await db.query(
+        `SELECT COUNT(*) as total
+         FROM chapters
+         WHERE bookId = ?
+           AND id NOT IN (SELECT chapterId FROM chapter_tombstones WHERE bookId = ?)`,
+        [bookId, bookId]
+      );
+      const countRow = (countRes.values?.[0] ?? null) as any;
+      totalCount = countRow ? Number(countRow.total ?? 0) : 0;
+    } catch {
+      totalCount = undefined;
+    }
   }
 
   return {
@@ -715,7 +761,8 @@ export async function getChaptersByIds(bookId: string, chapterIds: string[]): Pr
     const rawIndex = Number(r.index ?? r.idx);
     const index = Number.isFinite(rawIndex) && rawIndex > 0 ? rawIndex : 1;
     const rawSortOrder = Number(r.sortOrder ?? r.index ?? r.idx);
-    const sortOrder = Number.isFinite(rawSortOrder) && rawSortOrder > 0 ? Math.floor(rawSortOrder) : index;
+    const sortOrder =
+      Number.isFinite(rawSortOrder) && rawSortOrder > 0 ? Math.floor(rawSortOrder) : index;
     const rawTitle = typeof r.title === "string" ? r.title.trim() : "";
     const title =
       rawTitle && !rawTitle.toLowerCase().startsWith("imported") ? rawTitle : `Chapter ${index}`;
@@ -804,11 +851,23 @@ export async function listBookAttachments(bookId: string): Promise<BookAttachmen
   }));
 }
 
+/** Normalize to book-level only; strip any chapterId. */
+function normalizeBookAttachment(
+  a: BookAttachment | (BookAttachment & { chapterId?: unknown }),
+  bookId: string
+): BookAttachment {
+  const { chapterId: _c, ...rest } = a as BookAttachment & { chapterId?: unknown };
+  return { ...rest, bookId } as BookAttachment;
+}
+
+/** Upsert a single book-level attachment. Enforces bookId; chapterId ignored. */
 export async function upsertBookAttachment(attachment: BookAttachment): Promise<void> {
   await ensureInit();
+  if (!attachment.bookId) throw new Error("BookAttachment requires bookId");
+  const norm = normalizeBookAttachment(attachment, attachment.bookId);
 
   if (!isNative()) {
-    await idbUpsertBookAttachment(attachment);
+    await idbUpsertBookAttachment(norm);
     return;
   }
 
@@ -826,32 +885,37 @@ export async function upsertBookAttachment(attachment: BookAttachment): Promise<
        sha256=excluded.sha256,
        updatedAt=excluded.updatedAt`,
     [
-      attachment.id,
-      attachment.bookId,
-      attachment.driveFileId ?? null,
-      attachment.filename,
-      attachment.mimeType ?? null,
-      attachment.sizeBytes ?? null,
-      attachment.localPath ?? null,
-      attachment.sha256 ?? null,
-      attachment.createdAt ?? Date.now(),
-      attachment.updatedAt ?? Date.now(),
+      norm.id,
+      norm.bookId,
+      norm.driveFileId ?? null,
+      norm.filename,
+      norm.mimeType ?? null,
+      norm.sizeBytes ?? null,
+      norm.localPath ?? null,
+      norm.sha256 ?? null,
+      norm.createdAt ?? Date.now(),
+      norm.updatedAt ?? Date.now(),
     ]
   );
 }
 
-export async function bulkUpsertBookAttachments(bookId: string, items: BookAttachment[]): Promise<void> {
+/** Upsert book-level attachments. Enforces bookId; any chapterId is stripped. */
+export async function bulkUpsertBookAttachments(
+  bookId: string,
+  items: BookAttachment[]
+): Promise<void> {
   await ensureInit();
+  const normalized = items.map((a) => normalizeBookAttachment(a, bookId));
 
   if (!isNative()) {
-    await idbBulkUpsertBookAttachments(bookId, items);
+    await idbBulkUpsertBookAttachments(bookId, normalized);
     return;
   }
 
   const db = await mustSqliteDb();
   await db.run("BEGIN");
   try {
-    for (const attachment of items) {
+    for (const attachment of normalized) {
       await db.run(
         `INSERT INTO book_attachments (id, bookId, driveFileId, filename, mimeType, sizeBytes, localPath, sha256, createdAt, updatedAt)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

@@ -1,7 +1,14 @@
 import { WebPlugin } from "@capacitor/core";
 import type { JobRecord } from "../../../types";
 import type { JobRunnerPayload, JobRunnerPlugin } from "./index";
-import { createJob, updateJob, getJob, listJobs, deleteJob, clearJobs } from "../../../services/jobStore";
+import {
+  createJob,
+  updateJob,
+  getJob,
+  listJobs,
+  deleteJob,
+  clearJobs,
+} from "../../../services/jobStore";
 
 function createJobId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -30,7 +37,34 @@ export class JobRunnerWeb extends WebPlugin implements JobRunnerPlugin {
     return { jobId };
   }
 
-  async enqueueFixIntegrity(options: { payload: { bookId: string; driveFolderId?: string; options?: { genAudio?: boolean; cleanupStrays?: boolean; convertLegacy?: boolean } } }): Promise<{ jobId: string }> {
+  async enqueueGenerateBookAudio(options: {
+    payload: JobRunnerPayload;
+  }): Promise<{ jobId: string }> {
+    const jobId = createJobId();
+    const now = Date.now();
+    const total = options.payload.chapterIds?.length ?? 0;
+
+    const job: JobRecord = {
+      jobId,
+      type: "generate_book_audio",
+      status: "queued",
+      payloadJson: options.payload,
+      progressJson: { total, completed: 0 },
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await createJob(job);
+    return { jobId };
+  }
+
+  async enqueueFixIntegrity(options: {
+    payload: {
+      bookId: string;
+      driveFolderId?: string;
+      options?: { genAudio?: boolean; cleanupStrays?: boolean; convertLegacy?: boolean };
+    };
+  }): Promise<{ jobId: string }> {
     const jobId = createJobId();
     const now = Date.now();
 
@@ -77,7 +111,11 @@ export class JobRunnerWeb extends WebPlugin implements JobRunnerPlugin {
     return { paused: false };
   }
 
-  async checkNotificationPermission(): Promise<{ supported: boolean; granted: boolean; enabled: boolean }> {
+  async checkNotificationPermission(): Promise<{
+    supported: boolean;
+    granted: boolean;
+    enabled: boolean;
+  }> {
     return { supported: false, granted: true, enabled: true };
   }
 

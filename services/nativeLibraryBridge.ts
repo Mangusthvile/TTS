@@ -13,7 +13,9 @@ let bridgeReady: Promise<SQLiteDBConnection> | null = null;
 
 function isNative(): boolean {
   try {
-    return typeof window !== "undefined" && !!(window as any).Capacitor && Capacitor.isNativePlatform();
+    return (
+      typeof window !== "undefined" && !!(window as any).Capacitor && Capacitor.isNativePlatform()
+    );
   } catch {
     return false;
   }
@@ -33,6 +35,30 @@ async function getDb(): Promise<SQLiteDBConnection> {
     throw err;
   });
   return bridgeReady;
+}
+
+async function hasColumn(
+  conn: SQLiteDBConnection,
+  table: string,
+  column: string
+): Promise<boolean> {
+  try {
+    const res = await conn.query(`PRAGMA table_info(${table})`);
+    const rows = Array.isArray(res.values) ? res.values : [];
+    return rows.some((row: any) => String(row?.name ?? "").toLowerCase() === column.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+async function ensureColumn(
+  conn: SQLiteDBConnection,
+  table: string,
+  column: string,
+  typeDef: string
+): Promise<void> {
+  if (await hasColumn(conn, table, column)) return;
+  await conn.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${typeDef}`);
 }
 
 async function ensureSchema(conn: SQLiteDBConnection): Promise<void> {
@@ -90,34 +116,29 @@ async function ensureSchema(conn: SQLiteDBConnection): Promise<void> {
       cueJson TEXT NOT NULL,
       updatedAt INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS chapter_tombstones (
+      bookId TEXT NOT NULL,
+      chapterId TEXT NOT NULL,
+      deletedAt INTEGER NOT NULL,
+      PRIMARY KEY (bookId, chapterId)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_chapter_tombstones_bookId ON chapter_tombstones(bookId);
   `);
-  try {
-    await conn.execute(`ALTER TABLE chapter_text ADD COLUMN localPath TEXT`);
-  } catch {
-    // Column already exists
-  }
-  try {
-    await conn.execute(`ALTER TABLE chapters ADD COLUMN volumeName TEXT`);
-  } catch {
-    // Column already exists
-  }
-  try {
-    await conn.execute(`ALTER TABLE chapters ADD COLUMN volumeLocalChapter INTEGER`);
-  } catch {
-    // Column already exists
-  }
-  try {
-    await conn.execute(`ALTER TABLE chapters ADD COLUMN sortOrder INTEGER`);
-  } catch {
-    // Column already exists
-  }
+  await ensureColumn(conn, "chapter_text", "localPath", "TEXT");
+  await ensureColumn(conn, "chapters", "volumeName", "TEXT");
+  await ensureColumn(conn, "chapters", "volumeLocalChapter", "INTEGER");
+  await ensureColumn(conn, "chapters", "sortOrder", "INTEGER");
   try {
     await conn.execute(`UPDATE chapters SET sortOrder = idx WHERE sortOrder IS NULL`);
   } catch {
     // best-effort backfill
   }
   try {
-    await conn.execute(`CREATE INDEX IF NOT EXISTS idx_chapters_book_sort ON chapters(bookId, sortOrder, idx)`);
+    await conn.execute(
+      `CREATE INDEX IF NOT EXISTS idx_chapters_book_sort ON chapters(bookId, sortOrder, idx)`
+    );
   } catch {
     // best-effort index creation
   }
@@ -388,9 +409,6 @@ export async function hasNativeBook(bookId: string, driveFolderId?: string): Pro
     where += " OR driveFolderId = ?";
     params.push(driveFolderId);
   }
-  const res = await conn.query(
-    `SELECT id FROM books WHERE ${where} LIMIT 1`,
-    params
-  );
+  const res = await conn.query(`SELECT id FROM books WHERE ${where} LIMIT 1`, params);
   return Array.isArray(res.values) && res.values.length > 0;
 }

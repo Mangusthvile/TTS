@@ -37,8 +37,8 @@ const NotificationHost: React.FC = () => {
           toast.type === "error"
             ? "bg-red-500 text-white"
             : toast.type === "success"
-            ? "bg-emerald-500 text-white"
-            : "bg-slate-900 text-white"
+              ? "bg-emerald-500 text-white"
+              : "bg-slate-900 text-white"
         }`}
       >
         {toast.type === "error" ? (

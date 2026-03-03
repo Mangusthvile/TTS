@@ -54,20 +54,31 @@ export function computeProgressUpdate(input: ProgressCommitInput): ProgressCommi
 
   const currentProgress = Number.isFinite(current.progress) ? current.progress : 0;
   const currentDuration =
-    typeof current.durationSec === "number" && Number.isFinite(current.durationSec) ? current.durationSec : 0;
+    typeof current.durationSec === "number" && Number.isFinite(current.durationSec)
+      ? current.durationSec
+      : 0;
   const currentTextLength =
-    typeof current.textLength === "number" && Number.isFinite(current.textLength) ? current.textLength : 0;
+    typeof current.textLength === "number" && Number.isFinite(current.textLength)
+      ? current.textLength
+      : 0;
   const currentChars =
-    typeof current.progressChars === "number" && Number.isFinite(current.progressChars) ? current.progressChars : 0;
+    typeof current.progressChars === "number" && Number.isFinite(current.progressChars)
+      ? current.progressChars
+      : 0;
 
   const incomingDuration =
-    typeof input.durationSec === "number" && Number.isFinite(input.durationSec) ? input.durationSec : 0;
+    typeof input.durationSec === "number" && Number.isFinite(input.durationSec)
+      ? input.durationSec
+      : 0;
   const durationSec = incomingDuration > 0 ? incomingDuration : currentDuration;
   const incomingTextLength =
-    typeof input.textLength === "number" && Number.isFinite(input.textLength) ? input.textLength : 0;
+    typeof input.textLength === "number" && Number.isFinite(input.textLength)
+      ? input.textLength
+      : 0;
   const textLength = incomingTextLength > 0 ? incomingTextLength : currentTextLength;
 
-  const rawTime = typeof input.timeSec === "number" && Number.isFinite(input.timeSec) ? input.timeSec : 0;
+  const rawTime =
+    typeof input.timeSec === "number" && Number.isFinite(input.timeSec) ? input.timeSec : 0;
   const timeSec = durationSec > 0 ? clamp(rawTime, 0, durationSec) : Math.max(0, rawTime);
   const progressChars =
     typeof input.progressChars === "number" && Number.isFinite(input.progressChars)
@@ -76,11 +87,12 @@ export function computeProgressUpdate(input: ProgressCommitInput): ProgressCommi
 
   const percentFromTime = computePercent(timeSec, durationSec);
   const percentFromChars =
-    percentFromTime === undefined && textLength > 0 ? computePercent(progressChars, textLength) : undefined;
+    percentFromTime === undefined && textLength > 0
+      ? computePercent(progressChars, textLength)
+      : undefined;
   const percentCandidate = typeof percentFromTime === "number" ? percentFromTime : percentFromChars;
 
-  let nextPercent =
-    typeof percentCandidate === "number" ? percentCandidate : currentProgress;
+  let nextPercent = typeof percentCandidate === "number" ? percentCandidate : currentProgress;
   if (!allowDecrease && typeof percentCandidate === "number") {
     nextPercent = Math.max(currentProgress, percentCandidate);
   }
@@ -114,8 +126,17 @@ export function computeProgressUpdate(input: ProgressCommitInput): ProgressCommi
   let nextIsCompleted = !!current.isCompleted;
   if (input.reason === "reset") {
     nextIsCompleted = false;
-  } else if (explicitCompletion || percentAtThreshold || (timeAtEpsilon && input.reason !== "tick")) {
-    if (input.reason === "ended" || isNearCompletion(timeSec, durationSec) || percentAtThreshold || timeAtEpsilon) {
+  } else if (
+    explicitCompletion ||
+    percentAtThreshold ||
+    (timeAtEpsilon && input.reason !== "tick")
+  ) {
+    if (
+      input.reason === "ended" ||
+      isNearCompletion(timeSec, durationSec) ||
+      percentAtThreshold ||
+      timeAtEpsilon
+    ) {
       nextIsCompleted = true;
     }
   }

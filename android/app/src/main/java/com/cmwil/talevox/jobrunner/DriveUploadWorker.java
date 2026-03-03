@@ -1,9 +1,6 @@
 package com.cmwil.talevox.jobrunner;
 
-import android.content.ContentValues;
 import android.content.Context;
-import android.database.Cursor;
-import android.database.sqlite.SQLiteDatabase;
 import android.net.Uri;
 
 import androidx.annotation.NonNull;
@@ -29,11 +26,20 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public class DriveUploadWorker extends Worker {
-    private static final String DB_NAME = "talevox_db";
-    private static final String DB_FILE = DB_NAME + "SQLite.db";
     private static final int MAX_UPLOAD_RETRIES = 5;
+    /** Number of uploads to run in parallel per batch. Keep at 1 for maximum stability. */
+    private static final int CONCURRENT_UPLOADS = 1;
+    /** Delay between uploads (ms) to pace job and reduce rate-limit risk. */
+    private static final long UPLOAD_DELAY_MS = 300;
+    private static final long TOKEN_EXPIRY_GRACE_MS = 5 * 60 * 1000; // 5 min grace past expiresAt
     private static final String CHANNEL_ID = JobNotificationChannels.CHANNEL_JOBS_ID;
     private static final String KEY_UPLOAD_QUEUE_PAUSED = "upload_queue_paused";
 
@@ -48,17 +54,17 @@ public class DriveUploadWorker extends Worker {
         try {
             ProgressState progress = loadJobProgress(jobId);
             progress.json.put("jobType", "drive_upload_queue");
-            progress.json.put("queuedTotal", countPendingUploads());
+            progress.json.put("queuedTotal", JobRunnerPlugin.countPendingUploadsSync());
             progress.json.put("processedThisRun", 0);
             progress.json.put("succeededCount", progress.completed);
             progress.json.put("failedCount", progress.json.optInt("failedCount", 0));
             updateJob(jobId, "running", progress.json, null);
-            if (isUploadQueuePaused()) {
+            if (JobRunnerPlugin.isUploadQueuePausedSync()) {
                 finishJob(jobId, progress, "paused", "Uploads paused");
                 return Result.success();
             }
             if (progress.total == 0) {
-                progress.total = countPendingUploads();
+                progress.total = JobRunnerPlugin.countPendingUploadsSync();
                 progress.json.put("total", progress.total);
             }
             setForegroundAsync(JobNotificationHelper.buildForegroundInfo(
@@ -76,80 +82,156 @@ public class DriveUploadWorker extends Worker {
 
             int processedThisRun = 0;
             while (processedThisRun < 20) {
-                DriveUploadItem item = getNextReadyUpload(System.currentTimeMillis());
-                if (item == null) {
+                List<JobRunnerPlugin.DriveUploadItemResult> itemsResult = JobRunnerPlugin.getNextReadyUploadsSync(System.currentTimeMillis(), CONCURRENT_UPLOADS);
+                if (itemsResult == null || itemsResult.isEmpty()) {
                     finishJob(jobId, progress, "completed", "Uploads complete");
                     return Result.success();
                 }
 
-                long nextAttemptAt = System.currentTimeMillis() + 5000;
-                markUploadUploading(item.id, nextAttemptAt);
-
-                try {
-                    if (isUploadQueuePaused()) {
-                        finishJob(jobId, progress, "paused", "Uploads paused");
-                        return Result.success();
-                    }
-                    String resolvedPath = resolveExistingPath(item.localPath, item.chapterId);
-                    if (resolvedPath != null && (item.localPath == null || !resolvedPath.equals(item.localPath))) {
-                        updateUploadLocalPath(item.id, resolvedPath);
-                        item.localPath = resolvedPath;
-                    }
-                    byte[] bytes = readFileBytes(resolvedPath);
-                    String accessToken = loadDriveAccessToken();
-                    if (accessToken == null || accessToken.isEmpty()) {
-                        markUploadFailed(item.id, "MISSING_DRIVE_TOKEN", System.currentTimeMillis() + 60000);
-                        return Result.success();
-                    }
-
-                    String folderId = resolveBookDriveFolderId(item.bookId);
-                    if (folderId == null || folderId.isEmpty()) folderId = item.bookId;
-
-                    String existingId = loadChapterDriveId(item.bookId, item.chapterId);
-                    String filename = "c_" + item.chapterId + ".mp3";
-
-                    String uploadedId = uploadToDriveWithRetry(accessToken, folderId, filename, "audio/mpeg", bytes, existingId);
-                    updateChapterAfterUpload(item.bookId, item.chapterId, uploadedId);
-                    markUploadDone(item.id);
-
-                    progress.completed += 1;
-                    processedThisRun += 1;
-                    progress.json.put("completed", progress.completed);
-                    progress.json.put("total", progress.total);
-                    progress.json.put("lastChapterId", item.chapterId);
-                    progress.json.put("processedThisRun", processedThisRun);
-                    progress.json.put("succeededCount", progress.completed);
-                    updateJob(jobId, "running", progress.json, null);
-                    emitProgress(jobId, progress);
-                    setForegroundAsync(JobNotificationHelper.buildForegroundInfo(
-                        getApplicationContext(),
-                        jobId,
-                        "Uploading audio",
-                        "",
-                        progress.total,
-                        progress.completed,
-                        false,
-                        true
-                    ));
-                    showProgressNotification(jobId, progress);
-                    JobRunnerPlugin.noteForegroundHeartbeat();
-                } catch (RetryableUploadException e) {
-                    long backoffMs = computeBackoff(item.attempts + 1);
-                    markUploadFailed(item.id, e.getMessage(), System.currentTimeMillis() + backoffMs);
-                    progress.json.put("failedCount", progress.json.optInt("failedCount", 0) + 1);
-                    updateJob(jobId, "running", progress.json, null);
-                    emitProgress(jobId, progress);
-                    progress.json.put("lastError", e.getMessage());
-                    JobRunnerPlugin.noteForegroundHeartbeat();
+                // Check paused BEFORE marking items as uploading to avoid leaving
+                // items stuck in "uploading" state when the queue is paused.
+                if (JobRunnerPlugin.isUploadQueuePausedSync()) {
+                    finishJob(jobId, progress, "paused", "Uploads paused");
                     return Result.success();
-                } catch (Exception e) {
-                    long backoffMs = computeBackoff(item.attempts + 1);
-                    markUploadFailed(item.id, e.getMessage(), System.currentTimeMillis() + backoffMs);
-                    progress.json.put("failedCount", progress.json.optInt("failedCount", 0) + 1);
+                }
+
+                long nextAttemptAt = System.currentTimeMillis() + 5000;
+                for (JobRunnerPlugin.DriveUploadItemResult it : itemsResult) {
+                    JobRunnerPlugin.markUploadUploadingSync(it.id, nextAttemptAt);
+                }
+
+                String accessToken = JobRunnerPlugin.getDriveAccessTokenSync();
+                if (accessToken == null || accessToken.isEmpty()) {
+                    for (JobRunnerPlugin.DriveUploadItemResult it : itemsResult) {
+                        JobRunnerPlugin.markUploadFailedSync(it.id, "MISSING_DRIVE_TOKEN", System.currentTimeMillis() + 60000);
+                    }
+                    return Result.success();
+                }
+
+                List<UploadTask> tasks = new ArrayList<>();
+                for (JobRunnerPlugin.DriveUploadItemResult item : itemsResult) {
+                    try {
+                        String resolvedPath = resolveExistingPath(item.localPath, item.chapterId);
+                        if (resolvedPath != null && (item.localPath == null || !resolvedPath.equals(item.localPath))) {
+                            JobRunnerPlugin.updateUploadLocalPathSync(item.id, resolvedPath);
+                        }
+                        byte[] bytes = readFileBytes(resolvedPath != null ? resolvedPath : item.localPath);
+                        String folderId = JobRunnerPlugin.resolveBookDriveFolderIdSync(item.bookId);
+                        if (folderId == null || folderId.isEmpty()) folderId = item.bookId;
+                        String existingId = JobRunnerPlugin.loadChapterDriveIdSync(item.bookId, item.chapterId);
+                        String filename = "c_" + item.chapterId + ".mp3";
+                        tasks.add(new UploadTask(item, bytes, folderId, existingId, filename));
+                    } catch (Exception e) {
+                        long backoffMs = computeBackoff(item.attempts + 1);
+                        JobRunnerPlugin.markUploadFailedSync(item.id, e.getMessage(), System.currentTimeMillis() + backoffMs);
+                        progress.json.put("failedCount", progress.json.optInt("failedCount", 0) + 1);
+                        progress.json.put("lastError", e.getMessage());
+                    }
+                }
+
+                if (tasks.isEmpty()) {
                     updateJob(jobId, "running", progress.json, null);
                     emitProgress(jobId, progress);
-                    progress.json.put("lastError", e.getMessage());
-                    JobRunnerPlugin.noteForegroundHeartbeat();
+                    continue;
+                }
+
+                if (CONCURRENT_UPLOADS == 1 && tasks.size() == 1) {
+                    UploadTask task = tasks.get(0);
+                    UploadResult r;
+                    try {
+                        String id = uploadToDriveWithRetry(accessToken, task.folderId, task.filename, "audio/mpeg", task.bytes, task.existingId);
+                        r = new UploadResult(task.item, id, null);
+                    } catch (Exception e) {
+                        r = new UploadResult(task.item, null, e.getMessage());
+                    }
+                    if (isStopped()) {
+                        finishJob(jobId, progress, "canceled", "Uploads canceled");
+                        JobRunnerPlugin.noteForegroundHeartbeat();
+                        return Result.success();
+                    }
+                    if (r.uploadedId != null) {
+                        JobRunnerPlugin.updateChapterAfterUploadSync(r.item.bookId, r.item.chapterId, r.uploadedId);
+                        JobRunnerPlugin.markUploadDoneSync(r.item.id);
+                        progress.completed += 1;
+                        progress.json.put("lastChapterId", r.item.chapterId);
+                    } else {
+                        long backoffMs = computeBackoff(r.item.attempts + 1);
+                        JobRunnerPlugin.markUploadFailedSync(r.item.id, r.error != null ? r.error : "Upload failed", System.currentTimeMillis() + backoffMs);
+                        progress.json.put("failedCount", progress.json.optInt("failedCount", 0) + 1);
+                        progress.json.put("lastError", r.error);
+                    }
+                    processedThisRun += 1;
+                } else {
+                ExecutorService exec = Executors.newFixedThreadPool(Math.min(tasks.size(), CONCURRENT_UPLOADS));
+                try {
+                    List<Future<UploadResult>> futures = new ArrayList<>();
+                    for (UploadTask task : tasks) {
+                        final String token = accessToken;
+                        futures.add(exec.submit(new Callable<UploadResult>() {
+                            @Override
+                            public UploadResult call() {
+                                try {
+                                    String id = uploadToDriveWithRetry(token, task.folderId, task.filename, "audio/mpeg", task.bytes, task.existingId);
+                                    return new UploadResult(task.item, id, null);
+                                } catch (Exception e) {
+                                    return new UploadResult(task.item, null, e.getMessage());
+                                }
+                            }
+                        }));
+                    }
+                    for (Future<UploadResult> f : futures) {
+                        if (isStopped()) {
+                            finishJob(jobId, progress, "canceled", "Uploads canceled");
+                            JobRunnerPlugin.noteForegroundHeartbeat();
+                            exec.shutdown();
+                            return Result.success();
+                        }
+                        try {
+                            UploadResult r = f.get();
+                            if (r.uploadedId != null) {
+                                JobRunnerPlugin.updateChapterAfterUploadSync(r.item.bookId, r.item.chapterId, r.uploadedId);
+                                JobRunnerPlugin.markUploadDoneSync(r.item.id);
+                                progress.completed += 1;
+                                progress.json.put("lastChapterId", r.item.chapterId);
+                            } else {
+                                long backoffMs = computeBackoff(r.item.attempts + 1);
+                                JobRunnerPlugin.markUploadFailedSync(r.item.id, r.error != null ? r.error : "Upload failed", System.currentTimeMillis() + backoffMs);
+                                progress.json.put("failedCount", progress.json.optInt("failedCount", 0) + 1);
+                                progress.json.put("lastError", r.error);
+                            }
+                            processedThisRun += 1;
+                        } catch (Exception e) {
+                            progress.json.put("lastError", e.getMessage());
+                        }
+                    }
+                } finally {
+                    exec.shutdown();
+                }
+                }
+
+                progress.json.put("completed", progress.completed);
+                progress.json.put("total", progress.total);
+                progress.json.put("processedThisRun", processedThisRun);
+                progress.json.put("succeededCount", progress.completed);
+                updateJob(jobId, "running", progress.json, null);
+                emitProgress(jobId, progress);
+                setForegroundAsync(JobNotificationHelper.buildForegroundInfo(
+                    getApplicationContext(),
+                    jobId,
+                    "Uploading audio",
+                    "",
+                    progress.total,
+                    progress.completed,
+                    false,
+                    true
+                ));
+                showProgressNotification(jobId, progress);
+                JobRunnerPlugin.noteForegroundHeartbeat();
+                try {
+                    Thread.sleep(UPLOAD_DELAY_MS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    finishJob(jobId, progress, "canceled", "Uploads interrupted");
                     return Result.success();
                 }
 
@@ -186,11 +268,12 @@ public class DriveUploadWorker extends Worker {
                 NotificationManager nm = (NotificationManager) getApplicationContext().getSystemService(Context.NOTIFICATION_SERVICE);
                 if (nm != null) {
                     JobNotificationChannels.ensureChannels(getApplicationContext());
+                    String text = (message != null && !message.trim().isEmpty()) ? message.trim() : ("completed".equals(status) ? "All uploads complete" : "An error occurred");
                     Notification notification = JobNotificationHelper.buildFinished(
                         getApplicationContext(),
                         jobId,
                         "Uploads " + status,
-                        message != null ? message : "",
+                        text,
                         "completed".equals(status)
                     );
                     nm.notify(JobNotificationHelper.getNotificationId(jobId), notification);
@@ -199,154 +282,19 @@ public class DriveUploadWorker extends Worker {
         } catch (Exception ignored) {}
     }
 
-    private SQLiteDatabase getDb() {
-        Context ctx = getApplicationContext();
-        SQLiteDatabase db = ctx.openOrCreateDatabase(DB_FILE, Context.MODE_PRIVATE, null);
-        db.execSQL(
-            "CREATE TABLE IF NOT EXISTS kv (" +
-            "key TEXT PRIMARY KEY," +
-            "json TEXT NOT NULL," +
-            "updatedAt INTEGER NOT NULL" +
-            ")"
-        );
-        db.execSQL(
-            "CREATE TABLE IF NOT EXISTS drive_upload_queue (" +
-            "id TEXT PRIMARY KEY," +
-            "chapterId TEXT," +
-            "bookId TEXT," +
-            "localPath TEXT," +
-            "status TEXT," +
-            "attempts INTEGER," +
-            "nextAttemptAt INTEGER," +
-            "lastError TEXT," +
-            "createdAt INTEGER," +
-            "updatedAt INTEGER," +
-            "priority INTEGER," +
-            "queuedAt INTEGER," +
-            "source TEXT," +
-            "lastAttemptAt INTEGER," +
-            "manual INTEGER" +
-            ")"
-        );
-        db.execSQL(
-            "CREATE TABLE IF NOT EXISTS chapters (" +
-            "id TEXT PRIMARY KEY," +
-            "bookId TEXT," +
-            "idx INTEGER," +
-            "title TEXT," +
-            "filename TEXT," +
-            "sourceUrl TEXT," +
-            "cloudTextFileId TEXT," +
-            "cloudAudioFileId TEXT," +
-            "audioDriveId TEXT," +
-            "audioStatus TEXT," +
-            "audioSignature TEXT," +
-            "durationSec REAL," +
-            "textLength INTEGER," +
-            "wordCount INTEGER," +
-            "isFavorite INTEGER," +
-            "updatedAt INTEGER" +
-            ")"
-        );
-        db.execSQL(
-            "CREATE TABLE IF NOT EXISTS books (" +
-            "id TEXT PRIMARY KEY," +
-            "title TEXT," +
-            "author TEXT," +
-            "coverImage TEXT," +
-            "backend TEXT," +
-            "driveFolderId TEXT," +
-            "driveFolderName TEXT," +
-            "currentChapterId TEXT," +
-            "settingsJson TEXT," +
-            "rulesJson TEXT," +
-            "updatedAt INTEGER" +
-            ")"
-        );
-        db.execSQL(
-            "CREATE TABLE IF NOT EXISTS jobs (" +
-            "jobId TEXT PRIMARY KEY," +
-            "type TEXT," +
-            "status TEXT," +
-            "payloadJson TEXT," +
-            "progressJson TEXT," +
-            "error TEXT," +
-            "createdAt INTEGER," +
-            "updatedAt INTEGER" +
-            ")"
-        );
-        return db;
-    }
-
-    private boolean isUploadQueuePaused() {
-        SQLiteDatabase db = getDb();
-        Cursor cursor = db.query(
-            "kv",
-            new String[]{"json"},
-            "key = ?",
-            new String[]{KEY_UPLOAD_QUEUE_PAUSED},
-            null,
-            null,
-            null,
-            "1"
-        );
-        try {
-            if (!cursor.moveToFirst()) return false;
-            String raw = cursor.getString(cursor.getColumnIndexOrThrow("json"));
-            if (raw == null || raw.isEmpty()) return false;
-            try {
-                JSONObject obj = new JSONObject(raw);
-                return obj.optBoolean("paused", false);
-            } catch (JSONException e) {
-                return "true".equalsIgnoreCase(raw);
-            }
-        } finally {
-            cursor.close();
-        }
-    }
-
     private ProgressState loadJobProgress(String jobId) {
         ProgressState state = new ProgressState();
         state.json = new JSONObject();
         if (jobId == null || jobId.isEmpty()) return state;
-        try {
-            SQLiteDatabase db = getDb();
-            Cursor cursor = db.query("jobs", new String[]{"progressJson", "status"}, "jobId = ?", new String[]{jobId}, null, null, null);
-            if (cursor.moveToFirst()) {
-                String progressStr = cursor.getString(cursor.getColumnIndexOrThrow("progressJson"));
-                if (progressStr != null) state.json = new JSONObject(progressStr);
-            }
-            cursor.close();
-        } catch (Exception ignored) {}
-        state.total = state.json.optInt("total", countPendingUploads());
+        state.json = JobRunnerPlugin.getJobProgressSync(jobId);
+        state.total = state.json.optInt("total", JobRunnerPlugin.countPendingUploadsSync());
         state.completed = state.json.optInt("completed", 0);
         return state;
     }
 
-    private int countPendingUploads() {
-        int count = 0;
-        try {
-            SQLiteDatabase db = getDb();
-            Cursor cursor = db.rawQuery("SELECT COUNT(*) as c FROM drive_upload_queue WHERE status IN ('queued','failed','uploading')", null);
-            if (cursor.moveToFirst()) {
-                count = cursor.getInt(cursor.getColumnIndexOrThrow("c"));
-            }
-            cursor.close();
-        } catch (Exception ignored) {}
-        return count;
-    }
-
     private void updateJob(String jobId, String status, JSONObject progress, String error) {
         if (jobId == null || jobId.isEmpty()) return;
-        try {
-            SQLiteDatabase db = getDb();
-            ContentValues values = new ContentValues();
-            values.put("status", status);
-            values.put("updatedAt", System.currentTimeMillis());
-            if (progress != null) values.put("progressJson", progress.toString());
-            if (error != null) values.put("error", error);
-            db.update("jobs", values, "jobId = ?", new String[]{jobId});
-        } catch (Exception ignored) {}
+        JobRunnerPlugin.updateJobProgressSync(jobId, status, progress != null ? progress : new JSONObject(), error);
     }
 
     private void emitProgress(String jobId, ProgressState progress) {
@@ -385,64 +333,6 @@ public class DriveUploadWorker extends Worker {
         nm.notify(JobNotificationHelper.getNotificationId(jobId), n);
     }
 
-    private DriveUploadItem getNextReadyUpload(long now) {
-        SQLiteDatabase db = getDb();
-        Cursor cursor = db.query(
-            "drive_upload_queue",
-            null,
-            "(status = ? OR status = ?) AND nextAttemptAt <= ?",
-            new String[]{"queued", "failed", String.valueOf(now)},
-            null,
-            null,
-            "priority DESC, queuedAt ASC, nextAttemptAt ASC",
-            "1"
-        );
-        if (!cursor.moveToFirst()) {
-            cursor.close();
-            return null;
-        }
-
-        DriveUploadItem item = new DriveUploadItem();
-        item.id = cursor.getString(cursor.getColumnIndexOrThrow("id"));
-        item.chapterId = cursor.getString(cursor.getColumnIndexOrThrow("chapterId"));
-        item.bookId = cursor.getString(cursor.getColumnIndexOrThrow("bookId"));
-        item.localPath = cursor.getString(cursor.getColumnIndexOrThrow("localPath"));
-        item.attempts = cursor.getInt(cursor.getColumnIndexOrThrow("attempts"));
-        cursor.close();
-        return item;
-    }
-
-    private void markUploadUploading(String id, long nextAttemptAt) {
-        SQLiteDatabase db = getDb();
-        db.execSQL(
-            "UPDATE drive_upload_queue SET status = 'uploading', attempts = attempts + 1, nextAttemptAt = ?, lastAttemptAt = ?, updatedAt = ? WHERE id = ?",
-            new Object[]{nextAttemptAt, System.currentTimeMillis(), System.currentTimeMillis(), id}
-        );
-    }
-
-    private void markUploadDone(String id) {
-        SQLiteDatabase db = getDb();
-        db.delete("drive_upload_queue", "id = ?", new String[]{id});
-    }
-
-    private void markUploadFailed(String id, String error, long nextAttemptAt) {
-        SQLiteDatabase db = getDb();
-        db.execSQL(
-            "UPDATE drive_upload_queue SET status = 'failed', lastError = ?, nextAttemptAt = ?, lastAttemptAt = ?, attempts = attempts + 1, updatedAt = ? WHERE id = ?",
-            new Object[]{error, nextAttemptAt, System.currentTimeMillis(), System.currentTimeMillis(), id}
-        );
-    }
-
-    private void updateUploadLocalPath(String id, String localPath) {
-        try {
-            SQLiteDatabase db = getDb();
-            db.execSQL(
-                "UPDATE drive_upload_queue SET localPath = ?, updatedAt = ? WHERE id = ?",
-                new Object[]{localPath, System.currentTimeMillis(), id}
-            );
-        } catch (Exception ignored) {}
-    }
-
     private String resolveExistingPath(String localPath, String chapterId) {
         if (isPathReadable(localPath)) return localPath;
         if (chapterId != null && !chapterId.isEmpty()) {
@@ -476,14 +366,16 @@ public class DriveUploadWorker extends Worker {
         String path = localPath.startsWith("file://") ? localPath.replace("file://", "") : localPath;
         if (path.startsWith("content://")) {
             Uri uri = Uri.parse(path);
-            InputStream is = getApplicationContext().getContentResolver().openInputStream(uri);
-            if (is == null) throw new Exception("Unable to open content URI");
-            return readAllBytes(is);
+            try (InputStream is = getApplicationContext().getContentResolver().openInputStream(uri)) {
+                if (is == null) throw new Exception("Unable to open content URI");
+                return readAllBytes(is);
+            }
         }
         File file = new File(path);
         if (!file.exists()) throw new Exception("Local file missing");
-        FileInputStream fis = new FileInputStream(file);
-        return readAllBytes(fis);
+        try (FileInputStream fis = new FileInputStream(file)) {
+            return readAllBytes(fis);
+        }
     }
 
     private byte[] readAllBytes(InputStream stream) throws Exception {
@@ -495,85 +387,6 @@ public class DriveUploadWorker extends Worker {
         }
         stream.close();
         return buffer.toByteArray();
-    }
-
-    private String resolveBookDriveFolderId(String bookId) {
-        SQLiteDatabase db = getDb();
-        Cursor cursor = db.query(
-            "books",
-            new String[]{"driveFolderId"},
-            "id = ?",
-            new String[]{bookId},
-            null,
-            null,
-            null
-        );
-        if (!cursor.moveToFirst()) {
-            cursor.close();
-            return null;
-        }
-        String folderId = cursor.getString(cursor.getColumnIndexOrThrow("driveFolderId"));
-        cursor.close();
-        return folderId;
-    }
-
-    private String loadChapterDriveId(String bookId, String chapterId) {
-        SQLiteDatabase db = getDb();
-        Cursor cursor = db.query(
-            "chapters",
-            new String[]{"cloudAudioFileId"},
-            "id = ? AND bookId = ?",
-            new String[]{chapterId, bookId},
-            null,
-            null,
-            null
-        );
-        if (!cursor.moveToFirst()) {
-            cursor.close();
-            return null;
-        }
-        String id = cursor.getString(cursor.getColumnIndexOrThrow("cloudAudioFileId"));
-        cursor.close();
-        return id;
-    }
-
-    private void updateChapterAfterUpload(String bookId, String chapterId, String uploadedId) {
-        SQLiteDatabase db = getDb();
-        ContentValues values = new ContentValues();
-        values.put("cloudAudioFileId", uploadedId);
-        values.put("audioDriveId", uploadedId);
-        values.put("audioStatus", "ready");
-        values.put("updatedAt", System.currentTimeMillis());
-        db.update("chapters", values, "id = ? AND bookId = ?", new String[]{chapterId, bookId});
-    }
-
-    private String loadDriveAccessToken() {
-        SQLiteDatabase db = getDb();
-        Cursor c = db.query(
-            "kv",
-            new String[]{"json"},
-            "key = ?",
-            new String[]{"auth_session"},
-            null,
-            null,
-            null
-        );
-        if (!c.moveToFirst()) {
-            c.close();
-            return null;
-        }
-        String raw = c.getString(c.getColumnIndexOrThrow("json"));
-        c.close();
-        try {
-            JSONObject session = new JSONObject(raw);
-            String token = session.optString("accessToken", null);
-            if (token == null || token.isEmpty()) return null;
-            long expiresAt = session.optLong("expiresAt", 0);
-            if (expiresAt > 0 && System.currentTimeMillis() > expiresAt) return null;
-            return token;
-        } catch (JSONException e) {
-            return null;
-        }
     }
 
     private String uploadToDriveWithRetry(
@@ -637,38 +450,62 @@ public class DriveUploadWorker extends Worker {
             : "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&supportsAllDrives=true";
 
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setRequestMethod(existingFileId != null && !existingFileId.isEmpty() ? "PATCH" : "POST");
-        conn.setConnectTimeout(20000);
-        conn.setReadTimeout(60000);
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Authorization", "Bearer " + accessToken);
-        conn.setRequestProperty("Content-Type", "multipart/related; boundary=" + boundary);
+        try {
+            conn.setRequestMethod(existingFileId != null && !existingFileId.isEmpty() ? "PATCH" : "POST");
+            conn.setConnectTimeout(20000);
+            conn.setReadTimeout(60000);
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+            conn.setRequestProperty("Content-Type", "multipart/related; boundary=" + boundary);
 
-        OutputStream os = conn.getOutputStream();
-        os.write(body.toByteArray());
-        os.flush();
-        os.close();
+            OutputStream os = conn.getOutputStream();
+            os.write(body.toByteArray());
+            os.flush();
+            os.close();
 
-        int code = conn.getResponseCode();
-        byte[] bytes = readAllBytes(code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream());
-        if (code == 429 || code == 500 || code == 502 || code == 503 || code == 504) {
-            throw new RetryableUploadException("Drive upload retryable: " + code);
+            int code = conn.getResponseCode();
+            byte[] bytes = readAllBytes(code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream());
+            if (code == 429 || code == 500 || code == 502 || code == 503 || code == 504) {
+                throw new RetryableUploadException("Drive upload retryable: " + code);
+            }
+            if (code < 200 || code >= 300) {
+                throw new Exception("Drive upload failed: " + code);
+            }
+
+            JSONObject json = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+            String id = json.optString("id", null);
+            return id != null ? id : existingFileId;
+        } finally {
+            conn.disconnect();
         }
-        if (code < 200 || code >= 300) {
-            throw new Exception("Drive upload failed: " + code);
-        }
-
-        JSONObject json = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
-        String id = json.optString("id", null);
-        return id != null ? id : existingFileId;
     }
 
-    private static class DriveUploadItem {
-        String id;
-        String chapterId;
-        String bookId;
-        String localPath;
-        int attempts;
+    private static class UploadTask {
+        final JobRunnerPlugin.DriveUploadItemResult item;
+        final byte[] bytes;
+        final String folderId;
+        final String existingId;
+        final String filename;
+
+        UploadTask(JobRunnerPlugin.DriveUploadItemResult item, byte[] bytes, String folderId, String existingId, String filename) {
+            this.item = item;
+            this.bytes = bytes;
+            this.folderId = folderId;
+            this.existingId = existingId;
+            this.filename = filename;
+        }
+    }
+
+    private static class UploadResult {
+        final JobRunnerPlugin.DriveUploadItemResult item;
+        final String uploadedId;
+        final String error;
+
+        UploadResult(JobRunnerPlugin.DriveUploadItemResult item, String uploadedId, String error) {
+            this.item = item;
+            this.uploadedId = uploadedId;
+            this.error = error;
+        }
     }
 
     private static class ProgressState {
@@ -681,5 +518,10 @@ public class DriveUploadWorker extends Worker {
         RetryableUploadException(String message) {
             super(message);
         }
+    }
+
+    @Override
+    public void onStopped() {
+        super.onStopped();
     }
 }

@@ -36,19 +36,28 @@ function emit(level: LogLevel, tag: string, message: string, context?: LogContex
   if (!shouldLog(tag, level)) return;
   const line = format(tag, message);
   pushLog({ ts: Date.now(), level, tag, message, context });
+  let contextStr = "";
+  if (context !== undefined && context !== null) {
+    try {
+      contextStr =
+        typeof context === "object" ? ` ${JSON.stringify(context)}` : ` ${String(context)}`;
+    } catch {
+      contextStr = " [context serialization failed]";
+    }
+  }
   if (level === "error") {
-    console.error(line, context ?? "");
+    console.error(line + contextStr);
     return;
   }
   if (level === "warn") {
-    console.warn(line, context ?? "");
+    console.warn(line + contextStr);
     return;
   }
   if (level === "debug") {
-    console.debug(line, context ?? "");
+    console.debug(line + contextStr);
     return;
   }
-  console.log(line, context ?? "");
+  console.log(line + contextStr);
 }
 
 export function getLogger(tag: string) {

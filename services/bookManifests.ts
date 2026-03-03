@@ -38,6 +38,8 @@ export type InventoryManifest = {
   bookId: string;
   expectedTotal?: number;
   chapters: InventoryChapter[];
+  /** Volume display order; persisted in book folder so it survives app updates/sync. */
+  volumeOrder?: string[];
 };
 
 export function safeParseJson<T>(raw: string, fallback: T): T {

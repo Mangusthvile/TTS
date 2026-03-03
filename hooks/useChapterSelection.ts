@@ -119,7 +119,7 @@ export function useChapterSelection(
       }
       setSelectionMode(true);
       setSelectedIds(new Set(nextIds));
-      setAnchorId((prev) => (prev && nextIds.includes(prev) ? prev : nextIds[0] ?? null));
+      setAnchorId((prev) => (prev && nextIds.includes(prev) ? prev : (nextIds[0] ?? null)));
       anchorRef.current = nextIds[0] ?? null;
     },
     [enabled, selectedIds]
@@ -145,6 +145,17 @@ export function useChapterSelection(
       invert,
       clear,
     }),
-    [selectionMode, selectedIds, anchorId, replace, enterSelection, toggle, rangeSelect, selectAll, invert, clear]
+    [
+      selectionMode,
+      selectedIds,
+      anchorId,
+      replace,
+      enterSelection,
+      toggle,
+      rangeSelect,
+      selectAll,
+      invert,
+      clear,
+    ]
   );
 }

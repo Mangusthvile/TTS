@@ -8,4 +8,10 @@ import {
 } from "./uploadQueueStore";
 
 export type { DriveUploadQueuedItem } from "./storageDriver";
-export { countQueuedUploads, listQueuedUploads, enqueueUpload as enqueueUploadEntry, enqueueChapterUpload, removeQueuedUpload };
+export {
+  countQueuedUploads,
+  listQueuedUploads,
+  enqueueUpload as enqueueUploadEntry,
+  enqueueChapterUpload,
+  removeQueuedUpload,
+};

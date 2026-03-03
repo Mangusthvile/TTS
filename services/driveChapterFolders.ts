@@ -1,15 +1,18 @@
 import type { Chapter } from "../types";
 import { listFoldersInFolder, resolveFolderIdByName } from "./driveService";
 
+const FOLDER_ID_CACHE_MAX = 100;
 const folderIdCache = new Map<string, string>();
 
-const SYSTEM_FOLDER_NAMES = new Set([
-  "meta",
-  "attachments",
-  "trash",
-  "text",
-  "audio",
-]);
+function evictFolderIdCacheLru(): void {
+  while (folderIdCache.size >= FOLDER_ID_CACHE_MAX) {
+    const oldest = folderIdCache.keys().next().value;
+    if (oldest === undefined) break;
+    folderIdCache.delete(oldest);
+  }
+}
+
+const SYSTEM_FOLDER_NAMES = new Set(["meta", "attachments", "trash", "text", "audio"]);
 
 function normalizeVolumeName(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
@@ -36,6 +39,7 @@ export async function ensureChapterDriveStorageFolder(
   const cached = folderIdCache.get(key);
   if (cached) return cached;
 
+  evictFolderIdCacheLru();
   const { id } = await resolveFolderIdByName(bookFolderId, volumeName);
   folderIdCache.set(key, id);
   return id;
@@ -52,15 +56,20 @@ export async function findChapterDriveStorageFolder(
   const cached = folderIdCache.get(key);
   if (cached) return cached;
 
+  evictFolderIdCacheLru();
   const folders = await listFoldersInFolder(bookFolderId);
-  const match = folders.find((folder) => folder.name.trim().toLowerCase() === volumeName.toLowerCase());
+  const match = folders.find(
+    (folder) => folder.name.trim().toLowerCase() === volumeName.toLowerCase()
+  );
   if (!match) return null;
 
   folderIdCache.set(key, match.id);
   return match.id;
 }
 
-export async function listVolumeFolders(bookFolderId: string): Promise<Array<{ id: string; name: string }>> {
+export async function listVolumeFolders(
+  bookFolderId: string
+): Promise<Array<{ id: string; name: string }>> {
   const folders = await listFoldersInFolder(bookFolderId);
   return folders
     .filter((folder) => {

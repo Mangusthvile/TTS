@@ -178,9 +178,12 @@ function openDb(): Promise<IDBDatabase> {
         s.createIndex("byBookSortOrder", ["bookId", "sortOrder", "idx"], { unique: false });
       } else {
         const s = req.transaction!.objectStore(STORE_CHAPTERS);
-        if (!s.indexNames.contains("byBookId")) s.createIndex("byBookId", "bookId", { unique: false });
-        if (!s.indexNames.contains("byBookIndex")) s.createIndex("byBookIndex", ["bookId", "idx"], { unique: false });
-        if (!s.indexNames.contains("bookId_index")) s.createIndex("bookId_index", ["bookId", "idx"], { unique: false });
+        if (!s.indexNames.contains("byBookId"))
+          s.createIndex("byBookId", "bookId", { unique: false });
+        if (!s.indexNames.contains("byBookIndex"))
+          s.createIndex("byBookIndex", ["bookId", "idx"], { unique: false });
+        if (!s.indexNames.contains("bookId_index"))
+          s.createIndex("bookId_index", ["bookId", "idx"], { unique: false });
         if (!s.indexNames.contains("byBookSortOrder")) {
           s.createIndex("byBookSortOrder", ["bookId", "sortOrder", "idx"], { unique: false });
         }
@@ -192,7 +195,8 @@ function openDb(): Promise<IDBDatabase> {
         s.createIndex("byBookId", "bookId", { unique: false });
       } else {
         const s = req.transaction!.objectStore(STORE_CHAPTER_TEXT);
-        if (!s.indexNames.contains("byBookId")) s.createIndex("byBookId", "bookId", { unique: false });
+        if (!s.indexNames.contains("byBookId"))
+          s.createIndex("byBookId", "bookId", { unique: false });
       }
 
       if (!db.objectStoreNames.contains(STORE_CHAPTER_CUE_MAPS)) {
@@ -204,7 +208,9 @@ function openDb(): Promise<IDBDatabase> {
       }
 
       if (!db.objectStoreNames.contains(STORE_CHAPTER_TOMBSTONES)) {
-        const s = db.createObjectStore(STORE_CHAPTER_TOMBSTONES, { keyPath: ["bookId", "chapterId"] });
+        const s = db.createObjectStore(STORE_CHAPTER_TOMBSTONES, {
+          keyPath: ["bookId", "chapterId"],
+        });
         s.createIndex("byBookId", "bookId", { unique: false });
         s.createIndex("byChapterId", "chapterId", { unique: false });
       }
@@ -256,7 +262,11 @@ function toBook(row: BookRow): Book {
               ? row.settings.autoGenerateAudioOnAdd
               : true,
         }
-      : { useBookSettings: false, highlightMode: HighlightMode.SENTENCE, autoGenerateAudioOnAdd: true },
+      : {
+          useBookSettings: false,
+          highlightMode: HighlightMode.SENTENCE,
+          autoGenerateAudioOnAdd: true,
+        },
     rules: row.rules ?? [],
     chapters: [],
     chapterCount: row.chapterCount ?? 0,
@@ -332,7 +342,11 @@ export async function upsertBook(book: Book): Promise<void> {
     driveFolderId: book.driveFolderId,
     driveFolderName: book.driveFolderName,
     currentChapterId: book.currentChapterId,
-    settings: book.settings ?? { useBookSettings: false, highlightMode: HighlightMode.SENTENCE, autoGenerateAudioOnAdd: true },
+    settings: book.settings ?? {
+      useBookSettings: false,
+      highlightMode: HighlightMode.SENTENCE,
+      autoGenerateAudioOnAdd: true,
+    },
     rules: book.rules ?? [],
     chapterCount: book.chapterCount ?? existing?.chapterCount ?? book.chapters?.length ?? 0,
     updatedAt: book.updatedAt ?? Date.now(),
@@ -370,7 +384,9 @@ export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promi
   const sBooks = tx.objectStore(STORE_BOOKS);
   const sCh = tx.objectStore(STORE_CHAPTERS);
 
-  const existingChapter = (await reqToPromise(sCh.get(chapter.id) as any)) as ChapterRow | undefined;
+  const existingChapter = (await reqToPromise(sCh.get(chapter.id) as any)) as
+    | ChapterRow
+    | undefined;
   const isNewChapter = !existingChapter;
   const sortOrder = getChapterSortOrder(chapter);
   const legacyIndex =
@@ -423,7 +439,10 @@ export async function upsertChapterMeta(bookId: string, chapter: Chapter): Promi
 
 export async function deleteChapter(bookId: string, chapterId: string): Promise<void> {
   const db = await openDb();
-  const tx = db.transaction([STORE_CHAPTERS, STORE_CHAPTER_TEXT, STORE_CHAPTER_TOMBSTONES], "readwrite");
+  const tx = db.transaction(
+    [STORE_CHAPTERS, STORE_CHAPTER_TEXT, STORE_CHAPTER_TOMBSTONES],
+    "readwrite"
+  );
 
   tx.objectStore(STORE_CHAPTERS).delete(chapterId);
   tx.objectStore(STORE_CHAPTER_TEXT).delete(chapterId);
@@ -438,7 +457,11 @@ export async function deleteChapter(bookId: string, chapterId: string): Promise<
   await txDone(tx);
 }
 
-export async function saveChapterText(bookId: string, chapterId: string, content: string): Promise<void> {
+export async function saveChapterText(
+  bookId: string,
+  chapterId: string,
+  content: string
+): Promise<void> {
   const db = await openDb();
   const tx = db.transaction([STORE_CHAPTER_TEXT], "readwrite");
   const store = tx.objectStore(STORE_CHAPTER_TEXT);
@@ -576,12 +599,13 @@ export async function listChaptersPage(
       : store.index("bookId_index");
 
   const start = (afterIndex ?? -1) + 1;
-  const range = idx.name === "byBookSortOrder"
-    ? IDBKeyRange.bound(
-        [bookId, start, Number.MIN_SAFE_INTEGER],
-        [bookId, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]
-      )
-    : IDBKeyRange.bound([bookId, start], [bookId, Number.MAX_SAFE_INTEGER]);
+  const range =
+    idx.name === "byBookSortOrder"
+      ? IDBKeyRange.bound(
+          [bookId, start, Number.MIN_SAFE_INTEGER],
+          [bookId, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]
+        )
+      : IDBKeyRange.bound([bookId, start], [bookId, Number.MAX_SAFE_INTEGER]);
 
   const chapters: Chapter[] = [];
   let totalCount: number | undefined;
@@ -604,13 +628,16 @@ export async function listChaptersPage(
     };
   });
 
-  try {
-    const countIdx = store.index("byBookId");
-    const rawCount = Number(await reqToPromise(countIdx.count(IDBKeyRange.only(bookId))));
-    const tombstoneCount = tombstonedIds.size;
-    totalCount = Math.max(0, rawCount - tombstoneCount);
-  } catch {
-    totalCount = undefined;
+  const skipCount = typeof afterIndex === "number" && afterIndex >= 0;
+  if (!skipCount) {
+    try {
+      const countIdx = store.index("byBookId");
+      const rawCount = Number(await reqToPromise(countIdx.count(IDBKeyRange.only(bookId))));
+      const tombstoneCount = tombstonedIds.size;
+      totalCount = Math.max(0, rawCount - tombstoneCount);
+    } catch {
+      totalCount = undefined;
+    }
   }
 
   await txDone(tx);
@@ -700,7 +727,9 @@ export async function bulkUpsertChapters(
     if (!existing) newCount += 1;
     const sortOrder = getChapterSortOrder(c);
     const legacyIndex =
-      Number.isFinite(Number(c.index)) && Number(c.index) > 0 ? Math.floor(Number(c.index)) : sortOrder;
+      Number.isFinite(Number(c.index)) && Number(c.index) > 0
+        ? Math.floor(Number(c.index))
+        : sortOrder;
 
     const row: ChapterRow = {
       id: c.id,
@@ -797,7 +826,10 @@ export async function upsertBookAttachment(attachment: BookAttachment): Promise<
   await txDone(tx);
 }
 
-export async function bulkUpsertBookAttachments(bookId: string, items: BookAttachment[]): Promise<void> {
+export async function bulkUpsertBookAttachments(
+  bookId: string,
+  items: BookAttachment[]
+): Promise<void> {
   const db = await openDb();
   const tx = db.transaction([STORE_BOOK_ATTACHMENTS], "readwrite");
   const store = tx.objectStore(STORE_BOOK_ATTACHMENTS);

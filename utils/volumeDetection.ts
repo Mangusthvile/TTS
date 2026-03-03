@@ -79,7 +79,9 @@ export function detectVolumeMeta(fileName: string, firstLine: string): DetectedV
   };
 }
 
-export function sortForSmartUpload<T extends { fileName: string; meta: DetectedVolumeMeta }>(files: T[]): T[] {
+export function sortForSmartUpload<T extends { fileName: string; meta: DetectedVolumeMeta }>(
+  files: T[]
+): T[] {
   const copy = [...files];
   const NONE = 1_000_000_000;
   copy.sort((a, b) => {
@@ -91,8 +93,9 @@ export function sortForSmartUpload<T extends { fileName: string; meta: DetectedV
     const bCh = b.meta.volumeLocalChapter ?? NONE;
     if (aCh !== bCh) return aCh - bCh;
 
-    return String(a.fileName || "").localeCompare(String(b.fileName || ""), undefined, { numeric: true });
+    return String(a.fileName || "").localeCompare(String(b.fileName || ""), undefined, {
+      numeric: true,
+    });
   });
   return copy;
 }
-

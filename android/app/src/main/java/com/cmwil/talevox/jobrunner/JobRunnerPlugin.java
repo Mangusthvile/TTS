@@ -20,6 +20,7 @@ import com.getcapacitor.annotation.PermissionCallback;
 import androidx.work.Data;
 import androidx.work.Constraints;
 import androidx.work.NetworkType;
+import androidx.work.BackoffPolicy;
 import androidx.work.OneTimeWorkRequest;
 import androidx.work.PeriodicWorkRequest;
 import androidx.work.ExistingPeriodicWorkPolicy;
@@ -39,8 +40,19 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import java.util.UUID;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+
+import android.os.Handler;
+import android.os.Looper;
 import java.io.File;
 import android.Manifest;
 import android.app.Notification;
@@ -65,6 +77,7 @@ public class JobRunnerPlugin extends Plugin {
     private static final String DB_FILE = DB_NAME + "SQLite.db";
     private static JobRunnerPlugin instance;
     private static volatile long lastForegroundAt = 0;
+    private SQLiteDatabase cachedDb = null;
 
     @Override
     public void load() {
@@ -72,6 +85,12 @@ public class JobRunnerPlugin extends Plugin {
         instance = this;
         try { JobNotificationChannels.ensureChannels(getContext()); } catch (Exception ignored) {}
         schedulePeriodicUploadQueue();
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        closeDbQuietly();
+        super.handleOnDestroy();
     }
 
     public static void emitJobProgress(JSObject payload) {
@@ -128,8 +147,10 @@ public class JobRunnerPlugin extends Plugin {
     }
 
     private SQLiteDatabase getDb() {
+        if (cachedDb != null && cachedDb.isOpen()) return cachedDb;
         Context ctx = getContext();
-        SQLiteDatabase db = ctx.openOrCreateDatabase(DB_FILE, Context.MODE_PRIVATE, null);
+        cachedDb = ctx.openOrCreateDatabase(DB_FILE, Context.MODE_PRIVATE, null);
+        SQLiteDatabase db = cachedDb;
         db.execSQL(
             "CREATE TABLE IF NOT EXISTS kv (" +
             "key TEXT PRIMARY KEY," +
@@ -176,7 +197,767 @@ public class JobRunnerPlugin extends Plugin {
             "manual INTEGER" +
             ")"
         );
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS chapter_progress (" +
+            "bookId TEXT NOT NULL," +
+            "chapterId TEXT NOT NULL," +
+            "timeSec REAL NOT NULL," +
+            "durationSec REAL," +
+            "percent REAL," +
+            "isComplete INTEGER NOT NULL," +
+            "updatedAt INTEGER NOT NULL," +
+            "PRIMARY KEY (bookId, chapterId)" +
+            ")"
+        );
+        try {
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_chapter_progress_chapterId ON chapter_progress(chapterId)");
+        } catch (Exception ignored) {}
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS books (" +
+            "id TEXT PRIMARY KEY," +
+            "title TEXT," +
+            "author TEXT," +
+            "coverImage TEXT," +
+            "backend TEXT," +
+            "driveFolderId TEXT," +
+            "driveFolderName TEXT," +
+            "currentChapterId TEXT," +
+            "settingsJson TEXT," +
+            "rulesJson TEXT," +
+            "updatedAt INTEGER" +
+            ")"
+        );
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS chapters (" +
+            "id TEXT PRIMARY KEY," +
+            "bookId TEXT," +
+            "idx INTEGER," +
+            "sortOrder INTEGER," +
+            "title TEXT," +
+            "filename TEXT," +
+            "sourceUrl TEXT," +
+            "volumeName TEXT," +
+            "volumeLocalChapter INTEGER," +
+            "cloudTextFileId TEXT," +
+            "cloudAudioFileId TEXT," +
+            "audioDriveId TEXT," +
+            "audioStatus TEXT," +
+            "audioSignature TEXT," +
+            "durationSec REAL," +
+            "textLength INTEGER," +
+            "wordCount INTEGER," +
+            "isFavorite INTEGER," +
+            "updatedAt INTEGER" +
+            ")"
+        );
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS chapter_text (" +
+            "chapterId TEXT PRIMARY KEY," +
+            "bookId TEXT NOT NULL," +
+            "content TEXT," +
+            "localPath TEXT," +
+            "updatedAt INTEGER NOT NULL" +
+            ")"
+        );
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS chapter_tombstones (" +
+            "bookId TEXT NOT NULL," +
+            "chapterId TEXT NOT NULL," +
+            "deletedAt INTEGER NOT NULL," +
+            "PRIMARY KEY (bookId, chapterId)" +
+            ")"
+        );
+        try {
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_chapter_tombstones_bookId ON chapter_tombstones(bookId)");
+        } catch (Exception ignored) {}
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS chapter_cue_maps (" +
+            "chapterId TEXT PRIMARY KEY," +
+            "cueJson TEXT NOT NULL," +
+            "updatedAt INTEGER NOT NULL" +
+            ")"
+        );
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS chapter_paragraph_maps (" +
+            "chapterId TEXT PRIMARY KEY," +
+            "paragraphJson TEXT NOT NULL," +
+            "updatedAt INTEGER NOT NULL" +
+            ")"
+        );
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS book_attachments (" +
+            "id TEXT PRIMARY KEY," +
+            "bookId TEXT NOT NULL," +
+            "driveFileId TEXT," +
+            "filename TEXT NOT NULL," +
+            "mimeType TEXT," +
+            "sizeBytes INTEGER," +
+            "localPath TEXT," +
+            "sha256 TEXT," +
+            "createdAt INTEGER NOT NULL," +
+            "updatedAt INTEGER NOT NULL" +
+            ")"
+        );
+        try {
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_book_attachments_bookId ON book_attachments(bookId)");
+        } catch (Exception ignored) {}
+        try {
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_book_attachments_driveFileId ON book_attachments(driveFileId)");
+        } catch (Exception ignored) {}
         return db;
+    }
+
+    private void closeDbQuietly() {
+        if (cachedDb != null) {
+            try {
+                if (cachedDb.isOpen()) cachedDb.close();
+            } catch (Exception ignored) {
+                // best-effort close
+            } finally {
+                cachedDb = null;
+            }
+        }
+    }
+
+    /** Run a runnable on the main thread and block until done. If already on main thread, runs directly. */
+    private static void runOnMainSync(final Runnable runnable) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            runnable.run();
+            return;
+        }
+        final CountDownLatch latch = new CountDownLatch(1);
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    runnable.run();
+                } finally {
+                    latch.countDown();
+                }
+            }
+        });
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** Result for getJobPayloadSync: job row data for workers. */
+    public static class JobPayloadResult {
+        public final String jobId;
+        public final JSONObject payloadJson;
+        public final JSONObject progressJson;
+
+        public JobPayloadResult(String jobId, JSONObject payloadJson, JSONObject progressJson) {
+            this.jobId = jobId;
+            this.payloadJson = payloadJson;
+            this.progressJson = progressJson;
+        }
+    }
+
+    public static JobPayloadResult getJobPayloadSync(final String jobId) {
+        final AtomicReference<JobPayloadResult> ref = new AtomicReference<>();
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                SQLiteDatabase db = inst.getDb();
+                Cursor cursor = db.query(
+                    "jobs",
+                    new String[]{"jobId", "payloadJson", "progressJson"},
+                    "jobId = ?",
+                    new String[]{jobId},
+                    null, null, null
+                );
+                if (cursor.moveToFirst()) {
+                    String payloadStr = cursor.getString(cursor.getColumnIndexOrThrow("payloadJson"));
+                    String progressStr = cursor.getString(cursor.getColumnIndexOrThrow("progressJson"));
+                    try {
+                        JSONObject payload = payloadStr != null ? new JSONObject(payloadStr) : null;
+                        JSONObject progress = progressStr != null ? new JSONObject(progressStr) : null;
+                        ref.set(new JobPayloadResult(jobId, payload, progress));
+                    } catch (JSONException ignored) {}
+                }
+                cursor.close();
+            }
+        });
+        return ref.get();
+    }
+
+    /** Returns map chapterId -> volumeName (nullable). */
+    public static Map<String, String> getChapterVolumeNamesSync(final String bookId, final List<String> chapterIds) {
+        final Map<String, String> out = new HashMap<>();
+        if (chapterIds == null || chapterIds.isEmpty()) return out;
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                SQLiteDatabase db = inst.getDb();
+                for (String chapterId : chapterIds) {
+                    String volumeName = null;
+                    if (bookId != null && !bookId.isEmpty()) {
+                        Cursor c = db.query("chapters", new String[]{"volumeName"}, "id = ? AND bookId = ?",
+                            new String[]{chapterId, bookId}, null, null, null);
+                        if (c.moveToFirst()) {
+                            volumeName = c.getString(c.getColumnIndexOrThrow("volumeName"));
+                            if (volumeName != null) volumeName = volumeName.trim();
+                            if (volumeName != null && volumeName.isEmpty()) volumeName = null;
+                        }
+                        c.close();
+                    }
+                    if (volumeName == null) {
+                        Cursor c = db.query("chapters", new String[]{"volumeName"}, "id = ?",
+                            new String[]{chapterId}, null, null, null);
+                        if (c.moveToFirst()) {
+                            volumeName = c.getString(c.getColumnIndexOrThrow("volumeName"));
+                            if (volumeName != null) volumeName = volumeName.trim();
+                            if (volumeName != null && volumeName.isEmpty()) volumeName = null;
+                        }
+                        c.close();
+                    }
+                    out.put(chapterId, volumeName);
+                }
+            }
+        });
+        return out;
+    }
+
+    public static String getDriveAccessTokenSync() {
+        final AtomicReference<String> ref = new AtomicReference<>();
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                ref.set(inst.getDriveAccessTokenFromDb());
+            }
+        });
+        return ref.get();
+    }
+
+    private static final long TOKEN_EXPIRY_GRACE_MS = 5 * 60 * 1000;
+
+    private String getDriveAccessTokenFromDb() {
+        SQLiteDatabase db = getDb();
+        Cursor c = db.query("kv", new String[]{"json"}, "key = ?", new String[]{"auth_session"}, null, null, null);
+        try {
+            if (!c.moveToFirst()) return null;
+            String raw = c.getString(c.getColumnIndexOrThrow("json"));
+            if (raw == null || raw.isEmpty()) return null;
+            JSONObject session = new JSONObject(raw);
+            String token = extractAccessTokenFromSession(session);
+            if (token == null) return null;
+            long expiresAt = normalizeEpochMillis(session.optLong("expiresAt", 0));
+            if (expiresAt > 0 && System.currentTimeMillis() > expiresAt + TOKEN_EXPIRY_GRACE_MS) return null;
+            return token;
+        } catch (Exception e) {
+            return null;
+        } finally {
+            c.close();
+        }
+    }
+
+    private static long normalizeEpochMillis(long value) {
+        if (value <= 0) return 0;
+        if (value < 1_000_000_000_000L) return value * 1000L;
+        return value;
+    }
+
+    private static String extractAccessTokenFromSession(JSONObject session) {
+        String token = session.optString("accessToken", null);
+        if (token == null || token.isEmpty()) token = session.optString("access_token", null);
+        if (token == null || token.isEmpty()) {
+            JSONObject auth = session.optJSONObject("authentication");
+            if (auth != null) {
+                token = auth.optString("accessToken", null);
+                if (token == null || token.isEmpty()) token = auth.optString("access_token", null);
+            }
+        }
+        Object tokenObj = session.opt("accessToken");
+        if ((token == null || token.isEmpty()) && tokenObj instanceof JSONObject) {
+            JSONObject accessTokenObj = (JSONObject) tokenObj;
+            token = accessTokenObj.optString("token", null);
+            if (token == null || token.isEmpty()) token = accessTokenObj.optString("accessToken", null);
+            if (token == null || token.isEmpty()) token = accessTokenObj.optString("access_token", null);
+        }
+        return (token == null || token.isEmpty()) ? null : token;
+    }
+
+    /** Returns JSON array string of rule objects (books.rulesJson + app_state.globalRules), or null. */
+    public static String getRulesForBookSync(final String bookId) {
+        final AtomicReference<String> ref = new AtomicReference<>();
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                ref.set(inst.getRulesForBookFromDb(bookId));
+            }
+        });
+        return ref.get();
+    }
+
+    private String getRulesForBookFromDb(String bookId) {
+        List<JSONObject> rules = new ArrayList<>();
+        SQLiteDatabase db = getDb();
+        Cursor cursor = db.query("books", new String[]{"rulesJson"}, "id = ?", new String[]{bookId}, null, null, null);
+        if (cursor.moveToFirst()) {
+            String rulesStr = cursor.getString(cursor.getColumnIndexOrThrow("rulesJson"));
+            addRulesFromJson(rules, rulesStr);
+        }
+        cursor.close();
+        Cursor c2 = db.query("kv", new String[]{"json"}, "key = ?", new String[]{"app_state"}, null, null, null);
+        if (c2.moveToFirst()) {
+            String appStateStr = c2.getString(c2.getColumnIndexOrThrow("json"));
+            try {
+                JSONObject appState = new JSONObject(appStateStr);
+                JSONArray globalRules = appState.optJSONArray("globalRules");
+                if (globalRules != null) addRulesFromJson(rules, globalRules.toString());
+            } catch (JSONException ignored) {}
+        }
+        c2.close();
+        if (rules.isEmpty()) return null;
+        sortRulesByPriorityDesc(rules);
+        try {
+            JSONArray arr = new JSONArray();
+            for (JSONObject r : rules) arr.put(r);
+            return arr.toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private void addRulesFromJson(List<JSONObject> out, String rawJson) {
+        if (rawJson == null || rawJson.isEmpty()) return;
+        try {
+            JSONArray arr = new JSONArray(rawJson);
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject r = arr.optJSONObject(i);
+                if (r != null && r.optBoolean("enabled", true) && r.optString("find", "").length() > 0) {
+                    out.add(r);
+                }
+            }
+        } catch (JSONException ignored) {}
+    }
+
+    private void sortRulesByPriorityDesc(List<JSONObject> rules) {
+        Collections.sort(rules, new Comparator<JSONObject>() {
+            @Override
+            public int compare(JSONObject a, JSONObject b) {
+                return Integer.compare(b.optInt("priority", 0), a.optInt("priority", 0));
+            }
+        });
+    }
+
+    public static void updateJobProgressSync(final String jobId, final String status, final JSONObject progressJson, final String error) {
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                SQLiteDatabase db = inst.getDb();
+                ContentValues values = new ContentValues();
+                values.put("status", status);
+                values.put("error", error);
+                values.put("updatedAt", System.currentTimeMillis());
+                if (progressJson != null) values.put("progressJson", progressJson.toString());
+                db.update("jobs", values, "jobId = ?", new String[]{jobId});
+            }
+        });
+    }
+
+    public static void updateChapterAudioStatusSync(final String bookId, final String chapterId, final String status, final String filePath, final String cloudId) {
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                SQLiteDatabase db = inst.getDb();
+                ContentValues values = new ContentValues();
+                values.put("audioStatus", status);
+                values.put("audioSignature", filePath);
+                if (cloudId != null) {
+                    values.put("cloudAudioFileId", cloudId);
+                    values.put("audioDriveId", cloudId);
+                }
+                values.put("updatedAt", System.currentTimeMillis());
+                int updated = db.update("chapters", values, "id = ? AND bookId = ?", new String[]{chapterId, bookId});
+                if (updated == 0) {
+                    db.update("chapters", values, "id = ?", new String[]{chapterId});
+                }
+            }
+        });
+    }
+
+    // ---------- Sync APIs for GenerateAudioWorker ----------
+    public static String getChapterTextSync(final String bookId, final String chapterId) {
+        final AtomicReference<String> ref = new AtomicReference<>();
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                ref.set(inst.getChapterTextFromDb(bookId, chapterId));
+            }
+        });
+        return ref.get();
+    }
+
+    private String getChapterTextFromDb(String bookId, String chapterId) {
+        SQLiteDatabase db = getDb();
+        if (bookId != null && !bookId.isEmpty()) {
+            Cursor c = db.query("chapter_text", new String[]{"content", "localPath"}, "chapterId = ? AND bookId = ?", new String[]{chapterId, bookId}, null, null, null);
+            if (c.moveToFirst()) {
+                String content = c.getString(c.getColumnIndexOrThrow("content"));
+                c.close();
+                return content;
+            }
+            c.close();
+        }
+        Cursor c = db.query("chapter_text", new String[]{"content"}, "chapterId = ?", new String[]{chapterId}, null, null, null);
+        if (c.moveToFirst()) {
+            String content = c.getString(c.getColumnIndexOrThrow("content"));
+            c.close();
+            return content;
+        }
+        c.close();
+        return null;
+    }
+
+    public static String resolveBookIdSync(final String inputBookId) {
+        final AtomicReference<String> ref = new AtomicReference<>();
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                ref.set(inst.resolveBookIdFromDb(inputBookId));
+            }
+        });
+        return ref.get();
+    }
+
+    private String resolveBookIdFromDb(String inputBookId) {
+        SQLiteDatabase db = getDb();
+        Cursor c = db.query("books", new String[]{"id"}, "id = ?", new String[]{inputBookId}, null, null, null);
+        if (c.moveToFirst()) {
+            String id = c.getString(c.getColumnIndexOrThrow("id"));
+            c.close();
+            return id;
+        }
+        c.close();
+        c = db.query("books", new String[]{"id"}, "driveFolderId = ?", new String[]{inputBookId}, null, null, null);
+        if (c.moveToFirst()) {
+            String id = c.getString(c.getColumnIndexOrThrow("id"));
+            c.close();
+            return id;
+        }
+        c.close();
+        return null;
+    }
+
+    public static String getChapterFilenameSync(final String bookId, final String chapterId) {
+        final AtomicReference<String> ref = new AtomicReference<>();
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                ref.set(inst.getChapterFilenameFromDb(bookId, chapterId));
+            }
+        });
+        return ref.get();
+    }
+
+    private String getChapterFilenameFromDb(String bookId, String chapterId) {
+        SQLiteDatabase db = getDb();
+        if (bookId != null && !bookId.isEmpty()) {
+            Cursor c = db.query("chapters", new String[]{"filename"}, "id = ? AND bookId = ?", new String[]{chapterId, bookId}, null, null, null);
+            if (c.moveToFirst()) {
+                String fn = c.getString(c.getColumnIndexOrThrow("filename"));
+                c.close();
+                return fn;
+            }
+            c.close();
+        }
+        Cursor c = db.query("chapters", new String[]{"filename"}, "id = ?", new String[]{chapterId}, null, null, null);
+        if (c.moveToFirst()) {
+            String fn = c.getString(c.getColumnIndexOrThrow("filename"));
+            c.close();
+            return fn;
+        }
+        c.close();
+        return null;
+    }
+
+    public static void upsertChapterAudioPathSync(final String chapterId, final String localPath, final int sizeBytes) {
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                SQLiteDatabase db = inst.getDb();
+                ContentValues values = new ContentValues();
+                values.put("chapterId", chapterId);
+                values.put("localPath", localPath);
+                values.put("sizeBytes", sizeBytes);
+                values.put("updatedAt", System.currentTimeMillis());
+                db.insertWithOnConflict("chapter_audio_files", null, values, SQLiteDatabase.CONFLICT_REPLACE);
+            }
+        });
+    }
+
+    public static void enqueueUploadQueueItemSync(final String bookId, final String chapterId, final String localPath) {
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                inst.enqueueUploadQueueItemFromDb(bookId, chapterId, localPath);
+            }
+        });
+    }
+
+    private void enqueueUploadQueueItemFromDb(String bookId, String chapterId, String localPath) {
+        SQLiteDatabase db = getDb();
+        String id = "q_" + chapterId;
+        long now = System.currentTimeMillis();
+        ContentValues values = new ContentValues();
+        values.put("id", id);
+        values.put("chapterId", chapterId);
+        values.put("bookId", bookId);
+        values.put("localPath", localPath);
+        values.put("status", "queued");
+        values.put("attempts", 0);
+        values.put("nextAttemptAt", now);
+        values.put("lastError", (String) null);
+        values.put("createdAt", now);
+        values.put("updatedAt", now);
+        values.put("priority", 0);
+        values.put("queuedAt", now);
+        values.put("source", "audio");
+        values.put("lastAttemptAt", 0);
+        values.put("manual", 0);
+        db.insertWithOnConflict("drive_upload_queue", null, values, SQLiteDatabase.CONFLICT_REPLACE);
+    }
+
+    public static int countPendingUploadsSync() {
+        final AtomicReference<Integer> ref = new AtomicReference<>(0);
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                ref.set(inst.countQueuedUploads());
+            }
+        });
+        return ref.get() != null ? ref.get() : 0;
+    }
+
+    public static void ensureUploadQueueJobSync() {
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                inst.scheduleUploadQueueOnce();
+            }
+        });
+    }
+
+    // ---------- Sync APIs for DriveUploadWorker ----------
+    public static class DriveUploadItemResult {
+        public final String id;
+        public final String chapterId;
+        public final String bookId;
+        public final String localPath;
+        public final int attempts;
+
+        public DriveUploadItemResult(String id, String chapterId, String bookId, String localPath, int attempts) {
+            this.id = id;
+            this.chapterId = chapterId;
+            this.bookId = bookId;
+            this.localPath = localPath;
+            this.attempts = attempts;
+        }
+    }
+
+    public static List<DriveUploadItemResult> getNextReadyUploadsSync(final long now, final int max) {
+        final List<DriveUploadItemResult> out = new ArrayList<>();
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                SQLiteDatabase db = inst.getDb();
+                Cursor cursor = db.query(
+                    "drive_upload_queue",
+                    new String[]{"id", "chapterId", "bookId", "localPath", "attempts"},
+                    "(status = ? OR status = ?) AND nextAttemptAt <= ?",
+                    new String[]{"queued", "failed", String.valueOf(now)},
+                    null, null,
+                    "priority DESC, queuedAt ASC, nextAttemptAt ASC",
+                    String.valueOf(Math.max(1, max))
+                );
+                while (cursor.moveToNext()) {
+                    out.add(new DriveUploadItemResult(
+                        cursor.getString(cursor.getColumnIndexOrThrow("id")),
+                        cursor.getString(cursor.getColumnIndexOrThrow("chapterId")),
+                        cursor.getString(cursor.getColumnIndexOrThrow("bookId")),
+                        cursor.getString(cursor.getColumnIndexOrThrow("localPath")),
+                        cursor.getInt(cursor.getColumnIndexOrThrow("attempts"))
+                    ));
+                }
+                cursor.close();
+            }
+        });
+        return out;
+    }
+
+    public static void markUploadUploadingSync(final String id, final long nextAttemptAt) {
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                SQLiteDatabase db = inst.getDb();
+                db.execSQL(
+                    "UPDATE drive_upload_queue SET status = 'uploading', attempts = attempts + 1, nextAttemptAt = ?, lastAttemptAt = ?, updatedAt = ? WHERE id = ?",
+                    new Object[]{nextAttemptAt, System.currentTimeMillis(), System.currentTimeMillis(), id}
+                );
+            }
+        });
+    }
+
+    public static void markUploadDoneSync(final String id) {
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                inst.getDb().delete("drive_upload_queue", "id = ?", new String[]{id});
+            }
+        });
+    }
+
+    public static void markUploadFailedSync(final String id, final String error, final long nextAttemptAt) {
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                SQLiteDatabase db = inst.getDb();
+                db.execSQL(
+                    "UPDATE drive_upload_queue SET status = 'failed', lastError = ?, nextAttemptAt = ?, lastAttemptAt = ?, attempts = attempts + 1, updatedAt = ? WHERE id = ?",
+                    new Object[]{error, nextAttemptAt, System.currentTimeMillis(), System.currentTimeMillis(), id}
+                );
+            }
+        });
+    }
+
+    public static void updateUploadLocalPathSync(final String id, final String localPath) {
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                SQLiteDatabase db = inst.getDb();
+                db.execSQL("UPDATE drive_upload_queue SET localPath = ?, updatedAt = ? WHERE id = ?",
+                    new Object[]{localPath, System.currentTimeMillis(), id});
+            }
+        });
+    }
+
+    public static String resolveBookDriveFolderIdSync(final String bookId) {
+        final AtomicReference<String> ref = new AtomicReference<>();
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                SQLiteDatabase db = inst.getDb();
+                Cursor c = db.query("books", new String[]{"driveFolderId"}, "id = ?", new String[]{bookId}, null, null, null);
+                if (c.moveToFirst()) {
+                    ref.set(c.getString(c.getColumnIndexOrThrow("driveFolderId")));
+                }
+                c.close();
+            }
+        });
+        return ref.get();
+    }
+
+    public static String loadChapterDriveIdSync(final String bookId, final String chapterId) {
+        final AtomicReference<String> ref = new AtomicReference<>();
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                SQLiteDatabase db = inst.getDb();
+                Cursor c = db.query("chapters", new String[]{"cloudAudioFileId"}, "id = ? AND bookId = ?", new String[]{chapterId, bookId}, null, null, null);
+                if (c.moveToFirst()) {
+                    ref.set(c.getString(c.getColumnIndexOrThrow("cloudAudioFileId")));
+                }
+                c.close();
+            }
+        });
+        return ref.get();
+    }
+
+    public static void updateChapterAfterUploadSync(final String bookId, final String chapterId, final String uploadedId) {
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                SQLiteDatabase db = inst.getDb();
+                ContentValues values = new ContentValues();
+                values.put("cloudAudioFileId", uploadedId);
+                values.put("audioDriveId", uploadedId);
+                values.put("audioStatus", "ready");
+                values.put("updatedAt", System.currentTimeMillis());
+                db.update("chapters", values, "id = ? AND bookId = ?", new String[]{chapterId, bookId});
+            }
+        });
+    }
+
+    public static boolean isUploadQueuePausedSync() {
+        final AtomicReference<Boolean> ref = new AtomicReference<>(false);
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                ref.set(inst.isUploadQueuePaused());
+            }
+        });
+        return ref.get() != null && ref.get();
+    }
+
+    public static JSONObject getJobProgressSync(final String jobId) {
+        final AtomicReference<JSONObject> ref = new AtomicReference<>();
+        runOnMainSync(new Runnable() {
+            @Override
+            public void run() {
+                JobRunnerPlugin inst = instance;
+                if (inst == null) return;
+                SQLiteDatabase db = inst.getDb();
+                Cursor cursor = db.query("jobs", new String[]{"progressJson"}, "jobId = ?", new String[]{jobId}, null, null, null);
+                if (cursor.moveToFirst()) {
+                    String s = cursor.getString(cursor.getColumnIndexOrThrow("progressJson"));
+                    try {
+                        ref.set(s != null ? new JSONObject(s) : new JSONObject());
+                    } catch (JSONException ignored) {}
+                } else {
+                    ref.set(new JSONObject());
+                }
+                cursor.close();
+            }
+        });
+        return ref.get() != null ? ref.get() : new JSONObject();
     }
 
     @PluginMethod
@@ -222,10 +1003,18 @@ public class JobRunnerPlugin extends Plugin {
         SQLiteDatabase db = getDb();
         db.insertWithOnConflict("jobs", null, values, SQLiteDatabase.CONFLICT_REPLACE);
 
+        Constraints.Builder constraintsBuilder = new Constraints.Builder()
+            .setRequiredNetworkType(total >= 100 ? NetworkType.UNMETERED : NetworkType.CONNECTED);
+        if (total >= 100) {
+            constraintsBuilder.setRequiresCharging(true);
+        }
+
         OneTimeWorkRequest request =
             new OneTimeWorkRequest.Builder(GenerateAudioWorker.class)
                 .setInputData(new Data.Builder().putString("jobId", jobId).build())
+                .setConstraints(constraintsBuilder.build())
                 .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 20, TimeUnit.SECONDS)
                 .build();
         WorkManager.getInstance(getContext()).enqueue(request);
 
@@ -238,6 +1027,79 @@ public class JobRunnerPlugin extends Plugin {
         } catch (JSONException ignored) {}
 
         Log.i("JobRunner", "enqueueGenerateAudio jobId=" + jobId + " workId=" + request.getId() + " correlationId=" + (correlationId != null ? correlationId : "none"));
+
+        JSObject ret = new JSObject();
+        ret.put("jobId", jobId);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void enqueueGenerateBookAudio(PluginCall call) {
+        if (!ensureNotificationAllowed(call)) return;
+        JSObject payload = call.getObject("payload");
+        String jobId = UUID.randomUUID().toString();
+        long now = System.currentTimeMillis();
+        String correlationId = null;
+        if (payload != null) {
+            try { correlationId = payload.optString("correlationId", null); } catch (Exception ignored) {}
+        }
+
+        int total = 0;
+        if (payload != null) {
+            try {
+                JSONArray chapterIds = payload.getJSONArray("chapterIds");
+                if (chapterIds != null) total = chapterIds.length();
+            } catch (JSONException ignored) {}
+        }
+
+        JSONObject progressJson = new JSONObject();
+        try {
+            progressJson.put("total", total);
+            progressJson.put("completed", 0);
+            if (correlationId != null && !correlationId.isEmpty()) {
+                progressJson.put("correlationId", correlationId);
+            }
+        } catch (JSONException ignored) {}
+
+        String payloadStr = payload != null ? payload.toString() : null;
+
+        ContentValues values = new ContentValues();
+        values.put("jobId", jobId);
+        values.put("type", "generate_book_audio");
+        values.put("status", "queued");
+        values.put("payloadJson", payloadStr);
+        values.put("progressJson", progressJson.toString());
+        values.put("error", (String) null);
+        values.put("createdAt", now);
+        values.put("updatedAt", now);
+
+        SQLiteDatabase db = getDb();
+        db.insertWithOnConflict("jobs", null, values, SQLiteDatabase.CONFLICT_REPLACE);
+
+        Constraints.Builder constraintsBuilder = new Constraints.Builder()
+            .setRequiredNetworkType(total >= 100 ? NetworkType.UNMETERED : NetworkType.CONNECTED);
+        if (total >= 100) {
+            constraintsBuilder.setRequiresCharging(true);
+        }
+
+        OneTimeWorkRequest request =
+            new OneTimeWorkRequest.Builder(GenerateAudioWorker.class)
+                .setInputData(new Data.Builder().putString("jobId", jobId).build())
+                .setConstraints(constraintsBuilder.build())
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 20, TimeUnit.SECONDS)
+                .build();
+        WorkManager.getInstance(getContext()).enqueue(request);
+
+        try {
+            progressJson.put("workRequestId", request.getId().toString());
+            ContentValues update = new ContentValues();
+            update.put("progressJson", progressJson.toString());
+            update.put("updatedAt", System.currentTimeMillis());
+            db.update("jobs", update, "jobId = ?", new String[]{jobId});
+        } catch (JSONException ignored) {}
+
+        Log.i("JobRunner", "enqueueGenerateBookAudio jobId=" + jobId + " workId=" + request.getId() + " correlationId=" + (correlationId != null ? correlationId : "none"));
 
         JSObject ret = new JSObject();
         ret.put("jobId", jobId);
@@ -294,6 +1156,7 @@ public class JobRunnerPlugin extends Plugin {
                     .setInputData(new Data.Builder().putString("jobId", jobId).build())
                     .setConstraints(buildUploadConstraints(call))
                     .addTag("drive_upload_queue")
+                    .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 20, TimeUnit.SECONDS)
                     .build();
             WorkManager.getInstance(getContext()).enqueue(request);
 
@@ -335,6 +1198,7 @@ public class JobRunnerPlugin extends Plugin {
             new OneTimeWorkRequest.Builder(FixIntegrityWorker.class)
                 .setInputData(new Data.Builder().putString("jobId", jobId).build())
                 .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 20, TimeUnit.SECONDS)
                 .build();
         WorkManager.getInstance(getContext()).enqueue(request);
 
@@ -406,6 +1270,7 @@ public class JobRunnerPlugin extends Plugin {
                 .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
                 .setConstraints(buildUploadConstraints(call))
                 .addTag("drive_upload_queue")
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 20, TimeUnit.SECONDS)
                 .build();
         WorkManager.getInstance(getContext()).enqueue(request);
 
@@ -474,7 +1339,7 @@ public class JobRunnerPlugin extends Plugin {
         Class workerClass;
         if ("fixIntegrity".equals(type)) {
             workerClass = FixIntegrityWorker.class;
-        } else if ("generateAudio".equals(type)) {
+        } else if ("generateAudio".equals(type) || "generate_book_audio".equals(type)) {
             workerClass = GenerateAudioWorker.class;
         } else {
             call.reject("unsupported job type");
@@ -485,6 +1350,7 @@ public class JobRunnerPlugin extends Plugin {
             new OneTimeWorkRequest.Builder(workerClass)
                 .setInputData(new Data.Builder().putString("jobId", jobId).build())
                 .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 20, TimeUnit.SECONDS)
                 .build();
         WorkManager.getInstance(getContext()).enqueue(request);
 
@@ -526,7 +1392,7 @@ public class JobRunnerPlugin extends Plugin {
         Class workerClass;
         if ("fixIntegrity".equals(type)) {
             workerClass = FixIntegrityWorker.class;
-        } else if ("generateAudio".equals(type)) {
+        } else if ("generateAudio".equals(type) || "generate_book_audio".equals(type)) {
             workerClass = GenerateAudioWorker.class;
         } else {
             call.reject("unsupported job type");
@@ -537,6 +1403,7 @@ public class JobRunnerPlugin extends Plugin {
             new OneTimeWorkRequest.Builder(workerClass)
                 .setInputData(new Data.Builder().putString("jobId", jobId).build())
                 .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 20, TimeUnit.SECONDS)
                 .build();
         WorkManager.getInstance(getContext()).enqueue(request);
 
@@ -823,6 +1690,7 @@ public class JobRunnerPlugin extends Plugin {
         OneTimeWorkRequest request =
             new OneTimeWorkRequest.Builder(DriveUploadWorker.class)
                 .setConstraints(constraints)
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 20, TimeUnit.SECONDS)
                 .build();
         WorkManager.getInstance(getContext())
             .enqueueUniqueWork("talevox_drive_upload_queue_once", ExistingWorkPolicy.KEEP, request);
@@ -935,9 +1803,10 @@ public class JobRunnerPlugin extends Plugin {
     private void reconcileWithWorkManager() {
         try {
             SQLiteDatabase db = getDb();
-            Cursor cursor = db.query("jobs", new String[]{"jobId", "status", "progressJson"}, null, null, null, null, null);
+            Cursor cursor = db.query("jobs", new String[]{"jobId", "type", "status", "progressJson"}, null, null, null, null, null);
             while (cursor.moveToNext()) {
                 String jobId = cursor.getString(cursor.getColumnIndexOrThrow("jobId"));
+                String type = cursor.getString(cursor.getColumnIndexOrThrow("type"));
                 String status = cursor.getString(cursor.getColumnIndexOrThrow("status"));
                 String progressStr = cursor.getString(cursor.getColumnIndexOrThrow("progressJson"));
                 JSONObject progress = parseJsonObject(progressStr);
@@ -949,6 +1818,16 @@ public class JobRunnerPlugin extends Plugin {
                 if (info == null) continue;
                 String mapped = mapWorkState(info.getState());
                 if (mapped != null && !mapped.equals(status)) {
+                    // Batched generate jobs: each batch is a new WorkRequest; when one batch SUCCEEDED
+                    // we must not mark the job "completed" until all chapters are done.
+                    if ("completed".equals(mapped) && ("generate_audio".equals(type) || "generate_book_audio".equals(type)) && progress != null) {
+                        int completed = progress.optInt("completed", 0);
+                        int total = progress.optInt("total", 0);
+                        if (total > 0 && completed < total) {
+                            Log.d("JobRunner", "Reconcile skip completed for batched job " + jobId + " (" + completed + "/" + total + ")");
+                            continue;
+                        }
+                    }
                     Log.d("JobRunner", "Reconcile job " + jobId + " from " + status + " -> " + mapped);
                     updateStatus(jobId, mapped, null);
                 }

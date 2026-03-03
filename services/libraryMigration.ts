@@ -31,7 +31,10 @@ function isNative(): boolean {
   }
 }
 
-export async function migrateLegacyLocalStorageIfNeeded(): Promise<{ migrated: boolean; reason: string }> {
+export async function migrateLegacyLocalStorageIfNeeded(): Promise<{
+  migrated: boolean;
+  reason: string;
+}> {
   const already = localStorage.getItem(MIGRATED_KEY) === "1";
   if (already) return { migrated: false, reason: "already_marked" };
 
@@ -62,8 +65,11 @@ export async function migrateLegacyLocalStorageIfNeeded(): Promise<{ migrated: b
       driveFolderId: b.driveFolderId ?? undefined,
       driveFolderName: b.driveFolderName ?? undefined,
       backend: b.backend ?? "local",
-      settings:
-        b.settings ?? { useBookSettings: false, highlightMode: HighlightMode.SENTENCE, autoGenerateAudioOnAdd: true },
+      settings: b.settings ?? {
+        useBookSettings: false,
+        highlightMode: HighlightMode.SENTENCE,
+        autoGenerateAudioOnAdd: true,
+      },
       updatedAt: Number(b.updatedAt ?? Date.now()),
     } as any;
 

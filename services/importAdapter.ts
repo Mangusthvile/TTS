@@ -1,9 +1,15 @@
-import { Filesystem } from '@capacitor/filesystem';
-import { Capacitor } from '@capacitor/core';
-import { computeMobileMode } from '../utils/platform';
-import { UiMode } from '../types';
+import { Filesystem } from "@capacitor/filesystem";
+import { Capacitor } from "@capacitor/core";
+import { computeMobileMode } from "../utils/platform";
+import { UiMode } from "../types";
 
-export type PickedFile = { name: string; mimeType?: string; size?: number; uri?: string; file?: File };
+export type PickedFile = {
+  name: string;
+  mimeType?: string;
+  size?: number;
+  uri?: string;
+  file?: File;
+};
 
 export interface ImportAdapter {
   pickTextFiles(): Promise<PickedFile[]>;
@@ -15,18 +21,18 @@ export interface ImportAdapter {
 
 class DesktopImportAdapter implements ImportAdapter {
   async pickTextFiles(): Promise<PickedFile[]> {
-    if (typeof window !== 'undefined' && 'showOpenFilePicker' in window) {
+    if (typeof window !== "undefined" && "showOpenFilePicker" in window) {
       // Modern picker path
       const handles = await (window as any).showOpenFilePicker({
         types: [
           {
-            description: 'Text files',
+            description: "Text files",
             accept: {
-              'text/plain': ['.txt'],
-              'text/markdown': ['.md'],
-              'application/json': ['.json'],
-              'application/zip': ['.zip'],
-              'application/x-zip-compressed': ['.zip'],
+              "text/plain": [".txt"],
+              "text/markdown": [".md"],
+              "application/json": [".json"],
+              "application/zip": [".zip"],
+              "application/x-zip-compressed": [".zip"],
             },
           },
         ],
@@ -43,11 +49,11 @@ class DesktopImportAdapter implements ImportAdapter {
 
     // Fallback to hidden input
     return new Promise<PickedFile[]>((resolve) => {
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = '.txt,.md,.json,.zip';
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = ".txt,.md,.json,.zip";
       input.multiple = true;
-      input.style.display = 'none';
+      input.style.display = "none";
       document.body.appendChild(input);
       input.onchange = () => {
         const list = Array.from(input.files || []).map((file) => ({
@@ -69,7 +75,7 @@ class DesktopImportAdapter implements ImportAdapter {
       const res = await fetch(picked.uri);
       return res.text();
     }
-    throw new Error('No file to read');
+    throw new Error("No file to read");
   }
 
   async readBytes(picked: PickedFile): Promise<Uint8Array> {
@@ -82,7 +88,7 @@ class DesktopImportAdapter implements ImportAdapter {
       const buf = await res.arrayBuffer();
       return new Uint8Array(buf);
     }
-    throw new Error('No file to read');
+    throw new Error("No file to read");
   }
 
   async pickAttachmentFiles(): Promise<PickedFile[]> {
@@ -137,13 +143,20 @@ class DesktopImportAdapter implements ImportAdapter {
 
 class MobileImportAdapter implements ImportAdapter {
   async pickTextFiles(): Promise<PickedFile[]> {
-    const picker = (Capacitor as any)?.Plugins?.CapacitorFilePicker || (Capacitor as any)?.Plugins?.FilePicker;
+    const picker =
+      (Capacitor as any)?.Plugins?.CapacitorFilePicker || (Capacitor as any)?.Plugins?.FilePicker;
     if (!picker?.pickFiles) {
-      throw new Error('FilePicker plugin not available');
+      throw new Error("FilePicker plugin not available");
     }
     const res = await picker.pickFiles({
       multiple: true,
-      types: ['text/plain', 'text/markdown', 'application/json', 'application/zip', 'application/x-zip-compressed'],
+      types: [
+        "text/plain",
+        "text/markdown",
+        "application/json",
+        "application/zip",
+        "application/x-zip-compressed",
+      ],
     });
     const files = res?.files || [];
     return files.map((f: any) => ({
@@ -177,19 +190,20 @@ class MobileImportAdapter implements ImportAdapter {
         const buf = await res.data.arrayBuffer();
         return new Uint8Array(buf);
       }
-      if (typeof res.data === 'string') {
-        const b64 = res.data.includes(',') ? res.data.split(',')[1] : res.data;
+      if (typeof res.data === "string") {
+        const b64 = res.data.includes(",") ? res.data.split(",")[1] : res.data;
         const binary = atob(b64);
         const out = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
         return out;
       }
     }
-    throw new Error('readBytes failed for mobile');
+    throw new Error("readBytes failed for mobile");
   }
 
   async pickAttachmentFiles(): Promise<PickedFile[]> {
-    const picker = (Capacitor as any)?.Plugins?.CapacitorFilePicker || (Capacitor as any)?.Plugins?.FilePicker;
+    const picker =
+      (Capacitor as any)?.Plugins?.CapacitorFilePicker || (Capacitor as any)?.Plugins?.FilePicker;
     if (!picker?.pickFiles) {
       throw new Error("FilePicker plugin not available");
     }

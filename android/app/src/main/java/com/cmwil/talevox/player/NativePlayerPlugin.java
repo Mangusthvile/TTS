@@ -2,6 +2,8 @@ package com.cmwil.talevox.player;
 
 import android.content.ComponentName;
 import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
 
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
@@ -32,6 +34,7 @@ public class NativePlayerPlugin extends Plugin {
     private MediaController controller;
     private ListenableFuture<MediaController> controllerFuture;
     private boolean listenerAttached = false;
+    private Player.Listener playerListener;
 
     private static class QueueItem {
         String id;
@@ -72,7 +75,7 @@ public class NativePlayerPlugin extends Plugin {
     private void attachListenerIfNeeded(MediaController controller) {
         if (listenerAttached) return;
         listenerAttached = true;
-        controller.addListener(new Player.Listener() {
+        playerListener = new Player.Listener() {
             @Override
             public void onIsPlayingChanged(boolean isPlaying) {
                 emitState();
@@ -108,7 +111,8 @@ public class NativePlayerPlugin extends Plugin {
                 payload.put("error", error != null ? error.getMessage() : "Unknown");
                 notifyListeners("error", payload, true);
             }
-        });
+        };
+        controller.addListener(playerListener);
     }
 
     private void emitItemChanged(@Nullable MediaItem mediaItem) {
@@ -387,9 +391,26 @@ public class NativePlayerPlugin extends Plugin {
 
     @Override
     protected void handleOnDestroy() {
-        if (controller != null) {
-            controller.release();
-            controller = null;
+        // MediaController.release() must be called from the application (main) thread.
+        // Remove listener before release so no callbacks run after destroy; reset flags so a new
+        // controller can attach listeners if the plugin is reused.
+        final MediaController toRelease = controller;
+        final Player.Listener toRemove = playerListener;
+        controller = null;
+        playerListener = null;
+        controllerFuture = null;
+        listenerAttached = false;
+        if (toRelease != null) {
+            new Handler(Looper.getMainLooper()).post(() -> {
+                try {
+                    if (toRemove != null) {
+                        toRelease.removeListener(toRemove);
+                    }
+                } catch (Exception ignored) {}
+                try {
+                    toRelease.release();
+                } catch (Exception ignored) {}
+            });
         }
         super.handleOnDestroy();
     }

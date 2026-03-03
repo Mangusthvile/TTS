@@ -1,5 +1,4 @@
-
-import { trace } from '../utils/trace';
+import { trace } from "../utils/trace";
 
 export type PlaybackItem = {
   id: string;
@@ -38,7 +37,7 @@ export interface PlaybackAdapter {
   onItemChanged: (listener: PlaybackItemListener) => () => void;
   onEnded: (listener: () => void) => () => void;
   onError: (listener: PlaybackErrorListener) => () => void;
-};
+}
 
 export class DesktopPlaybackAdapter implements PlaybackAdapter {
   private audio: HTMLAudioElement;
@@ -52,7 +51,7 @@ export class DesktopPlaybackAdapter implements PlaybackAdapter {
 
   constructor(audio?: HTMLAudioElement) {
     this.audio = audio ?? new Audio();
-    this.audio.preload = 'auto';
+    this.audio.preload = "auto";
     this.bindEvents();
   }
 
@@ -80,12 +79,13 @@ export class DesktopPlaybackAdapter implements PlaybackAdapter {
 
   pause() {
     this.audio.pause();
+    this.emitState();
   }
 
   stop() {
     this.audio.pause();
-    this.audio.removeAttribute('src');
-    this.audio.src = '';
+    this.audio.removeAttribute("src");
+    this.audio.src = "";
     this.audio.load();
     this.emitState();
   }
@@ -107,7 +107,9 @@ export class DesktopPlaybackAdapter implements PlaybackAdapter {
       isPlaying: !this.audio.paused,
       speed: this.audio.playbackRate || 1,
       positionMs: Math.floor((this.audio.currentTime || 0) * 1000),
-      durationMs: Math.floor(((Number.isFinite(this.audio.duration) ? this.audio.duration : 0) || 0) * 1000),
+      durationMs: Math.floor(
+        ((Number.isFinite(this.audio.duration) ? this.audio.duration : 0) || 0) * 1000
+      ),
       playbackRate: this.audio.playbackRate || 1,
       currentItemId: this.queue[this.currentIndex]?.id ?? null,
     };
@@ -135,17 +137,17 @@ export class DesktopPlaybackAdapter implements PlaybackAdapter {
 
   private bindEvents() {
     const emit = () => this.emitState();
-    this.audio.addEventListener('timeupdate', emit);
-    this.audio.addEventListener('play', emit);
-    this.audio.addEventListener('pause', emit);
-    this.audio.addEventListener('loadedmetadata', emit);
-    this.audio.addEventListener('ratechange', emit);
-    this.audio.addEventListener('ended', () => {
+    this.audio.addEventListener("timeupdate", emit);
+    this.audio.addEventListener("play", emit);
+    this.audio.addEventListener("pause", emit);
+    this.audio.addEventListener("loadedmetadata", emit);
+    this.audio.addEventListener("ratechange", emit);
+    this.audio.addEventListener("ended", () => {
       this.emitState();
       this.endedListeners.forEach((listener) => listener());
     });
-    this.audio.addEventListener('error', () => {
-      const err = this.audio.error ?? new Error('Playback error');
+    this.audio.addEventListener("error", () => {
+      const err = this.audio.error ?? new Error("Playback error");
       this.errorListeners.forEach((listener) => listener(err));
     });
   }
@@ -161,7 +163,7 @@ export class DesktopPlaybackAdapter implements PlaybackAdapter {
     const state = this.getState();
     this.stateListeners.forEach((listener) => listener(state));
 
-    // Throttle state emit while playing
+    // Throttle state emit while playing — use 80ms so highlight keeps up at 1.5x+ speed
     if (state.isPlaying && this.stateInterval === null) {
       this.stateInterval = setInterval(() => {
         const s = this.getState();
@@ -170,7 +172,7 @@ export class DesktopPlaybackAdapter implements PlaybackAdapter {
           clearInterval(this.stateInterval);
           this.stateInterval = null;
         }
-      }, 250);
+      }, 80);
     } else if (!state.isPlaying && this.stateInterval !== null) {
       clearInterval(this.stateInterval);
       this.stateInterval = null;
@@ -179,6 +181,15 @@ export class DesktopPlaybackAdapter implements PlaybackAdapter {
 }
 
 export class MobilePlaybackAdapter implements PlaybackAdapter {
+  /** Poll interval (ms) while playing. Native events drive most updates; this is a fallback. */
+  private static readonly MOBILE_POLL_INTERVAL_MS = 500;
+  /**
+   * If a native "state" event arrived within this window (ms), skip the getState() bridge call on
+   * the next poll tick — we already have fresh data. The poll still fires and emits cached state so
+   * highlight sync and progress listeners keep getting ticks.
+   */
+  private static readonly NATIVE_EVENT_FRESHNESS_MS = 400;
+
   private state: PlaybackState = {
     currentTime: 0,
     duration: 0,
@@ -197,8 +208,12 @@ export class MobilePlaybackAdapter implements PlaybackAdapter {
   private currentItemId: string | null = null;
   private lastLoggedIsPlaying: boolean | null = null;
   private lastLoggedItemId: string | null = null;
+  /** Timestamp of the last native "state" event; used to skip redundant poll bridge calls. */
+  private lastNativeStateAt = 0;
+  /** Remove functions for Capacitor plugin listeners; called in destroy(). */
+  private listenerRemovers: Array<() => Promise<void>> = [];
 
-  constructor(private plugin: typeof import('./nativePlayer').NativePlayer) {
+  constructor(private plugin: typeof import("./nativePlayer").NativePlayer) {
     void this.bindNativeListeners();
   }
 
@@ -209,8 +224,9 @@ export class MobilePlaybackAdapter implements PlaybackAdapter {
   }
 
   async loadQueue(items: PlaybackItem[], startIndex: number) {
-    await this.plugin.loadQueue({ items, startIndex });
-    const current = items[startIndex] ?? null;
+    const clamped = items.length > 0 ? Math.max(0, Math.min(startIndex, items.length - 1)) : 0;
+    await this.plugin.loadQueue({ items, startIndex: clamped });
+    const current = items[clamped] ?? null;
     this.currentItemId = current?.id ?? null;
     this.itemListeners.forEach((listener) => listener(current));
   }
@@ -221,10 +237,24 @@ export class MobilePlaybackAdapter implements PlaybackAdapter {
 
   pause() {
     void this.plugin.pause();
+    this.state.isPlaying = false;
+    this.state.positionMs = Math.floor((this.state.currentTime ?? 0) * 1000);
+    this.emitState();
   }
 
   stop() {
     void this.plugin.stop();
+    this.state.isPlaying = false;
+    this.state.currentTime = 0;
+    this.state.duration = 0;
+    this.state.positionMs = 0;
+    this.state.durationMs = 0;
+    this.currentItemId = null;
+    if (this.pollTimer != null) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+    this.emitState();
   }
 
   seek(ms: number) {
@@ -280,7 +310,7 @@ export class MobilePlaybackAdapter implements PlaybackAdapter {
     const itemChanged = this.lastLoggedItemId !== nextItemId;
 
     if (isPlayingChanged || itemChanged) {
-      trace('playback:state', {
+      trace("playback:state", {
         isPlaying: state.isPlaying,
         positionMs: state.positionMs,
         durationMs: state.durationMs,
@@ -295,7 +325,7 @@ export class MobilePlaybackAdapter implements PlaybackAdapter {
     if (this.nativeListenersBound) return;
     this.nativeListenersBound = true;
 
-    await this.plugin.addListener('state', (event: any) => {
+    const stateListener = await this.plugin.addListener("state", (event: any) => {
       this.state = {
         currentTime: event?.currentTime ?? 0,
         duration: event?.duration ?? 0,
@@ -305,26 +335,51 @@ export class MobilePlaybackAdapter implements PlaybackAdapter {
         durationMs: Math.floor((event?.duration ?? 0) * 1000),
         playbackRate: event?.speed ?? this.state.speed ?? 1,
       };
+      this.lastNativeStateAt = Date.now();
       this.handlePolling();
       this.emitState();
     });
+    this.listenerRemovers.push(() => stateListener.remove());
 
-    await this.plugin.addListener('itemChanged', (event: any) => {
+    const itemListener = await this.plugin.addListener("itemChanged", (event: any) => {
       const item = event?.item ?? null;
       this.currentItemId = item?.id ?? null;
       this.itemListeners.forEach((listener) => listener(item));
-      trace('playback:item', { currentItemId: this.currentItemId });
+      trace("playback:item", { currentItemId: this.currentItemId });
     });
+    this.listenerRemovers.push(() => itemListener.remove());
 
-    await this.plugin.addListener('ended', () => {
+    const endedListener = await this.plugin.addListener("ended", () => {
       this.endedListeners.forEach((listener) => listener());
-      trace('playback:ended', { currentItemId: this.currentItemId });
+      trace("playback:ended", { currentItemId: this.currentItemId });
     });
+    this.listenerRemovers.push(() => endedListener.remove());
 
-    await this.plugin.addListener('error', (event: any) => {
-      const error = event?.error ?? new Error('NativePlayer error');
+    const errorListener = await this.plugin.addListener("error", (event: any) => {
+      const error = event?.error ?? new Error("NativePlayer error");
       this.errorListeners.forEach((listener) => listener(error));
     });
+    this.listenerRemovers.push(() => errorListener.remove());
+  }
+
+  /**
+   * Remove Capacitor plugin listeners and stop polling. Call when replacing the adapter
+   * (e.g. switching to desktop) so old listeners do not keep firing.
+   */
+  async destroy(): Promise<void> {
+    if (this.pollTimer != null) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+    const removers = this.listenerRemovers.splice(0, this.listenerRemovers.length);
+    for (const remove of removers) {
+      try {
+        await remove();
+      } catch {
+        // ignore
+      }
+    }
+    this.nativeListenersBound = false;
   }
 
   private handlePolling() {
@@ -332,6 +387,12 @@ export class MobilePlaybackAdapter implements PlaybackAdapter {
       if (this.pollTimer == null) {
         this.pollTimer = setInterval(async () => {
           try {
+            // If a native event arrived recently, skip the bridge call — cached state is fresh
+            // enough. Still emit so highlight sync and progress listeners get their tick.
+            if (Date.now() - this.lastNativeStateAt < MobilePlaybackAdapter.NATIVE_EVENT_FRESHNESS_MS) {
+              this.emitState();
+              return;
+            }
             const res = await this.plugin.getState();
             this.state = {
               currentTime: res?.currentTime ?? this.state.currentTime,
@@ -350,7 +411,7 @@ export class MobilePlaybackAdapter implements PlaybackAdapter {
           } catch {
             // ignore transient errors
           }
-        }, 1000); // Relaxed from 250ms to 1s to reduce bridge traffic
+        }, MobilePlaybackAdapter.MOBILE_POLL_INTERVAL_MS);
       }
     } else if (this.pollTimer != null) {
       clearInterval(this.pollTimer);

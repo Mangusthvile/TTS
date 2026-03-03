@@ -40,9 +40,15 @@ function readPrefs(): UploadPreferences {
       wifiOnly: !!parsed.wifiOnly,
       requiresCharging: !!parsed.requiresCharging,
       autoStart: parsed.autoStart !== false,
-      retryBaseMs: Number.isFinite(Number(parsed.retryBaseMs)) ? Number(parsed.retryBaseMs) : DEFAULT_PREFS.retryBaseMs,
-      retryMaxMs: Number.isFinite(Number(parsed.retryMaxMs)) ? Number(parsed.retryMaxMs) : DEFAULT_PREFS.retryMaxMs,
-      maxRetries: Number.isFinite(Number(parsed.maxRetries)) ? Number(parsed.maxRetries) : DEFAULT_PREFS.maxRetries,
+      retryBaseMs: Number.isFinite(Number(parsed.retryBaseMs))
+        ? Number(parsed.retryBaseMs)
+        : DEFAULT_PREFS.retryBaseMs,
+      retryMaxMs: Number.isFinite(Number(parsed.retryMaxMs))
+        ? Number(parsed.retryMaxMs)
+        : DEFAULT_PREFS.retryMaxMs,
+      maxRetries: Number.isFinite(Number(parsed.maxRetries))
+        ? Number(parsed.maxRetries)
+        : DEFAULT_PREFS.maxRetries,
     };
     return cached;
   } catch {
@@ -75,15 +81,23 @@ export function updateUploadPreferences(patch: Partial<UploadPreferences>): Uplo
     wifiOnly: patch.wifiOnly ?? current.wifiOnly,
     requiresCharging: patch.requiresCharging ?? current.requiresCharging,
     autoStart: patch.autoStart ?? current.autoStart,
-    retryBaseMs: Number.isFinite(Number(patch.retryBaseMs)) ? Number(patch.retryBaseMs) : current.retryBaseMs,
-    retryMaxMs: Number.isFinite(Number(patch.retryMaxMs)) ? Number(patch.retryMaxMs) : current.retryMaxMs,
-    maxRetries: Number.isFinite(Number(patch.maxRetries)) ? Number(patch.maxRetries) : current.maxRetries,
+    retryBaseMs: Number.isFinite(Number(patch.retryBaseMs))
+      ? Number(patch.retryBaseMs)
+      : current.retryBaseMs,
+    retryMaxMs: Number.isFinite(Number(patch.retryMaxMs))
+      ? Number(patch.retryMaxMs)
+      : current.retryMaxMs,
+    maxRetries: Number.isFinite(Number(patch.maxRetries))
+      ? Number(patch.maxRetries)
+      : current.maxRetries,
   };
   writePrefs(next);
   return next;
 }
 
-export function subscribeUploadPreferences(listener: (prefs: UploadPreferences) => void): () => void {
+export function subscribeUploadPreferences(
+  listener: (prefs: UploadPreferences) => void
+): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
 }

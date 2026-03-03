@@ -108,4 +108,3 @@ export function chunkIndexFromChar(chunks: Chunk[], charIndex: number): number {
 
   return Math.max(0, Math.min(lo, chunks.length - 1));
 }
-

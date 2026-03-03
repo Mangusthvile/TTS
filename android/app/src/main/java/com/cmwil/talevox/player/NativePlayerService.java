@@ -24,12 +24,14 @@ public class NativePlayerService extends MediaSessionService {
                     .setUsage(C.USAGE_MEDIA)
                     .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
                     .build(),
-                true
+                true  // handleAudioFocus: request/abandon and respond to focus loss (pause when another app plays)
             )
             .setSeekBackIncrementMs(SEEK_INCREMENT_MS)
             .setSeekForwardIncrementMs(SEEK_INCREMENT_MS)
             .build();
         player.setHandleAudioBecomingNoisy(true);
+        // WAKE_MODE_LOCAL keeps audio playing when screen is off. When user enables "Keep screen on"
+        // (Keep Awake) in Settings, both screen and this wake lock are active, which can increase heat.
         player.setWakeMode(C.WAKE_MODE_LOCAL);
 
         mediaSession = new MediaSession.Builder(this, player).build();

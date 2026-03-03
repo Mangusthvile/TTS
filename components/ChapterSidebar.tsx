@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Book, Chapter, Theme } from '../types';
-import { UiMode } from '../types';
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Book, Chapter, Theme } from "../types";
+import { UiMode } from "../types";
+import { usePlaybackTick } from "../src/app/state/PlaybackTickContext";
 
 interface ChapterSidebarProps {
   book: Book;
@@ -10,6 +11,7 @@ interface ChapterSidebarProps {
   isDrawer: boolean;
   uiMode?: UiMode;
   isMobile?: boolean;
+  /** Optional; when not provided, read from PlaybackTickContext */
   playbackSnapshot?: { chapterId: string; percent: number } | null;
 
   onLoadMoreChapters?: () => void;
@@ -17,7 +19,7 @@ interface ChapterSidebarProps {
   isLoadingMoreChapters?: boolean;
 }
 
-const ChapterSidebar: React.FC<ChapterSidebarProps> = ({
+const ChapterSidebar: React.FC<ChapterSidebarProps> = React.memo(({
   book,
   theme,
   onSelectChapter,
@@ -25,11 +27,13 @@ const ChapterSidebar: React.FC<ChapterSidebarProps> = ({
   isDrawer,
   uiMode,
   isMobile,
-  playbackSnapshot,
+  playbackSnapshot: playbackSnapshotProp,
   onLoadMoreChapters,
   hasMoreChapters,
   isLoadingMoreChapters,
 }) => {
+  const { playbackSnapshot: tickSnapshot } = usePlaybackTick();
+  const playbackSnapshot = playbackSnapshotProp ?? tickSnapshot;
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
   const [collapsedVolumes, setCollapsedVolumes] = useState<Record<string, boolean>>({});
@@ -37,7 +41,7 @@ const ChapterSidebar: React.FC<ChapterSidebarProps> = ({
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const lastScrollCallRef = useRef(0);
-  const mobileMode = (typeof isMobile === 'boolean') ? isMobile : uiMode === 'mobile';
+  const mobileMode = typeof isMobile === "boolean" ? isMobile : uiMode === "mobile";
 
   const tryLoadMore = () => {
     if (!hasMoreChapters || !onLoadMoreChapters || isLoadingMoreChapters) return;
@@ -48,7 +52,7 @@ const ChapterSidebar: React.FC<ChapterSidebarProps> = ({
     if (!hasMoreChapters || !onLoadMoreChapters) return;
     const el = sentinelRef.current;
     if (!el) return;
-    if (typeof IntersectionObserver === 'undefined') return;
+    if (typeof IntersectionObserver === "undefined") return;
 
     const obs = new IntersectionObserver(
       (entries) => {
@@ -57,7 +61,7 @@ const ChapterSidebar: React.FC<ChapterSidebarProps> = ({
           tryLoadMore();
         }
       },
-      { root: containerRef.current || undefined, rootMargin: '200px' }
+      { root: containerRef.current || undefined, rootMargin: "200px" }
     );
 
     obs.observe(el);
@@ -82,28 +86,33 @@ const ChapterSidebar: React.FC<ChapterSidebarProps> = ({
 
     handleScroll();
 
-    if (mobileMode || typeof IntersectionObserver === 'undefined') {
-      el.addEventListener('scroll', handleScroll);
-      return () => el.removeEventListener('scroll', handleScroll);
+    if (mobileMode || typeof IntersectionObserver === "undefined") {
+      el.addEventListener("scroll", handleScroll);
+      return () => el.removeEventListener("scroll", handleScroll);
     }
   }, [hasMoreChapters, onLoadMoreChapters, isLoadingMoreChapters, mobileMode]);
 
-  const bgClass = isDark ? 'bg-neutral-900' : isSepia ? 'bg-amber-50' : 'bg-white';
-  const textClass = isDark ? 'text-neutral-100' : isSepia ? 'text-amber-900' : 'text-neutral-900';
-  const borderClass = isDark ? 'border-neutral-700' : 'border-neutral-200';
-  const hoverClass = isDark ? 'hover:bg-neutral-800' : isSepia ? 'hover:bg-amber-100' : 'hover:bg-neutral-100';
-  const activeClass = isDark ? 'bg-indigo-900/40' : isSepia ? 'bg-indigo-100' : 'bg-indigo-50';
+  const bgClass = isDark ? "bg-neutral-900" : isSepia ? "bg-amber-50" : "bg-white";
+  const textClass = isDark ? "text-neutral-100" : isSepia ? "text-amber-900" : "text-neutral-900";
+  const borderClass = isDark ? "border-neutral-700" : "border-neutral-200";
+  const hoverClass = isDark
+    ? "hover:bg-neutral-800"
+    : isSepia
+      ? "hover:bg-amber-100"
+      : "hover:bg-neutral-100";
+  const activeClass = isDark ? "bg-indigo-900/40" : isSepia ? "bg-indigo-100" : "bg-indigo-50";
 
   const isActive = (chapter: Chapter) => playbackSnapshot?.chapterId === chapter.id;
   const progressOf = (chapter: Chapter) =>
-    isActive(chapter) ? playbackSnapshot?.percent ?? 0 : chapter.progress ?? 0;
+    isActive(chapter) ? (playbackSnapshot?.percent ?? 0) : (chapter.progress ?? 0);
 
   const volumeGroups = useMemo(() => {
     const groups = new Map<string, Chapter[]>();
     for (const ch of book.chapters || []) {
-      const volumeName = typeof (ch as any).volumeName === "string" && (ch as any).volumeName.trim().length
-        ? String((ch as any).volumeName).trim()
-        : "Ungrouped";
+      const volumeName =
+        typeof (ch as any).volumeName === "string" && (ch as any).volumeName.trim().length
+          ? String((ch as any).volumeName).trim()
+          : "Ungrouped";
       const arr = groups.get(volumeName) || [];
       arr.push(ch);
       groups.set(volumeName, arr);
@@ -113,34 +122,67 @@ const ChapterSidebar: React.FC<ChapterSidebarProps> = ({
       const m = volumeName.match(/^(book|volume)\s*(\d+)/i);
       const volumeNumber = m ? parseInt(m[2], 10) : null;
       const sorted = [...chapters].sort((a, b) => a.index - b.index);
-      return { volumeName, volumeNumber: Number.isFinite(volumeNumber) ? volumeNumber : null, chapters: sorted };
+      return {
+        volumeName,
+        volumeNumber: Number.isFinite(volumeNumber) ? volumeNumber : null,
+        chapters: sorted,
+      };
     });
 
-    const NONE = 1_000_000_000;
-    parsed.sort((a, b) => {
-      const aUngrouped = a.volumeName.toLowerCase() === "ungrouped";
-      const bUngrouped = b.volumeName.toLowerCase() === "ungrouped";
-      if (aUngrouped !== bUngrouped) return aUngrouped ? 1 : -1;
+    const volumeOrder = book.settings?.volumeOrder;
+    if (Array.isArray(volumeOrder) && volumeOrder.length > 0) {
+      const orderIndex = new Map<string, number>();
+      volumeOrder.forEach((name, idx) => {
+        if (typeof name === "string" && name.trim()) orderIndex.set(name.trim(), idx);
+      });
+      const NONE = 1_000_000_000;
+      parsed.sort((a, b) => {
+        const aIn = orderIndex.has(a.volumeName);
+        const bIn = orderIndex.has(b.volumeName);
+        if (aIn && bIn)
+          return (orderIndex.get(a.volumeName) ?? NONE) - (orderIndex.get(b.volumeName) ?? NONE);
+        if (aIn) return -1;
+        if (bIn) return 1;
+        const aUngrouped = a.volumeName.toLowerCase() === "ungrouped";
+        const bUngrouped = b.volumeName.toLowerCase() === "ungrouped";
+        if (aUngrouped !== bUngrouped) return aUngrouped ? 1 : -1;
+        const aN = a.volumeNumber ?? NONE;
+        const bN = b.volumeNumber ?? NONE;
+        if (aN !== bN) return aN - bN;
+        return a.volumeName.localeCompare(b.volumeName, undefined, { numeric: true });
+      });
+    } else {
+      const NONE = 1_000_000_000;
+      parsed.sort((a, b) => {
+        const aUngrouped = a.volumeName.toLowerCase() === "ungrouped";
+        const bUngrouped = b.volumeName.toLowerCase() === "ungrouped";
+        if (aUngrouped !== bUngrouped) return aUngrouped ? 1 : -1;
 
-      const aN = a.volumeNumber ?? NONE;
-      const bN = b.volumeNumber ?? NONE;
-      if (aN !== bN) return aN - bN;
+        const aN = a.volumeNumber ?? NONE;
+        const bN = b.volumeNumber ?? NONE;
+        if (aN !== bN) return aN - bN;
 
-      return a.volumeName.localeCompare(b.volumeName, undefined, { numeric: true });
-    });
+        return a.volumeName.localeCompare(b.volumeName, undefined, { numeric: true });
+      });
+    }
 
     return parsed;
-  }, [book.chapters]);
+  }, [book.chapters, book.settings?.volumeOrder]);
 
   return (
-    <div className={`flex flex-col h-full ${bgClass} ${textClass} ${isDrawer ? '' : 'border-r'} ${borderClass}`}>
+    <div
+      className={`flex flex-col h-full ${bgClass} ${textClass} ${isDrawer ? "" : "border-r"} ${borderClass}`}
+    >
       <div className={`flex items-center justify-between px-6 py-4 border-b ${borderClass}`}>
         <div className="min-w-0">
           <div className="text-xs uppercase tracking-widest opacity-60">Chapters</div>
           <div className="font-semibold truncate">{book.title}</div>
         </div>
         {isDrawer && (
-          <button onClick={onClose} className={`px-3 py-1 rounded-lg border ${borderClass} ${hoverClass}`}>
+          <button
+            onClick={onClose}
+            className={`px-3 py-1 rounded-lg border ${borderClass} ${hoverClass}`}
+          >
             Close
           </button>
         )}
@@ -183,12 +225,14 @@ const ChapterSidebar: React.FC<ChapterSidebarProps> = ({
                     <button
                       key={chapter.id}
                       onClick={() => onSelectChapter(chapter.id)}
-                      className={`w-full text-left px-6 py-3 border-t ${borderClass} ${hoverClass} ${active ? activeClass : ''}`}
+                      className={`w-full text-left px-6 py-3 border-t ${borderClass} ${hoverClass} ${active ? activeClass : ""}`}
                     >
                       <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0">
                           <div className="text-sm font-medium truncate">{chapter.title}</div>
-                          <div className="text-xs opacity-60">{localLabel}#{chapter.index}</div>
+                          <div className="text-xs opacity-60">
+                            {localLabel}#{chapter.index}
+                          </div>
                         </div>
 
                         <div className="text-xs opacity-70 tabular-nums">
@@ -196,9 +240,11 @@ const ChapterSidebar: React.FC<ChapterSidebarProps> = ({
                         </div>
                       </div>
 
-                      <div className={`mt-2 h-1 rounded-full ${isDark ? 'bg-neutral-700' : 'bg-neutral-200'}`}>
+                      <div
+                        className={`mt-2 h-1 rounded-full ${isDark ? "bg-neutral-700" : "bg-neutral-200"}`}
+                      >
                         <div
-                          className={`h-1 rounded-full ${isDark ? 'bg-indigo-400' : 'bg-indigo-600'}`}
+                          className={`h-1 rounded-full ${isDark ? "bg-indigo-400" : "bg-indigo-600"}`}
                           style={{ width: `${Math.round(displayProgress * 100)}%` }}
                         />
                       </div>
@@ -214,7 +260,7 @@ const ChapterSidebar: React.FC<ChapterSidebarProps> = ({
             ref={sentinelRef}
             className={`px-6 py-4 text-xs ${textClass} opacity-60 text-center space-y-2`}
           >
-            <div>{isLoadingMoreChapters ? 'Loading more...' : 'Scroll or tap to load more'}</div>
+            <div>{isLoadingMoreChapters ? "Loading more..." : "Scroll or tap to load more"}</div>
             <button
               onClick={tryLoadMore}
               className="px-3 py-1 rounded-full border border-indigo-400 text-indigo-600 text-[11px] font-bold uppercase tracking-widest"
@@ -227,6 +273,7 @@ const ChapterSidebar: React.FC<ChapterSidebarProps> = ({
       </div>
     </div>
   );
-};
+});
 
+ChapterSidebar.displayName = "ChapterSidebar";
 export default ChapterSidebar;

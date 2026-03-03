@@ -1,4 +1,4 @@
-import { registerPlugin } from '@capacitor/core';
+import { registerPlugin } from "@capacitor/core";
 
 export type NativePlayerItem = {
   id: string;
@@ -29,10 +29,10 @@ export interface NativePlayerPlugin {
   previous: () => Promise<void>;
   getState: () => Promise<NativePlayerState>;
   addListener: (
-    eventName: 'state' | 'itemChanged' | 'ended' | 'error',
+    eventName: "state" | "itemChanged" | "ended" | "error",
     listenerFunc: (event: any) => void
   ) => Promise<{ remove: () => Promise<void> }>;
   removeAllListeners: () => Promise<void>;
 }
 
-export const NativePlayer = registerPlugin<NativePlayerPlugin>('NativePlayer');
+export const NativePlayer = registerPlugin<NativePlayerPlugin>("NativePlayer");

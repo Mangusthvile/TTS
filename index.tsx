@@ -14,8 +14,7 @@ declare const __APP_VERSION__: string;
 // ---------------------------
 
 // Prefer Vite-injected version; fallback only if somehow missing.
-window.__APP_VERSION__ =
-  (typeof __APP_VERSION__ !== "undefined" && __APP_VERSION__) || "3.0.16";
+window.__APP_VERSION__ = (typeof __APP_VERSION__ !== "undefined" && __APP_VERSION__) || "3.0.18";
 
 // Install global trace listeners immediately
 installGlobalTraceHandlers();
@@ -55,10 +54,8 @@ function safeStringify(obj: any, maxBytes: number): string {
     const info = String(trimmed.info ?? "");
 
     // Keep stacks reasonably sized
-    if (stack.length > 12_000)
-      trimmed.stack = stack.slice(0, 12_000) + "\n…(truncated)";
-    if (info.length > 2_000)
-      trimmed.info = info.slice(0, 2_000) + "\n…(truncated)";
+    if (stack.length > 12_000) trimmed.stack = stack.slice(0, 12_000) + "\n…(truncated)";
+    if (info.length > 2_000) trimmed.info = info.slice(0, 2_000) + "\n…(truncated)";
 
     let raw = JSON.stringify(trimmed);
 
@@ -161,10 +158,7 @@ window.onerror = (message, source, lineno, colno, error) => {
   ) {
     recordFatalError(error || message, "ChunkLoadError Detected");
   } else {
-    recordFatalError(
-      error || message,
-      `Global Window Error: ${source}:${lineno}:${colno}`
-    );
+    recordFatalError(error || message, `Global Window Error: ${source}:${lineno}:${colno}`);
   }
 };
 
@@ -210,10 +204,7 @@ class ErrorBoundary extends React.Component<Props, State> {
     console.error("Uncaught error:", error, errorInfo);
     const componentStack = toNullableString(errorInfo.componentStack);
     this.setState({ errorInfo: componentStack });
-    recordFatalError(
-      error,
-      `React Component Crash: ${(componentStack || "").substring(0, 200)}`
-    );
+    recordFatalError(error, `React Component Crash: ${(componentStack || "").substring(0, 200)}`);
   }
 
   private handleCopy = () => {
@@ -241,9 +232,7 @@ class ErrorBoundary extends React.Component<Props, State> {
               <div className="p-4 bg-red-500/10 rounded-3xl">
                 <AlertTriangle className="w-12 h-12 text-red-500" />
               </div>
-              <h1 className="text-2xl font-black tracking-tight">
-                App crashed after sign-in
-              </h1>
+              <h1 className="text-2xl font-black tracking-tight">App crashed after sign-in</h1>
               <p className="text-slate-400 text-sm font-medium">
                 {this.state.isChunkError
                   ? "A module failed to load. This usually happens after an update. A clean reload is required."

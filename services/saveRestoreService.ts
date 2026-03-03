@@ -2,18 +2,25 @@ import { Directory, Encoding, Filesystem } from "@capacitor/filesystem";
 import { Capacitor } from "@capacitor/core";
 import {
   AppState,
-  BackupSchedulerSettings,
   Book,
   BookAttachment,
   BookSettings,
   Chapter,
+  ChapterTombstone,
   FullSnapshotV1,
   HighlightMode,
   JobRecord,
   SnapshotPointerV1,
 } from "../types";
 import { buildFullSnapshotV1, migrateSnapshot } from "./fullSnapshot";
-import { ensureRootStructure, fetchDriveFile, findFileSync, listSaveFileCandidates, uploadToDrive } from "./driveService";
+import { applyExternalProgress, bestChapterProgress } from "./progressStore";
+import {
+  ensureRootStructure,
+  fetchDriveFile,
+  findFileSync,
+  listSaveFileCandidates,
+  uploadToDrive,
+} from "./driveService";
 import {
   deriveDisplayIndices,
   getChapterSortOrder,
@@ -22,7 +29,64 @@ import {
 
 const POINTER_FILE_NAME = "talevox-latest.json";
 const SNAPSHOT_FILE_PREFIX = "talevox_full_";
+const PROGRESS_FILE_NAME = "talevox_progress.json";
 const LOCAL_META_KEY = "talevox_full_snapshot_meta_v1";
+
+export type ProgressFilePayload = {
+  readerProgress: Record<string, unknown>;
+  legacyProgressStore: Record<string, unknown>;
+  progressStore?: Record<string, unknown>;
+  savedAt: number;
+};
+
+/** Normalise progress from file – prefer progressStore, fall back to legacyProgressStore. */
+function normaliseProgressFile(parsed: Record<string, unknown>): Record<string, unknown> {
+  const ps = isRecord(parsed.progressStore) ? parsed.progressStore : null;
+  const leg = isRecord(parsed.legacyProgressStore) ? parsed.legacyProgressStore : null;
+  return ps ?? leg ?? {};
+}
+
+export async function loadProgressFileFromDrive(
+  savesFolderId: string
+): Promise<ProgressFilePayload | null> {
+  try {
+    const fileId = await findFileSync(PROGRESS_FILE_NAME, savesFolderId);
+    if (!fileId) return null;
+    const raw = await fetchDriveFile(fileId);
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    const readerProgress = isRecord(parsed.readerProgress) ? parsed.readerProgress : {};
+    const progress = normaliseProgressFile(parsed);
+    const legacyProgressStore = progress; // same value for backward compatibility
+    const savedAt = asNumber(parsed.savedAt, 0);
+    return { readerProgress, legacyProgressStore, progressStore: progress, savedAt };
+  } catch {
+    return null;
+  }
+}
+
+export async function saveProgressFileToDrive(
+  savesFolderId: string,
+  readerProgress: Record<string, unknown>,
+  legacyProgressStore: Record<string, unknown>
+): Promise<void> {
+  // Write both keys so readers expecting either format get data
+  const payload: ProgressFilePayload & Record<string, unknown> = {
+    readerProgress,
+    legacyProgressStore,
+    progressStore: legacyProgressStore,
+    savedAt: Date.now(),
+  };
+  const content = JSON.stringify(payload);
+  const fileId = await findFileSync(PROGRESS_FILE_NAME, savesFolderId);
+  await uploadToDrive(
+    savesFolderId,
+    PROGRESS_FILE_NAME,
+    content,
+    fileId || undefined,
+    "application/json"
+  );
+}
 
 type SortableEntity = { id: string; updatedAt?: number };
 
@@ -72,23 +136,13 @@ function normalizeBookSettings(settings: BookSettings | undefined): BookSettings
     volumeOrder,
     collapsedVolumes,
     autoGenerateAudioOnAdd:
-      typeof settings?.autoGenerateAudioOnAdd === "boolean" ? settings.autoGenerateAudioOnAdd : true,
-    autoUploadOnAdd: typeof settings?.autoUploadOnAdd === "boolean" ? settings.autoUploadOnAdd : false,
-    confirmBulkDelete: typeof settings?.confirmBulkDelete === "boolean" ? settings.confirmBulkDelete : true,
-  };
-}
-
-function normalizeBackupSettings(settings: unknown): BackupSchedulerSettings {
-  const raw = isRecord(settings) ? settings : {};
-  const interval = Number(raw.backupIntervalMin);
-  const normalizedInterval =
-    interval === 5 || interval === 15 || interval === 30 || interval === 60 ? interval : 30;
-  return {
-    autoBackupToDrive: raw.autoBackupToDrive === true,
-    autoBackupToDevice: raw.autoBackupToDevice === true,
-    backupIntervalMin: normalizedInterval,
-    keepDriveBackups: Math.max(1, asNumber(raw.keepDriveBackups, 10)),
-    keepLocalBackups: Math.max(1, asNumber(raw.keepLocalBackups, 10)),
+      typeof settings?.autoGenerateAudioOnAdd === "boolean"
+        ? settings.autoGenerateAudioOnAdd
+        : true,
+    autoUploadOnAdd:
+      typeof settings?.autoUploadOnAdd === "boolean" ? settings.autoUploadOnAdd : false,
+    confirmBulkDelete:
+      typeof settings?.confirmBulkDelete === "boolean" ? settings.confirmBulkDelete : true,
   };
 }
 
@@ -115,6 +169,29 @@ function pickNewer<T extends SortableEntity>(localItem: T, incomingItem: T): T {
   return incomingUpdated >= localUpdated ? incomingItem : localItem;
 }
 
+/** Prefer the chapter with completion/progress when merging during restore. Uses bestChapterProgress
+ * for canonical rules: completed beats incomplete, newer updatedAt wins, higher percent wins. */
+function mergeChapterForRestore(localChapter: Chapter, incomingChapter: Chapter): Chapter {
+  const localEntry = toProgressEntry(localChapter);
+  const incomingEntry = toProgressEntry(incomingChapter);
+  const best = bestChapterProgress(localEntry, incomingEntry);
+  if (best === incomingEntry) return incomingChapter;
+  if (best === localEntry) return localChapter;
+  return pickNewer(localChapter, incomingChapter);
+}
+
+function toProgressEntry(ch: Chapter): {
+  completed?: boolean;
+  updatedAt?: number;
+  percent?: number;
+} {
+  return {
+    completed: (ch as any).isCompleted === true,
+    updatedAt: typeof (ch as any).updatedAt === "number" ? (ch as any).updatedAt : 0,
+    percent: typeof (ch as any).progress === "number" ? (ch as any).progress : 0,
+  };
+}
+
 function mergeById<T extends SortableEntity>(
   localItems: T[],
   incomingItems: T[],
@@ -128,7 +205,10 @@ function mergeById<T extends SortableEntity>(
       byId.set(incoming.id, incoming);
       continue;
     }
-    byId.set(incoming.id, mergeMatched ? mergeMatched(existing, incoming) : pickNewer(existing, incoming));
+    byId.set(
+      incoming.id,
+      mergeMatched ? mergeMatched(existing, incoming) : pickNewer(existing, incoming)
+    );
   }
   return Array.from(byId.values());
 }
@@ -156,8 +236,9 @@ function mergeBook(localBook: Book, incomingBook: Book): Book {
   const mergedChapters = deriveDisplayIndices(
     normalizeChapterOrder(
       mergeById(
-    (localBook.chapters || []).map((chapter) => normalizeChapter(chapter)),
-    (incomingBook.chapters || []).map((chapter) => normalizeChapter(chapter))
+        (localBook.chapters || []).map((chapter) => normalizeChapter(chapter)),
+        (incomingBook.chapters || []).map((chapter) => normalizeChapter(chapter)),
+        mergeChapterForRestore
       )
     )
   );
@@ -173,7 +254,11 @@ function mergeBook(localBook: Book, incomingBook: Book): Book {
     chapterCount: mergedChapters.length,
     currentChapterId:
       incomingBook.currentChapterId || localBook.currentChapterId || mergedBase.currentChapterId,
-    updatedAt: Math.max(asNumber(localBook.updatedAt, 0), asNumber(incomingBook.updatedAt, 0), Date.now()),
+    updatedAt: Math.max(
+      asNumber(localBook.updatedAt, 0),
+      asNumber(incomingBook.updatedAt, 0),
+      Date.now()
+    ),
   };
 }
 
@@ -186,6 +271,7 @@ export type BuildFullSnapshotArgs = {
   preferences: Record<string, unknown>;
   readerProgress: Record<string, unknown>;
   legacyProgressStore?: Record<string, unknown>;
+  chapterTombstones?: ChapterTombstone[];
   attachments?: BookAttachment[];
   jobs?: JobRecord[];
   activeChapterId?: string;
@@ -227,10 +313,16 @@ export function applyFullSnapshot(input: ApplySnapshotInput): ApplySnapshotResul
     mergeBook
   ).sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0));
 
-  const mergedAttachments = mergeById(
-    currentAttachments,
-    Array.isArray(incoming.attachments) ? incoming.attachments : []
-  );
+  const incomingAttachments = (Array.isArray(incoming.attachments) ? incoming.attachments : [])
+    .filter(
+      (a): a is BookAttachment =>
+        isRecord(a) && typeof a.id === "string" && typeof a.bookId === "string"
+    )
+    .map((a) => {
+      const { chapterId: _c, ...rest } = a as BookAttachment & { chapterId?: unknown };
+      return { ...rest, bookId: a.bookId } as BookAttachment;
+    });
+  const mergedAttachments = mergeById(currentAttachments, incomingAttachments);
   const mergedJobs = mergeJobs(currentJobs, Array.isArray(incoming.jobs) ? incoming.jobs : []);
 
   const pref = isRecord(incoming.preferences) ? incoming.preferences : {};
@@ -276,17 +368,6 @@ export function applyFullSnapshot(input: ApplySnapshotInput): ApplySnapshotResul
       typeof pref.showDiagnostics === "boolean"
         ? pref.showDiagnostics
         : currentState.showDiagnostics,
-    backupSettings: normalizeBackupSettings(pref.backupSettings ?? currentState.backupSettings),
-    lastBackupAt:
-      typeof pref.lastBackupAt === "number" ? pref.lastBackupAt : currentState.lastBackupAt,
-    lastBackupLocation:
-      typeof pref.lastBackupLocation === "string"
-        ? pref.lastBackupLocation
-        : currentState.lastBackupLocation,
-    lastBackupError:
-      typeof pref.lastBackupError === "string"
-        ? pref.lastBackupError
-        : currentState.lastBackupError,
     lastSavedAt: Date.now(),
   };
 
@@ -298,10 +379,27 @@ export function applyFullSnapshot(input: ApplySnapshotInput): ApplySnapshotResul
     book.chapterCount = book.chapters.length;
   }
 
+  // Write snapshot progress into progressStore (SQLite + localStorage) so it survives restart
+  const progressPayload = normaliseSnapshotProgress(incoming);
+  if (progressPayload) applyExternalProgress(progressPayload);
+
   return { state: mergedState, attachments: mergedAttachments, jobs: mergedJobs };
 }
 
-export async function saveToLocalFile(snapshot: FullSnapshotV1): Promise<{ fileName: string; path?: string }> {
+/** Normalise progress from snapshot – prefer progressStore, fall back to legacyProgressStore. */
+function normaliseSnapshotProgress(
+  snapshot: FullSnapshotV1 & { progressStore?: unknown }
+): Record<string, unknown> | null {
+  const ps = isRecord(snapshot.progressStore) ? snapshot.progressStore : null;
+  const leg = isRecord((snapshot as any).legacyProgressStore)
+    ? (snapshot as any).legacyProgressStore
+    : null;
+  return ps ?? leg ?? null;
+}
+
+export async function saveToLocalFile(
+  snapshot: FullSnapshotV1
+): Promise<{ fileName: string; path?: string }> {
   const fileName = `${SNAPSHOT_FILE_PREFIX}${snapshot.createdAt}.json`;
   const content = JSON.stringify(snapshot, null, 2);
   if (Capacitor.isNativePlatform()) {

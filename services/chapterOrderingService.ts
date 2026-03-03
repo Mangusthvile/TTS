@@ -33,11 +33,7 @@ function compareChapters(a: Chapter, b: Chapter): number {
 }
 
 export function getChapterSortOrder(chapter: Chapter): number {
-  return (
-    asPositiveInt(chapter.sortOrder) ??
-    asPositiveInt(chapter.index) ??
-    DEFAULT_SORT_ORDER
-  );
+  return asPositiveInt(chapter.sortOrder) ?? asPositiveInt(chapter.index) ?? DEFAULT_SORT_ORDER;
 }
 
 export function normalizeChapterOrder(chapters: Chapter[]): Chapter[] {
@@ -53,10 +49,7 @@ export function normalizeChapterOrder(chapters: Chapter[]): Chapter[] {
     const explicitSortOrder = asPositiveInt(chapter.sortOrder);
     const explicitIndex = asPositiveInt(chapter.index);
     const hasExplicit = explicitSortOrder !== null || explicitIndex !== null;
-    const normalizedSortOrder =
-      explicitSortOrder ??
-      explicitIndex ??
-      fallbackOrderById.get(id)!;
+    const normalizedSortOrder = explicitSortOrder ?? explicitIndex ?? fallbackOrderById.get(id)!;
     const nextChapter: Chapter = {
       ...chapter,
       sortOrder: normalizedSortOrder,
@@ -70,7 +63,10 @@ export function normalizeChapterOrder(chapters: Chapter[]): Chapter[] {
 
     const existingUpdated = Number(existing.chapter.updatedAt ?? 0);
     const incomingUpdated = Number(nextChapter.updatedAt ?? 0);
-    byId.set(id, incomingUpdated >= existingUpdated ? { chapter: nextChapter, hasExplicit } : existing);
+    byId.set(
+      id,
+      incomingUpdated >= existingUpdated ? { chapter: nextChapter, hasExplicit } : existing
+    );
   });
 
   return Array.from(byId.values())
@@ -83,15 +79,19 @@ export function normalizeChapterOrder(chapters: Chapter[]): Chapter[] {
 
 export function deriveDisplayIndices(chapters: Chapter[]): Chapter[] {
   const ordered = normalizeChapterOrder(chapters);
+  let lastDisplayIndex = 0;
   return ordered.map((chapter, idx) => {
     const fallbackIndex = idx + DEFAULT_SORT_ORDER;
     const existingIndex = asPositiveInt(chapter.index);
     const normalizedSortOrder = getChapterSortOrder(chapter);
-    const displayIndex =
+    const baseIndex =
       existingIndex ??
       asPositiveInt(chapter.sortOrder) ??
       asPositiveInt(normalizedSortOrder) ??
       fallbackIndex;
+    // If duplicate (same number as previous): first keeps, next moves up by one
+    const displayIndex = baseIndex === lastDisplayIndex ? lastDisplayIndex + 1 : baseIndex;
+    lastDisplayIndex = displayIndex;
     return {
       ...chapter,
       sortOrder: normalizedSortOrder,
@@ -109,6 +109,37 @@ export function computeNextSortOrder(chapters: Chapter[]): number {
   return Math.max(DEFAULT_SORT_ORDER, maxSortOrder + 1);
 }
 
+/**
+ * Renumber chapters sequentially from the minimum existing sortOrder.
+ * Use after delete so indices stay consistent: e.g. 1–858 → delete one → 1–857;
+ * or 3514–4314 → delete one → 3514–4313.
+ * Duplicates are resolved: first keeps its place, subsequent get +1.
+ */
+export function renumberChaptersSequentially(chapters: Chapter[]): Chapter[] {
+  if (!chapters.length) return [];
+  const sorted = [...chapters].sort((a, b) => {
+    const bySort = getChapterSortOrder(a) - getChapterSortOrder(b);
+    if (bySort !== 0) return bySort;
+    const byIdx = (asPositiveInt(a.index) ?? 0) - (asPositiveInt(b.index) ?? 0);
+    if (byIdx !== 0) return byIdx;
+    return String(a.id).localeCompare(String(b.id), undefined, { numeric: true });
+  });
+  const startIndex = Math.max(1, getChapterSortOrder(sorted[0]) || DEFAULT_SORT_ORDER);
+  return sorted.map((chapter, idx) => {
+    const sortOrder = startIndex + idx;
+    return {
+      ...chapter,
+      sortOrder,
+      index: sortOrder,
+      updatedAt: chapter.updatedAt ?? Date.now(),
+    };
+  });
+}
+
+/**
+ * Fix duplicates and missing chapter numbers. Preserves starting index
+ * (e.g. 3514–4314 stays in range; 1–858 stays 1-based).
+ */
 export async function fixChapterOrdering(
   _bookId: string,
   chapters: Chapter[]
@@ -118,31 +149,27 @@ export async function fixChapterOrdering(
     const value = getChapterSortOrder(chapter);
     return value > max ? value : max;
   }, 0);
+  const reindexed = renumberChaptersSequentially(normalized);
+  const reindexedById = new Map<string, Chapter>(reindexed.map((c) => [String(c.id), c]));
   const now = Date.now();
   let updated = 0;
-  const reindexed = normalized.map((chapter, idx) => {
-    const sortOrder = idx + DEFAULT_SORT_ORDER;
-    const displayIndex = sortOrder;
-    const nextChapter: Chapter = {
-      ...chapter,
-      sortOrder,
-      index: displayIndex,
-      updatedAt: chapter.updatedAt ?? now,
-    };
+  for (const prev of normalized) {
+    const next = reindexedById.get(String(prev.id));
+    if (!next) continue;
     if (
-      getChapterSortOrder(chapter) !== sortOrder ||
-      (asPositiveInt(chapter.index) ?? 0) !== displayIndex
+      getChapterSortOrder(prev) !== (next.sortOrder ?? 0) ||
+      (asPositiveInt(prev.index) ?? 0) !== (next.index ?? 0)
     ) {
       updated += 1;
-      nextChapter.updatedAt = now;
     }
-    return nextChapter;
-  });
+  }
+
+  const maxAfter = reindexed.reduce((max, c) => Math.max(max, getChapterSortOrder(c)), 0);
 
   return {
     updated,
     maxBefore,
-    maxAfter: reindexed.length,
-    chapters: reindexed,
+    maxAfter,
+    chapters: reindexed.map((c) => ({ ...c, updatedAt: c.updatedAt ?? now })),
   };
 }

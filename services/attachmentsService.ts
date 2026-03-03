@@ -1,8 +1,23 @@
 import { Capacitor } from "@capacitor/core";
 import { Filesystem, Directory } from "@capacitor/filesystem";
-import { appConfig } from "../src/config/appConfig";
 
-const BASE_DIR = appConfig.paths.attachmentsDir;
+/** Attachments live under each book's folder: talevox/{bookId}/attachments/{filename}. */
+const NEW_ATTACHMENTS_PREFIX = "talevox";
+/** Legacy path was talevox/attachments/{bookId}/{filename}. */
+const LEGACY_ATTACHMENTS_DIR = "talevox/attachments";
+
+/** Build path for book-level attachment (new layout: book folder contains attachments subfolder). */
+function buildAttachmentPath(bookId: string, filename: string): string {
+  return `${NEW_ATTACHMENTS_PREFIX}/${bookId}/attachments/${filename}`;
+}
+
+function getNewAttachmentsDir(bookId: string): string {
+  return `${NEW_ATTACHMENTS_PREFIX}/${bookId}/attachments`;
+}
+
+function getLegacyAttachmentsDir(bookId: string): string {
+  return `${LEGACY_ATTACHMENTS_DIR}/${bookId}`;
+}
 
 function bytesToBase64(data: Uint8Array): string {
   const chunk = 0x8000;
@@ -31,13 +46,43 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
-function buildAttachmentPath(bookId: string, filename: string): string {
-  return `${BASE_DIR}/${bookId}/${filename}`;
-}
-
 export async function ensureAttachmentsDir(bookId: string): Promise<string> {
-  const path = `${BASE_DIR}/${bookId}`;
-  await Filesystem.mkdir({ path, directory: Directory.Data, recursive: true });
+  const path = getNewAttachmentsDir(bookId);
+  try {
+    await Filesystem.mkdir({ path, directory: Directory.Data, recursive: true });
+  } catch (e: any) {
+    const msg = String(e?.message ?? e).toLowerCase();
+    if (!msg.includes("already exists") && !msg.includes("exist") && !msg.includes("file exists")) {
+      throw e;
+    }
+  }
+  const legacyDir = getLegacyAttachmentsDir(bookId);
+  try {
+    const legacyList = await Filesystem.readdir({ path: legacyDir, directory: Directory.Data });
+    const rawFiles = legacyList.files ?? [];
+    const files = rawFiles.map((f) => (typeof f === "string" ? f : (f as { name: string }).name));
+    if (files.length > 0) {
+      for (const name of files) {
+        if (name === "." || name === "..") continue;
+        const legacyPath = `${legacyDir}/${name}`;
+        const newPath = buildAttachmentPath(bookId, name);
+        try {
+          await Filesystem.readFile({ path: legacyPath, directory: Directory.Data }).then((r) =>
+            Filesystem.writeFile({
+              path: newPath,
+              directory: Directory.Data,
+              data: r.data,
+              recursive: true,
+            })
+          );
+        } catch {
+          // skip failed copy
+        }
+      }
+    }
+  } catch {
+    // legacy dir may not exist
+  }
   return path;
 }
 
@@ -85,6 +130,22 @@ export async function attachmentExists(localPath?: string): Promise<boolean> {
     await Filesystem.stat({ path: localPath, directory: Directory.Data });
     return true;
   } catch {
+    const legacyPrefix = LEGACY_ATTACHMENTS_DIR + "/";
+    if (localPath.startsWith(legacyPrefix)) {
+      const after = localPath.slice(legacyPrefix.length);
+      const slash = after.indexOf("/");
+      if (slash > 0) {
+        const bookId = after.slice(0, slash);
+        const filename = after.slice(slash + 1);
+        const newPath = buildAttachmentPath(bookId, filename);
+        try {
+          await Filesystem.stat({ path: newPath, directory: Directory.Data });
+          return true;
+        } catch {
+          // ignore
+        }
+      }
+    }
     return false;
   }
 }
@@ -99,6 +160,22 @@ export async function resolveAttachmentUri(localPath?: string): Promise<string |
     if (!res?.uri) return null;
     return Capacitor.convertFileSrc(res.uri);
   } catch {
+    const legacyPrefix = LEGACY_ATTACHMENTS_DIR + "/";
+    if (localPath.startsWith(legacyPrefix)) {
+      const after = localPath.slice(legacyPrefix.length);
+      const slash = after.indexOf("/");
+      if (slash > 0) {
+        const bookId = after.slice(0, slash);
+        const filename = after.slice(slash + 1);
+        const newPath = buildAttachmentPath(bookId, filename);
+        try {
+          const res = await Filesystem.getUri({ path: newPath, directory: Directory.Data });
+          if (res?.uri) return Capacitor.convertFileSrc(res.uri);
+        } catch {
+          // ignore
+        }
+      }
+    }
     return null;
   }
 }

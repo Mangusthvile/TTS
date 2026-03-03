@@ -4,6 +4,10 @@ import { initStorage } from "../../services/storageSingleton";
 import { migrateLegacyLocalStorageIfNeeded } from "../../services/libraryMigration";
 import { authManager } from "../../services/authManager";
 
+/** Fallback when VITE_GOOGLE_WEB_CLIENT_ID is not in the build (e.g. capacitor mode doesn't load .env.production). */
+const FALLBACK_WEB_CLIENT_ID =
+  "762195576430-ta761qojpp0o6r1rt74i2i3lhtthsoac.apps.googleusercontent.com";
+
 declare global {
   interface Window {
     __TALEVOX_SOCIALLOGIN_READY__?: Promise<void>;
@@ -31,12 +35,12 @@ export function ensureAuthReady(clientId?: string): Promise<void> {
     }
 
     const webClientId =
-      (import.meta as any).env?.VITE_GOOGLE_WEB_CLIENT_ID || clientId || "";
+      (import.meta as any).env?.VITE_GOOGLE_WEB_CLIENT_ID ||
+      clientId ||
+      FALLBACK_WEB_CLIENT_ID;
 
     if (!webClientId) {
-      console.warn(
-        "[TaleVox][Auth] Missing VITE_GOOGLE_WEB_CLIENT_ID (Google login will fail)"
-      );
+      console.warn("[TaleVox][Auth] Missing VITE_GOOGLE_WEB_CLIENT_ID (Google login will fail)");
       return;
     }
 

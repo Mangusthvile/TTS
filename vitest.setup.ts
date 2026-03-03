@@ -45,11 +45,14 @@ if (typeof (globalThis as any).requestAnimationFrame === "undefined") {
   (globalThis as any).cancelAnimationFrame = (id: number) => window.clearTimeout(id);
 }
 
-if (typeof (globalThis as any).requestIdleCallback === "undefined") {
-  (globalThis as any).requestIdleCallback = (cb: () => void) =>
-    window.setTimeout(cb, 0);
-  (globalThis as any).cancelIdleCallback = (id: number) => window.clearTimeout(id);
-}
+// Use a consistent setTimeout-based pair so clear always matches (Vitest 3 / jsdom may provide
+// requestIdleCallback with an id that cannot be cleared with clearTimeout).
+const idleCb = (cb: () => void) => window.setTimeout(cb, 0) as unknown as number;
+const cancelIdle = (id: number) => window.clearTimeout(id);
+vi.stubGlobal("requestIdleCallback", idleCb);
+vi.stubGlobal("cancelIdleCallback", cancelIdle);
+(globalThis as any).requestIdleCallback = idleCb;
+(globalThis as any).cancelIdleCallback = cancelIdle;
 
 vi.mock("react-window", () => {
   return {
@@ -62,7 +65,11 @@ vi.mock("react-window", () => {
     }: {
       itemCount: number;
       itemData?: unknown;
-      children: (props: { index: number; style: React.CSSProperties; data?: unknown }) => React.ReactNode;
+      children: (props: {
+        index: number;
+        style: React.CSSProperties;
+        data?: unknown;
+      }) => React.ReactNode;
       className?: string;
       outerRef?: React.Ref<HTMLDivElement>;
     }) => {

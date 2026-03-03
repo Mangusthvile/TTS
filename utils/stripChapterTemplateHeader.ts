@@ -22,4 +22,3 @@ export function stripChapterTemplateHeader(input: string): string {
   const rest = lines.slice(2).join("\n");
   return rest.replace(/^\n+/, "");
 }
-

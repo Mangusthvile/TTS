@@ -73,7 +73,7 @@ export class MobileAudioStorage implements AudioStorage {
   }
 
   private base64LengthBytes(base64: string): number {
-    const padding = (base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0);
+    const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
     return Math.round((base64.length * 3) / 4) - padding;
   }
 
@@ -121,7 +121,7 @@ export class MobileAudioStorage implements AudioStorage {
     const record = await getChapterAudioPath(chapterId);
     const cached = MobileAudioStorage.statCache.get(chapterId);
     if (cached && Date.now() - cached.ts < MobileAudioStorage.STAT_TTL_MS) {
-      return cached.ok ? record?.localPath ?? null : null;
+      return cached.ok ? (record?.localPath ?? null) : null;
     }
     try {
       const primaryPath = this.buildPath(chapterId);
@@ -149,7 +149,11 @@ export class MobileAudioStorage implements AudioStorage {
       });
       const legacyUri = await Filesystem.getUri({ path: legacyPath, directory: Directory.Data });
       if (legacyUri?.uri) {
-        await setChapterAudioPath(chapterId, legacyUri.uri, typeof legacyStat?.size === "number" ? legacyStat.size : 0);
+        await setChapterAudioPath(
+          chapterId,
+          legacyUri.uri,
+          typeof legacyStat?.size === "number" ? legacyStat.size : 0
+        );
         MobileAudioStorage.statCache.set(chapterId, { ok: true, ts: Date.now() });
         return legacyUri.uri;
       }
@@ -186,13 +190,20 @@ export function getAudioStorage(uiMode: UiMode): AudioStorage {
   return shouldUseMobileStorage(uiMode) ? mobileStorage : desktopStorage;
 }
 
-export async function persistChapterAudio(chapterId: string, data: AudioChunk, uiMode: UiMode): Promise<string | null> {
+export async function persistChapterAudio(
+  chapterId: string,
+  data: AudioChunk,
+  uiMode: UiMode
+): Promise<string | null> {
   if (!shouldUseMobileStorage(uiMode)) return null;
   const storage = getAudioStorage(uiMode);
   return storage.saveAudio(chapterId, data);
 }
 
-export async function resolveChapterAudioUrl(chapterId: string, uiMode: UiMode): Promise<string | null> {
+export async function resolveChapterAudioUrl(
+  chapterId: string,
+  uiMode: UiMode
+): Promise<string | null> {
   if (!shouldUseMobileStorage(uiMode)) return null;
   const storage = getAudioStorage(uiMode);
   const localPath = await storage.getAudioPath(chapterId);

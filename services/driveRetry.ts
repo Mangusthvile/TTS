@@ -38,7 +38,9 @@ export async function driveRetry<T>(
   }
 
   if (lastResponse && !lastResponse.ok) {
-    throw new Error(`${label} failed after ${maxAttempts} attempts (status ${lastResponse.status})`);
+    throw new Error(
+      `${label} failed after ${maxAttempts} attempts (status ${lastResponse.status})`
+    );
   }
   if (lastError instanceof Error) {
     throw lastError;

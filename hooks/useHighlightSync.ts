@@ -16,6 +16,7 @@ type HighlightSyncParams = {
 };
 
 type HighlightSyncState = {
+  /** Batched into one object so we get a single setState (one re-render) per tick. */
   activeCueIndex: number | null;
   activeParagraphIndex: number | null;
   activeCueRange: { start: number; end: number } | null;
@@ -35,12 +36,19 @@ export function useHighlightSync({
   paragraphMap,
   playbackAdapter,
   enabled = true,
-  throttleMs = 250,
+  throttleMs = 100,
   onOffsetChange,
 }: HighlightSyncParams): HighlightSyncState {
-  const [activeCueIndex, setActiveCueIndex] = useState<number | null>(null);
-  const [activeParagraphIndex, setActiveParagraphIndex] = useState<number | null>(null);
-  const [activeCueRange, setActiveCueRange] = useState<{ start: number; end: number } | null>(null);
+  const [highlightState, setHighlightState] = useState<{
+    /** Single state object = one re-render per tick (not three). */
+    activeCueIndex: number | null;
+    activeParagraphIndex: number | null;
+    activeCueRange: { start: number; end: number } | null;
+  }>({
+    activeCueIndex: null,
+    activeParagraphIndex: null,
+    activeCueRange: null,
+  });
 
   const cueReady = !!cueMap && cueMap.cues?.length > 0;
   const textLength = text.length;
@@ -52,7 +60,10 @@ export function useHighlightSync({
     paragraphIndex: null as number | null,
   });
   const playRef = useRef({ isPlaying: false });
-  const warnRef = useRef<{ chapterId: string | null; warned: boolean }>({ chapterId: null, warned: false });
+  const warnRef = useRef<{ chapterId: string | null; warned: boolean }>({
+    chapterId: null,
+    warned: false,
+  });
 
   useEffect(() => {
     if (!enabled) return;
@@ -68,18 +79,22 @@ export function useHighlightSync({
         });
       }
       if (!cueMap || !cueMap.cues || cueMap.cues.length === 0 || !chapterId) {
-        if (lastRef.current.cueIndex !== null || activeCueRange !== null) {
+        if (lastRef.current.cueIndex !== null || lastRef.current.paragraphIndex !== null) {
           lastRef.current.cueIndex = null;
           lastRef.current.paragraphIndex = null;
-          setActiveCueIndex(null);
-          setActiveParagraphIndex(null);
-          setActiveCueRange(null);
+          setHighlightState({
+            activeCueIndex: null,
+            activeParagraphIndex: null,
+            activeCueRange: null,
+          });
         }
         return;
       }
 
       const positionMs =
-        typeof state.positionMs === "number" ? state.positionMs : Math.floor((state.currentTime ?? 0) * 1000);
+        typeof state.positionMs === "number"
+          ? state.positionMs
+          : Math.floor((state.currentTime ?? 0) * 1000);
       const now = performance.now();
       const jump = Math.abs(positionMs - lastRef.current.lastPosMs) > 1200;
       const allow =
@@ -95,12 +110,14 @@ export function useHighlightSync({
 
       const introMs = cueMap.introOffsetMs ?? 0;
       if (introMs > 0 && positionMs < introMs) {
-        if (lastRef.current.cueIndex !== null || activeCueRange !== null) {
+        if (lastRef.current.cueIndex !== null || lastRef.current.paragraphIndex !== null) {
           lastRef.current.cueIndex = null;
           lastRef.current.paragraphIndex = null;
-          setActiveCueIndex(null);
-          setActiveParagraphIndex(null);
-          setActiveCueRange(null);
+          setHighlightState({
+            activeCueIndex: null,
+            activeParagraphIndex: null,
+            activeCueRange: null,
+          });
         }
         return;
       }
@@ -123,10 +140,9 @@ export function useHighlightSync({
         nextParagraphIndex = findParagraphIndex(paragraphMap.paragraphs, range.start);
       }
 
-      if (idx !== lastRef.current.cueIndex) {
+      const cueIndexChanged = idx !== lastRef.current.cueIndex;
+      if (cueIndexChanged) {
         lastRef.current.cueIndex = idx;
-        setActiveCueIndex(idx);
-        setActiveCueRange(range);
         if (onOffsetChange) onOffsetChange(range.start);
         console.log("[Highlight] cueIndex", {
           chapterId,
@@ -134,28 +150,41 @@ export function useHighlightSync({
           cueCount: cueMap.cues.length,
           positionMs,
         });
-      } else if (
-        activeCueRange &&
-        (activeCueRange.start !== range.start || activeCueRange.end !== range.end)
-      ) {
-        setActiveCueRange(range);
       }
-
       if (nextParagraphIndex !== lastRef.current.paragraphIndex) {
         lastRef.current.paragraphIndex = nextParagraphIndex;
-        setActiveParagraphIndex(nextParagraphIndex);
       }
+
+      setHighlightState((prev) => {
+        const next = {
+          activeCueIndex: idx,
+          activeParagraphIndex: nextParagraphIndex,
+          activeCueRange: range,
+        };
+        if (
+          prev.activeCueIndex === next.activeCueIndex &&
+          prev.activeParagraphIndex === next.activeParagraphIndex &&
+          prev.activeCueRange?.start === next.activeCueRange?.start &&
+          prev.activeCueRange?.end === next.activeCueRange?.end
+        ) {
+          return prev;
+        }
+        return next;
+      });
     };
 
     const unsubscribe = playbackAdapter.onState((state) => updateFromState(state));
     updateFromState(playbackAdapter.getState(), true);
 
-    const poll = setInterval(() => {
-      const state = playbackAdapter.getState();
-      if (state.isPlaying) {
-        updateFromState(state, true);
-      }
-    }, Math.max(150, throttleMs));
+    const poll = setInterval(
+      () => {
+        const state = playbackAdapter.getState();
+        if (state.isPlaying) {
+          updateFromState(state, true);
+        }
+      },
+      Math.max(80, throttleMs)
+    );
 
     return () => {
       unsubscribe();
@@ -170,14 +199,15 @@ export function useHighlightSync({
     textLength,
     throttleMs,
     onOffsetChange,
-    activeCueRange,
   ]);
 
   // Reset on chapter change or cue map invalidation
   useEffect(() => {
-    setActiveCueIndex(null);
-    setActiveParagraphIndex(null);
-    setActiveCueRange(null);
+    setHighlightState({
+      activeCueIndex: null,
+      activeParagraphIndex: null,
+      activeCueRange: null,
+    });
     lastRef.current.cueIndex = null;
     lastRef.current.paragraphIndex = null;
     lastRef.current.lastPosMs = 0;
@@ -187,9 +217,11 @@ export function useHighlightSync({
 
   useEffect(() => {
     if (!enabled) {
-      setActiveCueIndex(null);
-      setActiveParagraphIndex(null);
-      setActiveCueRange(null);
+      setHighlightState({
+        activeCueIndex: null,
+        activeParagraphIndex: null,
+        activeCueRange: null,
+      });
       lastRef.current.cueIndex = null;
       lastRef.current.paragraphIndex = null;
     }
@@ -197,11 +229,11 @@ export function useHighlightSync({
 
   return useMemo(
     () => ({
-      activeCueIndex,
-      activeParagraphIndex,
-      activeCueRange,
+      activeCueIndex: highlightState.activeCueIndex,
+      activeParagraphIndex: highlightState.activeParagraphIndex,
+      activeCueRange: highlightState.activeCueRange,
       isCueReady: cueReady,
     }),
-    [activeCueIndex, activeParagraphIndex, activeCueRange, cueReady]
+    [highlightState.activeCueIndex, highlightState.activeParagraphIndex, highlightState.activeCueRange, cueReady]
   );
 }

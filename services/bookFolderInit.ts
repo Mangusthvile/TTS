@@ -33,7 +33,7 @@ export async function initBookFolderManifests(args: {
   const root: FolderRef = {
     backend: adapter.backend,
     id: rootFolderId,
-    name: rootFolderName ?? book.title
+    name: rootFolderName ?? book.title,
   };
 
   const metaFolder = await adapter.ensureFolder(root, "meta");
@@ -52,8 +52,8 @@ export async function initBookFolderManifests(args: {
       meta: "meta",
       text: "text",
       audio: "audio",
-      trash: "trash"
-    }
+      trash: "trash",
+    },
   };
 
   let bookManifest: BookManifest;
@@ -72,7 +72,7 @@ export async function initBookFolderManifests(args: {
       schemaVersion: "3.0",
       bookId: book.id,
       expectedTotal: 0,
-      chapters: []
+      chapters: [],
     });
   } else {
     const chapters = await listAllChapterMeta(book.id);
@@ -90,8 +90,9 @@ export async function initBookFolderManifests(args: {
         textName:
           c.filename ||
           buildTextName(book.id, c.id, c.contentFormat === "markdown" ? "markdown" : "text"),
-        audioName: buildMp3Name(book.id, c.id)
-      }))
+        audioName: buildMp3Name(book.id, c.id),
+      })),
+      volumeOrder: Array.isArray(book.settings?.volumeOrder) ? book.settings.volumeOrder : undefined,
     };
 
     await adapter.writeText(metaFolder, "inventory.json", JSON.stringify(inventory, null, 2), null);

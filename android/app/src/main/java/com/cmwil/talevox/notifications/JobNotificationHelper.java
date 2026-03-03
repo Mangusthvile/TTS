@@ -38,9 +38,12 @@ public class JobNotificationHelper {
 
     public static Notification buildProgress(Context ctx, String jobId, String title, String text, int total, int done, boolean indeterminate, boolean ongoing) {
         JobNotificationChannels.ensureChannels(ctx);
+        String safeTitle = (title != null && !title.trim().isEmpty()) ? title.trim() : "Background job";
+        String safeText = (text != null && !text.trim().isEmpty()) ? text.trim()
+            : (total <= 0 ? "Preparing…" : (done >= total ? "Complete" : "In progress…"));
         NotificationCompat.Builder b = new NotificationCompat.Builder(ctx, JobNotificationChannels.CHANNEL_JOBS_ID)
-            .setContentTitle(title)
-            .setContentText(text)
+            .setContentTitle(safeTitle)
+            .setContentText(safeText)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentIntent(contentIntent(ctx))
             .setGroup(JobNotificationChannels.GROUP_KEY_JOBS)
@@ -58,9 +61,11 @@ public class JobNotificationHelper {
 
     public static Notification buildFinished(Context ctx, String jobId, String title, String text, boolean success) {
         JobNotificationChannels.ensureChannels(ctx);
+        String safeTitle = (title != null && !title.trim().isEmpty()) ? title.trim() : (success ? "Complete" : "Failed");
+        String safeText = (text != null && !text.trim().isEmpty()) ? text.trim() : (success ? "Done" : "An error occurred");
         return new NotificationCompat.Builder(ctx, JobNotificationChannels.CHANNEL_JOBS_ID)
-            .setContentTitle(title)
-            .setContentText(text)
+            .setContentTitle(safeTitle)
+            .setContentText(safeText)
             .setSmallIcon(success ? android.R.drawable.stat_sys_download_done : android.R.drawable.stat_notify_error)
             .setContentIntent(contentIntent(ctx))
             .setAutoCancel(true)

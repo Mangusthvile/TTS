@@ -33,7 +33,9 @@ export function segmentTextForCues(text: string): Segment[] {
 
   // Prefer Intl.Segmenter for sentence granularity
   try {
-    const seg = (Intl as any)?.Segmenter ? new (Intl as any).Segmenter("en", { granularity: "sentence" }) : null;
+    const seg = (Intl as any)?.Segmenter
+      ? new (Intl as any).Segmenter("en", { granularity: "sentence" })
+      : null;
     if (seg) {
       const segments: Segment[] = [];
       let offset = 0;
@@ -162,14 +164,20 @@ export function generateFallbackCueMap(params: {
     const minTotal = minSlice * segments.length;
     const adjustable = Math.max(1, totalSlices - minTotal);
     const scale = Math.max(0, (available - minTotal) / adjustable);
-    rawSlices = rawSlices.map((slice) => Math.max(minSlice, Math.floor(minSlice + (slice - minSlice) * scale)));
+    rawSlices = rawSlices.map((slice) =>
+      Math.max(minSlice, Math.floor(minSlice + (slice - minSlice) * scale))
+    );
   }
 
   let cumulative = introOffsetMs;
   const cues: Cue[] = [];
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
-    cues.push({ tMs: Math.min(Math.max(0, cumulative), durationMs), startChar: seg.startChar, endChar: seg.endChar });
+    cues.push({
+      tMs: Math.min(Math.max(0, cumulative), durationMs),
+      startChar: seg.startChar,
+      endChar: seg.endChar,
+    });
     cumulative += rawSlices[i] ?? minSlice;
   }
 

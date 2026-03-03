@@ -3,12 +3,15 @@
  * Manages persistent storage of synthesized audio blobs in IndexedDB.
  */
 
-const DB_NAME = 'TalevoxAudioCache';
-const STORE_NAME = 'audio_files';
+const DB_NAME = "TalevoxAudioCache";
+const STORE_NAME = "audio_files";
 const DB_VERSION = 1;
 
-export async function initAudioDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+let _dbPromise: Promise<IDBDatabase> | null = null;
+
+export function initAudioDB(): Promise<IDBDatabase> {
+  if (_dbPromise) return _dbPromise;
+  _dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
@@ -17,14 +20,18 @@ export async function initAudioDB(): Promise<IDBDatabase> {
       }
     };
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onerror = () => {
+      _dbPromise = null; // allow retry on next call if open fails
+      reject(request.error);
+    };
   });
+  return _dbPromise;
 }
 
 export async function saveAudioToCache(key: string, blob: Blob): Promise<void> {
   const db = await initAudioDB();
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(STORE_NAME, 'readwrite');
+    const transaction = db.transaction(STORE_NAME, "readwrite");
     const store = transaction.objectStore(STORE_NAME);
     const request = store.put(blob, key);
     request.onsuccess = () => resolve();
@@ -35,7 +42,7 @@ export async function saveAudioToCache(key: string, blob: Blob): Promise<void> {
 export async function getAudioFromCache(key: string): Promise<Blob | null> {
   const db = await initAudioDB();
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(STORE_NAME, 'readonly');
+    const transaction = db.transaction(STORE_NAME, "readonly");
     const store = transaction.objectStore(STORE_NAME);
     const request = store.get(key);
     request.onsuccess = () => resolve(request.result || null);
@@ -46,16 +53,15 @@ export async function getAudioFromCache(key: string): Promise<Blob | null> {
 export async function hasAudioInCache(key: string): Promise<boolean> {
   const db = await initAudioDB();
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(STORE_NAME, 'readonly');
+    const transaction = db.transaction(STORE_NAME, "readonly");
     const store = transaction.objectStore(STORE_NAME);
 
     const anyStore = store as any;
-    const request: IDBRequest = typeof anyStore.getKey === 'function'
-      ? anyStore.getKey(key)
-      : store.get(key);
+    const request: IDBRequest =
+      typeof anyStore.getKey === "function" ? anyStore.getKey(key) : store.get(key);
 
     request.onsuccess = () => {
-      if (typeof anyStore.getKey === 'function') {
+      if (typeof anyStore.getKey === "function") {
         resolve(!!request.result);
       } else {
         resolve(!!request.result);
@@ -68,7 +74,7 @@ export async function hasAudioInCache(key: string): Promise<boolean> {
 export async function deleteAudioFromCache(key: string): Promise<void> {
   const db = await initAudioDB();
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(STORE_NAME, 'readwrite');
+    const transaction = db.transaction(STORE_NAME, "readwrite");
     const store = transaction.objectStore(STORE_NAME);
     const request = store.delete(key);
     request.onsuccess = () => resolve();
@@ -83,7 +89,7 @@ export function generateAudioKey(text: string, voice: string, speed: number): st
   let hash = 0;
   for (let i = 0; i < text.length; i++) {
     const char = text.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
+    hash = (hash << 5) - hash + char;
     hash |= 0;
   }
   return `audio_${voice}_${speed}_${hash}`;

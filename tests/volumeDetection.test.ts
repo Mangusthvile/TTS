@@ -34,10 +34,22 @@ describe("volumeDetection", () => {
 
   it("sorts smart upload files by volume then local chapter", () => {
     const files = [
-      { fileName: "Book_2__Chapter_1__B.md", meta: detectVolumeMeta("Book_2__Chapter_1__B.md", "") },
-      { fileName: "Book_1__Chapter_10__C.md", meta: detectVolumeMeta("Book_1__Chapter_10__C.md", "") },
-      { fileName: "Book_1__Chapter_2__A.md", meta: detectVolumeMeta("Book_1__Chapter_2__A.md", "") },
-      { fileName: "Chapter_3__Ungrouped.md", meta: detectVolumeMeta("Chapter_3__Ungrouped.md", "") },
+      {
+        fileName: "Book_2__Chapter_1__B.md",
+        meta: detectVolumeMeta("Book_2__Chapter_1__B.md", ""),
+      },
+      {
+        fileName: "Book_1__Chapter_10__C.md",
+        meta: detectVolumeMeta("Book_1__Chapter_10__C.md", ""),
+      },
+      {
+        fileName: "Book_1__Chapter_2__A.md",
+        meta: detectVolumeMeta("Book_1__Chapter_2__A.md", ""),
+      },
+      {
+        fileName: "Chapter_3__Ungrouped.md",
+        meta: detectVolumeMeta("Chapter_3__Ungrouped.md", ""),
+      },
     ];
     const sorted = sortForSmartUpload(files);
     expect(sorted.map((f) => f.fileName)).toEqual([
@@ -48,4 +60,3 @@ describe("volumeDetection", () => {
     ]);
   });
 });
-

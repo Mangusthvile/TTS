@@ -13,13 +13,7 @@ import type { JobRecord, JobType } from "../types";
  * - On web: fall back to safe localStorage (size-capped) or memory.
  */
 
-export type JsonValue =
-  | string
-  | number
-  | boolean
-  | null
-  | { [k: string]: JsonValue }
-  | JsonValue[];
+export type JsonValue = string | number | boolean | null | { [k: string]: JsonValue } | JsonValue[];
 
 export type AppState = Record<string, any>;
 export type SettingsState = Record<string, any>;
@@ -83,13 +77,18 @@ export type StorageDriver = {
   loadSmallBackupSnapshot(): Promise<LoadResult<Record<string, any> | null>>;
 
   createJob(job: JobRecord): Promise<SaveResult>;
-  updateJob(jobId: string, patch: Partial<Omit<JobRecord, "jobId" | "createdAt">>): Promise<SaveResult>;
+  updateJob(
+    jobId: string,
+    patch: Partial<Omit<JobRecord, "jobId" | "createdAt">>
+  ): Promise<SaveResult>;
   getJob(jobId: string): Promise<LoadResult<JobRecord | null>>;
   listJobs(type?: JobType): Promise<LoadResult<JobRecord[]>>;
   deleteJob(jobId: string): Promise<SaveResult>;
   clearJobs(statuses: string[]): Promise<SaveResult>;
   setChapterAudioPath(chapterId: string, localPath: string, sizeBytes: number): Promise<SaveResult>;
-  getChapterAudioPath(chapterId: string): Promise<LoadResult<{ localPath: string; sizeBytes: number; updatedAt: number } | null>>;
+  getChapterAudioPath(
+    chapterId: string
+  ): Promise<LoadResult<{ localPath: string; sizeBytes: number; updatedAt: number } | null>>;
   deleteChapterAudioPath(chapterId: string): Promise<SaveResult>;
   enqueueUpload(item: DriveUploadQueuedItem): Promise<SaveResult>;
   updateUploadItem?: (id: string, patch: Partial<DriveUploadQueuedItem>) => Promise<SaveResult>;
@@ -99,6 +98,8 @@ export type StorageDriver = {
   markUploadFailed(id: string, error: string, nextAttemptAt: number): Promise<SaveResult>;
   countQueuedUploads(): Promise<LoadResult<number>>;
   listQueuedUploads(limit?: number): Promise<LoadResult<DriveUploadQueuedItem[]>>;
+  /** Optional: keyed lookup to avoid loading full queue for dedup. */
+  hasQueuedUpload?(bookId: string, chapterId: string): Promise<LoadResult<boolean>>;
 };
 
 export type DriveUploadQueuedItem = {
@@ -106,7 +107,7 @@ export type DriveUploadQueuedItem = {
   chapterId: string;
   bookId: string;
   localPath: string;
-  status: 'queued' | 'uploading' | 'failed' | 'done';
+  status: "queued" | "uploading" | "failed" | "done";
   attempts: number;
   nextAttemptAt: number;
   lastError?: string;
@@ -122,9 +123,7 @@ export type DriveUploadQueuedItem = {
 function isNativeCapacitor(): boolean {
   try {
     return (
-      typeof window !== "undefined" &&
-      !!(window as any).Capacitor &&
-      Capacitor.isNativePlatform()
+      typeof window !== "undefined" && !!(window as any).Capacitor && Capacitor.isNativePlatform()
     );
   } catch {
     return false;
@@ -164,7 +163,10 @@ class MemoryStorageDriver implements StorageDriver {
   private progress = new Map<string, ChapterProgress>();
   private smallBackup: Record<string, any> | null = null;
   private jobs = new Map<string, JobRecord>();
-  private chapterAudio = new Map<string, { localPath: string; sizeBytes: number; updatedAt: number }>();
+  private chapterAudio = new Map<
+    string,
+    { localPath: string; sizeBytes: number; updatedAt: number }
+  >();
   private uploadQueue = new Map<string, DriveUploadQueuedItem>();
 
   async init(): Promise<StorageInitResult> {
@@ -240,7 +242,10 @@ class MemoryStorageDriver implements StorageDriver {
     return { ok: true, where: "memory" };
   }
 
-  async updateJob(jobId: string, patch: Partial<Omit<JobRecord, "jobId" | "createdAt">>): Promise<SaveResult> {
+  async updateJob(
+    jobId: string,
+    patch: Partial<Omit<JobRecord, "jobId" | "createdAt">>
+  ): Promise<SaveResult> {
     const existing = this.jobs.get(jobId);
     if (!existing) return { ok: false, where: "memory", error: "missing" };
     const next: JobRecord = {
@@ -277,12 +282,18 @@ class MemoryStorageDriver implements StorageDriver {
     return { ok: true, where: "memory" };
   }
 
-  async setChapterAudioPath(chapterId: string, localPath: string, sizeBytes: number): Promise<SaveResult> {
+  async setChapterAudioPath(
+    chapterId: string,
+    localPath: string,
+    sizeBytes: number
+  ): Promise<SaveResult> {
     this.chapterAudio.set(chapterId, { localPath, sizeBytes, updatedAt: Date.now() });
     return { ok: true, where: "memory" };
   }
 
-  async getChapterAudioPath(chapterId: string): Promise<LoadResult<{ localPath: string; sizeBytes: number; updatedAt: number } | null>> {
+  async getChapterAudioPath(
+    chapterId: string
+  ): Promise<LoadResult<{ localPath: string; sizeBytes: number; updatedAt: number } | null>> {
     return { ok: true, where: "memory", value: this.chapterAudio.get(chapterId) ?? null };
   }
 
@@ -323,7 +334,8 @@ class MemoryStorageDriver implements StorageDriver {
         if (
           !candidate ||
           (item.priority ?? 0) > (candidate.priority ?? 0) ||
-          ((item.priority ?? 0) === (candidate.priority ?? 0) && (item.queuedAt ?? 0) < (candidate.queuedAt ?? 0))
+          ((item.priority ?? 0) === (candidate.priority ?? 0) &&
+            (item.queuedAt ?? 0) < (candidate.queuedAt ?? 0))
         ) {
           candidate = item;
         }
@@ -376,7 +388,24 @@ class MemoryStorageDriver implements StorageDriver {
       if (p !== 0) return p;
       return (a.queuedAt ?? a.createdAt) - (b.queuedAt ?? b.createdAt);
     });
-    return { ok: true, where: "memory", value: typeof limit === "number" ? list.slice(0, limit) : list };
+    return {
+      ok: true,
+      where: "memory",
+      value: typeof limit === "number" ? list.slice(0, limit) : list,
+    };
+  }
+
+  async hasQueuedUpload(bookId: string, chapterId: string): Promise<LoadResult<boolean>> {
+    for (const item of this.uploadQueue.values()) {
+      if (
+        (item.status === "queued" || item.status === "failed") &&
+        item.bookId === bookId &&
+        item.chapterId === chapterId
+      ) {
+        return { ok: true, where: "memory", value: true };
+      }
+    }
+    return { ok: true, where: "memory", value: false };
   }
 }
 
@@ -477,9 +506,13 @@ class SafeLocalStorageDriver implements StorageDriver {
     return { ok: true, where: "localStorage" };
   }
 
-  async updateJob(jobId: string, patch: Partial<Omit<JobRecord, "jobId" | "createdAt">>): Promise<SaveResult> {
+  async updateJob(
+    jobId: string,
+    patch: Partial<Omit<JobRecord, "jobId" | "createdAt">>
+  ): Promise<SaveResult> {
     const existing = await this.getJob(jobId);
-    if (!existing.ok || !existing.value) return { ok: false, where: "localStorage", error: "missing" };
+    if (!existing.ok || !existing.value)
+      return { ok: false, where: "localStorage", error: "missing" };
     const next: JobRecord = {
       ...existing.value,
       ...patch,
@@ -549,7 +582,9 @@ class SafeLocalStorageDriver implements StorageDriver {
     }
   }
 
-  private async loadChapterAudioMap(): Promise<Record<string, { localPath: string; sizeBytes: number; updatedAt: number }>> {
+  private async loadChapterAudioMap(): Promise<
+    Record<string, { localPath: string; sizeBytes: number; updatedAt: number }>
+  > {
     try {
       const raw = window.localStorage.getItem(this.KEY_CHAPTER_AUDIO);
       if (!raw) return {};
@@ -559,17 +594,25 @@ class SafeLocalStorageDriver implements StorageDriver {
     }
   }
 
-  private async saveChapterAudioMap(map: Record<string, { localPath: string; sizeBytes: number; updatedAt: number }>): Promise<SaveResult> {
+  private async saveChapterAudioMap(
+    map: Record<string, { localPath: string; sizeBytes: number; updatedAt: number }>
+  ): Promise<SaveResult> {
     return this.safeSetJson(this.KEY_CHAPTER_AUDIO, map, "localStorage");
   }
 
-  async setChapterAudioPath(chapterId: string, localPath: string, sizeBytes: number): Promise<SaveResult> {
+  async setChapterAudioPath(
+    chapterId: string,
+    localPath: string,
+    sizeBytes: number
+  ): Promise<SaveResult> {
     const map = await this.loadChapterAudioMap();
     map[chapterId] = { localPath, sizeBytes, updatedAt: Date.now() };
     return this.saveChapterAudioMap(map);
   }
 
-  async getChapterAudioPath(chapterId: string): Promise<LoadResult<{ localPath: string; sizeBytes: number; updatedAt: number } | null>> {
+  async getChapterAudioPath(
+    chapterId: string
+  ): Promise<LoadResult<{ localPath: string; sizeBytes: number; updatedAt: number } | null>> {
     const map = await this.loadChapterAudioMap();
     return { ok: true, where: "localStorage", value: map[chapterId] ?? null };
   }
@@ -632,7 +675,8 @@ class SafeLocalStorageDriver implements StorageDriver {
         if (
           !candidate ||
           (item.priority ?? 0) > (candidate.priority ?? 0) ||
-          ((item.priority ?? 0) === (candidate.priority ?? 0) && (item.queuedAt ?? 0) < (candidate.queuedAt ?? 0))
+          ((item.priority ?? 0) === (candidate.priority ?? 0) &&
+            (item.queuedAt ?? 0) < (candidate.queuedAt ?? 0))
         ) {
           candidate = item;
         }
@@ -693,7 +737,25 @@ class SafeLocalStorageDriver implements StorageDriver {
       if (p !== 0) return p;
       return (a.queuedAt ?? a.createdAt) - (b.queuedAt ?? b.createdAt);
     });
-    return { ok: true, where: "localStorage", value: typeof limit === "number" ? list.slice(0, limit) : list };
+    return {
+      ok: true,
+      where: "localStorage",
+      value: typeof limit === "number" ? list.slice(0, limit) : list,
+    };
+  }
+
+  async hasQueuedUpload(bookId: string, chapterId: string): Promise<LoadResult<boolean>> {
+    const queue = await this.loadUploadQueue();
+    for (const item of Object.values(queue)) {
+      if (
+        (item.status === "queued" || item.status === "failed") &&
+        item.bookId === bookId &&
+        item.chapterId === chapterId
+      ) {
+        return { ok: true, where: "localStorage", value: true };
+      }
+    }
+    return { ok: true, where: "localStorage", value: false };
   }
 
   private async safeGetJson<T>(key: string, where: SaveResult["where"]): Promise<LoadResult<T>> {

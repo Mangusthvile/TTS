@@ -11,6 +11,7 @@ type Props = {
   showOverflow: boolean;
   onToggleOverflow: () => void;
   onOpenSettingsFromMenu: () => void;
+  onOpenAttachments?: () => void;
   onToggleOrganize: () => void;
   isOrganizeMode: boolean;
   onCheck: () => void;
@@ -32,6 +33,7 @@ const BookTopBar: React.FC<Props> = ({
   showOverflow,
   onToggleOverflow,
   onOpenSettingsFromMenu,
+  onOpenAttachments,
   onToggleOrganize,
   isOrganizeMode,
   onCheck,
@@ -92,24 +94,28 @@ const BookTopBar: React.FC<Props> = ({
             <MoreVertical className="w-4 h-4" />
           </button>
           {showOverflow ? (
-            <div className={`absolute right-0 mt-2 w-56 rounded-2xl border shadow-2xl p-2 z-[60] ${isDark ? "bg-slate-900 border-white/10" : "bg-white border-black/10"}`}>
+            <div
+              className={`absolute right-0 mt-2 w-56 rounded-2xl border shadow-2xl p-2 z-[60] ${isDark ? "bg-slate-900 border-white/10" : "bg-white border-black/10"}`}
+            >
               <button
                 onClick={onOpenSettingsFromMenu}
                 className="w-full text-left px-3 py-2 rounded-xl text-xs font-black hover:bg-black/5"
               >
-                Book Settings
+                Book Options
               </button>
+              {onOpenAttachments ? (
+                <button
+                  onClick={onOpenAttachments}
+                  className="w-full text-left px-3 py-2 rounded-xl text-xs font-black hover:bg-black/5"
+                >
+                  Attachments
+                </button>
+              ) : null}
               <button
                 onClick={onCheck}
                 className="w-full text-left px-3 py-2 rounded-xl text-xs font-black hover:bg-black/5"
               >
                 Check
-              </button>
-              <button
-                onClick={onReindex}
-                className="w-full text-left px-3 py-2 rounded-xl text-xs font-black hover:bg-black/5"
-              >
-                Reindex
               </button>
               <button
                 onClick={onFix}

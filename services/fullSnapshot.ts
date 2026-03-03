@@ -4,6 +4,7 @@ import {
   BookAttachment,
   BookSettings,
   Chapter,
+  ChapterTombstone,
   FullSnapshotV1,
   HighlightMode,
   JobRecord,
@@ -76,8 +77,7 @@ function normalizeBookSettings(value: unknown): BookSettings {
     chapterLayout: raw.chapterLayout === "grid" ? "grid" : "sections",
     enableSelectionMode:
       typeof raw.enableSelectionMode === "boolean" ? raw.enableSelectionMode : true,
-    enableOrganizeMode:
-      typeof raw.enableOrganizeMode === "boolean" ? raw.enableOrganizeMode : true,
+    enableOrganizeMode: typeof raw.enableOrganizeMode === "boolean" ? raw.enableOrganizeMode : true,
     allowDragReorderChapters:
       typeof raw.allowDragReorderChapters === "boolean" ? raw.allowDragReorderChapters : true,
     allowDragMoveToVolume:
@@ -153,10 +153,18 @@ function normalizeSnapshot(snapshot: FullSnapshotV1): FullSnapshotV1 {
   const attachments = dedupeById(
     Array.isArray(snapshot.attachments) ? snapshot.attachments : []
   ) as BookAttachment[];
-  const jobs = dedupeByKey(
-    Array.isArray(snapshot.jobs) ? snapshot.jobs : [],
-    (job) => String(job.jobId)
+  const jobs = dedupeByKey(Array.isArray(snapshot.jobs) ? snapshot.jobs : [], (job) =>
+    String(job.jobId)
   ) as JobRecord[];
+
+  const chapterTombstones = Array.isArray(snapshot.chapterTombstones)
+    ? (snapshot.chapterTombstones as ChapterTombstone[]).filter(
+        (t) =>
+          typeof t?.bookId === "string" &&
+          typeof t?.chapterId === "string" &&
+          typeof t?.deletedAt === "number"
+      )
+    : [];
 
   return {
     ...snapshot,
@@ -173,6 +181,7 @@ function normalizeSnapshot(snapshot: FullSnapshotV1): FullSnapshotV1 {
     legacyProgressStore: isRecord(snapshot.legacyProgressStore)
       ? snapshot.legacyProgressStore
       : undefined,
+    chapterTombstones,
   };
 }
 
@@ -272,6 +281,7 @@ export type BuildFullSnapshotInput = {
   preferences: Record<string, unknown>;
   readerProgress: Record<string, unknown>;
   legacyProgressStore?: Record<string, unknown>;
+  chapterTombstones?: ChapterTombstone[];
   attachments?: BookAttachment[];
   jobs?: JobRecord[];
   activeChapterId?: string;
@@ -291,6 +301,7 @@ export function buildFullSnapshotV1(input: BuildFullSnapshotInput): FullSnapshot
     preferences: input.preferences || {},
     readerProgress: input.readerProgress || {},
     legacyProgressStore: input.legacyProgressStore || {},
+    chapterTombstones: input.chapterTombstones || [],
     globalRules: Array.isArray(input.state.globalRules) ? input.state.globalRules : [],
     books,
     chapters,

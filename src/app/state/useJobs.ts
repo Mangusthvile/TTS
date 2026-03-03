@@ -1,17 +1,30 @@
 import { useCallback, useState } from "react";
 import type { JobRecord, UiMode } from "../../../types";
-import { listAllJobs, cancelJob as cancelJobService, retryJob as retryJobService, deleteJob as deleteJobService, clearJobs as clearJobsService, jobRunnerHealthCheck } from "../../../services/jobRunnerService";
+import {
+  listAllJobs,
+  cancelJob as cancelJobService,
+  retryJob as retryJobService,
+  deleteJob as deleteJobService,
+  clearJobs as clearJobsService,
+  jobRunnerHealthCheck,
+  syncCloudBackedJobs,
+} from "../../../services/jobRunnerService";
 import { getLogger } from "../../../utils/logger";
 
 const jobLog = getLogger("Jobs");
 
-export function useJobs(args: { uiMode: UiMode; refreshUploadQueueCount: () => Promise<void>; logJobs: boolean }) {
+export function useJobs(args: {
+  uiMode: UiMode;
+  refreshUploadQueueCount: () => Promise<void>;
+  logJobs: boolean;
+}) {
   const { uiMode, refreshUploadQueueCount, logJobs } = args;
   const [jobs, setJobs] = useState<JobRecord[]>([]);
 
   const refreshJobs = useCallback(async () => {
     try {
-      const all = await listAllJobs(uiMode);
+      let all = await listAllJobs(uiMode);
+      all = await syncCloudBackedJobs(all, uiMode);
       setJobs(all);
       jobLog.info("refresh", {
         count: all.length,
@@ -22,7 +35,7 @@ export function useJobs(args: { uiMode: UiMode; refreshUploadQueueCount: () => P
         })),
       });
       await refreshUploadQueueCount();
-      await jobRunnerHealthCheck(uiMode);
+      void jobRunnerHealthCheck(uiMode);
     } catch (e) {
       // ignore
     }
@@ -31,7 +44,10 @@ export function useJobs(args: { uiMode: UiMode; refreshUploadQueueCount: () => P
   const cancelJob = useCallback((jobId: string) => cancelJobService(jobId, uiMode), [uiMode]);
   const retryJob = useCallback((jobId: string) => retryJobService(jobId, uiMode), [uiMode]);
   const deleteJob = useCallback((jobId: string) => deleteJobService(jobId, uiMode), [uiMode]);
-  const clearJobs = useCallback((statuses: string[]) => clearJobsService(statuses, uiMode), [uiMode]);
+  const clearJobs = useCallback(
+    (statuses: string[]) => clearJobsService(statuses, uiMode),
+    [uiMode]
+  );
 
   return { jobs, setJobs, refreshJobs, cancelJob, retryJob, deleteJob, clearJobs };
 }

@@ -6,10 +6,7 @@ export function useNotify() {
 }
 
 export function useNotifySimple() {
-  return useCallback(
-    (message: string, type: Notice["type"] = "info", ms: number = 3000) => {
-      notifySimple(message, type, ms);
-    },
-    []
-  );
+  return useCallback((message: string, type: Notice["type"] = "info", ms: number = 3000) => {
+    notifySimple(message, type, ms);
+  }, []);
 }

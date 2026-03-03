@@ -42,10 +42,51 @@ export interface ParsedBlocks {
 
 const normalizeNewlines = (input: string) => input.replace(/\r\n?/g, "\n");
 
+/**
+ * Pre-process markdown so that table rows are consecutive (no blank lines between them).
+ * Many sources have blank lines between every table row, which breaks GFM table parsing.
+ * This finds runs of lines that look like table rows (| ... |) and removes blank lines
+ * between them so the parser sees a valid table.
+ */
+export function collapseBlankLinesBetweenTableRows(text: string): string {
+  const lines = text.split("\n");
+  const result: string[] = [];
+  let i = 0;
+
+  const isTableRow = (line: string) => {
+    const t = line.trim();
+    return t.length > 0 && t.startsWith("|") && t.endsWith("|");
+  };
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!isTableRow(line)) {
+      result.push(line);
+      i += 1;
+      continue;
+    }
+    result.push(line);
+    i += 1;
+    while (i < lines.length) {
+      const next = lines[i];
+      if (next.trim() === "") {
+        i += 1;
+        continue;
+      }
+      if (isTableRow(next)) {
+        result.push(next);
+        i += 1;
+        continue;
+      }
+      break;
+    }
+  }
+
+  return result.join("\n");
+}
+
 const stripZeroWidth = (input: string) =>
-  input
-    .replace(/\uFEFF/g, "")
-    .replace(/[\u200B-\u200D\u2060]/g, "");
+  input.replace(/\uFEFF/g, "").replace(/[\u200B-\u200D\u2060]/g, "");
 
 const normalizeHtmlLineBreaks = (input: string) => input.replace(/<br\s*\/?>/gi, "\n");
 
@@ -59,8 +100,15 @@ const stripInlineCodeMarkers = (input: string) => input.replace(/`([^`]+)`/g, "$
 
 const stripEmphasisMarkers = (input: string) => input.replace(/(\*\*|__|\*|_)/g, "");
 
-const collapseInlineWhitespace = (input: string) =>
-  input.replace(/\s+/g, " ").trim();
+const collapseInlineWhitespace = (input: string) => input.replace(/\s+/g, " ").trim();
+
+/** Remove table syntax characters from text so TTS does not read "pipe" or "colon". */
+const stripTableSyntaxForSpeech = (input: string): string =>
+  (input ?? "")
+    .replace(/\|/g, " ")
+    .replace(/:[\-\u2013\u2014]{2,}:?|[\-\u2013\u2014]{2,}:?/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
 const cleanInlineMarkdown = (input: string) =>
   collapseInlineWhitespace(
@@ -93,10 +141,23 @@ const parseTableRow = (line: string) => {
   return withoutOuter.split("|").map((c) => c.trim());
 };
 
+/** Match a single separator cell: optional :, 3+ dashes (ASCII or Unicode), optional :. */
+const SEPARATOR_CELL = /^:?[\-\u2013\u2014]{3,}:?$/;
+
+/** Normalize separator cell for matching: collapse internal whitespace so " :--- " matches. */
+const normalizeSeparatorCell = (s: string) =>
+  (typeof s === "string" ? s : "")
+    .trim()
+    .replace(/\s+/g, "");
+
 const isSeparatorRow = (line: string) => {
   const cells = parseTableRow(line);
   if (!cells) return false;
-  return cells.every((c) => /^:?-{3,}:?$/.test(c));
+  return cells.every((c) => {
+    const t = typeof c === "string" ? c.trim() : "";
+    if (t === "") return true;
+    return SEPARATOR_CELL.test(normalizeSeparatorCell(t));
+  });
 };
 
 const makeBlockId = (() => {
@@ -151,8 +212,22 @@ const parseMarkdownBlocks = (rawText: string): RenderBlock[] => {
 
   const isTableStart = (index: number) => {
     const header = parseTableRow(lines[index] ?? "");
-    const separator = lines[index + 1];
-    return !!header && !!separator && isSeparatorRow(separator);
+    if (!header || header.length === 0) return false;
+    let j = index + 1;
+    while (j < lines.length && (lines[j] ?? "").trim() === "") j += 1;
+    if (j >= lines.length) return false;
+    return isSeparatorRow(lines[j] ?? "");
+  };
+
+  /** If line at index starts a table, return { headerIndex, separatorIndex }; else null. */
+  const findTableStart = (index: number): { headerIndex: number; separatorIndex: number } | null => {
+    const header = parseTableRow(lines[index] ?? "");
+    if (!header || header.length === 0) return null;
+    let j = index + 1;
+    while (j < lines.length && (lines[j] ?? "").trim() === "") j += 1;
+    if (j >= lines.length) return null;
+    if (!isSeparatorRow(lines[j] ?? "")) return null;
+    return { headerIndex: index, separatorIndex: j };
   };
 
   while (i < lines.length) {
@@ -184,8 +259,9 @@ const parseMarkdownBlocks = (rawText: string): RenderBlock[] => {
     }
 
     if (isTableStart(i)) {
-      const headerCells = parseTableRow(lines[i] || "") ?? [];
-      i += 2;
+      const start = findTableStart(i)!;
+      const headerCells = parseTableRow(lines[start.headerIndex] ?? "") ?? [];
+      i = start.separatorIndex + 1;
       const rows: string[][] = [];
 
       while (i < lines.length) {
@@ -303,7 +379,7 @@ const applyRulesAndBuildOffsets = (
     if (block.type === "paragraph" || block.type === "heading") {
       const content = applySpeechRules(block.content || "", rules, reflowLineBreaksEnabled);
       const startIndex = speakText.length;
-      speakText += content;
+      speakText += stripTableSyntaxForSpeech(content);
       const endIndex = speakText.length;
       processed.push({
         ...block,
@@ -342,10 +418,12 @@ const applyRulesAndBuildOffsets = (
 
     if (block.type === "table") {
       const headers = (block.headers ?? []).map((cell) =>
-        applySpeechRules(cell, rules, reflowLineBreaksEnabled)
+        stripTableSyntaxForSpeech(applySpeechRules(cell, rules, reflowLineBreaksEnabled))
       );
       const rows = (block.rows ?? []).map((row) =>
-        row.map((cell) => applySpeechRules(cell, rules, reflowLineBreaksEnabled))
+        row.map((cell) =>
+          stripTableSyntaxForSpeech(applySpeechRules(cell, rules, reflowLineBreaksEnabled))
+        )
       );
       const cellRanges: CellRange[] = [];
 
@@ -392,7 +470,10 @@ export function buildReaderModel(
   rules: Rule[],
   reflowLineBreaksEnabled: boolean
 ): ParsedBlocks {
-  const normalized = stripChapterTemplateHeader(rawText || "");
+  let normalized = stripChapterTemplateHeader(rawText || "");
+  if (isMarkdown) {
+    normalized = collapseBlankLinesBetweenTableRows(normalized);
+  }
   const blocks = isMarkdown ? parseMarkdownBlocks(normalized) : parsePlainTextBlocks(normalized);
   return applyRulesAndBuildOffsets(blocks, rules, reflowLineBreaksEnabled);
 }

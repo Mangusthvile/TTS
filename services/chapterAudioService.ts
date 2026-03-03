@@ -5,7 +5,10 @@ import { generateAudioKey, saveAudioToCache } from "./audioCache";
 import { persistChapterAudio } from "./audioStorage";
 import { buildMp3Name, uploadToDrive } from "./driveService";
 import { ensureChapterDriveStorageFolder } from "./driveChapterFolders";
-import { upsertChapterMeta as libraryUpsertChapterMeta, loadChapterText as libraryLoadChapterText } from "./libraryStore";
+import {
+  upsertChapterMeta as libraryUpsertChapterMeta,
+  loadChapterText as libraryLoadChapterText,
+} from "./libraryStore";
 
 type GenerateAndPersistChapterAudioArgs = {
   book: Book;
@@ -84,9 +87,10 @@ export async function generateAndPersistChapterAudio(
   const fullText = introText + textToSpeak;
 
   const cloudRes = await synthesizeChunk(fullText, voiceId, playbackSpeed);
-  const mp3Bytes = cloudRes.mp3Bytes instanceof Uint8Array
-    ? cloudRes.mp3Bytes
-    : new Uint8Array(cloudRes.mp3Bytes as any);
+  const mp3Bytes =
+    cloudRes.mp3Bytes instanceof Uint8Array
+      ? cloudRes.mp3Bytes
+      : new Uint8Array(cloudRes.mp3Bytes as any);
   const mp3Copy = new Uint8Array(mp3Bytes);
   const audioBlob = new Blob([mp3Copy], { type: "audio/mpeg" });
   const audioSignature = generateAudioKey(fullText, voiceId, playbackSpeed);

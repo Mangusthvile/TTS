@@ -1,13 +1,13 @@
-import { AudioChunkMetadata, Book, Chapter } from '../types';
-import { clamp, computePercent } from './progress';
-import { deriveDisplayIndices, normalizeChapterOrder } from '../services/chapterOrderingService';
+import { AudioChunkMetadata, Book, Chapter } from "../types";
+import { clamp, computePercent } from "./progress";
+import { deriveDisplayIndices, normalizeChapterOrder } from "../services/chapterOrderingService";
 
 export const normalizeChapterProgress = (c: Chapter): Chapter => {
-  let percent = typeof c.progress === 'number' ? c.progress : 0;
+  let percent = typeof c.progress === "number" ? c.progress : 0;
   if (c.progress === undefined) {
-    if (typeof c.progressSec === 'number' && c.durationSec) {
+    if (typeof c.progressSec === "number" && c.durationSec) {
       percent = computePercent(c.progressSec, c.durationSec) ?? 0;
-    } else if (typeof c.progressChars === 'number' && c.textLength) {
+    } else if (typeof c.progressChars === "number" && c.textLength) {
       percent = computePercent(c.progressChars, c.textLength) ?? 0;
     }
   }
@@ -30,7 +30,7 @@ export const normalizeBookChapters = (book: Book): Book => {
     ...book,
     chapters: ordered,
     chapterCount:
-      typeof book.chapterCount === 'number'
+      typeof book.chapterCount === "number"
         ? Math.max(book.chapterCount, ordered.length)
         : ordered.length,
   };
@@ -46,7 +46,10 @@ export const getEffectivePrefixLen = (chapter: Chapter, fallbackIntroLen: number
   return 0;
 };
 
-export const deriveIntroMsFromChunkMap = (chunkMap: AudioChunkMetadata[], prefixLen: number): number => {
+export const deriveIntroMsFromChunkMap = (
+  chunkMap: AudioChunkMetadata[],
+  prefixLen: number
+): number => {
   if (!chunkMap.length || prefixLen <= 0) return 0;
   let introMs = 0;
   for (const chunk of chunkMap) {

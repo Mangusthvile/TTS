@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { registerBeforeUnloadFlush } from "../utils/progressFlush";
+import { SESSION_DELTA_KEY, type SessionDelta } from "../services/progressStore";
 
 export type ChapterProgress = {
   chapterId: string;
@@ -22,6 +24,8 @@ type UseReaderProgressOptions = {
   chapters: ReaderChapter[];
   currentChapterId: string | null;
   setCurrentChapterId?: (chapterId: string) => void;
+  /** Required for session-delta: only the current chapter is saved to talevox_session_delta on beforeunload. */
+  bookId?: string | null;
   autoplay?: boolean;
   onAutoplayNext?: (chapterId: string) => void;
   storageKey?: string;
@@ -87,14 +91,14 @@ const isNearEnd = (index: number, total: number, threshold: number) => {
   return remaining <= Math.max(2, Math.round(total * (1 - threshold)));
 };
 
-const safeNumber = (value: number, fallback: number) =>
-  Number.isFinite(value) ? value : fallback;
+const safeNumber = (value: number, fallback: number) => (Number.isFinite(value) ? value : fallback);
 
 export function useReaderProgress(options: UseReaderProgressOptions): UseReaderProgressResult {
   const {
     chapters,
     currentChapterId,
     setCurrentChapterId,
+    bookId,
     autoplay = true,
     onAutoplayNext,
     storageKey = DEFAULT_STORAGE_KEY,
@@ -139,29 +143,75 @@ export function useReaderProgress(options: UseReaderProgressOptions): UseReaderP
     prev?: ChapterProgress;
   } | null>(null);
   const pendingSaveRef = useRef<ProgressMap | null>(null);
+  /** Latest current-chapter-only delta for beforeunload. Ref avoids stale closures. */
+  const sessionDeltaRef = useRef<SessionDelta | null>(null);
 
   useEffect(() => {
     progressRef.current = progressByChapter;
   }, [progressByChapter]);
 
-  const scheduleSave = useCallback((nextMap?: ProgressMap) => {
-    if (typeof window === "undefined") return;
-    if (nextMap) {
-      progressRef.current = nextMap;
+  /** Update session delta ref from current chapter so beforeunload has latest. */
+  const updateSessionDeltaRef = useCallback(() => {
+    if (typeof window === "undefined" || !currentChapterId) return;
+    const map = progressRef.current;
+    const p = map[currentChapterId];
+    if (!p) return;
+    const delta: SessionDelta = {
+      bookId: bookId ?? "unknown",
+      chapterId: currentChapterId,
+      entry: {
+        timeSec: p.timeSec,
+        durationSec: p.durationSec,
+        percent: p.percent,
+        completed: p.isCompleted,
+        updatedAt: p.updatedAt,
+      },
+      savedAt: Date.now(),
+    };
+    sessionDeltaRef.current = delta;
+  }, [currentChapterId, bookId]);
+
+  /** On beforeunload: sync write ONLY the tiny session delta (avoids 5MB quota and aborted IDB). */
+  const flushSessionDeltaOnly = useCallback(() => {
+    const d = sessionDeltaRef.current;
+    if (!d) return;
+    try {
+      localStorage.setItem(SESSION_DELTA_KEY, JSON.stringify(d));
+    } catch {
+      // ignore
     }
-    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = window.setTimeout(() => {
-      try {
-        if (persist) {
-          persist(progressRef.current);
-        } else {
-          localStorage.setItem(storageKey, JSON.stringify(progressRef.current));
-        }
-      } catch {
-        // ignore write errors
+  }, []);
+
+  useEffect(() => {
+    const unregister = registerBeforeUnloadFlush(flushSessionDeltaOnly);
+    return unregister;
+  }, [flushSessionDeltaOnly]);
+
+  useEffect(() => {
+    updateSessionDeltaRef();
+  }, [currentChapterId, bookId, updateSessionDeltaRef]);
+
+  const scheduleSave = useCallback(
+    (nextMap?: ProgressMap) => {
+      if (typeof window === "undefined") return;
+      if (nextMap) {
+        progressRef.current = nextMap;
       }
-    }, debounceMs);
-  }, [debounceMs, persist, storageKey]);
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = window.setTimeout(() => {
+        try {
+          if (persist) {
+            persist(progressRef.current);
+          } else {
+            localStorage.setItem(storageKey, JSON.stringify(progressRef.current));
+          }
+        } catch {
+          // ignore write errors
+        }
+      }, debounceMs);
+    },
+    [debounceMs, persist, storageKey]
+  );
 
   const shallowEqualProgress = (a: ProgressMap, b: ProgressMap) => {
     if (a === b) return true;
@@ -211,9 +261,7 @@ export function useReaderProgress(options: UseReaderProgressOptions): UseReaderP
         const existing = prev[chapterId];
         const allowDecrease = opts?.allowDecrease ?? false;
         const safeTotal =
-          Number.isFinite(total) && total > 0
-            ? total
-            : safeNumber(existing?.total ?? 0, 0);
+          Number.isFinite(total) && total > 0 ? total : safeNumber(existing?.total ?? 0, 0);
         const rawIndex = safeTotal > 0 ? clamp(index, 0, safeTotal) : Math.max(0, index);
         let safeIndex = rawIndex;
         if (!allowDecrease && existing) {
@@ -239,7 +287,8 @@ export function useReaderProgress(options: UseReaderProgressOptions): UseReaderP
         if (opts?.markComplete) nextCompleted = true;
         if (
           opts?.allowComplete &&
-          (isNearEnd(safeIndex, safeTotal, completionThreshold) || nextPercent >= completionThreshold)
+          (isNearEnd(safeIndex, safeTotal, completionThreshold) ||
+            nextPercent >= completionThreshold)
         ) {
           nextCompleted = true;
         }
@@ -284,7 +333,12 @@ export function useReaderProgress(options: UseReaderProgressOptions): UseReaderP
   );
 
   const updateProgress = useCallback(
-    (chapterId: string, index: number, total: number, opts?: { timeSec?: number; durationSec?: number }) => {
+    (
+      chapterId: string,
+      index: number,
+      total: number,
+      opts?: { timeSec?: number; durationSec?: number }
+    ) => {
       updateEntry(chapterId, index, total, {
         allowComplete: index >= total && total > 0,
         timeSec: opts?.timeSec,
@@ -295,9 +349,15 @@ export function useReaderProgress(options: UseReaderProgressOptions): UseReaderP
   );
 
   const handleManualScrub = useCallback(
-    (chapterId: string, index: number, total: number, opts?: { timeSec?: number; durationSec?: number }) => {
+    (
+      chapterId: string,
+      index: number,
+      total: number,
+      opts?: { timeSec?: number; durationSec?: number }
+    ) => {
       updateEntry(chapterId, index, total, {
         allowComplete: true,
+        allowDecrease: true,
         timeSec: opts?.timeSec,
         durationSec: opts?.durationSec,
       });
@@ -306,7 +366,12 @@ export function useReaderProgress(options: UseReaderProgressOptions): UseReaderP
   );
 
   const handleChapterEnd = useCallback(
-    (chapterId: string, index: number, total: number, opts?: { timeSec?: number; durationSec?: number }) => {
+    (
+      chapterId: string,
+      index: number,
+      total: number,
+      opts?: { timeSec?: number; durationSec?: number }
+    ) => {
       updateEntry(chapterId, index, total, {
         markComplete: true,
         allowComplete: true,
@@ -402,12 +467,10 @@ export function useReaderProgress(options: UseReaderProgressOptions): UseReaderP
       pendingSaveRef.current = null;
       scheduleSave(nextMap);
     }
-  }, [onCommit, scheduleSave, progressByChapter]);
+    updateSessionDeltaRef();
+  }, [onCommit, scheduleSave, progressByChapter, updateSessionDeltaRef]);
 
-  const chapterOrder = useMemo(
-    () => chapters.map((chapter) => chapter.id),
-    [chapters]
-  );
+  const chapterOrder = useMemo(() => chapters.map((chapter) => chapter.id), [chapters]);
 
   useEffect(() => {
     if (!autoplay || !currentChapterId || !setCurrentChapterId) return;

@@ -1,5 +1,12 @@
 import type { DriveUploadQueuedItem } from "./storageDriver";
-import { enqueueUpload, enqueueChapterUpload, listQueuedUploads, countQueuedUploads, clearQueuedUploads, updateUploadItem } from "./uploadQueueStore";
+import {
+  enqueueUpload,
+  enqueueChapterUpload,
+  listQueuedUploads,
+  countQueuedUploads,
+  clearQueuedUploads,
+  updateUploadItem,
+} from "./uploadQueueStore";
 import { notifyUpload } from "./uploadNotifier";
 import { getUploadPreferences } from "./uploadPreferences";
 import { ensureUploadQueueJob, setUploadQueuePaused } from "./jobRunnerService";
@@ -16,14 +23,22 @@ export type UploadEnqueueInput = {
 
 export async function enqueueUploads(items: UploadEnqueueInput[], uiMode: UiMode): Promise<number> {
   if (!items.length) return 0;
+  const existing = await listQueuedUploads();
+  const existingKeys = new Set(existing.map((i) => `${i.bookId}:${i.chapterId}`));
   let count = 0;
   for (const item of items) {
+    const key = `${item.bookId}:${item.chapterId}`;
+    if (existingKeys.has(key)) continue;
     const ok = await enqueueChapterUpload(item.bookId, item.chapterId, item.localPath, {
       priority: item.priority,
       source: item.source ?? "audio",
       manual: item.manual ?? true,
+      skipDuplicateCheck: true,
     });
-    if (ok) count += 1;
+    if (ok) {
+      count += 1;
+      existingKeys.add(key);
+    }
   }
   if (count) notifyUpload("queued", `Queued ${count} upload${count === 1 ? "" : "s"}`);
   const prefs = getUploadPreferences();
@@ -33,7 +48,10 @@ export async function enqueueUploads(items: UploadEnqueueInput[], uiMode: UiMode
   return count;
 }
 
-export async function enqueueUploadItem(item: DriveUploadQueuedItem, uiMode: UiMode): Promise<boolean> {
+export async function enqueueUploadItem(
+  item: DriveUploadQueuedItem,
+  uiMode: UiMode
+): Promise<boolean> {
   const ok = await enqueueUpload(item);
   if (ok) notifyUpload("queued");
   const prefs = getUploadPreferences();

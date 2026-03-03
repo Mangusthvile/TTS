@@ -44,11 +44,29 @@ const DEBUG_LOG_SQLITE = toBool(env.VITE_TALEVOX_DEBUG_LOG_SQLITE, false);
 
 const BACKEND_MODE = String(env.VITE_TALEVOX_BACKEND_MODE ?? "drive");
 const JOB_CONCURRENCY = toNumber(env.VITE_TALEVOX_JOB_CONCURRENCY, 1);
+const JOB_AUDIO_BATCH_SIZE = Math.max(
+  3,
+  Math.min(7, toNumber(env.VITE_TALEVOX_JOB_AUDIO_BATCH_SIZE, 5))
+);
 const JOB_RETRY_MAX = toNumber(env.VITE_TALEVOX_JOB_RETRY_MAX, 5);
 const JOB_RETRY_BASE_MS = toNumber(env.VITE_TALEVOX_JOB_RETRY_BASE_MS, 1000);
 const JOB_RETRY_MAX_MS = toNumber(env.VITE_TALEVOX_JOB_RETRY_MAX_MS, 20000);
 
 const SYNC_INTERVAL_MS = toNumber(env.VITE_TALEVOX_SYNC_INTERVAL_MS, 5 * 60 * 1000);
+
+const BATCH_JOBS_ENDPOINT = String(
+  env.VITE_TALEVOX_BATCH_JOBS_ENDPOINT ?? env.VITE_BATCH_JOBS_ENDPOINT ?? ""
+);
+/** When chapter count >= this, use cloud batch instead of on-device (if endpoint configured). */
+const CLOUD_BATCH_MIN_CHAPTERS = Math.max(
+  1,
+  toNumber(env.VITE_TALEVOX_CLOUD_BATCH_MIN_CHAPTERS, 50)
+);
+/** Poll interval (ms) for in-progress cloud batch jobs. */
+const CLOUD_JOB_POLL_INTERVAL_MS = toNumber(
+  env.VITE_TALEVOX_CLOUD_JOB_POLL_MS,
+  5 * 1000
+);
 
 export const appConfig = {
   db: {
@@ -70,6 +88,7 @@ export const appConfig = {
   },
   jobs: {
     concurrency: JOB_CONCURRENCY,
+    audioBatchSize: JOB_AUDIO_BATCH_SIZE,
     retry: {
       maxAttempts: JOB_RETRY_MAX,
       baseDelayMs: JOB_RETRY_BASE_MS,
@@ -78,6 +97,11 @@ export const appConfig = {
   },
   sync: {
     intervalMs: SYNC_INTERVAL_MS,
+  },
+  cloud: {
+    batchJobsEndpoint: BATCH_JOBS_ENDPOINT,
+    audioCloudBatchMinChapters: CLOUD_BATCH_MIN_CHAPTERS,
+    jobPollIntervalMs: CLOUD_JOB_POLL_INTERVAL_MS,
   },
   debug: {
     logJobs: DEBUG_LOG_JOBS,
@@ -95,6 +119,7 @@ export function getConfigDump(): Record<string, any> {
     cache: appConfig.cache,
     jobs: appConfig.jobs,
     sync: appConfig.sync,
+    cloud: appConfig.cloud,
     debug: appConfig.debug,
     backend: appConfig.backend,
   };

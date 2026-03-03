@@ -3,11 +3,11 @@
  * Delegates to AuthManager for state and token handling.
  */
 
-import { authManager } from './authManager';
+import { authManager } from "./authManager";
 
 export class AuthError extends Error {
-  code: 'expired' | 'interactive_required';
-  constructor(code: 'expired' | 'interactive_required', message: string) {
+  code: "expired" | "interactive_required";
+  constructor(code: "expired" | "interactive_required", message: string) {
     super(message);
     this.code = code;
   }
@@ -20,9 +20,10 @@ export function isTokenValid() {
 export function getAuthSessionInfo() {
   const state = authManager.getState();
   return {
-    authorized: state.status === 'signed_in',
+    authorized: state.status === "signed_in",
     expiresAt: state.expiresAt,
-    hasToken: !!state.accessToken
+    hasToken: !!state.accessToken,
+    userEmail: state.userEmail,
   };
 }
 
@@ -39,16 +40,19 @@ export function clearStoredToken() {
 }
 
 export async function ensureValidToken(interactive: boolean): Promise<string> {
-  const mode = interactive ? 'interactive' : 'silent';
+  const mode = interactive ? "interactive" : "silent";
   console.log(`[TaleVox][Auth] ensureValidToken (${mode})`);
   try {
     const token = await authManager.ensureValidToken(interactive);
     console.log(`[TaleVox][Auth] ensureValidToken (${mode}) success`);
     return token;
   } catch (e: any) {
-    authManager.markExpired(e?.message || 'Reconnect required');
+    authManager.markExpired(e?.message || "Reconnect required");
     console.log(`[TaleVox][Auth] ensureValidToken (${mode}) failed`);
-    throw new AuthError(interactive ? 'interactive_required' : 'expired', e?.message || 'Reconnect required');
+    throw new AuthError(
+      interactive ? "interactive_required" : "expired",
+      e?.message || "Reconnect required"
+    );
   }
 }
 
@@ -66,16 +70,16 @@ export async function driveFetch(input: RequestInfo, init: RequestInit = {}): Pr
   let res = await doFetch(token);
 
   if (res.status === 401) {
-    console.log('[TaleVox][Auth] driveFetch 401, attempting silent refresh');
+    console.log("[TaleVox][Auth] driveFetch 401, attempting silent refresh");
     token = await ensureValidToken(false);
     res = await doFetch(token);
     if (res.status === 401) {
-      console.log('[TaleVox][Auth] driveFetch retry 401, marking expired');
-      authManager.markExpired('Reconnect required');
-      window.dispatchEvent(new CustomEvent('talevox_auth_invalid'));
-      throw new AuthError('expired', 'Reconnect required');
+      console.log("[TaleVox][Auth] driveFetch retry 401, marking expired");
+      authManager.markExpired("Reconnect required");
+      window.dispatchEvent(new CustomEvent("talevox_auth_invalid"));
+      throw new AuthError("expired", "Reconnect required");
     }
-    console.log('[TaleVox][Auth] driveFetch retry success');
+    console.log("[TaleVox][Auth] driveFetch retry success");
   }
 
   return res;

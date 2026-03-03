@@ -3,7 +3,7 @@
 
 import { Capacitor } from "@capacitor/core";
 import type { SQLiteDBConnection } from "@capacitor-community/sqlite";
-import { getSqliteDb, closeSqliteDb } from "./sqliteConnectionManager";
+import { getSqliteDb, closeSqliteDb, forceCloseSqliteDb, dbQuery, addCorruptionListener } from "./sqliteConnectionManager";
 import { appConfig } from "../src/config/appConfig";
 
 import type {
@@ -133,6 +133,156 @@ const LIBRARY_SCHEMA_SQL = `
 
 `;
 
+/** Core + jobs + drive_upload_queue schema run at bootstrap so full schema exists before any query. */
+const CORE_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS kv (
+    key TEXT PRIMARY KEY,
+    json TEXT NOT NULL,
+    updatedAt INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS progress (
+    chapterId TEXT PRIMARY KEY,
+    timeSec REAL NOT NULL,
+    durationSec REAL,
+    percent REAL,
+    isComplete INTEGER NOT NULL,
+    updatedAt INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS chapter_progress (
+    bookId TEXT NOT NULL,
+    chapterId TEXT NOT NULL,
+    timeSec REAL NOT NULL,
+    durationSec REAL,
+    percent REAL,
+    isComplete INTEGER NOT NULL,
+    updatedAt INTEGER NOT NULL,
+    PRIMARY KEY (bookId, chapterId)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_chapter_progress_chapterId ON chapter_progress(chapterId);
+
+  CREATE TABLE IF NOT EXISTS jobs (
+    jobId TEXT PRIMARY KEY,
+    type TEXT,
+    status TEXT,
+    payloadJson TEXT,
+    progressJson TEXT,
+    error TEXT,
+    createdAt INTEGER,
+    updatedAt INTEGER
+  );
+
+  CREATE TABLE IF NOT EXISTS chapter_audio_files (
+    chapterId TEXT PRIMARY KEY,
+    localPath TEXT,
+    sizeBytes INTEGER,
+    updatedAt INTEGER
+  );
+
+  CREATE TABLE IF NOT EXISTS drive_upload_queue (
+    id TEXT PRIMARY KEY,
+    chapterId TEXT,
+    bookId TEXT,
+    localPath TEXT,
+    status TEXT,
+    attempts INTEGER,
+    nextAttemptAt INTEGER,
+    lastError TEXT,
+    createdAt INTEGER,
+    updatedAt INTEGER,
+    priority INTEGER,
+    queuedAt INTEGER,
+    source TEXT,
+    lastAttemptAt INTEGER,
+    manual INTEGER
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_upload_queue_book_chapter ON drive_upload_queue(bookId, chapterId);
+`;
+
+async function hasColumnOnConnection(
+  db: SQLiteDBConnection,
+  table: string,
+  column: string
+): Promise<boolean> {
+  try {
+    const res = await (db as any).query(`PRAGMA table_info(${table})`, [], false);
+    const rows = Array.isArray(res?.values) ? res.values : [];
+    return rows.some(
+      (row: any) => String(row?.name ?? "").toLowerCase() === column.toLowerCase()
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function ensureColumnOnConnection(
+  db: SQLiteDBConnection,
+  table: string,
+  column: string,
+  typeDef: string
+): Promise<void> {
+  if (await hasColumnOnConnection(db, table, column)) return;
+  await db.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${typeDef}`, true, true);
+}
+
+/**
+ * Run full app schema on an open connection. Used at bootstrap so no query runs before schema exists.
+ * Single source of truth for CREATE TABLE + ensureColumn logic.
+ */
+export async function runSchemaOnConnection(db: SQLiteDBConnection): Promise<void> {
+  await db.execute(CORE_SCHEMA_SQL, true, true);
+  await db.execute(LIBRARY_SCHEMA_SQL, true, true);
+  await ensureColumnOnConnection(db, "chapter_text", "localPath", "TEXT");
+  await ensureColumnOnConnection(db, "chapters", "volumeName", "TEXT");
+  await ensureColumnOnConnection(db, "chapters", "volumeLocalChapter", "INTEGER");
+  await ensureColumnOnConnection(db, "chapters", "sortOrder", "INTEGER");
+  try {
+    await db.execute(`UPDATE chapters SET sortOrder = idx WHERE sortOrder IS NULL`, true, true);
+  } catch {
+    // best-effort backfill
+  }
+  try {
+    await db.execute(
+      `CREATE INDEX IF NOT EXISTS idx_chapters_book_sort ON chapters(bookId, sortOrder, idx)`,
+      true,
+      true
+    );
+  } catch {
+    // best-effort index creation
+  }
+  await ensureColumnOnConnection(db, "drive_upload_queue", "priority", "INTEGER");
+  await ensureColumnOnConnection(db, "drive_upload_queue", "queuedAt", "INTEGER");
+  await ensureColumnOnConnection(db, "drive_upload_queue", "source", "TEXT");
+  await ensureColumnOnConnection(db, "drive_upload_queue", "lastAttemptAt", "INTEGER");
+  await ensureColumnOnConnection(db, "drive_upload_queue", "manual", "INTEGER");
+  try {
+    await db.execute(`UPDATE drive_upload_queue SET priority = 0 WHERE priority IS NULL`, true, true);
+  } catch {
+    // best-effort backfill
+  }
+  try {
+    await db.execute(
+      `UPDATE drive_upload_queue SET queuedAt = createdAt WHERE queuedAt IS NULL`,
+      true,
+      true
+    );
+  } catch {
+    // best-effort backfill
+  }
+}
+
+/**
+ * Run full app migrations once. Call at bootstrap after ensureAppDatabaseOpen so the DB has
+ * full schema (chapter_progress, drive_upload_queue, etc.) before any progress or library query.
+ */
+export async function runAppMigrationsOnce(): Promise<void> {
+  const db = await getSqliteDb(DB_NAME, DB_VERSION);
+  await runSchemaOnConnection(db);
+}
+
 function nowMs() {
   return Date.now();
 }
@@ -149,6 +299,7 @@ export class SqliteStorageDriver implements StorageDriver {
 
   private db: SQLiteDBConnection | null = null;
   private initInFlight: Promise<StorageInitResult> | null = null;
+  private corruptionUnsubscribe: (() => void) | null = null;
 
   async init(): Promise<StorageInitResult> {
     if (this.initInFlight) return this.initInFlight;
@@ -167,6 +318,12 @@ export class SqliteStorageDriver implements StorageDriver {
 
     if (this.db) {
       return { driverName: this.name, mode: "sqlite" };
+    }
+
+    if (!this.corruptionUnsubscribe) {
+      this.corruptionUnsubscribe = addCorruptionListener((dbName) => {
+        if (dbName === DB_NAME) this.invalidateConnection();
+      });
     }
 
     let lastErr: unknown = null;
@@ -261,16 +418,16 @@ export class SqliteStorageDriver implements StorageDriver {
   // Chapter Progress (row)
   // -----------------------
 
-  async loadChapterProgress(
-    chapterId: string
-  ): Promise<LoadResult<ChapterProgress | null>> {
-    const db = await this.dbConn();
-
+  async loadChapterProgress(chapterId: string): Promise<LoadResult<ChapterProgress | null>> {
     try {
-      const res = await db.query(
+      const res = await dbQuery(
+        DB_NAME,
+        DB_VERSION,
         `SELECT chapterId, timeSec, durationSec, percent, isComplete, updatedAt
-         FROM progress
-         WHERE chapterId = ?`,
+         FROM chapter_progress
+         WHERE chapterId = ?
+         ORDER BY updatedAt DESC
+         LIMIT 1`,
         [chapterId]
       );
 
@@ -296,35 +453,36 @@ export class SqliteStorageDriver implements StorageDriver {
     const db = await this.dbConn();
 
     const updatedAt = progress.updatedAt || nowMs();
-    const durationSec =
-      typeof progress.durationSec === "number" ? progress.durationSec : null;
+    const durationSec = typeof progress.durationSec === "number" ? progress.durationSec : null;
 
     const percent =
       typeof progress.percent === "number"
         ? progress.percent
         : durationSec && durationSec > 0
-        ? Math.max(0, Math.min(1, progress.timeSec / durationSec))
-        : null;
+          ? Math.max(0, Math.min(1, progress.timeSec / durationSec))
+          : null;
 
     const isComplete =
       typeof progress.isComplete === "boolean"
         ? progress.isComplete
         : typeof percent === "number"
-        ? percent >= 0.995
-        : false;
+          ? percent >= 0.995
+          : false;
+
+    const bookId = (progress as any).bookId ?? "";
 
     try {
-      // SQLite UPSERT keeps this safe and atomic
       await db.run(
-        `INSERT INTO progress (chapterId, timeSec, durationSec, percent, isComplete, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(chapterId) DO UPDATE SET
+        `INSERT INTO chapter_progress (bookId, chapterId, timeSec, durationSec, percent, isComplete, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(bookId, chapterId) DO UPDATE SET
            timeSec     = excluded.timeSec,
            durationSec = excluded.durationSec,
            percent     = excluded.percent,
            isComplete  = excluded.isComplete,
            updatedAt   = excluded.updatedAt`,
         [
+          bookId,
           progress.chapterId,
           progress.timeSec,
           durationSec,
@@ -381,7 +539,10 @@ export class SqliteStorageDriver implements StorageDriver {
     }
   }
 
-  async updateJob(jobId: string, patch: Partial<Omit<JobRecord, "jobId" | "createdAt">>): Promise<SaveResult> {
+  async updateJob(
+    jobId: string,
+    patch: Partial<Omit<JobRecord, "jobId" | "createdAt">>
+  ): Promise<SaveResult> {
     const existing = await this.getJob(jobId);
     if (!existing.ok || !existing.value) return { ok: false, where: "sqlite", error: "missing" };
 
@@ -416,9 +577,10 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async getJob(jobId: string): Promise<LoadResult<JobRecord | null>> {
-    const db = await this.dbConn();
     try {
-      const res = await db.query(
+      const res = await dbQuery(
+        DB_NAME,
+        DB_VERSION,
         `SELECT jobId, type, status, payloadJson, progressJson, error, createdAt, updatedAt
          FROM jobs
          WHERE jobId = ?`,
@@ -446,9 +608,10 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async listJobs(type?: JobType): Promise<LoadResult<JobRecord[]>> {
-    const db = await this.dbConn();
     try {
-      const res = await db.query(
+      const res = await dbQuery(
+        DB_NAME,
+        DB_VERSION,
         `SELECT jobId, type, status, payloadJson, progressJson, error, createdAt, updatedAt
          FROM jobs
          ${type ? "WHERE type = ?" : ""}
@@ -474,7 +637,11 @@ export class SqliteStorageDriver implements StorageDriver {
     }
   }
 
-  async setChapterAudioPath(chapterId: string, localPath: string, sizeBytes: number): Promise<SaveResult> {
+  async setChapterAudioPath(
+    chapterId: string,
+    localPath: string,
+    sizeBytes: number
+  ): Promise<SaveResult> {
     const db = await this.dbConn();
     try {
       await db.run(
@@ -492,10 +659,13 @@ export class SqliteStorageDriver implements StorageDriver {
     }
   }
 
-  async getChapterAudioPath(chapterId: string): Promise<LoadResult<{ localPath: string; sizeBytes: number; updatedAt: number } | null>> {
-    const db = await this.dbConn();
+  async getChapterAudioPath(
+    chapterId: string
+  ): Promise<LoadResult<{ localPath: string; sizeBytes: number; updatedAt: number } | null>> {
     try {
-      const res = await db.query(
+      const res = await dbQuery(
+        DB_NAME,
+        DB_VERSION,
         `SELECT localPath, sizeBytes, updatedAt FROM chapter_audio_files WHERE chapterId = ?`,
         [chapterId]
       );
@@ -566,9 +736,10 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async getNextReadyUpload(now: number): Promise<LoadResult<DriveUploadQueuedItem | null>> {
-    const db = await this.dbConn();
     try {
-      const res = await db.query(
+      const res = await dbQuery(
+        DB_NAME,
+        DB_VERSION,
         `SELECT * FROM drive_upload_queue
          WHERE (status = 'queued' OR status = 'failed') AND nextAttemptAt <= ?
          ORDER BY priority DESC, queuedAt ASC, nextAttemptAt ASC
@@ -585,7 +756,7 @@ export class SqliteStorageDriver implements StorageDriver {
           chapterId: String(row.chapterId),
           bookId: String(row.bookId),
           localPath: String(row.localPath),
-          status: String(row.status) as DriveUploadQueuedItem['status'],
+          status: String(row.status) as DriveUploadQueuedItem["status"],
           attempts: Number(row.attempts) || 0,
           nextAttemptAt: Number(row.nextAttemptAt) || 0,
           lastError: row.lastError == null ? undefined : String(row.lastError),
@@ -593,7 +764,8 @@ export class SqliteStorageDriver implements StorageDriver {
           updatedAt: Number(row.updatedAt) || 0,
           priority: Number(row.priority) || 0,
           queuedAt: Number(row.queuedAt) || Number(row.createdAt) || 0,
-          source: row.source == null ? "audio" : String(row.source) as DriveUploadQueuedItem["source"],
+          source:
+            row.source == null ? "audio" : (String(row.source) as DriveUploadQueuedItem["source"]),
           lastAttemptAt: Number(row.lastAttemptAt) || 0,
           manual: row.manual === 1 || row.manual === true,
         },
@@ -653,22 +825,41 @@ export class SqliteStorageDriver implements StorageDriver {
   }
 
   async countQueuedUploads(): Promise<LoadResult<number>> {
-    const db = await this.dbConn();
     try {
-      const res = await db.query(
+      const res = await dbQuery(
+        DB_NAME,
+        DB_VERSION,
         `SELECT COUNT(*) AS cnt FROM drive_upload_queue WHERE status IN ('queued', 'failed')`
       );
       const row = (res.values?.[0] ?? null) as any;
       return { ok: true, where: "sqlite", value: Number(row?.cnt ?? 0) };
     } catch (e: any) {
+      this.invalidateConnectionIfCorruption(e);
+      return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
+    }
+  }
+
+  async hasQueuedUpload(bookId: string, chapterId: string): Promise<LoadResult<boolean>> {
+    try {
+      const res = await dbQuery(
+        DB_NAME,
+        DB_VERSION,
+        `SELECT 1 FROM drive_upload_queue WHERE bookId = ? AND chapterId = ? AND status IN ('queued', 'failed') LIMIT 1`,
+        [bookId, chapterId]
+      );
+      const hasRow = Array.isArray(res?.values) && res.values.length > 0;
+      return { ok: true, where: "sqlite", value: hasRow };
+    } catch (e: any) {
+      this.invalidateConnectionIfCorruption(e);
       return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
     }
   }
 
   async listQueuedUploads(limit?: number): Promise<LoadResult<DriveUploadQueuedItem[]>> {
-    const db = await this.dbConn();
     try {
-      const res = await db.query(
+      const res = await dbQuery(
+        DB_NAME,
+        DB_VERSION,
         `SELECT id, chapterId, bookId, localPath, status, attempts, nextAttemptAt, lastError, createdAt, updatedAt,
                 priority, queuedAt, source, lastAttemptAt, manual
          FROM drive_upload_queue
@@ -690,12 +881,14 @@ export class SqliteStorageDriver implements StorageDriver {
         updatedAt: Number(row.updatedAt) || 0,
         priority: Number(row.priority) || 0,
         queuedAt: Number(row.queuedAt) || Number(row.createdAt) || 0,
-        source: row.source == null ? "audio" : String(row.source) as DriveUploadQueuedItem["source"],
+        source:
+          row.source == null ? "audio" : (String(row.source) as DriveUploadQueuedItem["source"]),
         lastAttemptAt: Number(row.lastAttemptAt) || 0,
         manual: row.manual === 1 || row.manual === true,
       }));
       return { ok: true, where: "sqlite", value: items };
     } catch (e: any) {
+      this.invalidateConnectionIfCorruption(e);
       return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
     }
   }
@@ -726,14 +919,70 @@ export class SqliteStorageDriver implements StorageDriver {
   // Internals
   // -----------------------
 
+  /**
+   * Get DB connection. Always runs migrations on open so a fresh DB (e.g. after plugin wipe)
+   * gets all tables including drive_upload_queue. On corruption-like errors, closes cleanly,
+   * reopens, and runs migrations once before returning.
+   */
   private async dbConn(): Promise<SQLiteDBConnection> {
-    this.db = await getSqliteDb(DB_NAME, DB_VERSION);
-    try {
-      await (this.db as any).open?.();
-    } catch {
-      // open is idempotent; ignore errors like "already open"
+    if (this.db) {
+      await this.runMigrationsWithRecovery();
+      return this.db;
     }
+    this.db = await getSqliteDb(DB_NAME, DB_VERSION);
+    await this.runMigrationsWithRecovery();
     return this.db;
+  }
+
+  /**
+   * Run full migrations (idempotent CREATE TABLE IF NOT EXISTS). If the connection is
+   * invalid (e.g. after plugin corruption wipe), close it, clear cache, reopen, and
+   * run migrations again so the app can continue without restart.
+   */
+  private async runMigrationsWithRecovery(): Promise<void> {
+    if (!this.db) return;
+    try {
+      await this.ensureSchema();
+    } catch (e: any) {
+      const msg = String(e?.message ?? e).toLowerCase();
+      const isCorruption =
+        msg.includes("corruption") ||
+        msg.includes("malformed") ||
+        msg.includes("disk image") ||
+        msg.includes("no such table") ||
+        msg.includes("not opened");
+      if (!isCorruption) throw e;
+      this.invalidateConnection();
+      try {
+        await forceCloseSqliteDb(DB_NAME);
+      } catch {
+        // ignore
+      }
+      this.db = await getSqliteDb(DB_NAME, DB_VERSION);
+      await this.ensureSchema();
+    }
+  }
+
+  /**
+   * Clear cached connection so next dbConn() fetches a new one (e.g. after corruption eviction).
+   * Reduces risk of using a connection that was closed by the connection manager.
+   */
+  private invalidateConnection(): void {
+    this.db = null;
+  }
+
+  /** If the error suggests DB corruption or wipe, clear our cached connection so next use reopens and runs migrations. */
+  private invalidateConnectionIfCorruption(e: any): void {
+    const msg = String(e?.message ?? e).toLowerCase();
+    if (
+      msg.includes("corruption") ||
+      msg.includes("malformed") ||
+      msg.includes("disk image") ||
+      msg.includes("not opened") ||
+      msg.includes("no such table")
+    ) {
+      this.invalidateConnection();
+    }
   }
 
   async updateUploadItem(id: string, patch: Partial<DriveUploadQueuedItem>): Promise<SaveResult> {
@@ -760,149 +1009,39 @@ export class SqliteStorageDriver implements StorageDriver {
       setField("updatedAt", Date.now());
       values.push(id);
 
-      await db.run(
-        `UPDATE drive_upload_queue SET ${fields.join(", ")} WHERE id = ?`,
-        values
-      );
+      await db.run(`UPDATE drive_upload_queue SET ${fields.join(", ")} WHERE id = ?`, values);
       return { ok: true, where: "sqlite" };
     } catch (e: any) {
       return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
     }
   }
 
-  private async ensureSchema(): Promise<void> {
-    const db = await this.dbConn();
-
-    // Keep schema small & clear. We can expand later (offline_cache, books, chapters tables).
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS kv (
-        key TEXT PRIMARY KEY,
-        json TEXT NOT NULL,
-        updatedAt INTEGER NOT NULL
+  private async hasColumn(table: string, column: string): Promise<boolean> {
+    try {
+      const res = await dbQuery(DB_NAME, DB_VERSION, `PRAGMA table_info(${table})`);
+      const rows = Array.isArray(res.values) ? res.values : [];
+      return rows.some(
+        (row: any) => String(row?.name ?? "").toLowerCase() === column.toLowerCase()
       );
-
-      CREATE TABLE IF NOT EXISTS progress (
-        chapterId TEXT PRIMARY KEY,
-        timeSec REAL NOT NULL,
-        durationSec REAL,
-        percent REAL,
-        isComplete INTEGER NOT NULL,
-        updatedAt INTEGER NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS jobs (
-        jobId TEXT PRIMARY KEY,
-        type TEXT,
-        status TEXT,
-        payloadJson TEXT,
-        progressJson TEXT,
-        error TEXT,
-        createdAt INTEGER,
-        updatedAt INTEGER
-      );
-
-      CREATE TABLE IF NOT EXISTS chapter_audio_files (
-        chapterId TEXT PRIMARY KEY,
-        localPath TEXT,
-        sizeBytes INTEGER,
-        updatedAt INTEGER
-      );
-
-      CREATE TABLE IF NOT EXISTS drive_upload_queue (
-        id TEXT PRIMARY KEY,
-        chapterId TEXT,
-        bookId TEXT,
-        localPath TEXT,
-        status TEXT,
-        attempts INTEGER,
-        nextAttemptAt INTEGER,
-        lastError TEXT,
-        createdAt INTEGER,
-        updatedAt INTEGER,
-        priority INTEGER,
-        queuedAt INTEGER,
-        source TEXT,
-        lastAttemptAt INTEGER,
-        manual INTEGER
-      );
-    `);
-
-    await this.db!.execute(LIBRARY_SCHEMA_SQL);
-    try {
-      await this.db!.execute(`ALTER TABLE chapter_text ADD COLUMN localPath TEXT`);
     } catch {
-      // Column already exists
-    }
-    try {
-      await this.db!.execute(`ALTER TABLE chapters ADD COLUMN volumeName TEXT`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      await this.db!.execute(`ALTER TABLE chapters ADD COLUMN volumeLocalChapter INTEGER`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      await this.db!.execute(`ALTER TABLE chapters ADD COLUMN sortOrder INTEGER`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      await this.db!.execute(`UPDATE chapters SET sortOrder = idx WHERE sortOrder IS NULL`);
-    } catch {
-      // best-effort backfill
-    }
-    try {
-      await this.db!.execute(`CREATE INDEX IF NOT EXISTS idx_chapters_book_sort ON chapters(bookId, sortOrder, idx)`);
-    } catch {
-      // best-effort index creation
-    }
-    try {
-      await this.db!.execute(`ALTER TABLE drive_upload_queue ADD COLUMN priority INTEGER`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      await this.db!.execute(`ALTER TABLE drive_upload_queue ADD COLUMN queuedAt INTEGER`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      await this.db!.execute(`ALTER TABLE drive_upload_queue ADD COLUMN source TEXT`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      await this.db!.execute(`ALTER TABLE drive_upload_queue ADD COLUMN lastAttemptAt INTEGER`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      await this.db!.execute(`ALTER TABLE drive_upload_queue ADD COLUMN manual INTEGER`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      await this.db!.execute(`UPDATE drive_upload_queue SET priority = 0 WHERE priority IS NULL`);
-    } catch {
-      // best-effort backfill
-    }
-    try {
-      await this.db!.execute(`UPDATE drive_upload_queue SET queuedAt = createdAt WHERE queuedAt IS NULL`);
-    } catch {
-      // best-effort backfill
+      return false;
     }
   }
 
-  private async loadKvJson<T>(key: string): Promise<LoadResult<T>> {
-    const db = await this.dbConn();
+  private async ensureColumn(table: string, column: string, typeDef: string): Promise<void> {
+    if (await this.hasColumn(table, column)) return;
+    await this.db!.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${typeDef}`);
+  }
 
+  private async ensureSchema(): Promise<void> {
+    const db = this.db ?? (await getSqliteDb(DB_NAME, DB_VERSION));
+    if (!this.db) this.db = db;
+    await runSchemaOnConnection(db);
+  }
+
+  private async loadKvJson<T>(key: string): Promise<LoadResult<T>> {
     try {
-      const res = await db.query(
-        `SELECT json FROM kv WHERE key = ?`,
-        [key]
-      );
+      const res = await dbQuery(DB_NAME, DB_VERSION, `SELECT json FROM kv WHERE key = ?`, [key]);
 
       const row = (res.values?.[0] ?? null) as any;
       if (!row || row.json == null) return { ok: false, where: "sqlite", error: "missing" };
@@ -910,6 +1049,7 @@ export class SqliteStorageDriver implements StorageDriver {
       const parsed = JSON.parse(String(row.json)) as T;
       return { ok: true, where: "sqlite", value: parsed };
     } catch (e: any) {
+      this.invalidateConnectionIfCorruption(e);
       return { ok: false, where: "sqlite", error: e?.message ?? String(e) };
     }
   }

@@ -1,6 +1,9 @@
 import { useMemo } from "react";
 import type { Book, Chapter } from "../../../types";
-import { normalizeChapterOrder, getChapterSortOrder } from "../../../services/chapterOrderingService";
+import {
+  normalizeChapterOrder,
+  getChapterSortOrder,
+} from "../../../services/chapterOrderingService";
 import { useSelectionStore } from "../../../hooks/useSelectionStore";
 
 type VolumeSection = {
@@ -58,7 +61,11 @@ export function useBookState(params: Params) {
       const m = volumeName.match(/^(book|volume)\s*(\d+)/i);
       const volumeNumber = m ? parseInt(m[2], 10) : null;
       const sorted = normalizeChapterOrder(items);
-      return { volumeName, volumeNumber: Number.isFinite(volumeNumber) ? volumeNumber : null, chapters: sorted };
+      return {
+        volumeName,
+        volumeNumber: Number.isFinite(volumeNumber) ? volumeNumber : null,
+        chapters: sorted,
+      };
     });
 
     const explicitOrder = Array.isArray(book.settings?.volumeOrder)
@@ -80,7 +87,12 @@ export function useBookState(params: Params) {
       }
       for (const [volumeName] of Object.entries(collapsedVolumes || {})) {
         const normalized = volumeName.trim();
-        if (!normalized || grouped.has(normalized) || volumes.some((v) => v.volumeName === normalized)) continue;
+        if (
+          !normalized ||
+          grouped.has(normalized) ||
+          volumes.some((v) => v.volumeName === normalized)
+        )
+          continue;
         const m = normalized.match(/^(book|volume)\s*(\d+)/i);
         const volumeNumber = m ? parseInt(m[2], 10) : null;
         volumes.push({
@@ -95,8 +107,12 @@ export function useBookState(params: Params) {
 
     const NONE = 1_000_000_000;
     volumes.sort((a, b) => {
-      const explicitA = explicitOrderMap.has(a.volumeName) ? explicitOrderMap.get(a.volumeName)! : NONE;
-      const explicitB = explicitOrderMap.has(b.volumeName) ? explicitOrderMap.get(b.volumeName)! : NONE;
+      const explicitA = explicitOrderMap.has(a.volumeName)
+        ? explicitOrderMap.get(a.volumeName)!
+        : NONE;
+      const explicitB = explicitOrderMap.has(b.volumeName)
+        ? explicitOrderMap.get(b.volumeName)!
+        : NONE;
       if (explicitA !== explicitB) return explicitA - explicitB;
       const aN = a.volumeNumber ?? NONE;
       const bN = b.volumeNumber ?? NONE;

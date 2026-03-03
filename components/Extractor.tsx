@@ -1,19 +1,28 @@
-
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { Upload, Plus, AlertCircle, Trash2, Sparkles, Headphones, Check, Loader2, Files } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useCallback } from "react";
+import {
+  Upload,
+  Plus,
+  AlertCircle,
+  Trash2,
+  Sparkles,
+  Headphones,
+  Check,
+  Loader2,
+  Files,
+} from "lucide-react";
 import JSZip from "jszip";
-import { Theme, CLOUD_VOICES, Chapter, UiMode } from '../types';
-import { getImportAdapter, PickedFile } from '../services/importAdapter';
-import { computeMobileMode } from '../utils/platform';
-import { detectVolumeMeta } from '../utils/volumeDetection';
-import { JobRunner } from '../src/plugins/jobRunner';
+import { Theme, CLOUD_VOICES, Chapter, UiMode } from "../types";
+import { getImportAdapter, PickedFile } from "../services/importAdapter";
+import { computeMobileMode } from "../utils/platform";
+import { detectVolumeMeta } from "../utils/volumeDetection";
+import { JobRunner } from "../src/plugins/jobRunner";
 
 interface ImporterProps {
-  onChapterExtracted: (data: { 
-    title: string; 
-    content: string; 
+  onChapterExtracted: (data: {
+    title: string;
+    content: string;
     contentFormat?: "text" | "markdown";
-    url: string; 
+    url: string;
     sourceUrl?: string;
     index: number;
     volumeName?: string;
@@ -35,7 +44,7 @@ interface SmartFile {
   fileName: string;
   title: string;
   sourceUrl?: string;
-  status: 'ready' | 'error' | 'uploaded';
+  status: "ready" | "error" | "uploaded";
   content: string;
   contentFormat: "text" | "markdown";
   volumeId: string;
@@ -99,7 +108,8 @@ function buildManifestLookup(chapters: ZipManifestChapter[]): ManifestLookup {
   const orderByFileName = new Map<string, number>();
 
   chapters.forEach((chapter, idx) => {
-    const fileName = typeof chapter.filename === "string" ? getBaseName(chapter.filename).toLowerCase() : "";
+    const fileName =
+      typeof chapter.filename === "string" ? getBaseName(chapter.filename).toLowerCase() : "";
     if (fileName) {
       if (!byFileName.has(fileName)) byFileName.set(fileName, chapter);
       if (!orderByFileName.has(fileName)) orderByFileName.set(fileName, idx);
@@ -113,7 +123,10 @@ function buildManifestLookup(chapters: ZipManifestChapter[]): ManifestLookup {
   return { chapters, byFileName, byChapterIndex, orderByFileName };
 }
 
-function resolveManifestChapter(fileName: string, lookup: ManifestLookup | null): ZipManifestChapter | null {
+function resolveManifestChapter(
+  fileName: string,
+  lookup: ManifestLookup | null
+): ZipManifestChapter | null {
   if (!lookup) return null;
   const base = getBaseName(fileName).toLowerCase();
   const byName = lookup.byFileName.get(base);
@@ -133,18 +146,18 @@ const Extractor: React.FC<ImporterProps> = ({
   existingVolumeNames = [],
   uiMode,
 }) => {
-  const [activeTab, setActiveTab] = useState<'manual' | 'smart'>('manual');
-  
+  const [activeTab, setActiveTab] = useState<"manual" | "smart">("manual");
+
   // Manual Tab State
-  const [title, setTitle] = useState('');
-  const [content, setContent] = useState('');
+  const [title, setTitle] = useState("");
+  const [content, setContent] = useState("");
   const [manualContentFormat, setManualContentFormat] = useState<"text" | "markdown">("text");
   const [chapterNum, setChapterNum] = useState<number>(suggestedIndex);
   const [error, setError] = useState<string | null>(null);
-  const [selectedVoiceId, setSelectedVoiceId] = useState(defaultVoiceId || 'en-US-Standard-C');
+  const [selectedVoiceId, setSelectedVoiceId] = useState(defaultVoiceId || "en-US-Standard-C");
   const [setAsDefault, setSetAsDefault] = useState(false);
   const [options, setOptions] = useState({ removeBlankLines: true, normalizeSeparators: true });
-  
+
   // Smart Bulk Tab State
   const [smartFiles, setSmartFiles] = useState<SmartFile[]>([]);
   const [isProcessingFiles, setIsProcessingFiles] = useState(false);
@@ -178,12 +191,12 @@ const Extractor: React.FC<ImporterProps> = ({
 
   const cleanText = (text: string) => {
     let result = text;
-    result = result.replace(/<[^>]*>?/gm, '');
+    result = result.replace(/<[^>]*>?/gm, "");
     if (options.removeBlankLines) {
-      result = result.replace(/^\s*[\r\n]/gm, '\n').replace(/\n{3,}/g, '\n\n');
+      result = result.replace(/^\s*[\r\n]/gm, "\n").replace(/\n{3,}/g, "\n\n");
     }
     if (options.normalizeSeparators) {
-      result = result.replace(/_{3,}/g, '---').replace(/\*{3,}/g, '***');
+      result = result.replace(/_{3,}/g, "---").replace(/\*{3,}/g, "***");
     }
     return result.trim();
   };
@@ -196,12 +209,12 @@ const Extractor: React.FC<ImporterProps> = ({
       const text = await importAdapter.readText(picked);
       setContent(text);
       setManualContentFormat(detectFormatFromName(picked.name));
-      const guessedTitle = picked.name.replace(/\.(txt|md)$/i, '').replace(/^\d+\s*/, '');
-      setTitle(prev => prev || guessedTitle);
+      const guessedTitle = picked.name.replace(/\.(txt|md)$/i, "").replace(/^\d+\s*/, "");
+      setTitle((prev) => prev || guessedTitle);
       const match = picked.name.match(/^(\d+)/);
       if (match) setChapterNum(parseInt(match[1]));
     } catch (err: any) {
-      setError(err?.message || 'Import failed');
+      setError(err?.message || "Import failed");
     }
   };
 
@@ -216,14 +229,14 @@ const Extractor: React.FC<ImporterProps> = ({
         title: finalTitle,
         content: content,
         contentFormat: manualContentFormat,
-        url: 'text-import',
+        url: "text-import",
         index: chapterNum,
         voiceId: selectedVoiceId,
         setAsDefault: setAsDefault,
-        keepOpen: false
+        keepOpen: false,
       });
-      setTitle('');
-      setContent('');
+      setTitle("");
+      setContent("");
       setManualContentFormat("text");
       setError(null);
     } catch (err: any) {
@@ -276,7 +289,10 @@ const Extractor: React.FC<ImporterProps> = ({
     return [{ id: "ungrouped", name: "Unassigned", number: null }, ...sorted];
   }, [existingChapters, existingVolumeNames]);
 
-  const smartVolumeLookupById = useMemo(() => new Map(smartVolumes.map((v) => [v.id, v] as const)), [smartVolumes]);
+  const smartVolumeLookupById = useMemo(
+    () => new Map(smartVolumes.map((v) => [v.id, v] as const)),
+    [smartVolumes]
+  );
   const smartVolumeLookupByName = useMemo(() => {
     const map = new Map<string, SmartVolume>();
     for (const vol of smartVolumes) {
@@ -295,7 +311,8 @@ const Extractor: React.FC<ImporterProps> = ({
     async (picks: PickedFile[]): Promise<ManifestLookup | null> => {
       const manifestPick =
         picks.find((p) => (p.name || "").trim().toLowerCase() === "talevox_manifest.json") ||
-        picks.find((p) => /manifest.*\.json$/i.test((p.name || "").trim())) ||
+        picks.find((p) => /^(talevox_)?manifest\.(json|txt|md)$/i.test((p.name || "").trim())) ||
+        picks.find((p) => /manifest.*\.(json|txt|md)$/i.test((p.name || "").trim())) ||
         null;
       if (!manifestPick) return null;
 
@@ -312,7 +329,10 @@ const Extractor: React.FC<ImporterProps> = ({
     [importAdapter]
   );
 
-  const parseSmartFile = async (picked: PickedFile, manifestLookup?: ManifestLookup | null): Promise<SmartFile> => {
+  const parseSmartFile = async (
+    picked: PickedFile,
+    manifestLookup?: ManifestLookup | null
+  ): Promise<SmartFile> => {
     const text = await importAdapter.readText(picked);
     const fileName = picked.name || "Untitled.txt";
     const lines = text.split(/\r?\n/);
@@ -467,11 +487,14 @@ const Extractor: React.FC<ImporterProps> = ({
         return;
       }
       const manifestLookup = await readManifestLookupFromPicks(picks);
-      const filtered = picks.filter((p) => (p.name || "").toLowerCase().match(/\.(txt|md|zip|json)$/));
+      const filtered = picks.filter((p) =>
+        (p.name || "").toLowerCase().match(/\.(txt|md|zip|json)$/)
+      );
       const newSmartFiles: SmartFile[] = [];
       for (const p of filtered) {
         const lowerName = (p.name || "").toLowerCase();
         if (lowerName.endsWith(".json")) continue;
+        if (/^(talevox_)?manifest\.(txt|md)$/i.test(lowerName)) continue;
         if ((p.name || "").toLowerCase().endsWith(".zip")) {
           newSmartFiles.push(...(await parseSmartZip(p)));
         } else {
@@ -481,7 +504,7 @@ const Extractor: React.FC<ImporterProps> = ({
       setSmartFiles((prev) => [...prev, ...newSmartFiles]);
       setSmartStep("preview");
     } catch (err: any) {
-      setError(err?.message || 'Import failed');
+      setError(err?.message || "Import failed");
     } finally {
       setIsProcessingFiles(false);
     }
@@ -500,21 +523,24 @@ const Extractor: React.FC<ImporterProps> = ({
         file: f,
       }));
       const manifestLookup = await readManifestLookupFromPicks(picked);
-      const filtered = picked.filter((p) => (p.name || "").toLowerCase().match(/\.(txt|md|zip|json)$/));
+      const filtered = picked.filter((p) =>
+        (p.name || "").toLowerCase().match(/\.(txt|md|zip|json)$/)
+      );
       const newSmartFiles: SmartFile[] = [];
       for (const p of filtered) {
         const lowerName = (p.name || "").toLowerCase();
         if (lowerName.endsWith(".json")) continue;
+        if (/^(talevox_)?manifest\.(txt|md)$/i.test(lowerName)) continue;
         if ((p.name || "").toLowerCase().endsWith(".zip")) {
           newSmartFiles.push(...(await parseSmartZip(p)));
         } else {
           newSmartFiles.push(await parseSmartFile(p, manifestLookup));
         }
       }
-      setSmartFiles(prev => [...prev, ...newSmartFiles]);
+      setSmartFiles((prev) => [...prev, ...newSmartFiles]);
       setSmartStep("preview");
     } catch (err: any) {
-      setError(err?.message || 'Import failed');
+      setError(err?.message || "Import failed");
     } finally {
       setIsProcessingFiles(false);
     }
@@ -624,10 +650,14 @@ const Extractor: React.FC<ImporterProps> = ({
           keepOpen: true,
         });
         completed += 1;
-        setSmartFiles((prev) => prev.map((pf) => (pf.id === f.id ? { ...pf, status: "uploaded" } : pf)));
+        setSmartFiles((prev) =>
+          prev.map((pf) => (pf.id === f.id ? { ...pf, status: "uploaded" } : pf))
+        );
       } catch {
         failed += 1;
-        setSmartFiles((prev) => prev.map((pf) => (pf.id === f.id ? { ...pf, status: "error" } : pf)));
+        setSmartFiles((prev) =>
+          prev.map((pf) => (pf.id === f.id ? { ...pf, status: "error" } : pf))
+        );
       }
       setImportProgress((prev) =>
         prev
@@ -650,7 +680,9 @@ const Extractor: React.FC<ImporterProps> = ({
   };
 
   const moveSmartFileToVolume = (fileId: string, nextVolumeId: string) => {
-    setSmartFiles((prev) => prev.map((f) => (f.id === fileId ? { ...f, volumeId: nextVolumeId } : f)));
+    setSmartFiles((prev) =>
+      prev.map((f) => (f.id === fileId ? { ...f, volumeId: nextVolumeId } : f))
+    );
   };
 
   const applyVolumeToAllSmartFiles = (volumeId: string) => {
@@ -658,7 +690,7 @@ const Extractor: React.FC<ImporterProps> = ({
   };
 
   const removeSmartFile = (id: string) => {
-    setSmartFiles(prev => prev.filter(f => f.id !== id));
+    setSmartFiles((prev) => prev.filter((f) => f.id !== id));
   };
 
   const clearSmart = () => {
@@ -671,29 +703,47 @@ const Extractor: React.FC<ImporterProps> = ({
   // -- Theme helpers --
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
-  const inputBg = isDark ? 'bg-slate-800 text-white border-slate-700' : isSepia ? 'bg-[#efe6d5] text-[#3c2f25] border-[#d8ccb6]' : 'bg-slate-50 text-black border-slate-200';
-  const voiceItemBg = isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-black/10';
-  const tabInactive = isDark ? 'text-slate-500 hover:text-slate-300' : 'text-slate-400 hover:text-slate-600';
-  const tabActive = 'text-indigo-600 border-b-2 border-indigo-600';
+  const inputBg = isDark
+    ? "bg-slate-800 text-white border-slate-700"
+    : isSepia
+      ? "bg-[#efe6d5] text-[#3c2f25] border-[#d8ccb6]"
+      : "bg-slate-50 text-black border-slate-200";
+  const voiceItemBg = isDark ? "bg-slate-800 border-slate-700" : "bg-white border-black/10";
+  const tabInactive = isDark
+    ? "text-slate-500 hover:text-slate-300"
+    : "text-slate-400 hover:text-slate-600";
+  const tabActive = "text-indigo-600 border-b-2 border-indigo-600";
   const importPercent = importProgress
-    ? Math.max(0, Math.min(100, Math.round((importProgress.completed / Math.max(1, importProgress.total)) * 100)))
+    ? Math.max(
+        0,
+        Math.min(
+          100,
+          Math.round((importProgress.completed / Math.max(1, importProgress.total)) * 100)
+        )
+      )
     : 0;
 
   return (
-    <div className={`border rounded-[2.5rem] shadow-2xl overflow-hidden transition-colors duration-500 max-w-4xl mx-auto flex flex-col max-h-[85vh] ${isDark ? 'bg-slate-900 border-white/10' : isSepia ? 'bg-[#f4ecd8] border-[#d8ccb6]' : 'bg-white border-black/10'}`}>
+    <div
+      className={`border rounded-[2.5rem] shadow-2xl overflow-hidden transition-colors duration-500 max-w-4xl mx-auto flex flex-col max-h-[85vh] ${isDark ? "bg-slate-900 border-white/10" : isSepia ? "bg-[#f4ecd8] border-[#d8ccb6]" : "bg-white border-black/10"}`}
+    >
       {/* Header & Tabs */}
-      <div className={`flex-shrink-0 p-6 sm:p-8 pb-0 ${isDark ? 'bg-slate-900' : 'bg-white/50'}`}>
-        <h2 className={`text-2xl font-black tracking-tight mb-6 ${isDark ? 'text-white' : 'text-black'}`}>Add New Chapter</h2>
+      <div className={`flex-shrink-0 p-6 sm:p-8 pb-0 ${isDark ? "bg-slate-900" : "bg-white/50"}`}>
+        <h2
+          className={`text-2xl font-black tracking-tight mb-6 ${isDark ? "text-white" : "text-black"}`}
+        >
+          Add New Chapter
+        </h2>
         <div className="flex gap-8 border-b border-black/10">
-          <button 
-            onClick={() => setActiveTab('manual')} 
-            className={`pb-4 text-xs font-black uppercase tracking-widest transition-all ${activeTab === 'manual' ? tabActive : tabInactive}`}
+          <button
+            onClick={() => setActiveTab("manual")}
+            className={`pb-4 text-xs font-black uppercase tracking-widest transition-all ${activeTab === "manual" ? tabActive : tabInactive}`}
           >
             Manual Input
           </button>
-          <button 
-            onClick={() => setActiveTab('smart')} 
-            className={`pb-4 text-xs font-black uppercase tracking-widest transition-all ${activeTab === 'smart' ? tabActive : tabInactive}`}
+          <button
+            onClick={() => setActiveTab("smart")}
+            className={`pb-4 text-xs font-black uppercase tracking-widest transition-all ${activeTab === "smart" ? tabActive : tabInactive}`}
           >
             Smart Upload
           </button>
@@ -701,7 +751,7 @@ const Extractor: React.FC<ImporterProps> = ({
       </div>
 
       <div className="flex-1 overflow-y-auto p-6 sm:p-8">
-        {activeTab === 'manual' && (
+        {activeTab === "manual" && (
           <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-300">
             {error && (
               <div className="flex items-center gap-3 p-4 bg-red-500/10 border border-red-500/20 text-red-500 rounded-2xl text-xs font-bold">
@@ -711,50 +761,65 @@ const Extractor: React.FC<ImporterProps> = ({
 
             <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
               <div className="md:col-span-3 space-y-2">
-                <label className="text-[10px] font-black uppercase tracking-widest opacity-60">Chapter Title</label>
-                <input 
-                  type="text" 
-                  value={title} 
-                  onChange={(e) => setTitle(e.target.value)} 
-                  placeholder="e.g. Chapter 1: The Beginning" 
-                  className={`w-full px-4 py-4 rounded-xl border outline-none font-black text-sm transition-all focus:ring-2 focus:ring-indigo-500 ${inputBg}`} 
+                <label className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                  Chapter Title
+                </label>
+                <input
+                  type="text"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="e.g. Chapter 1: The Beginning"
+                  className={`w-full px-4 py-4 rounded-xl border outline-none font-black text-sm transition-all focus:ring-2 focus:ring-indigo-500 ${inputBg}`}
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-[10px] font-black uppercase tracking-widest opacity-60">Chapter #</label>
-                <input 
-                  type="number" 
-                  value={chapterNum} 
-                  onChange={(e) => setChapterNum(parseInt(e.target.value) || 0)} 
-                  className={`w-full px-4 py-4 rounded-xl border outline-none font-black text-sm focus:ring-2 focus:ring-indigo-500 ${inputBg}`} 
+                <label className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                  Chapter #
+                </label>
+                <input
+                  type="number"
+                  value={chapterNum}
+                  onChange={(e) => setChapterNum(parseInt(e.target.value) || 0)}
+                  className={`w-full px-4 py-4 rounded-xl border outline-none font-black text-sm focus:ring-2 focus:ring-indigo-500 ${inputBg}`}
                 />
               </div>
             </div>
 
             <div className="space-y-4">
               <div className="flex flex-col gap-2">
-                 <label className="text-[10px] font-black uppercase tracking-widest opacity-60 flex items-center gap-2">
-                   <Headphones className="w-3.5 h-3.5" /> Audio Synthesis Voice
-                 </label>
-                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                    {CLOUD_VOICES.map(v => (
-                      <button 
-                        key={v.id} 
-                        onClick={() => setSelectedVoiceId(v.id)}
-                        className={`flex items-center justify-between px-4 py-3 rounded-xl border-2 text-left transition-all ${selectedVoiceId === v.id ? 'border-indigo-600 bg-indigo-600/5' : 'border-transparent ' + voiceItemBg}`}
-                      >
-                        <span className="text-xs font-black truncate mr-2">{v.name}</span>
-                        {selectedVoiceId === v.id && <Check className="w-4 h-4 text-indigo-600 flex-shrink-0" />}
-                      </button>
-                    ))}
-                 </div>
-                 <label className="mt-2 flex items-center gap-2 cursor-pointer group">
-                   <div className={`w-5 h-5 rounded-md border-2 flex items-center justify-center transition-all ${setAsDefault ? 'bg-indigo-600 border-indigo-600' : 'border-black/10'}`}>
-                     <input type="checkbox" className="hidden" checked={setAsDefault} onChange={e => setSetAsDefault(e.target.checked)} />
-                     {setAsDefault && <Check className="w-3.5 h-3.5 text-white" />}
-                   </div>
-                   <span className="text-[10px] font-black uppercase tracking-widest opacity-60 group-hover:opacity-100">Set as book default</span>
-                 </label>
+                <label className="text-[10px] font-black uppercase tracking-widest opacity-60 flex items-center gap-2">
+                  <Headphones className="w-3.5 h-3.5" /> Audio Synthesis Voice
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                  {CLOUD_VOICES.map((v) => (
+                    <button
+                      key={v.id}
+                      onClick={() => setSelectedVoiceId(v.id)}
+                      className={`flex items-center justify-between px-4 py-3 rounded-xl border-2 text-left transition-all ${selectedVoiceId === v.id ? "border-indigo-600 bg-indigo-600/5" : "border-transparent " + voiceItemBg}`}
+                    >
+                      <span className="text-xs font-black truncate mr-2">{v.name}</span>
+                      {selectedVoiceId === v.id && (
+                        <Check className="w-4 h-4 text-indigo-600 flex-shrink-0" />
+                      )}
+                    </button>
+                  ))}
+                </div>
+                <label className="mt-2 flex items-center gap-2 cursor-pointer group">
+                  <div
+                    className={`w-5 h-5 rounded-md border-2 flex items-center justify-center transition-all ${setAsDefault ? "bg-indigo-600 border-indigo-600" : "border-black/10"}`}
+                  >
+                    <input
+                      type="checkbox"
+                      className="hidden"
+                      checked={setAsDefault}
+                      onChange={(e) => setSetAsDefault(e.target.checked)}
+                    />
+                    {setAsDefault && <Check className="w-3.5 h-3.5 text-white" />}
+                  </div>
+                  <span className="text-[10px] font-black uppercase tracking-widest opacity-60 group-hover:opacity-100">
+                    Set as book default
+                  </span>
+                </label>
               </div>
             </div>
 
@@ -764,31 +829,40 @@ const Extractor: React.FC<ImporterProps> = ({
                   Text Content
                 </label>
                 <div className="flex gap-2">
-                  <button 
-                    onClick={() => { setContent(''); }} 
-                    className={`p-2 rounded-xl transition-all ${isDark ? 'bg-white/5 hover:bg-red-500/20' : 'bg-black/5 hover:bg-red-500/10'}`}
+                  <button
+                    onClick={() => {
+                      setContent("");
+                    }}
+                    className={`p-2 rounded-xl transition-all ${isDark ? "bg-white/5 hover:bg-red-500/20" : "bg-black/5 hover:bg-red-500/10"}`}
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
-                  <button onClick={handleManualPick} className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-[10px] font-black uppercase border transition-all ${isDark ? 'border-slate-700 hover:bg-white/5' : 'border-slate-200 hover:bg-black/5'}`}>
+                  <button
+                    onClick={handleManualPick}
+                    className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-[10px] font-black uppercase border transition-all ${isDark ? "border-slate-700 hover:bg-white/5" : "border-slate-200 hover:bg-black/5"}`}
+                  >
                     <Upload className="w-3.5 h-3.5" /> Upload .TXT/.MD
                   </button>
-                  <button onClick={() => setContent(cleanText(content))} disabled={!content.trim()} className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[10px] font-black uppercase bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition-all shadow-md">
+                  <button
+                    onClick={() => setContent(cleanText(content))}
+                    disabled={!content.trim()}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[10px] font-black uppercase bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition-all shadow-md"
+                  >
                     <Sparkles className="w-3.5 h-3.5" /> Quick Clean
                   </button>
                 </div>
               </div>
-              <textarea 
-                value={content} 
-                onChange={(e) => setContent(e.target.value)} 
-                placeholder="Paste your text content here..." 
-                className={`w-full h-80 px-6 py-6 rounded-3xl focus:ring-2 focus:ring-indigo-500 outline-none font-bold transition-all resize-none leading-relaxed border ${inputBg}`} 
+              <textarea
+                value={content}
+                onChange={(e) => setContent(e.target.value)}
+                placeholder="Paste your text content here..."
+                className={`w-full h-80 px-6 py-6 rounded-3xl focus:ring-2 focus:ring-indigo-500 outline-none font-bold transition-all resize-none leading-relaxed border ${inputBg}`}
               />
             </div>
 
-            <button 
-              onClick={handleAddManual} 
-              disabled={!content.trim() || !selectedVoiceId} 
+            <button
+              onClick={handleAddManual}
+              disabled={!content.trim() || !selectedVoiceId}
               className="w-full py-6 bg-indigo-600 text-white rounded-[1.5rem] font-black uppercase tracking-[0.3em] shadow-2xl hover:bg-indigo-700 transition-all flex items-center justify-center gap-4 active:scale-[0.98] text-sm disabled:opacity-50"
             >
               <Plus className="w-6 h-6" /> SAVE TO COLLECTION
@@ -796,21 +870,32 @@ const Extractor: React.FC<ImporterProps> = ({
           </div>
         )}
 
-        {activeTab === 'smart' && (
+        {activeTab === "smart" && (
           <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300 h-full flex flex-col">
-            <div 
-              className={`border-2 border-dashed rounded-3xl p-8 text-center transition-all cursor-pointer ${isDark ? 'border-slate-700 hover:bg-slate-800' : 'border-slate-300 hover:bg-slate-50'}`}
-              onDragOver={e => e.preventDefault()}
-              onDrop={e => { e.preventDefault(); if (!isMobile && e.dataTransfer?.files?.length) { void handleDroppedFiles(e.dataTransfer.files); } }}
+            <div
+              className={`border-2 border-dashed rounded-3xl p-8 text-center transition-all cursor-pointer ${isDark ? "border-slate-700 hover:bg-slate-800" : "border-slate-300 hover:bg-slate-50"}`}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (!isMobile && e.dataTransfer?.files?.length) {
+                  void handleDroppedFiles(e.dataTransfer.files);
+                }
+              }}
               onClick={handleBulkPick}
             >
               <div className="flex flex-col items-center gap-4">
-                <div className={`p-4 rounded-full ${isDark ? 'bg-indigo-900/30 text-indigo-400' : 'bg-indigo-50 text-indigo-600'}`}>
+                <div
+                  className={`p-4 rounded-full ${isDark ? "bg-indigo-900/30 text-indigo-400" : "bg-indigo-50 text-indigo-600"}`}
+                >
                   <Files className="w-8 h-8" />
                 </div>
                 <div>
-                  <h3 className="text-lg font-black tracking-tight">Drop .txt/.md/.zip files here</h3>
-                  <p className="text-xs font-bold opacity-50 mt-1 uppercase tracking-widest">or click to select multiple files</p>
+                  <h3 className="text-lg font-black tracking-tight">
+                    Drop .txt/.md/.zip files here
+                  </h3>
+                  <p className="text-xs font-bold opacity-50 mt-1 uppercase tracking-widest">
+                    or click to select multiple files
+                  </p>
                 </div>
               </div>
             </div>
@@ -834,12 +919,18 @@ const Extractor: React.FC<ImporterProps> = ({
                     Preview & Edit (manifest chapter indices are used when available)
                   </div>
                   {importProgress ? (
-                    <div className={`rounded-2xl border p-3 space-y-2 ${isDark ? "border-slate-700 bg-slate-900/40" : "border-black/10 bg-white/60"}`}>
+                    <div
+                      className={`rounded-2xl border p-3 space-y-2 ${isDark ? "border-slate-700 bg-slate-900/40" : "border-black/10 bg-white/60"}`}
+                    >
                       <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest">
                         <span>Uploading chapters</span>
-                        <span>{importProgress.completed}/{importProgress.total}</span>
+                        <span>
+                          {importProgress.completed}/{importProgress.total}
+                        </span>
                       </div>
-                      <div className={`h-2 rounded-full overflow-hidden ${isDark ? "bg-slate-800" : "bg-black/10"}`}>
+                      <div
+                        className={`h-2 rounded-full overflow-hidden ${isDark ? "bg-slate-800" : "bg-black/10"}`}
+                      >
                         <div
                           className="h-full bg-indigo-500 transition-all duration-300"
                           style={{ width: `${importPercent}%` }}
@@ -854,10 +945,14 @@ const Extractor: React.FC<ImporterProps> = ({
                     </div>
                   ) : null}
 
-                  <div className={`rounded-2xl border p-3 text-[10px] font-bold ${isDark ? "border-slate-700 bg-slate-900/30" : "border-black/10 bg-white/40"}`}>
+                  <div
+                    className={`rounded-2xl border p-3 text-[10px] font-bold ${isDark ? "border-slate-700 bg-slate-900/30" : "border-black/10 bg-white/40"}`}
+                  >
                     Smart Upload will only assign chapters to existing volumes or Unassigned.
                   </div>
-                  <div className={`rounded-2xl border p-3 space-y-2 ${isDark ? "border-slate-700 bg-slate-900/30" : "border-black/10 bg-white/40"}`}>
+                  <div
+                    className={`rounded-2xl border p-3 space-y-2 ${isDark ? "border-slate-700 bg-slate-900/30" : "border-black/10 bg-white/40"}`}
+                  >
                     <div className="text-[10px] font-black uppercase tracking-widest opacity-60">
                       Assign one volume to all
                     </div>
@@ -890,7 +985,8 @@ const Extractor: React.FC<ImporterProps> = ({
                     const assignedVolume = smartVolumeLookupById.get(f.volumeId);
                     const detectedName = (f.detectedVolumeName || "").trim();
                     const detectedMissing =
-                      detectedName.length > 0 && !smartVolumeLookupByName.has(detectedName.toLowerCase());
+                      detectedName.length > 0 &&
+                      !smartVolumeLookupByName.has(detectedName.toLowerCase());
                     return (
                       <div
                         key={f.id}
@@ -909,13 +1005,16 @@ const Extractor: React.FC<ImporterProps> = ({
                             <div className="mt-1 text-[10px] font-bold opacity-50 truncate">
                               {assignedVolume?.name || "Unassigned"}
                               {f.volumeLocalChapter ? ` - Ch ${f.volumeLocalChapter}` : ""}
-                              {f.manifestChapterIndex ? ` - Manifest ${f.manifestChapterIndex}` : ""}
+                              {f.manifestChapterIndex
+                                ? ` - Manifest ${f.manifestChapterIndex}`
+                                : ""}
                               {" - "}
                               {f.fileName}
                             </div>
                             {detectedMissing ? (
                               <div className="mt-1 text-[10px] font-bold text-amber-500">
-                                Detected "{detectedName}" is not an existing volume. Choose an existing volume or Unassigned.
+                                Detected "{detectedName}" is not an existing volume. Choose an
+                                existing volume or Unassigned.
                               </div>
                             ) : null}
                           </div>
@@ -950,14 +1049,25 @@ const Extractor: React.FC<ImporterProps> = ({
             </div>
 
             <div className="flex justify-between items-center pt-2">
-              <button onClick={clearSmart} className="px-6 py-3 text-xs font-black uppercase tracking-widest opacity-60 hover:opacity-100">Clear List</button>
-              <button 
+              <button
+                onClick={clearSmart}
+                className="px-6 py-3 text-xs font-black uppercase tracking-widest opacity-60 hover:opacity-100"
+              >
+                Clear List
+              </button>
+              <button
                 onClick={handleBulkImport}
-                disabled={isImporting || orderedSmartFiles.filter(f => f.status === 'ready').length === 0}
+                disabled={
+                  isImporting || orderedSmartFiles.filter((f) => f.status === "ready").length === 0
+                }
                 className="px-8 py-4 bg-indigo-600 text-white rounded-xl font-black uppercase tracking-widest shadow-xl hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2"
               >
-                {isImporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
-                Import {orderedSmartFiles.filter(f => f.status === 'ready').length} Files
+                {isImporting ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Upload className="w-4 h-4" />
+                )}
+                Import {orderedSmartFiles.filter((f) => f.status === "ready").length} Files
               </button>
             </div>
           </div>

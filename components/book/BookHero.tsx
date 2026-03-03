@@ -1,5 +1,12 @@
 import React from "react";
-import { Image as ImageIcon, AlertCircle, Cloud, CloudOff, FolderSync, Loader2 } from "lucide-react";
+import {
+  Image as ImageIcon,
+  AlertCircle,
+  Cloud,
+  CloudOff,
+  FolderSync,
+  Loader2,
+} from "lucide-react";
 import type { Book } from "../../types";
 
 type SyncBadge = {
@@ -35,9 +42,7 @@ const syncLabelToIcon = (label: SyncBadge["statusLabel"]) => {
 };
 
 const lastSavedLabel = (timestamp?: number) =>
-  timestamp
-    ? new Date(timestamp).toLocaleTimeString()
-    : "not available yet";
+  timestamp ? new Date(timestamp).toLocaleTimeString() : "not available yet";
 
 const BookHero: React.FC<Props> = ({
   book,

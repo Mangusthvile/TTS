@@ -28,7 +28,9 @@ const ReaderTopBar: React.FC<Props> = ({
   children,
 }) => {
   return (
-    <div className={`mb-10 border-b pb-6 flex justify-between items-end select-none ${theme === Theme.DARK ? 'border-white/10' : theme === Theme.SEPIA ? 'border-black/10' : 'border-black/10'}`}>
+    <div
+      className={`mb-10 border-b pb-6 flex justify-between items-end select-none ${theme === Theme.DARK ? "border-white/10" : theme === Theme.SEPIA ? "border-black/10" : "border-black/10"}`}
+    >
       <div className="flex-1 min-w-0 pr-4">
         <button
           onClick={onBack}
@@ -36,18 +38,25 @@ const ReaderTopBar: React.FC<Props> = ({
         >
           <ChevronLeft className="w-3 h-3" /> Back
         </button>
-        <div className="text-[11px] font-black uppercase tracking-widest text-[color:var(--tvx-accent)] mb-1">Chapter {chapter?.index || 0}</div>
-        <h1 className="text-3xl lg:text-5xl font-black tracking-tight leading-tight truncate heading-font">{chapter?.title || "Untitled"}</h1>
+        <div className="text-[11px] font-black uppercase tracking-widest text-[color:var(--tvx-accent)] mb-1">
+          Chapter {chapter?.index || 0}
+        </div>
+        <h1 className="text-3xl lg:text-5xl font-black tracking-tight leading-tight truncate heading-font">
+          {chapter?.title || "Untitled"}
+        </h1>
         {showHighlightPending && (
-          <div className="mt-2 text-[10px] font-black uppercase tracking-widest" style={{ color: themeMuted }}>
+          <div
+            className="mt-2 text-[10px] font-black uppercase tracking-widest"
+            style={{ color: themeMuted }}
+          >
             Highlight generating...
           </div>
         )}
         {debugMode && (
           <div className="mt-2 text-[10px] font-mono text-indigo-400 flex items-center gap-3">
-            <span>Cues: {cueMeta?.count ?? 'n/a'}</span>
-            <span>Method: {cueMeta?.method ?? 'n/a'}</span>
-            <span>Active idx: {activeCueIndex ?? '--'}</span>
+            <span>Cues: {cueMeta?.count ?? "n/a"}</span>
+            <span>Method: {cueMeta?.method ?? "n/a"}</span>
+            <span>Active idx: {activeCueIndex ?? "--"}</span>
             {onRegenerateCueMap && chapter && (
               <button
                 onClick={onRegenerateCueMap}

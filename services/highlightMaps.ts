@@ -24,7 +24,10 @@ export async function getParagraphMap(chapterId: string): Promise<ParagraphMap |
   return getChapterParagraphMap(chapterId);
 }
 
-export async function saveParagraphMap(chapterId: string, paragraphMap: ParagraphMap): Promise<void> {
+export async function saveParagraphMap(
+  chapterId: string,
+  paragraphMap: ParagraphMap
+): Promise<void> {
   return saveChapterParagraphMap(chapterId, paragraphMap);
 }
 

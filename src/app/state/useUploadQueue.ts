@@ -1,6 +1,11 @@
 import { useCallback, useState } from "react";
 import type { Book, UiMode } from "../../../types";
-import { enqueueUploads, listUploadQueue, countUploadQueue, startUploads } from "../../../services/uploadManager";
+import {
+  enqueueUploads,
+  listUploadQueue,
+  countUploadQueue,
+  startUploads,
+} from "../../../services/uploadManager";
 import { removeQueuedUpload } from "../../../services/uploadQueueStore";
 import type { DriveUploadQueuedItem } from "../../../services/driveUploadQueueService";
 
@@ -14,7 +19,8 @@ export type UploadQueueHookArgs = {
 };
 
 export function useUploadQueue(args: UploadQueueHookArgs) {
-  const { uiMode, books, activeBookId, resolveLocalPathForUpload, uploadChapterNow, pushNotice } = args;
+  const { uiMode, books, activeBookId, resolveLocalPathForUpload, uploadChapterNow, pushNotice } =
+    args;
   const [uploadQueueCount, setUploadQueueCount] = useState(0);
   const [uploadQueueItems, setUploadQueueItems] = useState<DriveUploadQueuedItem[]>([]);
   const [isUploadingAll, setIsUploadingAll] = useState(false);
@@ -80,7 +86,17 @@ export function useUploadQueue(args: UploadQueueHookArgs) {
         }
       }
     },
-    [activeBookId, books, resolveLocalPathForUpload, uploadChapterNow, pushNotice, refreshUploadQueueCount, refreshUploadQueueList, kickUploadQueue, uiMode]
+    [
+      activeBookId,
+      books,
+      resolveLocalPathForUpload,
+      uploadChapterNow,
+      pushNotice,
+      refreshUploadQueueCount,
+      refreshUploadQueueList,
+      kickUploadQueue,
+      uiMode,
+    ]
   );
 
   const handleUploadAllChapters = useCallback(async () => {
@@ -112,15 +128,28 @@ export function useUploadQueue(args: UploadQueueHookArgs) {
     } finally {
       setIsUploadingAll(false);
     }
-  }, [activeBookId, books, resolveLocalPathForUpload, uploadChapterNow, pushNotice, refreshUploadQueueCount, refreshUploadQueueList, kickUploadQueue, uiMode]);
+  }, [
+    activeBookId,
+    books,
+    resolveLocalPathForUpload,
+    uploadChapterNow,
+    pushNotice,
+    refreshUploadQueueCount,
+    refreshUploadQueueList,
+    kickUploadQueue,
+    uiMode,
+  ]);
 
-  const handleDismissQueuedUpload = useCallback(async (id: string) => {
-    const ok = await removeQueuedUpload(id);
-    if (ok) {
-      await refreshUploadQueueCount();
-      await refreshUploadQueueList();
-    }
-  }, [refreshUploadQueueCount, refreshUploadQueueList]);
+  const handleDismissQueuedUpload = useCallback(
+    async (id: string) => {
+      const ok = await removeQueuedUpload(id);
+      if (ok) {
+        await refreshUploadQueueCount();
+        await refreshUploadQueueList();
+      }
+    },
+    [refreshUploadQueueCount, refreshUploadQueueList]
+  );
 
   return {
     uploadQueueCount,

@@ -15,10 +15,7 @@ export type SelectionStore = {
   clear: () => void;
 };
 
-export function useSelectionStore(
-  getVisibleIds: () => string[],
-  enabled: boolean
-): SelectionStore {
+export function useSelectionStore(getVisibleIds: () => string[], enabled: boolean): SelectionStore {
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [anchorId, setAnchorId] = useState<string | null>(null);
@@ -119,7 +116,7 @@ export function useSelectionStore(
       }
       setSelectionMode(true);
       setSelectedIds(new Set(nextIds));
-      setAnchorId((prev) => (prev && nextIds.includes(prev) ? prev : nextIds[0] ?? null));
+      setAnchorId((prev) => (prev && nextIds.includes(prev) ? prev : (nextIds[0] ?? null)));
       anchorRef.current = nextIds[0] ?? null;
     },
     [enabled, selectedIds]
@@ -145,6 +142,17 @@ export function useSelectionStore(
       invert,
       clear,
     }),
-    [selectionMode, selectedIds, anchorId, replace, enterSelection, toggle, rangeSelect, selectAll, invert, clear]
+    [
+      selectionMode,
+      selectedIds,
+      anchorId,
+      replace,
+      enterSelection,
+      toggle,
+      rangeSelect,
+      selectAll,
+      invert,
+      clear,
+    ]
   );
 }

@@ -27,5 +27,10 @@ export interface FolderAdapter {
 
   readText(file: FileRef): Promise<string>;
 
-  writeText(folder: FolderRef, name: string, content: string, existing?: FileRef | null): Promise<FileRef>;
+  writeText(
+    folder: FolderRef,
+    name: string,
+    content: string,
+    existing?: FileRef | null
+  ): Promise<FileRef>;
 }

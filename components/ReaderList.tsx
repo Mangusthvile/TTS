@@ -14,6 +14,7 @@ type Props = {
   onUserScrollingChange?: (v: boolean) => void;
   theme?: Theme;
   spacerClassName?: string;
+  contentLoading?: boolean;
 };
 
 function clamp(n: number, min: number, max: number): number {
@@ -36,10 +37,7 @@ function isSpeakableBlock(block: RenderBlock): boolean {
 
 function findActiveBlockIndex(blocks: RenderBlock[], index: number): number | null {
   const direct = blocks.findIndex(
-    (b) =>
-      isSpeakableBlock(b) &&
-      index >= b.startIndex &&
-      index < b.endIndex
+    (b) => isSpeakableBlock(b) && index >= b.startIndex && index < b.endIndex
   );
   if (direct >= 0) return direct;
 
@@ -70,6 +68,7 @@ const ReaderList: React.FC<Props> = ({
   onUserScrollingChange,
   theme,
   spacerClassName,
+  contentLoading = false,
 }) => {
   const blockRefs = useRef<Array<HTMLElement | null>>([]);
 
@@ -148,8 +147,7 @@ const ReaderList: React.FC<Props> = ({
       if (!item) return false;
       if (!force && isUserScrolling()) return false;
 
-      const anchor =
-        item.querySelector<HTMLElement>("[data-highlight-anchor='true']") ?? item;
+      const anchor = item.querySelector<HTMLElement>("[data-highlight-anchor='true']") ?? item;
       const targetTop = computeTargetTop(container, anchor);
       const anchorY = container.clientHeight * 0.3;
 
@@ -255,7 +253,15 @@ const ReaderList: React.FC<Props> = ({
       if (didScroll) lastFollowedBlockRef.current = activeBlockIndex;
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [followNudge, autoFollow, isScrubbing, activeBlockIndex, scrollToBlock, setUserScrolling, isUserScrolling]);
+  }, [
+    followNudge,
+    autoFollow,
+    isScrubbing,
+    activeBlockIndex,
+    scrollToBlock,
+    setUserScrolling,
+    isUserScrolling,
+  ]);
 
   const dimOthers = activeBlockIndex != null;
 
@@ -312,7 +318,11 @@ const ReaderList: React.FC<Props> = ({
     <div className="whitespace-pre-wrap flex flex-col">
       {blocks.map((block, idx) => {
         const isActiveBlock = idx === activeBlockIndex;
-        const opacityClass = dimOthers ? (isActiveBlock ? "opacity-100" : "opacity-60") : "opacity-100";
+        const opacityClass = dimOthers
+          ? isActiveBlock
+            ? "opacity-100"
+            : "opacity-60"
+          : "opacity-100";
 
         if (block.type === "spacer") {
           return (
@@ -341,7 +351,9 @@ const ReaderList: React.FC<Props> = ({
             >
               <table className="min-w-full border-separate border-spacing-0 text-sm">
                 {headerRow.length > 0 && (
-                  <thead className={`text-[10px] font-black uppercase tracking-widest opacity-80 border-b ${cellBorder}`}>
+                  <thead
+                    className={`text-[10px] font-black uppercase tracking-widest opacity-80 border-b ${cellBorder}`}
+                  >
                     <tr>
                       {headerRow.map((cell, colIdx) => {
                         const cellRange = block.cellRanges?.find(
@@ -351,7 +363,10 @@ const ReaderList: React.FC<Props> = ({
                           ? renderHighlightedText(cell, cellRange.startIndex)
                           : cell;
                         return (
-                          <th key={colIdx} className={`px-4 py-3 text-left whitespace-nowrap border-b ${cellBorder}`}>
+                          <th
+                            key={colIdx}
+                            className={`px-4 py-3 text-left whitespace-nowrap border-b ${cellBorder}`}
+                          >
                             {content}
                           </th>
                         );
@@ -399,7 +414,8 @@ const ReaderList: React.FC<Props> = ({
 
         if (block.type === "heading") {
           const Tag = `h${Math.min(6, Math.max(1, block.level || 1))}` as React.ElementType;
-          const sizeClass = block.level === 1 ? "text-2xl" : block.level === 2 ? "text-xl" : "text-lg";
+          const sizeClass =
+            block.level === 1 ? "text-2xl" : block.level === 2 ? "text-xl" : "text-lg";
           return (
             <Tag
               key={block.id}
@@ -447,7 +463,11 @@ const ReaderList: React.FC<Props> = ({
           </p>
         );
       })}
-      {!blocks.length && <p className="opacity-60">No text</p>}
+      {!blocks.length && (
+        <p className="opacity-60">
+          {contentLoading ? "Loading..." : "No text"}
+        </p>
+      )}
     </div>
   );
 };

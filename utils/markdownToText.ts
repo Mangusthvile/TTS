@@ -20,9 +20,7 @@ const stripMarkdownHeadings = (input: string) => input.replace(/^\s{0,3}#{1,6}\s
 const stripBlockquoteMarkers = (input: string) => input.replace(/^\s{0,3}>\s?/gm, "");
 
 const stripListMarkers = (input: string) =>
-  input
-    .replace(/^\s*[-*+]\s+/gm, "")
-    .replace(/^\s*\d+\.\s+/gm, "");
+  input.replace(/^\s*[-*+]\s+/gm, "").replace(/^\s*\d+\.\s+/gm, "");
 
 const convertLinks = (input: string) => input.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
 
@@ -69,7 +67,9 @@ const convertGfmTables = (input: string) => {
     while (i < lines.length) {
       const rowCells = parseTableRow(lines[i]);
       if (!rowCells) break;
-      const cells = rowCells.map((c) => stripEmphasisMarkers(stripInlineCodeMarkers(convertLinks(c))));
+      const cells = rowCells.map((c) =>
+        stripEmphasisMarkers(stripInlineCodeMarkers(convertLinks(c)))
+      );
 
       if (cells.length === 1) {
         const value = cells[0];

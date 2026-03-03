@@ -1,7 +1,12 @@
 // services/driveFolderAdapter.ts
 
 import type { FolderAdapter, FolderRef, FileRef } from "./folderAdapter";
-import { createDriveFolder, listFilesInFolder, uploadToDrive, fetchDriveFile } from "./driveService";
+import {
+  createDriveFolder,
+  listFilesInFolder,
+  uploadToDrive,
+  fetchDriveFile,
+} from "./driveService";
 
 const DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder";
 
@@ -44,7 +49,7 @@ export function createDriveFolderAdapter(): FolderAdapter {
         id: f.id,
         name: f.name,
         mimeType: f.mimeType,
-        modifiedTime: f.modifiedTime
+        modifiedTime: f.modifiedTime,
       }));
     },
 
@@ -60,7 +65,7 @@ export function createDriveFolderAdapter(): FolderAdapter {
         id: chosen.id,
         name: chosen.name,
         mimeType: chosen.mimeType,
-        modifiedTime: chosen.modifiedTime
+        modifiedTime: chosen.modifiedTime,
       };
     },
 
@@ -68,9 +73,14 @@ export function createDriveFolderAdapter(): FolderAdapter {
       return fetchDriveFile(file.id);
     },
 
-    async writeText(folder: FolderRef, name: string, content: string, existing?: FileRef | null): Promise<FileRef> {
+    async writeText(
+      folder: FolderRef,
+      name: string,
+      content: string,
+      existing?: FileRef | null
+    ): Promise<FileRef> {
       const id = await uploadToDrive(folder.id, name, content, existing?.id, "application/json");
       return { backend: "drive", id, name, mimeType: "application/json" };
-    }
+    },
   };
 }

@@ -1,9 +1,9 @@
-import type { CapacitorConfig } from '@capacitor/cli';
+import type { CapacitorConfig } from "@capacitor/cli";
 
 const config: CapacitorConfig = {
-  appId: 'com.cmwil.talevox',
-  appName: 'TaleVox',
-  webDir: 'dist',
+  appId: "com.cmwil.talevox",
+  appName: "TaleVox",
+  webDir: "dist",
   plugins: {
     SocialLogin: {
       providers: {

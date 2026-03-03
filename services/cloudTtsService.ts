@@ -152,10 +152,7 @@ function stripId3(u8in: Uint8Array): Uint8Array {
   if (u8.length < 10) return u8;
   if (u8[0] === 0x49 && u8[1] === 0x44 && u8[2] === 0x33) {
     const size =
-      ((u8[6] & 0x7f) << 21) |
-      ((u8[7] & 0x7f) << 14) |
-      ((u8[8] & 0x7f) << 7) |
-      (u8[9] & 0x7f);
+      ((u8[6] & 0x7f) << 21) | ((u8[7] & 0x7f) << 14) | ((u8[8] & 0x7f) << 7) | (u8[9] & 0x7f);
     const end = 10 + size;
     if (end < u8.length) return u8.slice(end);
   }
@@ -189,7 +186,10 @@ async function postTts(
 ): Promise<U8> {
   const response = await fetch(endpoint, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": (import.meta as any).env?.VITE_TTS_API_KEY ?? "",
+    },
     body: JSON.stringify({
       text: chunkText,
       voiceName: cloudVoice,
@@ -200,7 +200,8 @@ async function postTts(
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "");
-    const isOversize = response.status === 413 || 
+    const isOversize =
+      response.status === 413 ||
       (response.status === 500 && errText.includes("longer than the limit of 5000 bytes"));
     if (isOversize) {
       throw Object.assign(new Error("TOO_LARGE"), { status: 413, tooLarge: true });
@@ -244,8 +245,20 @@ async function synthesizeWithAdaptiveSplit(
       if (!a || !b) {
         const mid = Math.floor(t.length / 2);
         return [
-          ...(await synthesizeWithAdaptiveSplit(endpoint, t.slice(0, mid).trim(), cloudVoice, speakingRate, depth + 1)),
-          ...(await synthesizeWithAdaptiveSplit(endpoint, t.slice(mid).trim(), cloudVoice, speakingRate, depth + 1)),
+          ...(await synthesizeWithAdaptiveSplit(
+            endpoint,
+            t.slice(0, mid).trim(),
+            cloudVoice,
+            speakingRate,
+            depth + 1
+          )),
+          ...(await synthesizeWithAdaptiveSplit(
+            endpoint,
+            t.slice(mid).trim(),
+            cloudVoice,
+            speakingRate,
+            depth + 1
+          )),
         ];
       }
       return [
@@ -276,7 +289,12 @@ export async function synthesizeChunk(
     let segmentIndex = 0;
     for (let i = 0; i < chunks.length; i++) {
       const baseChunk = chunks[i];
-      const segments = await synthesizeWithAdaptiveSplit(endpoint, baseChunk, cloudVoice, speakingRate);
+      const segments = await synthesizeWithAdaptiveSplit(
+        endpoint,
+        baseChunk,
+        cloudVoice,
+        speakingRate
+      );
       for (const seg of segments) {
         let bytes: Uint8Array = seg;
         if (segmentIndex > 0) bytes = stripId3(bytes);

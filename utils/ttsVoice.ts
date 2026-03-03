@@ -3,7 +3,11 @@ export type TtsProvider = "google" | "openai";
 const OPENAI_PREFIX = "openai:";
 const DEFAULT_GOOGLE_VOICE = "en-US-Standard-C";
 
-export function parseTtsVoiceId(raw?: string | null): { provider: TtsProvider; id: string; raw: string } {
+export function parseTtsVoiceId(raw?: string | null): {
+  provider: TtsProvider;
+  id: string;
+  raw: string;
+} {
   const trimmed = (raw ?? "").trim();
   if (!trimmed) {
     return { provider: "google", id: DEFAULT_GOOGLE_VOICE, raw: DEFAULT_GOOGLE_VOICE };

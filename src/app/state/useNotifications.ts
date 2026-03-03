@@ -1,15 +1,15 @@
-import { useCallback, useEffect, useState } from 'react';
-import { JobRunner } from '../../plugins/jobRunner';
-import { getLogger } from '../../../utils/logger';
+import { useCallback, useEffect, useState } from "react";
+import { JobRunner } from "../../plugins/jobRunner";
+import { getLogger } from "../../../utils/logger";
 
-const jobLog = getLogger('Jobs');
+const jobLog = getLogger("Jobs");
 
 type NotificationStatus = { supported: boolean; granted: boolean; enabled: boolean } | null;
 
 export function useNotifications(
   jobRunnerAvailable: boolean,
   logJobs: boolean,
-  pushNotice: (opts: { message: string; type?: 'info' | 'error' | 'success'; ms?: number }) => void
+  pushNotice: (opts: { message: string; type?: "info" | "error" | "success"; ms?: number }) => void
 ) {
   const [notificationStatus, setNotificationStatus] = useState<NotificationStatus>(null);
 
@@ -21,7 +21,7 @@ export function useNotifications(
       }
       const res = await JobRunner.checkNotificationPermission();
       setNotificationStatus(res);
-      jobLog.info('notifications.status', res);
+      jobLog.info("notifications.status", res);
     } catch {
       setNotificationStatus(null);
     }
@@ -34,39 +34,52 @@ export function useNotifications(
   const handleRequestNotifications = useCallback(async () => {
     try {
       if (!jobRunnerAvailable) {
-        pushNotice({ message: 'Notifications are unavailable on this device.', type: 'error' });
+        pushNotice({ message: "Notifications are unavailable on this device.", type: "error" });
         return;
       }
       await JobRunner.requestNotificationPermission();
       await refreshNotificationStatus();
-      pushNotice({ message: 'Notification permissions updated.', type: 'success' });
+      pushNotice({ message: "Notification permissions updated.", type: "success" });
     } catch (e: any) {
-      pushNotice({ message: e?.message ?? 'Failed to request notifications.', type: 'error' });
+      pushNotice({
+        message:
+          String(e?.message ?? "Failed to request notifications.").trim() || "An error occurred",
+        type: "error",
+      });
     }
   }, [refreshNotificationStatus, pushNotice, jobRunnerAvailable]);
 
   const handleOpenNotificationSettings = useCallback(async () => {
     try {
       if (!jobRunnerAvailable) {
-        pushNotice({ message: 'Notifications are unavailable on this device.', type: 'error' });
+        pushNotice({ message: "Notifications are unavailable on this device.", type: "error" });
         return;
       }
       await JobRunner.openNotificationSettings();
     } catch (e: any) {
-      pushNotice({ message: e?.message ?? 'Unable to open notification settings.', type: 'error' });
+      pushNotice({
+        message:
+          String(e?.message ?? "Unable to open notification settings.").trim() ||
+          "An error occurred",
+        type: "error",
+      });
     }
   }, [jobRunnerAvailable, pushNotice]);
 
   const handleSendTestNotification = useCallback(async () => {
     try {
       if (!jobRunnerAvailable) {
-        pushNotice({ message: 'Notifications are unavailable on this device.', type: 'error' });
+        pushNotice({ message: "Notifications are unavailable on this device.", type: "error" });
         return;
       }
       await JobRunner.sendTestNotification();
-      pushNotice({ message: 'Test notification sent.', type: 'success' });
+      pushNotice({ message: "Test notification sent.", type: "success" });
     } catch (e: any) {
-      pushNotice({ message: e?.message ?? 'Failed to send test notification.', type: 'error' });
+      pushNotice({
+        message:
+          String(e?.message ?? "Failed to send test notification.").trim() || "An error occurred",
+        type: "error",
+      });
     }
   }, [jobRunnerAvailable, pushNotice]);
 

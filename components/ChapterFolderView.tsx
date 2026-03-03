@@ -1,18 +1,60 @@
-import React, { useMemo, useState, useEffect, useCallback, useRef, useTransition } from 'react';
+import React, { useMemo, useState, useEffect, useCallback, useRef, useTransition } from "react";
 import { VariableSizeList, type ListChildComponentProps } from "react-window";
-import { Book, Theme, StorageBackend, Chapter, AudioStatus, CLOUD_VOICES, ScanResult, StrayFile, Rule, UiMode, JobRecord, ChapterIndexConflict } from '../types';
-import { Eye, Plus, Edit2, RefreshCw, Trash2, Headphones, Loader2, Cloud, CloudOff, AlertTriangle, X, RotateCcw, FileX, AlertCircle, Wrench, Check, History, Trash, ChevronDown, ChevronUp, Sparkles, MoreVertical, GripVertical, FolderSync, FolderPlus, Play, Pause } from 'lucide-react';
+import {
+  Book,
+  Theme,
+  StorageBackend,
+  Chapter,
+  AudioStatus,
+  CLOUD_VOICES,
+  ScanResult,
+  StrayFile,
+  FileInRootToMove,
+  Rule,
+  UiMode,
+  JobRecord,
+  ChapterIndexConflict,
+} from "../types";
+import {
+  Eye,
+  Plus,
+  Edit2,
+  RefreshCw,
+  Trash2,
+  Headphones,
+  Loader2,
+  Cloud,
+  CloudOff,
+  AlertTriangle,
+  X,
+  RotateCcw,
+  FileX,
+  AlertCircle,
+  Wrench,
+  Check,
+  History,
+  Trash,
+  ChevronDown,
+  ChevronUp,
+  Sparkles,
+  MoreVertical,
+  GripVertical,
+  FolderSync,
+  FolderPlus,
+  Play,
+  Pause,
+} from "lucide-react";
 import BookTopBar from "./book/BookTopBar";
 import SelectionBar from "./book/SelectionBar";
 import BookHero from "./book/BookHero";
 import BulkActionDock from "./book/BulkActionDock";
 import ChapterList from "./book/ChapterList";
 import ChapterGrid from "./book/ChapterGrid";
-import { hasAudioInCache } from '../services/audioCache';
+import { hasAudioInCache } from "../services/audioCache";
 import { useNotifySimple } from "../hooks/useNotify";
 import { useBookState } from "../src/features/library/BookState";
 import { useSelectionGesture } from "../hooks/useSelectionGesture";
-import { getChapterAudioPath } from '../services/chapterAudioStore';
+import { getChapterAudioPath } from "../services/chapterAudioStore";
 import {
   uploadToDrive,
   listFilesInFolder,
@@ -23,18 +65,18 @@ import {
   copyDriveFile,
   resolveFolderIdByName,
 } from "../services/driveService";
-import { isTokenValid } from '../services/driveAuth';
-import { reflowLineBreaks } from '../services/textFormat';
-import { computeMobileMode } from '../utils/platform';
-import { parseTtsVoiceId } from '../utils/ttsVoice';
-import { yieldToUi } from '../utils/async';
-import { enqueueGenerateAudio, enqueueFixIntegrity } from '../services/jobRunnerService';
-import { generateAndPersistChapterAudio } from '../services/chapterAudioService';
+import { isTokenValid } from "../services/driveAuth";
+import { reflowLineBreaks } from "../services/textFormat";
+import { computeMobileMode } from "../utils/platform";
+import { parseTtsVoiceId } from "../utils/ttsVoice";
+import { yieldToUi } from "../utils/async";
+import { enqueueGenerateAudio, enqueueFixIntegrity } from "../services/jobRunnerService";
+import { generateAndPersistChapterAudio } from "../services/chapterAudioService";
 import { synthesizeChunk } from "../services/cloudTtsService";
 import {
   loadChapterText as libraryLoadChapterText,
   bulkUpsertChapters as libraryBulkUpsertChapters,
-  listChaptersPage as libraryListChaptersPage
+  listChaptersPage as libraryListChaptersPage,
 } from "../services/libraryStore";
 import { initBookFolderManifests } from "../services/bookFolderInit";
 import { createDriveFolderAdapter } from "../services/driveFolderAdapter";
@@ -45,16 +87,26 @@ import {
   getChapterSortOrder,
   normalizeChapterOrder,
 } from "../services/chapterOrderingService";
+import { usePlaybackTick } from "../src/app/state/PlaybackTickContext";
 
-type ViewMode = 'sections' | 'grid';
+type ViewMode = "sections" | "grid";
 type ViewScrollState = { sections: number; grid: number };
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
 const lerp = (start: number, end: number, t: number) => start + (end - start) * t;
 const BULK_ASSIGN_UNASSIGNED = "__unassigned__";
+/** Cap fix log lines during long runs (e.g. 700 chapters) to avoid memory growth and UI freeze. */
+const FIX_LOG_MAX_LINES = 500;
 
 type GroupPos = "single" | "first" | "middle" | "last";
 type SectionListItem =
-  | { type: "volume-header"; id: string; volumeName: string; chapterCount: number; isCollapsed: boolean; groupPos: GroupPos }
+  | {
+      type: "volume-header";
+      id: string;
+      volumeName: string;
+      chapterCount: number;
+      isCollapsed: boolean;
+      groupPos: GroupPos;
+    }
   | { type: "chapter-row"; id: string; chapter: Chapter; fallbackIndex: number; groupPos: GroupPos }
   | { type: "ungrouped-label"; id: string }
   | { type: "spacer"; id: string; size: number }
@@ -62,7 +114,13 @@ type SectionListItem =
 type GroupedSectionItem = Extract<SectionListItem, { groupPos: GroupPos }>;
 
 type GridListItem =
-  | { type: "volume-header"; id: string; volumeName: string; chapterCount: number; isCollapsed: boolean }
+  | {
+      type: "volume-header";
+      id: string;
+      volumeName: string;
+      chapterCount: number;
+      isCollapsed: boolean;
+    }
   | { type: "grid-row"; id: string; chapters: Array<{ chapter: Chapter; localIndex: number }> }
   | { type: "ungrouped-label"; id: string }
   | { type: "spacer"; id: string; size: number }
@@ -85,7 +143,8 @@ const detectChapterIndexConflicts = (chapters: Chapter[]): ChapterIndexConflict[
   const groups = new Map<number, string[]>();
   const ordered = normalizeChapterOrder(chapters || []);
   for (const chapter of ordered) {
-    const normalized = toPositiveIndex(chapter.index);
+    const sortOrder = getChapterSortOrder(chapter);
+    const normalized = toPositiveIndex(sortOrder) ?? toPositiveIndex(chapter.index);
     if (normalized === null) continue;
     const existing = groups.get(normalized);
     if (existing) {
@@ -100,6 +159,22 @@ const detectChapterIndexConflicts = (chapters: Chapter[]): ChapterIndexConflict[
       index,
       chapterIds: ids,
     }));
+};
+
+/** True if chapters have gaps (missing numbers) or duplicates; reindex will fix both. */
+const hasChapterIndexGapsOrDuplicates = (chapters: Chapter[]): boolean => {
+  if (!chapters.length) return false;
+  const ordered = normalizeChapterOrder(chapters || []);
+  const startIndex = Math.max(1, getChapterSortOrder(ordered[0]) || 1);
+  const seen = new Set<number>();
+  for (let i = 0; i < ordered.length; i++) {
+    const sortOrder = getChapterSortOrder(ordered[i]);
+    if (seen.has(sortOrder)) return true;
+    seen.add(sortOrder);
+    const expected = startIndex + i;
+    if (sortOrder !== expected) return true;
+  }
+  return false;
 };
 
 interface ChapterFolderViewProps {
@@ -130,7 +205,9 @@ interface ChapterFolderViewProps {
   onBackToLibrary: () => void;
   onResetChapterProgress: (bookId: string, chapterId: string) => void;
   onAddAttachment?: () => void;
-  playbackSnapshot?: { chapterId: string, percent: number } | null;
+  onOpenAttachments?: () => void;
+  /** Optional; when not provided, read from PlaybackTickContext */
+  playbackSnapshot?: { chapterId: string; percent: number } | null;
   isDirty?: boolean;
   isSyncing: boolean;
   lastSavedAt?: number;
@@ -143,7 +220,7 @@ interface ChapterFolderViewProps {
   onLoadMoreChapters?: () => void;
   hasMoreChapters?: boolean;
   isLoadingMoreChapters?: boolean;
-  
+
   // Optional UI refresh callback
   onAppendChapters?: (chapters: Chapter[]) => void;
   onQueueGenerateJob?: (chapterIds: string[], voiceId?: string) => Promise<boolean>;
@@ -158,9 +235,10 @@ interface ChapterFolderViewProps {
   }>;
   onReindexChapters?: () => Promise<{ updated: number; maxBefore: number; maxAfter: number }>;
   onRegisterBackHandler?: (handler: (() => boolean) | null) => void;
+  onResolveChapterText?: (bookId: string, chapterId: string) => Promise<string | null>;
 }
 
-const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
+const ChapterFolderView: React.FC<ChapterFolderViewProps> = React.memo(({
   book,
   theme,
   globalRules,
@@ -188,7 +266,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   onBackToLibrary,
   onResetChapterProgress,
   onAddAttachment,
-  playbackSnapshot,
+  onOpenAttachments,
+  playbackSnapshot: playbackSnapshotProp,
   isDirty,
   isSyncing,
   lastSavedAt,
@@ -205,7 +284,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   onSyncNativeLibrary,
   onReindexChapters,
   onRegisterBackHandler,
+  onResolveChapterText,
 }) => {
+  const { playbackSnapshot: tickSnapshot } = usePlaybackTick();
+  const playbackSnapshot = playbackSnapshotProp ?? tickSnapshot;
   const { driveFolderId } = book;
   const VIEW_MODE_KEY = `talevox:viewMode:${book.id}`;
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
@@ -223,7 +305,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const coverCollapseRef = useRef(-1);
   const coverRafRef = useRef<number | null>(null);
 
-  useEffect(() => { localStorage.setItem(VIEW_MODE_KEY, viewMode); }, [viewMode, VIEW_MODE_KEY]);
+  useEffect(() => {
+    localStorage.setItem(VIEW_MODE_KEY, viewMode);
+  }, [viewMode, VIEW_MODE_KEY]);
   useEffect(() => {
     const el = listWrapperRef.current;
     if (!el) return;
@@ -248,7 +332,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     if (current === viewMode) return;
     let cancelled = false;
     let timeoutId: number | null = null;
-    const requestIdle = (window as any).requestIdleCallback as undefined | ((cb: () => void, opts?: { timeout?: number }) => number);
+    const requestIdle = (window as any).requestIdleCallback as
+      | undefined
+      | ((cb: () => void, opts?: { timeout?: number }) => number);
     const cancelIdle = (window as any).cancelIdleCallback as undefined | ((id: number) => void);
     const persist = () => {
       if (cancelled) return;
@@ -274,9 +360,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   }, []);
 
   const [editingChapterId, setEditingChapterId] = useState<string | null>(null);
-  const [tempTitle, setTempTitle] = useState('');
+  const [tempTitle, setTempTitle] = useState("");
   const [synthesizingId, setSynthesizingId] = useState<string | null>(null);
-  const [synthesisProgress, setSynthesisProgress] = useState<{ current: number, total: number, message: string } | null>(null);
+  const [synthesisProgress, setSynthesisProgress] = useState<{
+    current: number;
+    total: number;
+    message: string;
+  } | null>(null);
   const [isCheckingDrive, setIsCheckingDrive] = useState(false);
   const [isInitManifests, setIsInitManifests] = useState(false);
   const [lastScan, setLastScan] = useState<ScanResult | null>(null);
@@ -320,10 +410,17 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [searchQuery, setSearchQuery] = useState("");
   const [showSearchBar, setShowSearchBar] = useState(false);
   const [isOrganizeMode, setIsOrganizeMode] = useState(false);
-  const [bulkActionProgress, setBulkActionProgress] = useState<{ label: string; current: number; total: number } | null>(null);
+  const [bulkActionProgress, setBulkActionProgress] = useState<{
+    label: string;
+    current: number;
+    total: number;
+  } | null>(null);
   const [draggingChapterId, setDraggingChapterId] = useState<string | null>(null);
   const [draggingVolumeName, setDraggingVolumeName] = useState<string | null>(null);
-  const [mobileHoldDrag, setMobileHoldDrag] = useState<{ kind: "chapter" | "volume"; id: string } | null>(null);
+  const [mobileHoldDrag, setMobileHoldDrag] = useState<{
+    kind: "chapter" | "volume";
+    id: string;
+  } | null>(null);
   const [mobileMenuId, setMobileMenuId] = useState<string | null>(null);
   const [cachedAudioChapterIds, setCachedAudioChapterIds] = useState<Set<string>>(() => new Set());
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -332,18 +429,25 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const viewScrollRef = useRef<ViewScrollState>({ sections: 0, grid: 0 });
   const lastViewModeRef = useRef<ViewMode>(viewMode);
   const restoreKeyRef = useRef<string | null>(null);
-  const [bgGenProgress, setBgGenProgress] = useState<{ current: number; total: number } | null>(null);
+  const [bgGenProgress, setBgGenProgress] = useState<{ current: number; total: number } | null>(
+    null
+  );
   const [isRegeneratingAudio, setIsRegeneratingAudio] = useState(false);
   const [showBookSettings, setShowBookSettings] = useState(false);
   const [showBookMoreActions, setShowBookMoreActions] = useState(false);
   const [showBookOverflow, setShowBookOverflow] = useState(false);
   const [showSelectionOverflow, setShowSelectionOverflow] = useState(false);
   const [showBulkAssignVolumeModal, setShowBulkAssignVolumeModal] = useState(false);
-  const [bulkAssignVolumeValue, setBulkAssignVolumeValue] = useState<string>(BULK_ASSIGN_UNASSIGNED);
+  const [bulkAssignVolumeValue, setBulkAssignVolumeValue] =
+    useState<string>(BULK_ASSIGN_UNASSIGNED);
   const [showCreateMenu, setShowCreateMenu] = useState(false);
   const organizeHoldTimerRef = useRef<number | null>(null);
   const organizeHoldStartRef = useRef<{ x: number; y: number } | null>(null);
-  const organizeHoldIgnoreTapRef = useRef<{ kind: "chapter" | "volume"; id: string; until: number } | null>(null);
+  const organizeHoldIgnoreTapRef = useRef<{
+    kind: "chapter" | "volume";
+    id: string;
+    until: number;
+  } | null>(null);
   const coverInputRef = useRef<HTMLInputElement | null>(null);
   const shouldIgnoreOrganizeTap = useCallback((kind: "chapter" | "volume", id: string) => {
     const marker = organizeHoldIgnoreTapRef.current;
@@ -363,11 +467,19 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const [fixOptions, setFixOptions] = useState({
     genAudio: false,
     cleanupStrays: false,
+    forceCleanup: false,
     convertLegacy: true,
-    reindex: true
+    moveRootToVolume: true,
+    reindex: true,
+    resequence: false,
   });
   const [isSyncingNative, setIsSyncingNative] = useState(false);
-  const [syncSummary, setSyncSummary] = useState<{ books: number; chapters: number; texts: number; failures: number } | null>(null);
+  const [syncSummary, setSyncSummary] = useState<{
+    books: number;
+    chapters: number;
+    texts: number;
+    failures: number;
+  } | null>(null);
 
   useEffect(() => {
     const raw = book.settings?.collapsedVolumes || {};
@@ -395,11 +507,15 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const isDark = theme === Theme.DARK;
   const isSepia = theme === Theme.SEPIA;
-  const cardSurface = isDark ? 'bg-slate-800' : isSepia ? 'bg-[#f4ecd8]' : 'bg-white';
-  const cardBorder = isDark ? 'border-slate-700' : isSepia ? 'border-[#d8ccb6]' : 'border-black/10';
-  const textSecondary = isDark ? 'text-slate-400' : isSepia ? 'text-[#3c2f25]/70' : 'text-slate-600';
+  const cardSurface = isDark ? "bg-slate-800" : isSepia ? "bg-[#f4ecd8]" : "bg-white";
+  const cardBorder = isDark ? "border-slate-700" : isSepia ? "border-[#d8ccb6]" : "border-black/10";
+  const textSecondary = isDark
+    ? "text-slate-400"
+    : isSepia
+      ? "text-[#3c2f25]/70"
+      : "text-slate-600";
   const subtleText = textSecondary;
-  const stickyHeaderBg = 'glass-header';
+  const stickyHeaderBg = "glass-header";
   const accentButtonClass = `btn-secondary`;
   const primaryActionClass = `btn-primary`;
   const selectionRowClass = "tvx-selected";
@@ -424,11 +540,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const cardPad = "p-4";
   const rowPad = "px-4 py-4";
   const tapTarget = "min-h-[44px] min-w-[44px]";
-  const SelectionCheckbox: React.FC<{ checked: boolean; onToggle: () => void; className?: string }> = ({
-    checked,
-    onToggle,
-    className,
-  }) => {
+  const SelectionCheckbox: React.FC<{
+    checked: boolean;
+    onToggle: () => void;
+    className?: string;
+  }> = ({ checked, onToggle, className }) => {
     return (
       <button
         type="button"
@@ -447,12 +563,18 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     );
   };
   const ListOuterElement = useMemo(() => {
-    return React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(function ListOuterElement(
-      { style, className, ...rest },
-      ref
-    ) {
-      return <div ref={ref} className={className} style={{ ...style, boxSizing: "border-box" }} {...rest} />;
-    });
+    return React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+      function ListOuterElement({ style, className, ...rest }, ref) {
+        return (
+          <div
+            ref={ref}
+            className={className}
+            style={{ ...style, boxSizing: "border-box" }}
+            {...rest}
+          />
+        );
+      }
+    );
   }, []);
   const { derived, selection } = useBookState({
     book,
@@ -525,7 +647,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     if (book.settings?.enableOrganizeMode === false && isOrganizeMode) {
       setIsOrganizeMode(false);
     }
-  }, [book.settings?.enableSelectionMode, book.settings?.enableOrganizeMode, selectionMode, isOrganizeMode, clearSelection]);
+  }, [
+    book.settings?.enableSelectionMode,
+    book.settings?.enableOrganizeMode,
+    selectionMode,
+    isOrganizeMode,
+    clearSelection,
+  ]);
 
   useEffect(() => {
     if (selectionMode) {
@@ -548,7 +676,16 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const gridVolumeHeaderHeight = isMobileInterface ? 44 : 48;
 
   const gridGap = isMobileInterface ? 16 : 18;
-  const gridColumns = listViewport.width >= 1280 ? 6 : listViewport.width >= 1024 ? 5 : listViewport.width >= 768 ? 4 : listViewport.width >= 640 ? 3 : 2;
+  const gridColumns =
+    listViewport.width >= 1280
+      ? 6
+      : listViewport.width >= 1024
+        ? 5
+        : listViewport.width >= 768
+          ? 4
+          : listViewport.width >= 640
+            ? 3
+            : 2;
   const gridCardHeight = isMobileInterface ? 210 : 220;
   const gridRowHeight = gridCardHeight + gridGap;
 
@@ -558,7 +695,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       if (!groupItems.length) return;
       groupItems.forEach((item, idx) => {
         const pos: GroupPos =
-          groupItems.length === 1 ? "single" : idx === 0 ? "first" : idx === groupItems.length - 1 ? "last" : "middle";
+          groupItems.length === 1
+            ? "single"
+            : idx === 0
+              ? "first"
+              : idx === groupItems.length - 1
+                ? "last"
+                : "middle";
         item.groupPos = pos;
       });
       items.push(...groupItems);
@@ -587,7 +730,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         });
       }
       addGroup(groupItems);
-      const hasNextGroup = groupIdx < volumeSections.volumes.length - 1 || volumeSections.ungrouped.length > 0;
+      const hasNextGroup =
+        groupIdx < volumeSections.volumes.length - 1 || volumeSections.ungrouped.length > 0;
       if (hasNextGroup) {
         items.push({ type: "spacer", id: `spacer:vol:${group.volumeName}`, size: spacerHeight });
       }
@@ -614,7 +758,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
 
     return items;
-  }, [volumeSections, collapsedVolumes, isMobileInterface, hasMoreChapters, spacerHeight, labelSpacerHeight]);
+  }, [
+    volumeSections,
+    collapsedVolumes,
+    isMobileInterface,
+    hasMoreChapters,
+    spacerHeight,
+    labelSpacerHeight,
+  ]);
 
   const sectionIndexByChapterId = useMemo(() => {
     const map = new Map<string, number>();
@@ -653,7 +804,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       if (!isCollapsed) {
         addGridRows(`vol:${group.volumeName}`, group.chapters);
       }
-      const hasNextGroup = idx < volumeSections.volumes.length - 1 || volumeSections.ungrouped.length > 0;
+      const hasNextGroup =
+        idx < volumeSections.volumes.length - 1 || volumeSections.ungrouped.length > 0;
       if (hasNextGroup) addSpacer(`spacer:vol:${group.volumeName}`, spacerHeight);
     });
 
@@ -668,7 +820,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
 
     return items;
-  }, [volumeSections, collapsedVolumes, gridColumns, hasMoreChapters, spacerHeight, labelSpacerHeight]);
+  }, [
+    volumeSections,
+    collapsedVolumes,
+    gridColumns,
+    hasMoreChapters,
+    spacerHeight,
+    labelSpacerHeight,
+  ]);
 
   const gridIndexByChapterId = useMemo(() => {
     const map = new Map<string, number>();
@@ -844,7 +1003,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     for (const volumeName of book.settings?.volumeOrder || []) pushName(volumeName);
     for (const chapter of book.chapters || []) pushName((chapter as any)?.volumeName);
     for (const group of volumeSections.volumes) pushName(group.volumeName);
-    return Array.from(values).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }));
+    return Array.from(values).sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: "base", numeric: true })
+    );
   }, [book.chapters, book.settings?.volumeOrder, volumeSections.volumes]);
 
   const openBulkAssignVolumeModal = useCallback(() => {
@@ -904,7 +1065,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       await generateAudio(chapter, book.settings?.defaultVoiceId, { upload: false });
     });
     closeSelectionMode();
-  }, [book.settings?.defaultVoiceId, closeSelectionMode, onQueueGenerateJob, runBulkAction, selectedChapterList]);
+  }, [
+    book.settings?.defaultVoiceId,
+    closeSelectionMode,
+    onQueueGenerateJob,
+    runBulkAction,
+    selectedChapterList,
+  ]);
 
   const handleBulkMarkCompleted = useCallback(async () => {
     const now = Date.now();
@@ -915,7 +1082,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         isCompleted: true,
         progress: 1,
         progressChars: textLen,
-        progressSec: typeof chapter.durationSec === "number" ? chapter.durationSec : chapter.progressSec,
+        progressSec:
+          typeof chapter.durationSec === "number" ? chapter.durationSec : chapter.progressSec,
         updatedAt: now,
       };
     });
@@ -940,27 +1108,38 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     closeSelectionMode();
   }, [closeSelectionMode, persistChapters, selectedChapterList]);
 
-  const handleBulkAssignVolume = useCallback(async (nextValue: string) => {
-    if (!selectedChapterList.length) return;
-    const normalized = nextValue === BULK_ASSIGN_UNASSIGNED ? "" : nextValue.trim();
-    const nextVolumeName = normalized || undefined;
-    const now = Date.now();
-    const updated = selectedChapterList.map((chapter) => ({
-      ...chapter,
-      volumeName: nextVolumeName,
-      volumeLocalChapter: undefined,
-      updatedAt: now,
-    }));
-    await persistChapters(updated);
-    if (nextVolumeName) {
-      const current = Array.isArray(book.settings?.volumeOrder) ? [...book.settings.volumeOrder] : [];
-      if (!current.includes(nextVolumeName)) {
-        upsertBookSettings({ volumeOrder: [...current, nextVolumeName] });
+  const handleBulkAssignVolume = useCallback(
+    async (nextValue: string) => {
+      if (!selectedChapterList.length) return;
+      const normalized = nextValue === BULK_ASSIGN_UNASSIGNED ? "" : nextValue.trim();
+      const nextVolumeName = normalized || undefined;
+      const now = Date.now();
+      const updated = selectedChapterList.map((chapter) => ({
+        ...chapter,
+        volumeName: nextVolumeName,
+        volumeLocalChapter: undefined,
+        updatedAt: now,
+      }));
+      await persistChapters(updated);
+      if (nextVolumeName) {
+        const current = Array.isArray(book.settings?.volumeOrder)
+          ? [...book.settings.volumeOrder]
+          : [];
+        if (!current.includes(nextVolumeName)) {
+          upsertBookSettings({ volumeOrder: [...current, nextVolumeName] });
+        }
       }
-    }
-    setShowBulkAssignVolumeModal(false);
-    closeSelectionMode();
-  }, [book.settings?.volumeOrder, closeSelectionMode, persistChapters, selectedChapterList, upsertBookSettings]);
+      setShowBulkAssignVolumeModal(false);
+      closeSelectionMode();
+    },
+    [
+      book.settings?.volumeOrder,
+      closeSelectionMode,
+      persistChapters,
+      selectedChapterList,
+      upsertBookSettings,
+    ]
+  );
 
   const handleBulkDelete = useCallback(async () => {
     if (!selectedChapterList.length) return;
@@ -1001,7 +1180,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         .filter((chapter) => (chapter.volumeName || "").trim() === oldName)
         .map((chapter) => ({ ...chapter, volumeName: nextName, updatedAt: now }));
       await persistChapters(updates);
-      const volumeOrder = Array.isArray(book.settings?.volumeOrder) ? [...book.settings.volumeOrder] : [];
+      const volumeOrder = Array.isArray(book.settings?.volumeOrder)
+        ? [...book.settings.volumeOrder]
+        : [];
       const replaced = volumeOrder.map((name) => (name === oldName ? nextName : name));
       upsertBookSettings({ volumeOrder: Array.from(new Set(replaced)) });
       setCollapsedVolumes((prev) => {
@@ -1023,7 +1204,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       const now = Date.now();
       const updates = chapters
         .filter((chapter) => (chapter.volumeName || "").trim() === volumeName)
-        .map((chapter) => ({ ...chapter, volumeName: undefined, volumeLocalChapter: undefined, updatedAt: now }));
+        .map((chapter) => ({
+          ...chapter,
+          volumeName: undefined,
+          volumeLocalChapter: undefined,
+          updatedAt: now,
+        }));
       await persistChapters(updates);
       const order = (book.settings?.volumeOrder || []).filter((name) => name !== volumeName);
       const nextCollapsed = { ...(book.settings?.collapsedVolumes || {}) };
@@ -1031,7 +1217,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       upsertBookSettings({ volumeOrder: order, collapsedVolumes: nextCollapsed });
       setCollapsedVolumes(nextCollapsed);
     },
-    [book.settings?.collapsedVolumes, book.settings?.volumeOrder, chapters, persistChapters, upsertBookSettings]
+    [
+      book.settings?.collapsedVolumes,
+      book.settings?.volumeOrder,
+      chapters,
+      persistChapters,
+      upsertBookSettings,
+    ]
   );
 
   const reorderVolumes = useCallback(
@@ -1112,7 +1304,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     await moveChapterToVolume(mobileHoldDrag.id, undefined);
     setMobileHoldDrag(null);
     pushNotice("Chapter moved to ungrouped.", "success", 1100);
-  }, [chapters, isMobileInterface, isOrganizeMode, mobileHoldDrag, moveChapterToVolume, pushNotice]);
+  }, [
+    chapters,
+    isMobileInterface,
+    isOrganizeMode,
+    mobileHoldDrag,
+    moveChapterToVolume,
+    pushNotice,
+  ]);
 
   const reorderWithinVolume = useCallback(
     async (sourceChapterId: string, targetChapterId: string) => {
@@ -1205,11 +1404,17 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       return !bookId || bookId === book.id;
     });
   }, [jobs, book.id]);
+
+  const activeGenJob = useMemo(() => {
+    const gens = (bookJobs || []).filter((j) => {
+      if (j.type !== "generateAudio" && j.type !== "generate_book_audio") return false;
+      return ["queued", "running", "paused", "failed"].includes(j.status);
+    });
+    if (!gens.length) return null;
+    return gens.slice().sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  }, [bookJobs]);
   const hasInFlightBookJobs = useMemo(
-    () =>
-      (bookJobs || []).some((job) =>
-        job.status === "queued" || job.status === "running"
-      ),
+    () => (bookJobs || []).some((job) => job.status === "queued" || job.status === "running"),
     [bookJobs]
   );
   const hasPausedBookJobs = useMemo(
@@ -1254,7 +1459,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     if (fixJobId) {
       return (bookJobs || []).find((j) => j.jobId === fixJobId) || null;
     }
-    return (bookJobs || []).find((j) => j.type === "fixIntegrity" && (j.status === "queued" || j.status === "running" || j.status === "paused")) || null;
+    return (
+      (bookJobs || []).find(
+        (j) =>
+          j.type === "fixIntegrity" &&
+          (j.status === "queued" || j.status === "running" || j.status === "paused")
+      ) || null
+    );
   }, [bookJobs, fixJobId]);
 
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
@@ -1267,29 +1478,43 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     const el = loadMoreSentinelRef.current;
     if (!el) return;
 
-    const obs = new IntersectionObserver((entries) => {
-      const first = entries[0];
-      if (first?.isIntersecting && !isLoadingMoreChapters) {
-        onLoadMoreChapters();
-      }
-    }, { rootMargin: '200px' });
+    const obs = new IntersectionObserver(
+      (entries) => {
+        const first = entries[0];
+        if (first?.isIntersecting && !isLoadingMoreChapters) {
+          onLoadMoreChapters();
+        }
+      },
+      { rootMargin: "200px" }
+    );
 
     obs.observe(el);
     return () => obs.disconnect();
   }, [useVirtualization, hasMoreChapters, onLoadMoreChapters, isLoadingMoreChapters]);
 
-  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
-    if (useVirtualization) return;
-    const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
-    viewScrollRef.current[viewMode] = scrollTop;
-    onScrollPositionChange?.(scrollTop);
-    applyCoverCollapse(scrollTop);
-    if (scrollHeight - scrollTop - clientHeight < 200) {
-      if (hasMoreChapters && !isLoadingMoreChapters && onLoadMoreChapters) {
-        onLoadMoreChapters();
+  const handleScroll = useCallback(
+    (e: React.UIEvent<HTMLDivElement>) => {
+      if (useVirtualization) return;
+      const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
+      viewScrollRef.current[viewMode] = scrollTop;
+      onScrollPositionChange?.(scrollTop);
+      applyCoverCollapse(scrollTop);
+      if (scrollHeight - scrollTop - clientHeight < 200) {
+        if (hasMoreChapters && !isLoadingMoreChapters && onLoadMoreChapters) {
+          onLoadMoreChapters();
+        }
       }
-    }
-  }, [useVirtualization, hasMoreChapters, isLoadingMoreChapters, onLoadMoreChapters, onScrollPositionChange, viewMode, applyCoverCollapse]);
+    },
+    [
+      useVirtualization,
+      hasMoreChapters,
+      isLoadingMoreChapters,
+      onLoadMoreChapters,
+      onScrollPositionChange,
+      viewMode,
+      applyCoverCollapse,
+    ]
+  );
 
   useEffect(() => {
     lastViewModeRef.current = viewMode;
@@ -1321,12 +1546,15 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   useEffect(() => {
     if (!chapters.length) return;
     if (restoreScrollTop == null && !restoreChapterId && restoreChapterIndex == null) return;
+    const restoreTargetToken =
+      restoreChapterId ?? (restoreChapterIndex != null ? String(restoreChapterIndex) : "none");
+    const includeVisibleCountForRestore = !!restoreChapterId || restoreChapterIndex != null;
     const key = [
       book.id,
       viewMode,
       restoreScrollTop ?? "none",
-      restoreChapterId ?? restoreChapterIndex ?? "none",
-      visibleChapters.length,
+      restoreTargetToken,
+      includeVisibleCountForRestore ? visibleChapters.length : "stable",
       useVirtualization ? "virtual" : "dom",
     ].join("|");
     if (restoreKeyRef.current === key) return;
@@ -1430,7 +1658,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         book,
         rootFolderId: driveFolderId,
         rootFolderName: (book as any).driveFolderName ?? book.title,
-        adapter
+        adapter,
       });
 
       const total = res.inventory.expectedTotal ?? res.inventory.chapters.length;
@@ -1465,6 +1693,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     (scan.missingTextIds.length > 0 ||
       scan.missingAudioIds.length > 0 ||
       scan.strayFiles.length > 0 ||
+      (scan.filesInRootToMove?.length ?? 0) > 0 ||
       (scan as any).legacyCount > 0 ||
       (scan as any).unlinkedNewFormatCount > 0 ||
       (scan.indexConflicts?.length ?? 0) > 0);
@@ -1486,13 +1715,18 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       const rootFiles = await listFilesInFolder(driveFolderId);
 
       // 2. Identify subfolders
-      const rootSubfolders = rootFiles.filter((f) => f.mimeType === "application/vnd.google-apps.folder");
+      const rootSubfolders = rootFiles.filter(
+        (f) => f.mimeType === "application/vnd.google-apps.folder"
+      );
       const skipSubfolders = new Set(["attachments", "trash"]);
 
-      let allFiles = [...rootFiles];
+      let allFiles: (StrayFile & { parentFolderId?: string })[] = rootFiles.map((f) => ({
+        ...f,
+        parentFolderId: driveFolderId,
+      }));
       let metaFiles: StrayFile[] = [];
 
-      // 3. Recursively scan subfolders and combine files
+      // 3. Recursively scan subfolders and combine files (tag each file with parent folder id)
       const folderQueue = rootSubfolders.map((folder) => ({
         id: folder.id,
         name: folder.name?.trim() || "",
@@ -1512,7 +1746,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         try {
           const subFiles = await listFilesInFolder(folder.id);
           for (const subFile of subFiles) {
-            allFiles.push(subFile);
+            allFiles.push({ ...subFile, parentFolderId: folder.id });
             if (subFile.mimeType === "application/vnd.google-apps.folder") {
               folderQueue.push({
                 id: subFile.id,
@@ -1538,7 +1772,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         metaFiles = await listFilesInFolder(metaFolder.id);
       }
 
-      const inventoryFile = metaFiles.find(f => f.name === "inventory.json");
+      const inventoryFile = metaFiles.find((f) => f.name === "inventory.json");
       if (!inventoryFile) {
         throw new Error("inventory.json not found in meta folder.");
       }
@@ -1579,25 +1813,25 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       let dedupeCounter = 0;
       for (const [name, files] of filesByName) {
-          if (isCancelled()) return null;
-          if (dedupeCounter % 60 === 0) {
-            await yieldToUi();
+        if (isCancelled()) return null;
+        if (dedupeCounter % 60 === 0) {
+          await yieldToUi();
+        }
+        dedupeCounter += 1;
+        if (files.length === 1) {
+          driveFiles.push(files[0]);
+        } else {
+          // Sort newest first
+          files.sort((a, b) => {
+            const tA = Date.parse(a.modifiedTime || "") || 0;
+            const tB = Date.parse(b.modifiedTime || "") || 0;
+            return tB - tA;
+          });
+          driveFiles.push(files[0]); // Keep newest
+          for (let i = 1; i < files.length; i++) {
+            duplicateStrays.push(files[i]);
           }
-          dedupeCounter += 1;
-          if (files.length === 1) {
-              driveFiles.push(files[0]);
-          } else {
-              // Sort newest first
-              files.sort((a, b) => {
-                  const tA = Date.parse(a.modifiedTime || '') || 0;
-                  const tB = Date.parse(b.modifiedTime || '') || 0;
-                  return tB - tA;
-              });
-              driveFiles.push(files[0]); // Keep newest
-              for (let i = 1; i < files.length; i++) {
-                  duplicateStrays.push(files[i]);
-              }
-          }
+        }
       }
 
       const hasName = (name: string) => (filesByName.get(name)?.length || 0) > 0;
@@ -1671,7 +1905,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       // Group legacy by prefix
       const legacyMap = new Map<string, LegacyGroup>();
-      const legacyFiles: Array<{ file: StrayFile; idx: number; slug: string; type: "text" | "audio" }> = [];
+      const legacyFiles: Array<{
+        file: StrayFile;
+        idx: number;
+        slug: string;
+        type: "text" | "audio";
+      }> = [];
 
       let driveFileCounter = 0;
       for (const f of driveFiles) {
@@ -1693,8 +1932,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           f.name === "manifest.json" ||
           f.name === "book.json" ||
           f.name === "inventory.json" ||
-          f.name.startsWith('_')
-        ) continue;
+          f.name.startsWith("_")
+        )
+          continue;
 
         const leg = f.name.match(legacyRegex);
         if (leg) {
@@ -1704,14 +1944,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           const key = `${idx}_${slug}`;
           const type = ext === "txt" ? "text" : "audio";
           legacyFiles.push({ file: f, idx, slug, type });
-          
+
           let group = legacyMap.get(key);
           if (!group) {
             group = { legacyIndex: idx, slug, text: undefined, audio: undefined };
             legacyMap.set(key, group);
           }
-          if (ext === 'txt') group.text = f;
-          if (ext === 'mp3') group.audio = f;
+          if (ext === "txt") group.text = f;
+          if (ext === "mp3") group.audio = f;
           continue;
         }
 
@@ -1722,8 +1962,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
         trueStrays.push(f);
       }
-      
-      const legacyGroupsList = Array.from(legacyMap.values()).sort((a,b) => a.legacyIndex - b.legacyIndex);
+
+      const legacyGroupsList = Array.from(legacyMap.values()).sort(
+        (a, b) => a.legacyIndex - b.legacyIndex
+      );
 
       setLegacyGroups(legacyGroupsList);
       setUnlinkedNewFormatFiles(unlinkedMatches);
@@ -1782,7 +2024,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           }
         }
 
-        if ((!legacyTextCandidate || !legacyAudioCandidate) && titleSlug && legacyBySlug.has(titleSlug)) {
+        if (
+          (!legacyTextCandidate || !legacyAudioCandidate) &&
+          titleSlug &&
+          legacyBySlug.has(titleSlug)
+        ) {
           const bySlug = legacyBySlug.get(titleSlug)!;
           if (!legacyTextCandidate) {
             const textNewest = newestFile(bySlug.text);
@@ -1835,10 +2081,37 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         }
       }
 
+      // Files in book root that should be in a volume subfolder (by inventory)
+      const nameToChapterVolume = new Map<string, { chapterId: string; volumeName: string }>();
+      for (const ch of inventory.chapters) {
+        if (!ch.chapterId) continue;
+        const vol =
+          typeof (ch as any).volumeName === "string" && (ch as any).volumeName.trim()
+            ? (ch as any).volumeName.trim()
+            : null;
+        if (!vol) continue;
+        nameToChapterVolume.set(`c_${ch.chapterId}.txt`, { chapterId: ch.chapterId, volumeName: vol });
+        nameToChapterVolume.set(`c_${ch.chapterId}.md`, { chapterId: ch.chapterId, volumeName: vol });
+        nameToChapterVolume.set(`c_${ch.chapterId}.mp3`, { chapterId: ch.chapterId, volumeName: vol });
+      }
+      const filesInRootToMove: FileInRootToMove[] = [];
+      for (const f of driveFiles) {
+        if (f.mimeType === "application/vnd.google-apps.folder") continue;
+        if ((f as StrayFile & { parentFolderId?: string }).parentFolderId !== driveFolderId) continue;
+        const info = nameToChapterVolume.get(f.name);
+        if (info)
+          filesInRootToMove.push({
+            file: f,
+            targetVolumeName: info.volumeName,
+            chapterId: info.chapterId,
+          });
+      }
+
       const scan: ScanResult = {
         missingTextIds,
         missingAudioIds,
         strayFiles: trueStrays,
+        filesInRootToMove,
         duplicates,
         totalChecked: inventory.chapters.length,
         expectedChapters: inventory.chapters.length,
@@ -1860,11 +2133,15 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       setMissingAudioIds(scan.missingAudioIds);
       setLastDriveFiles(allFiles);
       if (!safeToCleanup) {
-        pushNotice("Not safe to cleanup. Some inventory chapters cannot be recovered yet.", "error", 6000);
+        pushNotice(
+          "Not safe to cleanup. Some inventory chapters cannot be recovered yet.",
+          "error",
+          6000
+        );
       }
       return scan;
     } catch (e: any) {
-      pushNotice("Integrity check failed: " + (e?.message || String(e)), 'error', 6000);
+      pushNotice("Integrity check failed: " + (e?.message || String(e)), "error", 6000);
       return null;
     } finally {
       setIsCheckingDrive(false);
@@ -1878,20 +2155,20 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     try {
       const allChapters = await fetchAllChapters();
       if (isCancelled()) return null;
-      
+
       // Update title cache
       const titleMap: Record<string, string> = {};
-      allChapters.forEach(c => titleMap[c.id] = c.title);
+      allChapters.forEach((c) => (titleMap[c.id] = c.title));
       setScanTitles(titleMap);
 
-    const scan: ScanResult = {
-      missingTextIds: [],
-      missingAudioIds: [],
-      strayFiles: [],
-      duplicates: [],
-      totalChecked: allChapters.length,
-      indexConflicts: detectChapterIndexConflicts(book.chapters || []),
-    };
+      const scan: ScanResult = {
+        missingTextIds: [],
+        missingAudioIds: [],
+        strayFiles: [],
+        duplicates: [],
+        totalChecked: allChapters.length,
+        indexConflicts: detectChapterIndexConflicts(book.chapters || []),
+      };
 
       let chapterCounter = 0;
       for (const chapter of allChapters) {
@@ -1918,7 +2195,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
         onUpdateChapter({
           ...chapter,
-          audioStatus: audioOk ? AudioStatus.READY : AudioStatus.PENDING
+          audioStatus: audioOk ? AudioStatus.READY : AudioStatus.PENDING,
         });
       }
 
@@ -1951,15 +2228,20 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     const missingText = scan.missingTextIds.length;
     const missingAudio = scan.missingAudioIds.length;
     const strays = scan.strayFiles.length;
+    const inRootCount = scan.filesInRootToMove?.length ?? 0;
     const legacyCount = Number((scan as any).legacyCount || 0);
     const unlinkedCount = Number((scan as any).unlinkedNewFormatCount || 0);
 
-    if (missingText || missingAudio || strays || legacyCount || unlinkedCount) {
-      pushNotice(
-        `Found issues: ${missingText} missing text, ${missingAudio} missing audio, ${strays} stray, ${legacyCount} legacy, ${unlinkedCount} unlinked.`,
-        "info",
-        6000
-      );
+    if (missingText || missingAudio || strays || inRootCount || legacyCount || unlinkedCount) {
+      const parts = [
+        missingText ? `${missingText} missing text` : "",
+        missingAudio ? `${missingAudio} missing audio` : "",
+        strays ? `${strays} stray` : "",
+        inRootCount ? `${inRootCount} in root` : "",
+        legacyCount ? `${legacyCount} legacy` : "",
+        unlinkedCount ? `${unlinkedCount} unlinked` : "",
+      ].filter(Boolean);
+      pushNotice(`Found issues: ${parts.join(", ")}.`, "info", 6000);
     } else {
       pushNotice("All good - nothing to fix.", "success", 2500);
     }
@@ -1967,7 +2249,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   const handleToggleOrganize = useCallback(() => {
     if (book.settings?.enableOrganizeMode === false) {
-      pushNotice("Organize mode disabled in Book Settings.", "info");
+      pushNotice("Organize mode disabled in Book Options.", "info");
       return;
     }
     setIsOrganizeMode((v) => !v);
@@ -2007,7 +2289,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   const generateAudio = async (
     chapter: Chapter,
     voiceIdOverride?: string,
-    options?: { upload?: boolean }
+    options?: { upload?: boolean; onLog?: (message: string) => void }
   ): Promise<boolean> => {
     if (synthesizingId) return false;
 
@@ -2029,20 +2311,35 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       const shouldUpload =
         options?.upload ?? (book.backend === StorageBackend.DRIVE && !!book.driveFolderId);
 
+      const resolvedContentRaw =
+        (onResolveChapterText
+          ? await onResolveChapterText(book.id, chapter.id)
+          : chapter.content || (await libraryLoadChapterText(book.id, chapter.id)) || "") ?? "";
+      const resolvedContent = typeof resolvedContentRaw === "string" ? resolvedContentRaw : "";
+      const chapterForGeneration: Chapter =
+        resolvedContent.trim().length > 0
+          ? {
+              ...chapter,
+              content: resolvedContent,
+              textLength:
+                typeof chapter.textLength === "number" && chapter.textLength > 0
+                  ? chapter.textLength
+                  : resolvedContent.length,
+            }
+          : chapter;
+
       setSynthesisProgress({ current: 0, total: 1, message: "Synthesizing audio..." });
       await generateAndPersistChapterAudio({
         book,
-        chapter,
+        chapter: chapterForGeneration,
         voiceId: selectedVoiceId,
-        playbackSpeed: book.settings?.useBookSettings
-          ? book.settings?.playbackSpeed ?? 1.0
-          : 1.0,
+        playbackSpeed: book.settings?.useBookSettings ? (book.settings?.playbackSpeed ?? 1.0) : 1.0,
         rules: [...(globalRules || []), ...(book.rules || [])],
         reflowLineBreaksEnabled,
         uiMode,
         isAuthorized: isTokenValid(),
         uploadToCloud: shouldUpload,
-        loadChapterText: async () => chapter.content || (await libraryLoadChapterText(book.id, chapter.id)) || "",
+        loadChapterText: async () => resolvedContent,
         onChapterUpdated: async (updatedChapter) => {
           onUpdateChapter(updatedChapter);
         },
@@ -2057,7 +2354,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         updatedAt: Date.now(),
       });
 
-      alert(err?.message || "Audio generation failed");
+      const chapterLabel = chapter.title || chapter.id;
+      const message = String(err?.message ?? "Audio generation failed");
+      options?.onLog?.(`Failed to generate audio for "${chapterLabel}": ${message}`);
+      pushNotice(`Audio generation failed for "${chapterLabel}": ${message}`, "error", 5000);
       return false;
     } finally {
       setSynthesizingId(null);
@@ -2083,9 +2383,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     try {
       for (const chapter of chapters) {
         await generateAudio(chapter, undefined, { upload: false });
-        setBgGenProgress((p) =>
-          p ? { ...p, current: Math.min(p.total, p.current + 1) } : null
-        );
+        setBgGenProgress((p) => (p ? { ...p, current: Math.min(p.total, p.current + 1) } : null));
       }
       pushNotice("Audio generation complete.", "success");
     } catch (e: any) {
@@ -2100,14 +2398,22 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       includeConversions?: boolean;
       includeGeneration?: boolean;
       includeCleanup?: boolean;
+      forceCleanup?: boolean;
       includeReindex?: boolean;
+      includeResequence?: boolean;
     }) => {
       const scan = lastScan;
       if (!scan || !lastInventory) {
         return {
-          conversions: [] as Array<{ chapterId: string; type: "text" | "audio"; source: StrayFile; targetName: string }>,
+          conversions: [] as Array<{
+            chapterId: string;
+            type: "text" | "audio";
+            source: StrayFile;
+            targetName: string;
+          }>,
           generationIds: [] as string[],
           cleanup: [] as StrayFile[],
+          moveRootToVolume: [] as FileInRootToMove[],
           safeToCleanup: false,
           indexConflicts: [],
           reindex: false,
@@ -2117,13 +2423,20 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       const includeConversions = options?.includeConversions ?? true;
       const includeGeneration = options?.includeGeneration ?? true;
       const includeCleanup = options?.includeCleanup ?? true;
+      const forceCleanup = options?.forceCleanup ?? false;
       const includeReindex = options?.includeReindex ?? true;
+      const includeResequence = options?.includeResequence ?? false;
 
       const nameSet = new Set(lastDriveFiles.map((f) => f.name).filter(Boolean));
       const hasName = (name: string) => nameSet.has(name);
       const legacyCandidates = scan.legacyRecoveryCandidates ?? {};
 
-      const conversions: Array<{ chapterId: string; type: "text" | "audio"; source: StrayFile; targetName: string }> = [];
+      const conversions: Array<{
+        chapterId: string;
+        type: "text" | "audio";
+        source: StrayFile;
+        targetName: string;
+      }> = [];
 
       if (includeConversions) {
         for (const chapterId of scan.missingTextIds) {
@@ -2167,8 +2480,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       const cleanup: StrayFile[] = [];
       const safeToCleanup = !!scan.safeToCleanup;
+      const cleanupAllowed = safeToCleanup || forceCleanup;
 
-      if (includeCleanup && safeToCleanup) {
+      if (includeCleanup && cleanupAllowed) {
         for (const f of scan.strayFiles || []) {
           if (f.mimeType === "application/vnd.google-apps.folder") continue;
           if (!f.name) continue;
@@ -2177,9 +2491,23 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       }
 
       const indexConflicts = scan.indexConflicts ?? [];
-      const reindex = includeReindex && indexConflicts.length > 0;
+      const hasGapsOrDupes = hasChapterIndexGapsOrDuplicates(book.chapters ?? []);
+      const reindex =
+        (includeReindex && (indexConflicts.length > 0 || hasGapsOrDupes)) ||
+        options?.includeResequence === true;
 
-      return { conversions, generationIds, cleanup, safeToCleanup, indexConflicts, reindex };
+      const moveRootToVolume = (scan.filesInRootToMove ?? []) as FileInRootToMove[];
+
+      return {
+        conversions,
+        generationIds,
+        cleanup,
+        moveRootToVolume,
+        safeToCleanup,
+        cleanupAllowed,
+        indexConflicts,
+        reindex,
+      };
     },
     [lastDriveFiles, lastInventory, lastScan]
   );
@@ -2189,23 +2517,27 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     abortFixRef.current = false;
     setFixLog([]);
     let errorCount = 0;
+    const pushLog = (msg: string) => setFixLog((prev) => [...prev, msg].slice(-FIX_LOG_MAX_LINES));
 
     const plan = buildFixPlan({
       includeConversions: fixOptions.convertLegacy,
       includeGeneration: fixOptions.genAudio,
       includeCleanup: fixOptions.cleanupStrays,
+      forceCleanup: fixOptions.forceCleanup,
       includeReindex: fixOptions.reindex,
+      includeResequence: fixOptions.resequence,
     });
 
     const totalSteps =
       (plan.reindex ? 1 : 0) +
       plan.conversions.length +
       plan.generationIds.length +
-      (plan.safeToCleanup ? plan.cleanup.length : 0);
+      (fixOptions.moveRootToVolume ? (plan.moveRootToVolume?.length ?? 0) : 0) +
+      (plan.cleanupAllowed ? plan.cleanup.length : 0);
 
     setFixProgress({ current: 0, total: totalSteps });
 
-    const bump = () => setFixProgress(p => ({ ...p, current: p.current + 1 }));
+    const bump = () => setFixProgress((p) => ({ ...p, current: p.current + 1 }));
 
     try {
       // Fetch all chapters to ensure we can fix items not currently in UI
@@ -2213,17 +2545,16 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
       if (plan.reindex) {
         if (abortFixRef.current) {
-          setFixLog((prev) => [...prev, "Reindex aborted by user."]);
+          pushLog("Reindex aborted by user.");
         } else {
-          setFixLog((prev) => [...prev, "Renumbering chapters to eliminate duplicate indexes."]);
+          pushLog("Renumbering chapters to eliminate duplicate indexes.");
           const summary = await fixChapterOrdering(book.id, allChapters);
           if (summary.chapters.length) {
             await persistChapters(summary.chapters);
           }
-          setFixLog((prev) => [
-            ...prev,
-            `Reindexed ${summary.updated} chapter${summary.updated === 1 ? "" : "s"} (${summary.maxBefore} -> ${summary.maxAfter}).`,
-          ]);
+          pushLog(
+            `Reindexed ${summary.updated} chapter${summary.updated === 1 ? "" : "s"} (${summary.maxBefore} -> ${summary.maxAfter}).`
+          );
           bump();
         }
       }
@@ -2240,11 +2571,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               await yieldToUi();
             }
             localCounter += 1;
-            const ch = allChapters.find(c => c.id === chapterId);
+            const ch = allChapters.find((c) => c.id === chapterId);
             if (!ch) continue;
 
-            setFixLog(prev => [...prev, `Generate audio: ${ch.title}`]);
-            await generateAudio(ch);
+            pushLog(`Generate audio: ${ch.title}`);
+            const success = await generateAudio(ch, undefined, { upload: false, onLog: pushLog });
+            if (!success) errorCount++;
             bump();
           }
         }
@@ -2266,16 +2598,17 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         fixOptions.genAudio &&
         !fixOptions.convertLegacy &&
         !fixOptions.cleanupStrays &&
-        !fixOptions.reindex &&
         plan.generationIds.length > 0;
 
       if (canQueueBackgroundFix) {
-        setFixLog(prev => [...prev, `Queued background fix job`]);
+        pushLog(
+          plan.reindex
+            ? "Queued background generation stage after reindex."
+            : "Queued background fix job"
+        );
         try {
           const voiceId =
-            book.settings?.defaultVoiceId ||
-            book.settings?.selectedVoiceName ||
-            "en-US-Standard-C";
+            book.settings?.defaultVoiceId || book.settings?.selectedVoiceName || "en-US-Standard-C";
           const parsedVoice = parseTtsVoiceId(voiceId);
           const res = await enqueueFixIntegrity(
             {
@@ -2284,12 +2617,12 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               options: {
                 genAudio: fixOptions.genAudio,
                 cleanupStrays: fixOptions.cleanupStrays,
-                convertLegacy: fixOptions.convertLegacy
+                convertLegacy: fixOptions.convertLegacy,
               },
               voice: { id: parsedVoice.id, provider: parsedVoice.provider },
               settings: {
                 playbackSpeed: book.settings?.useBookSettings
-                  ? book.settings?.playbackSpeed ?? 1.0
+                  ? (book.settings?.playbackSpeed ?? 1.0)
                   : 1.0,
               },
             },
@@ -2302,7 +2635,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           pushNotice("Fix started in background. Progress is shown here.", "success", 3000);
         } catch (e: any) {
           errorCount++;
-          setFixLog(prev => [...prev, `Failed to queue background fix job: ${String(e?.message ?? e)}`]);
+          pushLog(`Failed to queue background fix job: ${String(e?.message ?? e)}`);
           pushNotice("Failed to queue background fix job.", "error", 5000);
         }
         return;
@@ -2318,22 +2651,38 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           await yieldToUi();
         }
         conversionCounter += 1;
-        setFixLog(prev => [...prev, `Copy legacy ${conversion.type}: ${conversion.targetName}`]);
+        pushLog(`Copy legacy ${conversion.type}: ${conversion.targetName}`);
         try {
           const ch = chaptersById.get(conversion.chapterId);
           const targetFolderId =
-            ch && driveFolderId ? await ensureChapterDriveStorageFolder(driveFolderId, ch) : driveFolderId;
-          const newId = await copyDriveFile(conversion.source.id, targetFolderId, conversion.targetName);
+            ch && driveFolderId
+              ? await ensureChapterDriveStorageFolder(driveFolderId, ch)
+              : driveFolderId;
+          const newId = await copyDriveFile(
+            conversion.source.id,
+            targetFolderId,
+            conversion.targetName
+          );
           if (ch) {
             if (conversion.type === "text") {
-              onUpdateChapter({ ...ch, cloudTextFileId: newId, hasTextOnDrive: true, updatedAt: Date.now() } as any);
+              onUpdateChapter({
+                ...ch,
+                cloudTextFileId: newId,
+                hasTextOnDrive: true,
+                updatedAt: Date.now(),
+              } as any);
             } else {
-              onUpdateChapter({ ...ch, cloudAudioFileId: newId, audioStatus: AudioStatus.READY, updatedAt: Date.now() } as any);
+              onUpdateChapter({
+                ...ch,
+                cloudAudioFileId: newId,
+                audioStatus: AudioStatus.READY,
+                updatedAt: Date.now(),
+              } as any);
             }
           }
         } catch {
           errorCount++;
-          setFixLog(p => [...p, `Failed to copy legacy ${conversion.targetName}`]);
+          pushLog(`Failed to copy legacy ${conversion.targetName}`);
         }
         bump();
       }
@@ -2346,19 +2695,22 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         }
         genCounter += 1;
         const ch = chaptersById.get(chapterId);
-        if (!ch) { bump(); continue; }
-        setFixLog(prev => [...prev, `Generating missing audio: ${ch.title}`]);
-        const success = await generateAudio(ch, undefined, { upload: true });
+        if (!ch) {
+          bump();
+          continue;
+        }
+        pushLog(`Generating missing audio: ${ch.title}`);
+        const success = await generateAudio(ch, undefined, { upload: true, onLog: pushLog });
         if (!success) errorCount++;
         bump();
       }
 
-      // 3) Cleanup (only when safeToCleanup)
-      if (fixOptions.cleanupStrays && plan.safeToCleanup) {
+      // 3) Cleanup (safe or force-override)
+      if (fixOptions.cleanupStrays && plan.cleanupAllowed) {
         if (abortFixRef.current) {
-          setFixLog(p => [...p, "Cleanup aborted by user."]);
+          pushLog("Cleanup aborted by user.");
         } else if (errorCount > 0) {
-          setFixLog(p => [...p, "SKIPPING CLEANUP: Errors occurred during restoration."]);
+          pushLog("SKIPPING CLEANUP: Errors occurred during restoration.");
           pushNotice("Cleanup skipped for safety due to errors.", "error");
         } else {
           let cleanupCounter = 0;
@@ -2368,14 +2720,39 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               await yieldToUi();
             }
             cleanupCounter += 1;
-            setFixLog(prev => [...prev, `Trashing stray file: ${stray.name}`]);
+            setFixLog((prev) => [...prev, `Trashing stray file: ${stray.name}`]);
             try {
               await moveFileToTrash(stray.id);
             } catch {
-              setFixLog(p => [...p, `Failed to trash ${stray.name}`]);
+              pushLog(`Failed to trash ${stray.name}`);
             }
             bump();
           }
+        }
+      }
+
+      // 4) Move files from root into their volume subfolders
+      if (fixOptions.moveRootToVolume && plan.moveRootToVolume?.length && driveFolderId) {
+        let moveCounter = 0;
+        for (const entry of plan.moveRootToVolume) {
+          if (abortFixRef.current) break;
+          if (moveCounter % 10 === 0) await yieldToUi();
+          moveCounter += 1;
+          setFixLog((prev) => [
+            ...prev,
+            `Moving ${entry.file.name} → ${entry.targetVolumeName}`,
+          ]);
+          try {
+            const volumeFolderId = await ensureChapterDriveStorageFolder(driveFolderId, {
+              volumeName: entry.targetVolumeName,
+            });
+            if (volumeFolderId && volumeFolderId !== driveFolderId) {
+              await moveFile(entry.file.id, driveFolderId, volumeFolderId);
+            }
+          } catch (e: any) {
+            pushLog(`Failed to move ${entry.file.name}: ${e?.message ?? e}`);
+          }
+          bump();
         }
       }
 
@@ -2421,45 +2798,57 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     setShowVoiceModal(null);
   }, [stopVoicePreview]);
 
-  const currentDefaultVoiceId = (book.settings?.defaultVoiceId || book.settings?.selectedVoiceName || "").trim();
+  const currentDefaultVoiceId = (
+    book.settings?.defaultVoiceId ||
+    book.settings?.selectedVoiceName ||
+    ""
+  ).trim();
   const currentDefaultVoiceName = useMemo(() => {
     if (!currentDefaultVoiceId) return "Not set";
-    return CLOUD_VOICES.find((voice) => voice.id === currentDefaultVoiceId)?.name || currentDefaultVoiceId;
+    return (
+      CLOUD_VOICES.find((voice) => voice.id === currentDefaultVoiceId)?.name ||
+      currentDefaultVoiceId
+    );
   }, [currentDefaultVoiceId]);
 
-  const handlePreviewVoice = useCallback(async (voiceId: string) => {
-    if (previewPlayingVoiceId === voiceId) {
-      stopVoicePreview();
-      return;
-    }
-    if (previewLoadingVoiceId) return;
-
-    stopVoicePreview();
-    const runId = previewRunIdRef.current;
-    setPreviewLoadingVoiceId(voiceId);
-    try {
-      const previewText = "Hi, this is your TaleVox voice preview.";
-      const preview = await synthesizeChunk(previewText, voiceId, 1.0);
-      if (runId !== previewRunIdRef.current) return;
-      // Copy into a concrete ArrayBuffer so BlobPart typing stays compatible across TS lib targets.
-      const previewBuffer = new ArrayBuffer(preview.mp3Bytes.byteLength);
-      new Uint8Array(previewBuffer).set(preview.mp3Bytes);
-      const url = URL.createObjectURL(new Blob([previewBuffer], { type: preview.mime || "audio/mpeg" }));
-      previewAudioUrlRef.current = url;
-      const audio = new Audio(url);
-      previewAudioRef.current = audio;
-      audio.onended = () => stopVoicePreview();
-      setPreviewPlayingVoiceId(voiceId);
-      await audio.play();
-    } catch (err: any) {
-      stopVoicePreview();
-      pushNotice(`Voice test failed: ${String(err?.message ?? err)}`, "error", 4000);
-    } finally {
-      if (runId === previewRunIdRef.current) {
-        setPreviewLoadingVoiceId((current) => (current === voiceId ? null : current));
+  const handlePreviewVoice = useCallback(
+    async (voiceId: string) => {
+      if (previewPlayingVoiceId === voiceId) {
+        stopVoicePreview();
+        return;
       }
-    }
-  }, [previewLoadingVoiceId, previewPlayingVoiceId, pushNotice, stopVoicePreview]);
+      if (previewLoadingVoiceId) return;
+
+      stopVoicePreview();
+      const runId = previewRunIdRef.current;
+      setPreviewLoadingVoiceId(voiceId);
+      try {
+        const previewText = "Hi, this is your TaleVox voice preview.";
+        const preview = await synthesizeChunk(previewText, voiceId, 1.0);
+        if (runId !== previewRunIdRef.current) return;
+        // Copy into a concrete ArrayBuffer so BlobPart typing stays compatible across TS lib targets.
+        const previewBuffer = new ArrayBuffer(preview.mp3Bytes.byteLength);
+        new Uint8Array(previewBuffer).set(preview.mp3Bytes);
+        const url = URL.createObjectURL(
+          new Blob([previewBuffer], { type: preview.mime || "audio/mpeg" })
+        );
+        previewAudioUrlRef.current = url;
+        const audio = new Audio(url);
+        previewAudioRef.current = audio;
+        audio.onended = () => stopVoicePreview();
+        setPreviewPlayingVoiceId(voiceId);
+        await audio.play();
+      } catch (err: any) {
+        stopVoicePreview();
+        pushNotice(`Voice test failed: ${String(err?.message ?? err)}`, "error", 4000);
+      } finally {
+        if (runId === previewRunIdRef.current) {
+          setPreviewLoadingVoiceId((current) => (current === voiceId ? null : current));
+        }
+      }
+    },
+    [previewLoadingVoiceId, previewPlayingVoiceId, pushNotice, stopVoicePreview]
+  );
 
   const handleVoiceSelect = (voiceId: string) => {
     const chId = showVoiceModal?.chapterId;
@@ -2468,7 +2857,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     }
     handleCloseVoiceModal();
     if (chId) {
-      const chapter = chapters.find(c => c.id === chId);
+      const chapter = chapters.find((c) => c.id === chId);
       if (!chapter) return;
 
       // Mobile: queue background job instead of inline synthesis
@@ -2758,14 +3147,16 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     };
   }, [clearOrganizeHoldTimer]);
 
-  const ChapterRow: React.FC<{ chapter: Chapter; fallbackIndex: number; style?: React.CSSProperties }> = ({
-    chapter,
-    fallbackIndex,
-    style,
-  }) => {
+  const ChapterRow: React.FC<{
+    chapter: Chapter;
+    fallbackIndex: number;
+    style?: React.CSSProperties;
+  }> = ({ chapter, fallbackIndex, style }) => {
     const displayIndex = getDisplayIndex(
       chapter,
-      Number.isFinite(Number(chapter.index)) && Number(chapter.index) > 0 ? Number(chapter.index) : fallbackIndex
+      Number.isFinite(Number(chapter.index)) && Number(chapter.index) > 0
+        ? Number(chapter.index)
+        : fallbackIndex
     );
     const displayTitle = getDisplayTitle(chapter, displayIndex);
     const isCompleted = chapter.isCompleted || false;
@@ -2865,7 +3256,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             </span>
             <div className="flex-1 min-w-0 flex flex-col gap-1">
               {isEditing ? (
-                <div className="flex items-center gap-2 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
+                <div
+                  className="flex items-center gap-2 flex-1 min-w-0"
+                  onClick={(e) => e.stopPropagation()}
+                >
                   <input
                     autoFocus
                     type="text"
@@ -2909,7 +3303,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                 </div>
               )}
               <div className={`h-0.5 w-full ${isDark ? "bg-slate-700" : "bg-black/5"}`}>
-                <div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${percent}%` }} />
+                <div
+                  className="h-full bg-indigo-500 transition-all duration-300"
+                  style={{ width: `${percent}%` }}
+                />
               </div>
             </div>
             <span
@@ -2936,55 +3333,125 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
   };
 
   const MobileChapterMenu = ({ chapterId }: { chapterId: string }) => {
-    const ch = chapters.find(c => c.id === chapterId);
-    const [editTitle, setEditTitle] = useState(false);
-    const [editValue, setEditValue] = useState("");
+    const ch = chapters.find((c) => c.id === chapterId);
+    const [editChapter, setEditChapter] = useState(false);
+    const [editTitle, setEditTitle] = useState("");
+    const [editIndex, setEditIndex] = useState<number>(1);
     if (!ch) return null;
     const handleStartEdit = () => {
-      setEditValue(String(ch.title ?? "").trim() || "");
-      setEditTitle(true);
+      setEditTitle(String(ch.title ?? "").trim() || "");
+      setEditIndex(getChapterSortOrder(ch) || ch.index || 1);
+      setEditChapter(true);
     };
     const handleSaveEdit = () => {
-      if (editValue.trim() !== String(ch.title ?? "").trim()) {
-        onUpdateChapterTitle(ch.id, editValue.trim());
+      const titleChanged = editTitle.trim() !== String(ch.title ?? "").trim();
+      const safeIndex = Math.min(999999, Math.max(1, editIndex));
+      const indexChanged = safeIndex !== (getChapterSortOrder(ch) || ch.index || 1);
+      if (titleChanged || indexChanged) {
+        onUpdateChapter({
+          ...ch,
+          title: editTitle.trim() || ch.title || "",
+          sortOrder: safeIndex,
+          index: safeIndex,
+          updatedAt: Date.now(),
+        });
       }
-      setEditTitle(false);
+      setEditChapter(false);
       setMobileMenuId(null);
     };
     return (
-      <div className="fixed inset-0 z-[110] flex items-end sm:items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => { setMobileMenuId(null); setEditTitle(false); }}>
-        <div className={`w-full max-w-sm rounded-[2rem] shadow-2xl p-6 overflow-hidden animate-in slide-in-from-bottom-4 duration-200 ${isDark ? 'bg-slate-900 border border-white/10' : 'bg-white'}`} onClick={e => e.stopPropagation()}>
-           <div className="flex justify-between items-center mb-6">
-              <h3 className="text-sm font-black uppercase tracking-widest opacity-60">Chapter Options</h3>
-              <button onClick={() => { setMobileMenuId(null); setEditTitle(false); }} className="p-2 opacity-40"><X className="w-5 h-5" /></button>
-           </div>
-           <div className="space-y-2">
-              {editTitle ? (
-                <div className="space-y-3" onClick={e => e.stopPropagation()}>
+      <div
+        className="fixed inset-0 z-[110] flex items-end sm:items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        onClick={() => {
+          setMobileMenuId(null);
+          setEditChapter(false);
+        }}
+      >
+        <div
+          className={`w-full max-w-sm rounded-[2rem] shadow-2xl p-6 overflow-hidden animate-in slide-in-from-bottom-4 duration-200 ${isDark ? "bg-slate-900 border border-white/10" : "bg-white"}`}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex justify-between items-center mb-6">
+            <h3 className="text-sm font-black uppercase tracking-widest opacity-60">
+              Chapter Options
+            </h3>
+            <button
+              onClick={() => {
+                setMobileMenuId(null);
+                setEditChapter(false);
+              }}
+              className="p-2 opacity-40"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+          <div className="space-y-2">
+            {editChapter ? (
+              <div className="space-y-3" onClick={(e) => e.stopPropagation()}>
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider opacity-60 mb-1">
+                    Chapter number
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={editIndex}
+                    onChange={(e) =>
+                      setEditIndex(Math.min(999999, Math.max(1, parseInt(e.target.value, 10) || 1)))
+                    }
+                    className={`w-full px-4 py-3 rounded-xl border text-sm font-bold ${isDark ? "bg-slate-800 border-slate-600 text-white" : "bg-white border-black/10 text-black"}`}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider opacity-60 mb-1">
+                    Title
+                  </label>
                   <input
                     autoFocus
                     type="text"
-                    value={editValue}
-                    onChange={e => setEditValue(e.target.value)}
-                    onKeyDown={e => { if (e.key === "Enter") handleSaveEdit(); if (e.key === "Escape") { setEditTitle(false); setMobileMenuId(null); } }}
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleSaveEdit();
+                      if (e.key === "Escape") {
+                        setEditChapter(false);
+                        setMobileMenuId(null);
+                      }
+                    }}
                     className={`w-full px-4 py-3 rounded-xl border text-sm font-bold ${isDark ? "bg-slate-800 border-slate-600 text-white" : "bg-white border-black/10 text-black"}`}
                   />
-                  <div className="flex gap-2">
-                    <button onClick={handleSaveEdit} className="flex-1 py-3 rounded-xl bg-indigo-600 text-white font-black uppercase text-[10px] tracking-widest">Save</button>
-                    <button onClick={() => { setEditTitle(false); setMobileMenuId(null); }} className="flex-1 py-3 rounded-xl border border-black/10 font-black uppercase text-[10px] tracking-widest opacity-60">Cancel</button>
-                  </div>
                 </div>
-              ) : (
-                <button
-                  onClick={handleStartEdit}
-                  title="Edit title"
-                  className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}
-                >
-                  <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg"><Edit2 className="w-4 h-4" /></div>
-                  Edit Title
-                </button>
-              )}
-           </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleSaveEdit}
+                    className="flex-1 py-3 rounded-xl bg-indigo-600 text-white font-black uppercase text-[10px] tracking-widest"
+                  >
+                    Save
+                  </button>
+                  <button
+                    onClick={() => {
+                      setEditChapter(false);
+                      setMobileMenuId(null);
+                    }}
+                    className="flex-1 py-3 rounded-xl border border-black/10 font-black uppercase text-[10px] tracking-widest opacity-60"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={handleStartEdit}
+                title="Edit chapter"
+                className={`w-full flex items-center gap-4 p-4 rounded-2xl font-black text-sm transition-all ${isDark ? "hover:bg-white/5" : "hover:bg-black/5"}`}
+              >
+                <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-lg">
+                  <Edit2 className="w-4 h-4" />
+                </div>
+                Edit Chapter
+              </button>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -3011,131 +3478,149 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     items: SectionListItem[];
   };
   const renderSectionRow = ({ index, style, data }: ListChildComponentProps<SectionListData>) => {
-      const item = data.items[index];
-      if (item.type === "spacer") return <div style={style} />;
-      if (item.type === "ungrouped-label") {
-        return <ChaptersSectionHeader style={style} />;
-      }
-      if (item.type === "load-more") {
-        return (
-          <div style={style} className={`py-4 text-center text-xs ${subtleText}`}>
-            {isLoadingMoreChapters ? "Loading more..." : "Scroll to load more"}
-          </div>
-        );
-      }
+    const item = data.items[index];
+    if (item.type === "spacer") return <div style={style} />;
+    if (item.type === "ungrouped-label") {
+      return <ChaptersSectionHeader style={style} />;
+    }
+    if (item.type === "load-more") {
+      return (
+        <div style={style} className={`py-4 text-center text-xs ${subtleText}`}>
+          {isLoadingMoreChapters ? "Loading more..." : "Scroll to load more"}
+        </div>
+      );
+    }
 
-      const wrapperClass = getGroupWrapperClass(item.groupPos);
-      if (item.type === "volume-header") {
-        const canReorderVolumes = isOrganizeMode && book.settings?.allowDragReorderVolumes !== false;
-        const canMoveToVolume = isOrganizeMode && book.settings?.allowDragMoveToVolume !== false;
-        const isMobilePickedVolume =
-          mobileHoldDrag?.kind === "volume" && mobileHoldDrag.id === item.volumeName;
-        return (
-          <div style={style} className={wrapperClass}>
-            <div
-              className={`w-full px-6 py-3 flex items-center justify-between border-b border-theme bg-surface-2/60 ${
-                isMobilePickedVolume
-                  ? "bg-indigo-500/20 shadow-[inset_0_0_0_2px_rgba(99,102,241,0.6)]"
-                  : ""
-              }`}
-              onClick={() => {
-                void handleVolumeHeaderActivate(item.volumeName);
-              }}
-              onPointerDown={(event) => {
-                if (canReorderVolumes || canMoveToVolume) {
-                  startOrganizeHold("volume", item.volumeName, event);
-                }
-              }}
-              onPointerMove={moveOrganizeHold}
-              onPointerUp={endOrganizeHold}
-              onPointerCancel={endOrganizeHold}
-              draggable={canReorderVolumes}
-              onDragStart={() => {
-                if (!canReorderVolumes) return;
-                setDraggingVolumeName(item.volumeName);
-              }}
-              onDragEnd={() => setDraggingVolumeName(null)}
-              onDragOver={(event) => {
-                if ((canReorderVolumes && draggingVolumeName && draggingVolumeName !== item.volumeName) || (canMoveToVolume && draggingChapterId)) {
-                  event.preventDefault();
-                }
-              }}
-              onDrop={async (event) => {
-                if (canReorderVolumes && draggingVolumeName && draggingVolumeName !== item.volumeName) {
-                  event.preventDefault();
-                  reorderVolumes(draggingVolumeName, item.volumeName);
-                  setDraggingVolumeName(null);
-                  return;
-                }
-                if (canMoveToVolume && draggingChapterId) {
-                  event.preventDefault();
-                  await moveChapterToVolume(draggingChapterId, item.volumeName);
-                  setDraggingChapterId(null);
-                }
-              }}
-            >
-              <div className="text-left flex items-center gap-2 min-w-0">
-                {canReorderVolumes ? <GripVertical className="w-4 h-4 opacity-40" /> : null}
-                <button
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setCollapsedVolumes((p) => {
-                      const next = { ...p, [item.volumeName]: !p[item.volumeName] };
-                      upsertBookSettings({ collapsedVolumes: next });
-                      return next;
-                    });
-                  }}
-                  className="text-xs opacity-70 hover:opacity-100"
-                  title={item.isCollapsed ? "Expand" : "Collapse"}
-                >
-                  {item.isCollapsed ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
-                </button>
-                <div className="min-w-0">
-                  <div className="text-[10px] font-black uppercase tracking-widest opacity-70 truncate">{item.volumeName}</div>
-                  <div className="text-[10px] font-bold opacity-50">
-                    {item.chapterCount} chapters{item.isCollapsed ? " (collapsed)" : ""}
-                  </div>
+    const wrapperClass = getGroupWrapperClass(item.groupPos);
+    if (item.type === "volume-header") {
+      const canReorderVolumes = isOrganizeMode && book.settings?.allowDragReorderVolumes !== false;
+      const canMoveToVolume = isOrganizeMode && book.settings?.allowDragMoveToVolume !== false;
+      const isMobilePickedVolume =
+        mobileHoldDrag?.kind === "volume" && mobileHoldDrag.id === item.volumeName;
+      return (
+        <div style={style} className={wrapperClass}>
+          <div
+            className={`w-full px-6 py-3 flex items-center justify-between border-b border-theme bg-surface-2/60 ${
+              isMobilePickedVolume
+                ? "bg-indigo-500/20 shadow-[inset_0_0_0_2px_rgba(99,102,241,0.6)]"
+                : ""
+            }`}
+            onClick={() => {
+              void handleVolumeHeaderActivate(item.volumeName);
+            }}
+            onPointerDown={(event) => {
+              if (canReorderVolumes || canMoveToVolume) {
+                startOrganizeHold("volume", item.volumeName, event);
+              }
+            }}
+            onPointerMove={moveOrganizeHold}
+            onPointerUp={endOrganizeHold}
+            onPointerCancel={endOrganizeHold}
+            draggable={canReorderVolumes}
+            onDragStart={() => {
+              if (!canReorderVolumes) return;
+              setDraggingVolumeName(item.volumeName);
+            }}
+            onDragEnd={() => setDraggingVolumeName(null)}
+            onDragOver={(event) => {
+              if (
+                (canReorderVolumes &&
+                  draggingVolumeName &&
+                  draggingVolumeName !== item.volumeName) ||
+                (canMoveToVolume && draggingChapterId)
+              ) {
+                event.preventDefault();
+              }
+            }}
+            onDrop={async (event) => {
+              if (
+                canReorderVolumes &&
+                draggingVolumeName &&
+                draggingVolumeName !== item.volumeName
+              ) {
+                event.preventDefault();
+                reorderVolumes(draggingVolumeName, item.volumeName);
+                setDraggingVolumeName(null);
+                return;
+              }
+              if (canMoveToVolume && draggingChapterId) {
+                event.preventDefault();
+                await moveChapterToVolume(draggingChapterId, item.volumeName);
+                setDraggingChapterId(null);
+              }
+            }}
+          >
+            <div className="text-left flex items-center gap-2 min-w-0">
+              {canReorderVolumes ? <GripVertical className="w-4 h-4 opacity-40" /> : null}
+              <button
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setCollapsedVolumes((p) => {
+                    const next = { ...p, [item.volumeName]: !p[item.volumeName] };
+                    upsertBookSettings({ collapsedVolumes: next });
+                    return next;
+                  });
+                }}
+                className="text-xs opacity-70 hover:opacity-100"
+                title={item.isCollapsed ? "Expand" : "Collapse"}
+              >
+                {item.isCollapsed ? (
+                  <ChevronDown className="w-4 h-4" />
+                ) : (
+                  <ChevronUp className="w-4 h-4" />
+                )}
+              </button>
+              <div className="min-w-0">
+                <div className="text-[10px] font-black uppercase tracking-widest opacity-70 truncate">
+                  {item.volumeName}
+                </div>
+                <div className="text-[10px] font-bold opacity-50">
+                  {item.chapterCount} chapters{item.isCollapsed ? " (collapsed)" : ""}
                 </div>
               </div>
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void renameVolume(item.volumeName);
-                  }}
-                  className="p-2 opacity-40 hover:opacity-100"
-                  title="Rename volume"
-                >
-                  <Edit2 className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void deleteVolumeToUngrouped(item.volumeName);
-                  }}
-                  className="p-2 opacity-40 hover:opacity-100 text-red-500"
-                  title="Delete volume"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
+            </div>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void renameVolume(item.volumeName);
+                }}
+                className="p-2 opacity-40 hover:opacity-100"
+                title="Rename volume"
+              >
+                <Edit2 className="w-4 h-4" />
+              </button>
+              <button
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void deleteVolumeToUngrouped(item.volumeName);
+                }}
+                className="p-2 opacity-40 hover:opacity-100 text-red-500"
+                title="Delete volume"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
             </div>
           </div>
-        );
-      }
+        </div>
+      );
+    }
 
-      if (item.type === "chapter-row") {
-        return (
-          <div style={style} className={wrapperClass}>
-            <ChapterRow chapter={item.chapter} fallbackIndex={item.fallbackIndex} />
-          </div>
-        );
-      }
+    if (item.type === "chapter-row") {
+      return (
+        <div style={style} className={wrapperClass}>
+          <ChapterRow chapter={item.chapter} fallbackIndex={item.fallbackIndex} />
+        </div>
+      );
+    }
 
-      return <div style={style} />;
-    };
+    return <div style={style} />;
+  };
 
-  const ChapterCard: React.FC<{ chapter: Chapter; localIndex: number }> = ({ chapter, localIndex }) => {
+  const ChapterCard: React.FC<{ chapter: Chapter; localIndex: number }> = ({
+    chapter,
+    localIndex,
+  }) => {
     const displayIndex = getDisplayIndex(chapter, localIndex);
     const displayTitle = getDisplayTitle(chapter, displayIndex);
     let percent = chapter.progress !== undefined ? Math.floor(chapter.progress * 100) : 0;
@@ -3204,7 +3689,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         className={`${cardRadius} ${cardSurface} ${cardPad} pb-10 min-h-[190px] flex flex-col gap-2 cursor-pointer transition-all ${
           isDark ? "hover:bg-white/5" : "hover:bg-black/5"
         } relative ${selectionMode && isSelected ? selectionRowClass : ""} ${
-          isMobilePickedChapter ? "bg-indigo-500/20 shadow-[inset_0_0_0_2px_rgba(99,102,241,0.6)]" : ""
+          isMobilePickedChapter
+            ? "bg-indigo-500/20 shadow-[inset_0_0_0_2px_rgba(99,102,241,0.6)]"
+            : ""
         }`}
       >
         {selectionMode ? (
@@ -3248,7 +3735,10 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                 isDark ? "bg-slate-700" : "bg-black/5"
               }`}
             >
-              <div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${percent}%` }} />
+              <div
+                className="h-full bg-indigo-500 transition-all duration-300"
+                style={{ width: `${percent}%` }}
+              />
             </div>
             <div className="text-[10px] font-black opacity-70">{percent}%</div>
           </div>
@@ -3261,129 +3751,144 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     items: GridListItem[];
   };
   const renderGridRow = ({ index, style, data }: ListChildComponentProps<GridListData>) => {
-      const item = data.items[index];
-      if (item.type === "spacer") return <div style={style} />;
-      if (item.type === "ungrouped-label") {
-        return <ChaptersSectionHeader style={style} />;
-      }
-      if (item.type === "load-more") {
-        return (
-          <div style={style} className={`py-4 text-center text-xs ${subtleText}`}>
-            {isLoadingMoreChapters ? "Loading more..." : "Scroll to load more"}
-          </div>
-        );
-      }
-      if (item.type === "volume-header") {
-        const canReorderVolumes = isOrganizeMode && book.settings?.allowDragReorderVolumes !== false;
-        const canMoveToVolume = isOrganizeMode && book.settings?.allowDragMoveToVolume !== false;
-        const isMobilePickedVolume =
-          mobileHoldDrag?.kind === "volume" && mobileHoldDrag.id === item.volumeName;
-        return (
-          <div style={style}>
-            <div
-              className={`px-3 py-2 rounded-2xl cursor-pointer flex items-center justify-between ${
-                isDark ? "bg-white/5 hover:bg-white/10" : "bg-black/5 hover:bg-black/10"
-              } ${
-                isMobilePickedVolume
-                  ? "bg-indigo-500/20 shadow-[inset_0_0_0_2px_rgba(99,102,241,0.6)]"
-                  : ""
-              }`}
-              onClick={() => {
-                void handleVolumeHeaderActivate(item.volumeName);
-              }}
-              onPointerDown={(event) => {
-                if (canReorderVolumes || canMoveToVolume) {
-                  startOrganizeHold("volume", item.volumeName, event);
-                }
-              }}
-              onPointerMove={moveOrganizeHold}
-              onPointerUp={endOrganizeHold}
-              onPointerCancel={endOrganizeHold}
-              draggable={canReorderVolumes}
-              onDragStart={() => {
-                if (!canReorderVolumes) return;
-                setDraggingVolumeName(item.volumeName);
-              }}
-              onDragEnd={() => setDraggingVolumeName(null)}
-              onDragOver={(event) => {
-                if ((canReorderVolumes && draggingVolumeName && draggingVolumeName !== item.volumeName) || (canMoveToVolume && draggingChapterId)) {
-                  event.preventDefault();
-                }
-              }}
-              onDrop={async (event) => {
-                if (canReorderVolumes && draggingVolumeName && draggingVolumeName !== item.volumeName) {
-                  event.preventDefault();
-                  reorderVolumes(draggingVolumeName, item.volumeName);
-                  setDraggingVolumeName(null);
-                  return;
-                }
-                if (canMoveToVolume && draggingChapterId) {
-                  event.preventDefault();
-                  await moveChapterToVolume(draggingChapterId, item.volumeName);
-                  setDraggingChapterId(null);
-                }
-              }}
-            >
-              <div className="min-w-0 flex items-center gap-2">
-                {canReorderVolumes ? <GripVertical className="w-4 h-4 opacity-40" /> : null}
-                <div className="text-xs font-black uppercase tracking-widest opacity-70 truncate">{item.volumeName}</div>
-                <div className="text-[10px] font-bold opacity-40">
-                  {item.chapterCount} chapters{item.isCollapsed ? " (collapsed)" : ""}
-                </div>
+    const item = data.items[index];
+    if (item.type === "spacer") return <div style={style} />;
+    if (item.type === "ungrouped-label") {
+      return <ChaptersSectionHeader style={style} />;
+    }
+    if (item.type === "load-more") {
+      return (
+        <div style={style} className={`py-4 text-center text-xs ${subtleText}`}>
+          {isLoadingMoreChapters ? "Loading more..." : "Scroll to load more"}
+        </div>
+      );
+    }
+    if (item.type === "volume-header") {
+      const canReorderVolumes = isOrganizeMode && book.settings?.allowDragReorderVolumes !== false;
+      const canMoveToVolume = isOrganizeMode && book.settings?.allowDragMoveToVolume !== false;
+      const isMobilePickedVolume =
+        mobileHoldDrag?.kind === "volume" && mobileHoldDrag.id === item.volumeName;
+      return (
+        <div style={style}>
+          <div
+            className={`px-3 py-2 rounded-2xl cursor-pointer flex items-center justify-between ${
+              isDark ? "bg-white/5 hover:bg-white/10" : "bg-black/5 hover:bg-black/10"
+            } ${
+              isMobilePickedVolume
+                ? "bg-indigo-500/20 shadow-[inset_0_0_0_2px_rgba(99,102,241,0.6)]"
+                : ""
+            }`}
+            onClick={() => {
+              void handleVolumeHeaderActivate(item.volumeName);
+            }}
+            onPointerDown={(event) => {
+              if (canReorderVolumes || canMoveToVolume) {
+                startOrganizeHold("volume", item.volumeName, event);
+              }
+            }}
+            onPointerMove={moveOrganizeHold}
+            onPointerUp={endOrganizeHold}
+            onPointerCancel={endOrganizeHold}
+            draggable={canReorderVolumes}
+            onDragStart={() => {
+              if (!canReorderVolumes) return;
+              setDraggingVolumeName(item.volumeName);
+            }}
+            onDragEnd={() => setDraggingVolumeName(null)}
+            onDragOver={(event) => {
+              if (
+                (canReorderVolumes &&
+                  draggingVolumeName &&
+                  draggingVolumeName !== item.volumeName) ||
+                (canMoveToVolume && draggingChapterId)
+              ) {
+                event.preventDefault();
+              }
+            }}
+            onDrop={async (event) => {
+              if (
+                canReorderVolumes &&
+                draggingVolumeName &&
+                draggingVolumeName !== item.volumeName
+              ) {
+                event.preventDefault();
+                reorderVolumes(draggingVolumeName, item.volumeName);
+                setDraggingVolumeName(null);
+                return;
+              }
+              if (canMoveToVolume && draggingChapterId) {
+                event.preventDefault();
+                await moveChapterToVolume(draggingChapterId, item.volumeName);
+                setDraggingChapterId(null);
+              }
+            }}
+          >
+            <div className="min-w-0 flex items-center gap-2">
+              {canReorderVolumes ? <GripVertical className="w-4 h-4 opacity-40" /> : null}
+              <div className="text-xs font-black uppercase tracking-widest opacity-70 truncate">
+                {item.volumeName}
               </div>
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setCollapsedVolumes((p) => {
-                      const next = { ...p, [item.volumeName]: !p[item.volumeName] };
-                      upsertBookSettings({ collapsedVolumes: next });
-                      return next;
-                    });
-                  }}
-                  className="p-1.5 opacity-60 hover:opacity-100"
-                >
-                  {item.isCollapsed ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
-                </button>
-                <button
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void renameVolume(item.volumeName);
-                  }}
-                  className="p-1.5 opacity-60 hover:opacity-100"
-                >
-                  <Edit2 className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void deleteVolumeToUngrouped(item.volumeName);
-                  }}
-                  className="p-1.5 opacity-60 hover:opacity-100 text-red-500"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+              <div className="text-[10px] font-bold opacity-40">
+                {item.chapterCount} chapters{item.isCollapsed ? " (collapsed)" : ""}
               </div>
             </div>
-          </div>
-        );
-      }
-      if (item.type === "grid-row") {
-        return (
-          <div style={{ ...style, paddingBottom: gridGap, boxSizing: "border-box" }}>
-            <div
-              className="grid"
-              style={{ gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`, gap: gridGap }}
-            >
-              {item.chapters.map(({ chapter, localIndex }) => (
-                <ChapterCard key={chapter.id} chapter={chapter} localIndex={localIndex} />
-              ))}
+            <div className="flex items-center gap-1">
+              <button
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setCollapsedVolumes((p) => {
+                    const next = { ...p, [item.volumeName]: !p[item.volumeName] };
+                    upsertBookSettings({ collapsedVolumes: next });
+                    return next;
+                  });
+                }}
+                className="p-1.5 opacity-60 hover:opacity-100"
+              >
+                {item.isCollapsed ? (
+                  <ChevronDown className="w-4 h-4" />
+                ) : (
+                  <ChevronUp className="w-4 h-4" />
+                )}
+              </button>
+              <button
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void renameVolume(item.volumeName);
+                }}
+                className="p-1.5 opacity-60 hover:opacity-100"
+              >
+                <Edit2 className="w-4 h-4" />
+              </button>
+              <button
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void deleteVolumeToUngrouped(item.volumeName);
+                }}
+                className="p-1.5 opacity-60 hover:opacity-100 text-red-500"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
             </div>
           </div>
-        );
-      }
-      return <div style={style} />;
-    };
+        </div>
+      );
+    }
+    if (item.type === "grid-row") {
+      return (
+        <div style={{ ...style, paddingBottom: gridGap, boxSizing: "border-box" }}>
+          <div
+            className="grid"
+            style={{ gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`, gap: gridGap }}
+          >
+            {item.chapters.map(({ chapter, localIndex }) => (
+              <ChapterCard key={chapter.id} chapter={chapter} localIndex={localIndex} />
+            ))}
+          </div>
+        </div>
+      );
+    }
+    return <div style={style} />;
+  };
 
   const getSectionItemSize = useCallback(
     (index: number) => {
@@ -3528,7 +4033,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       <div className={`flex flex-col ${sectionGap}`}>
         {volumeSections.volumes.map((group) => {
           const isCollapsed = !!collapsedVolumes[group.volumeName];
-          const canReorderVolumes = isOrganizeMode && book.settings?.allowDragReorderVolumes !== false;
+          const canReorderVolumes =
+            isOrganizeMode && book.settings?.allowDragReorderVolumes !== false;
           const canMoveToVolume = isOrganizeMode && book.settings?.allowDragMoveToVolume !== false;
           const isMobilePickedVolume =
             mobileHoldDrag?.kind === "volume" && mobileHoldDrag.id === group.volumeName;
@@ -3558,12 +4064,21 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                 }}
                 onDragEnd={() => setDraggingVolumeName(null)}
                 onDragOver={(event) => {
-                  if ((canReorderVolumes && draggingVolumeName && draggingVolumeName !== group.volumeName) || (canMoveToVolume && draggingChapterId)) {
+                  if (
+                    (canReorderVolumes &&
+                      draggingVolumeName &&
+                      draggingVolumeName !== group.volumeName) ||
+                    (canMoveToVolume && draggingChapterId)
+                  ) {
                     event.preventDefault();
                   }
                 }}
                 onDrop={async (event) => {
-                  if (canReorderVolumes && draggingVolumeName && draggingVolumeName !== group.volumeName) {
+                  if (
+                    canReorderVolumes &&
+                    draggingVolumeName &&
+                    draggingVolumeName !== group.volumeName
+                  ) {
                     event.preventDefault();
                     reorderVolumes(draggingVolumeName, group.volumeName);
                     setDraggingVolumeName(null);
@@ -3590,39 +4105,45 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                     className="text-xs opacity-70 hover:opacity-100"
                     title={isCollapsed ? "Expand" : "Collapse"}
                   >
-                    {isCollapsed ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+                    {isCollapsed ? (
+                      <ChevronDown className="w-4 h-4" />
+                    ) : (
+                      <ChevronUp className="w-4 h-4" />
+                    )}
                   </button>
                   <div className="min-w-0">
-                    <div className="text-[10px] font-black uppercase tracking-widest opacity-70 truncate">{group.volumeName}</div>
+                    <div className="text-[10px] font-black uppercase tracking-widest opacity-70 truncate">
+                      {group.volumeName}
+                    </div>
                     <div className="text-[10px] font-bold opacity-50">
                       {group.chapters.length} chapters{isCollapsed ? " (collapsed)" : ""}
                     </div>
                   </div>
-              </div>
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void renameVolume(group.volumeName);
-                  }}
-                  className="p-2 opacity-40 hover:opacity-100"
-                  title="Rename volume"
-                >
-                  <Edit2 className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void deleteVolumeToUngrouped(group.volumeName);
-                  }}
-                  className="p-2 opacity-40 hover:opacity-100 text-red-500"
-                  title="Delete volume"
-                >
-                  <Trash2 className="w-4 h-4" />
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void renameVolume(group.volumeName);
+                    }}
+                    className="p-2 opacity-40 hover:opacity-100"
+                    title="Rename volume"
+                  >
+                    <Edit2 className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void deleteVolumeToUngrouped(group.volumeName);
+                    }}
+                    className="p-2 opacity-40 hover:opacity-100 text-red-500"
+                    title="Delete volume"
+                  >
+                    <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
               </div>
-                  {isCollapsed ? null : (
+              {isCollapsed ? null : (
                 <>
                   <div className="divide-y divide-black/5">
                     {group.chapters.map((chapter, idx) => (
@@ -3680,7 +4201,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         )}
 
         {!volumeSections.volumes.length && !volumeSections.ungrouped.length && (
-          <div className={`rounded-[2rem] overflow-hidden card-cinematic p-6 text-sm font-bold ${subtleText}`}>
+          <div
+            className={`rounded-[2rem] overflow-hidden card-cinematic p-6 text-sm font-bold ${subtleText}`}
+          >
             No chapters yet.
           </div>
         )}
@@ -3698,7 +4221,8 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     <div className="space-y-6">
       {volumeSections.volumes.map((group) => {
         const isCollapsed = !!collapsedVolumes[group.volumeName];
-        const canReorderVolumes = isOrganizeMode && book.settings?.allowDragReorderVolumes !== false;
+        const canReorderVolumes =
+          isOrganizeMode && book.settings?.allowDragReorderVolumes !== false;
         const canMoveToVolume = isOrganizeMode && book.settings?.allowDragMoveToVolume !== false;
         const isMobilePickedVolume =
           mobileHoldDrag?.kind === "volume" && mobileHoldDrag.id === group.volumeName;
@@ -3730,12 +4254,21 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               }}
               onDragEnd={() => setDraggingVolumeName(null)}
               onDragOver={(event) => {
-                if ((canReorderVolumes && draggingVolumeName && draggingVolumeName !== group.volumeName) || (canMoveToVolume && draggingChapterId)) {
+                if (
+                  (canReorderVolumes &&
+                    draggingVolumeName &&
+                    draggingVolumeName !== group.volumeName) ||
+                  (canMoveToVolume && draggingChapterId)
+                ) {
                   event.preventDefault();
                 }
               }}
               onDrop={async (event) => {
-                if (canReorderVolumes && draggingVolumeName && draggingVolumeName !== group.volumeName) {
+                if (
+                  canReorderVolumes &&
+                  draggingVolumeName &&
+                  draggingVolumeName !== group.volumeName
+                ) {
                   event.preventDefault();
                   reorderVolumes(draggingVolumeName, group.volumeName);
                   setDraggingVolumeName(null);
@@ -3750,7 +4283,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             >
               <div className="min-w-0 flex items-center gap-2">
                 {canReorderVolumes ? <GripVertical className="w-4 h-4 opacity-40" /> : null}
-                <div className="text-xs font-black uppercase tracking-widest opacity-70 truncate">{group.volumeName}</div>
+                <div className="text-xs font-black uppercase tracking-widest opacity-70 truncate">
+                  {group.volumeName}
+                </div>
                 <div className="text-[10px] font-bold opacity-40">
                   {group.chapters.length} chapters{isCollapsed ? " (collapsed)" : ""}
                 </div>
@@ -3767,7 +4302,11 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
                   }}
                   className="p-1.5 opacity-60 hover:opacity-100"
                 >
-                  {isCollapsed ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+                  {isCollapsed ? (
+                    <ChevronDown className="w-4 h-4" />
+                  ) : (
+                    <ChevronUp className="w-4 h-4" />
+                  )}
                 </button>
                 <button
                   onClick={(event) => {
@@ -3809,7 +4348,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
           </div>
         </div>
       )}
-        {isOrganizeMode && book.settings?.allowDragMoveToVolume !== false && (
+      {isOrganizeMode && book.settings?.allowDragMoveToVolume !== false && (
         <div
           className={`rounded-2xl border border-dashed px-4 py-6 text-center text-[10px] font-black uppercase tracking-widest ${
             isDark ? "border-slate-700 text-slate-300" : "border-black/20 text-slate-600"
@@ -3849,14 +4388,19 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
     includeConversions: fixOptions.convertLegacy,
     includeGeneration: fixOptions.genAudio,
     includeCleanup: fixOptions.cleanupStrays,
+    forceCleanup: fixOptions.forceCleanup,
     includeReindex: fixOptions.reindex,
+    includeResequence: fixOptions.resequence,
   });
-  const legacyTextCount = planPreview.conversions.filter(c => c.type === "text").length;
-  const legacyAudioCount = planPreview.conversions.filter(c => c.type === "audio").length;
+  const legacyTextCount = planPreview.conversions.filter((c) => c.type === "text").length;
+  const legacyAudioCount = planPreview.conversions.filter((c) => c.type === "audio").length;
   const generateCount = planPreview.generationIds.length;
-  const cleanupCount = planPreview.safeToCleanup ? planPreview.cleanup.length : 0;
+  const cleanupCount = planPreview.cleanupAllowed ? planPreview.cleanup.length : 0;
   const duplicateGroups = planPreview.indexConflicts ?? [];
-  const duplicateChapterCount = duplicateGroups.reduce((acc, group) => acc + group.chapterIds.length, 0);
+  const duplicateChapterCount = duplicateGroups.reduce(
+    (acc, group) => acc + group.chapterIds.length,
+    0
+  );
 
   const ChaptersSectionHeader = ({ style }: { style?: React.CSSProperties }) => (
     <div style={style} className="px-2 text-[10px] font-black uppercase tracking-widest opacity-60">
@@ -3866,11 +4410,20 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
 
   return (
     <div className="h-full min-h-0 flex flex-col bg-surface text-theme ui-font">
-      <input ref={coverInputRef} type="file" accept="image/*" className="hidden" onChange={handleCoverSelected} />
+      {/* sr-only keeps it out of view but NOT display:none, so programmatic .click() works on Android WebView */}
+      <input
+        ref={coverInputRef}
+        type="file"
+        accept="image/*"
+        className="sr-only"
+        onChange={handleCoverSelected}
+      />
 
       {showVoiceModal && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-          <div className={`w-full max-w-md rounded-3xl shadow-2xl p-8 space-y-6 ${isDark ? 'bg-slate-900 border border-slate-800' : 'bg-white border border-black/5'}`}>
+        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div
+            className={`w-full max-w-md rounded-3xl shadow-2xl p-8 space-y-6 ${isDark ? "bg-slate-900 border border-slate-800" : "bg-white border border-black/5"}`}
+          >
             <div className="flex justify-between items-center">
               <h3 className="text-xl font-black tracking-tight">Select Cloud Voice</h3>
               <button onClick={handleCloseVoiceModal} className="p-2 opacity-60 hover:opacity-100">
@@ -3878,7 +4431,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               </button>
             </div>
             <div className="space-y-4">
-              <div className={`p-3 rounded-xl text-xs font-black ${isDark ? "bg-white/5" : "bg-black/5"}`}>
+              <div
+                className={`p-3 rounded-xl text-xs font-black ${isDark ? "bg-white/5" : "bg-black/5"}`}
+              >
                 Default voice: <span className="opacity-70">{currentDefaultVoiceName}</span>
               </div>
               <div className="space-y-2 max-h-[40vh] overflow-y-auto pr-1">
@@ -3940,17 +4495,21 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-sm">
           <div
             data-testid="book-settings-modal"
-            className={`w-full max-w-lg rounded-[2rem] shadow-2xl flex max-h-[90dvh] flex-col overflow-hidden ${isDark ? 'bg-slate-900 border border-slate-800' : 'bg-white border border-black/5'}`}
+            className={`w-full max-w-lg rounded-[2rem] shadow-2xl flex max-h-[90dvh] flex-col overflow-hidden ${isDark ? "bg-slate-900 border border-slate-800" : "bg-white border border-black/5"}`}
           >
-            <div className={`sticky top-0 z-10 px-5 sm:px-6 py-4 flex items-center justify-between border-b ${isDark ? "border-white/10 bg-slate-900/95" : "border-black/10 bg-white/95"}`}>
+            <div
+              className={`sticky top-0 z-10 px-5 sm:px-6 py-4 flex items-center justify-between border-b ${isDark ? "border-white/10 bg-slate-900/95" : "border-black/10 bg-white/95"}`}
+            >
               <div>
-                <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Book Settings</div>
+                <div className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                  Book Options
+                </div>
                 <div className="text-xl font-black tracking-tight">{book.title}</div>
               </div>
               <button
                 onClick={() => setShowBookSettings(false)}
-                title="Close Book Settings"
-                aria-label="Close Book Settings"
+                title="Close Book Options"
+                aria-label="Close Book Options"
                 className="p-2 opacity-60 hover:opacity-100"
               >
                 <X className="w-5 h-5" />
@@ -3962,203 +4521,276 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               className="flex-1 overflow-y-auto overscroll-contain px-5 sm:px-6 py-5 space-y-6 pb-[calc(env(safe-area-inset-bottom)+12px)]"
               style={{ WebkitOverflowScrolling: "touch" }}
             >
-            <div className="space-y-3">
-              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Cover</div>
-              {book.coverImage ? (
-                <button
-                  onClick={() => coverInputRef.current?.click()}
-                  title="Change cover"
-                  className={`group flex items-center gap-4 p-2 rounded-2xl border transition-colors ${isDark ? 'border-white/10 hover:border-white/20' : 'border-black/10 hover:border-black/20'}`}
-                >
-                  <img src={book.coverImage} alt={`${book.title} cover`} className="w-16 h-20 object-cover rounded-xl shadow" />
-                  <div className="text-left">
-                    <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Cover</div>
-                    <div className="text-sm font-black">Tap to change</div>
-                  </div>
-                </button>
-              ) : (
-                <button
-                  onClick={() => coverInputRef.current?.click()}
-                  className={`${primaryActionClass}`}
-                  title="Add cover image"
-                >
-                  Add Cover
-                </button>
-              )}
-            </div>
+              <div className="space-y-3">
+                <div className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                  Cover
+                </div>
+                {book.coverImage ? (
+                  <button
+                    onClick={() => coverInputRef.current?.click()}
+                    title="Change cover"
+                    className={`group flex items-center gap-4 p-2 rounded-2xl border transition-colors ${isDark ? "border-white/10 hover:border-white/20" : "border-black/10 hover:border-black/20"}`}
+                  >
+                    <img
+                      src={book.coverImage}
+                      alt={`${book.title} cover`}
+                      className="w-16 h-20 object-cover rounded-xl shadow"
+                    />
+                    <div className="text-left">
+                      <div className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                        Cover
+                      </div>
+                      <div className="text-sm font-black">Tap to change</div>
+                    </div>
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => coverInputRef.current?.click()}
+                    className={`${primaryActionClass}`}
+                    title="Add cover image"
+                  >
+                    Add Cover
+                  </button>
+                )}
+              </div>
 
-            <div className="space-y-3">
-              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Selection & Organize</div>
-              {[
-                { key: "enableSelectionMode", label: "Enable Selection Mode", value: book.settings?.enableSelectionMode !== false },
-                { key: "allowDragReorderChapters", label: "Drag Reorder Chapters", value: book.settings?.allowDragReorderChapters !== false },
-                { key: "allowDragMoveToVolume", label: "Drag Move To Volume", value: book.settings?.allowDragMoveToVolume !== false },
-                { key: "allowDragReorderVolumes", label: "Drag Reorder Volumes", value: book.settings?.allowDragReorderVolumes !== false },
-              ].map((item) => (
-                <label
-                  key={item.key}
-                  className={`flex items-center justify-between gap-4 p-4 rounded-2xl border ${
-                    isDark ? "border-white/10 bg-white/5" : "border-black/10 bg-black/5"
-                  }`}
-                >
-                  <div className="text-xs font-black">{item.label}</div>
-                  <input
-                    type="checkbox"
-                    checked={item.value}
-                    onChange={(e) => onUpdateBookSettings?.({ [item.key]: e.target.checked })}
-                    className="w-5 h-5 accent-indigo-600"
-                  />
-                </label>
-              ))}
-            </div>
+              <div className="space-y-3">
+                <div className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                  Selection & Organize
+                </div>
+                {[
+                  {
+                    key: "enableSelectionMode",
+                    label: "Enable Selection Mode",
+                    value: book.settings?.enableSelectionMode !== false,
+                  },
+                  {
+                    key: "allowDragReorderChapters",
+                    label: "Drag Reorder Chapters",
+                    value: book.settings?.allowDragReorderChapters !== false,
+                  },
+                  {
+                    key: "allowDragMoveToVolume",
+                    label: "Drag Move To Volume",
+                    value: book.settings?.allowDragMoveToVolume !== false,
+                  },
+                  {
+                    key: "allowDragReorderVolumes",
+                    label: "Drag Reorder Volumes",
+                    value: book.settings?.allowDragReorderVolumes !== false,
+                  },
+                ].map((item) => (
+                  <label
+                    key={item.key}
+                    className={`flex items-center justify-between gap-4 p-4 rounded-2xl border ${
+                      isDark ? "border-white/10 bg-white/5" : "border-black/10 bg-black/5"
+                    }`}
+                  >
+                    <div className="text-xs font-black">{item.label}</div>
+                    <input
+                      type="checkbox"
+                      checked={item.value}
+                      onChange={(e) => onUpdateBookSettings?.({ [item.key]: e.target.checked })}
+                      className="w-5 h-5 accent-indigo-600"
+                    />
+                  </label>
+                ))}
+              </div>
 
-            <div className="space-y-3">
-              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Audio and Upload</div>
-              {[
-                { key: "autoGenerateAudioOnAdd", label: "Auto-generate On Add", help: "Generate chapter audio automatically when new chapters are added.", value: book.settings?.autoGenerateAudioOnAdd !== false },
-                { key: "autoUploadOnAdd", label: "Auto-upload On Add", help: "Queue chapter upload automatically after add.", value: book.settings?.autoUploadOnAdd === true },
-              ].map((item) => (
+              <div className="space-y-3">
+                <div className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                  Audio and Upload
+                </div>
+                {[
+                  {
+                    key: "autoGenerateAudioOnAdd",
+                    label: "Auto-generate On Add",
+                    help: "Generate chapter audio automatically when new chapters are added.",
+                    value: book.settings?.autoGenerateAudioOnAdd !== false,
+                  },
+                  {
+                    key: "autoUploadOnAdd",
+                    label: "Auto-upload On Add",
+                    help: "Queue chapter upload automatically after add.",
+                    value: book.settings?.autoUploadOnAdd === true,
+                  },
+                ].map((item) => (
+                  <label
+                    key={item.key}
+                    className={`flex items-center justify-between gap-4 p-4 rounded-2xl border ${
+                      isDark ? "border-white/10 bg-white/5" : "border-black/10 bg-black/5"
+                    }`}
+                  >
+                    <div>
+                      <div className="text-xs font-black">{item.label}</div>
+                      <div className="text-[10px] opacity-60">{item.help}</div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={item.value}
+                      onChange={(e) => onUpdateBookSettings?.({ [item.key]: e.target.checked })}
+                      className="w-5 h-5 accent-indigo-600"
+                    />
+                  </label>
+                ))}
+                <button
+                  onClick={() => {
+                    setShowVoiceModal({});
+                  }}
+                  className="w-full px-4 py-3 rounded-2xl border border-indigo-600/20 text-indigo-600 text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50"
+                >
+                  Default Voice: {currentDefaultVoiceName}
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                <div className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                  Safety
+                </div>
                 <label
-                  key={item.key}
                   className={`flex items-center justify-between gap-4 p-4 rounded-2xl border ${
                     isDark ? "border-white/10 bg-white/5" : "border-black/10 bg-black/5"
                   }`}
                 >
                   <div>
-                    <div className="text-xs font-black">{item.label}</div>
-                    <div className="text-[10px] opacity-60">{item.help}</div>
+                    <div className="text-xs font-black">Confirm Bulk Delete</div>
+                    <div className="text-[10px] opacity-60">
+                      Ask for confirmation before deleting selected chapters.
+                    </div>
                   </div>
                   <input
                     type="checkbox"
-                    checked={item.value}
-                    onChange={(e) => onUpdateBookSettings?.({ [item.key]: e.target.checked })}
+                    checked={book.settings?.confirmBulkDelete !== false}
+                    onChange={(e) =>
+                      onUpdateBookSettings?.({ confirmBulkDelete: e.target.checked })
+                    }
                     className="w-5 h-5 accent-indigo-600"
                   />
                 </label>
-              ))}
-              <button
-                onClick={() => {
-                  setShowVoiceModal({});
-                }}
-                className="w-full px-4 py-3 rounded-2xl border border-indigo-600/20 text-indigo-600 text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50"
-              >
-                Default Voice: {currentDefaultVoiceName}
-              </button>
-            </div>
+              </div>
 
-            <div className="space-y-3">
-              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Safety</div>
-              <label
-                className={`flex items-center justify-between gap-4 p-4 rounded-2xl border ${
-                  isDark ? "border-white/10 bg-white/5" : "border-black/10 bg-black/5"
-                }`}
-              >
-                <div>
-                  <div className="text-xs font-black">Confirm Bulk Delete</div>
-                  <div className="text-[10px] opacity-60">Ask for confirmation before deleting selected chapters.</div>
+              <div className="space-y-3">
+                <div className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                  Primary Actions
                 </div>
-                <input
-                  type="checkbox"
-                  checked={book.settings?.confirmBulkDelete !== false}
-                  onChange={(e) => onUpdateBookSettings?.({ confirmBulkDelete: e.target.checked })}
-                  className="w-5 h-5 accent-indigo-600"
-                />
-              </label>
-            </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => {
+                      setShowBookSettings(false);
+                      onToggleUploadQueue();
+                    }}
+                    className={`${accentButtonClass} px-3 flex items-center gap-2`}
+                    title="View offline uploads"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    View uploads
+                  </button>
+                </div>
+              </div>
 
-            <div className="space-y-3">
-              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Primary Actions</div>
-              <div className="flex flex-wrap gap-2">
+              <div className="space-y-3">
                 <button
-                  onClick={() => { setShowBookSettings(false); onToggleUploadQueue(); }}
-                  className={`${accentButtonClass} px-3 flex items-center gap-2`}
-                  title="View offline uploads"
+                  onClick={() => setShowBookMoreActions((v) => !v)}
+                  className={`w-full flex items-center justify-between px-4 py-3 rounded-2xl border text-[10px] font-black uppercase tracking-widest ${isDark ? "border-white/10 hover:bg-white/5" : "border-black/10 hover:bg-black/5"}`}
+                  title="Show more actions"
                 >
-                  <Eye className="w-3.5 h-3.5" />
-                  View uploads
+                  More Actions
+                  {showBookMoreActions ? (
+                    <ChevronUp className="w-4 h-4" />
+                  ) : (
+                    <ChevronDown className="w-4 h-4" />
+                  )}
+                </button>
+                {showBookMoreActions && (
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <div className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                        Background Tools
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          onClick={handleRegenerateAudio}
+                          disabled={isRegeneratingAudio}
+                          title="Regenerate audio for this book"
+                          className={`px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 transition-all ${isRegeneratingAudio ? "cursor-not-allowed opacity-60" : "hover:bg-indigo-50"}`}
+                        >
+                          {isRegeneratingAudio ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />
+                          ) : (
+                            <RotateCcw className="w-4 h-4 text-indigo-600" />
+                          )}
+                          {isRegeneratingAudio ? "Regenerating..." : "Regenerate Audio"}
+                        </button>
+                        <button
+                          onClick={handleInitManifests}
+                          disabled={isInitManifests}
+                          title="Initialize Drive manifests"
+                          className={`px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 transition-all ${isInitManifests ? "cursor-not-allowed opacity-60" : "hover:bg-indigo-50"}`}
+                        >
+                          {isInitManifests ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />
+                          ) : (
+                            <Cloud className="w-4 h-4 text-indigo-600" />
+                          )}
+                          {isInitManifests ? "Initializing..." : "Init Manifests"}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                          Uploads
+                        </span>
+                        <span className="text-[10px] font-black tracking-widest text-indigo-400">
+                          {uploadedChapterCount} uploaded - {uploadQueueCount} pending
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          onClick={onUploadAllChapters}
+                          disabled={isUploadingAll}
+                          title="Upload all chapters to Drive"
+                          className={`px-4 py-2 rounded-xl font-black uppercase tracking-widest text-[10px] transition-all flex items-center gap-2 ${isUploadingAll ? "bg-indigo-500/60 text-white cursor-not-allowed shadow-none" : isDark ? "bg-indigo-500 text-white hover:bg-indigo-400 shadow-lg" : "bg-indigo-600 text-white hover:bg-indigo-500 shadow-lg"}`}
+                        >
+                          {isUploadingAll ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Cloud className="w-3.5 h-3.5" />
+                          )}
+                          {isUploadingAll ? "Uploading..." : "Upload all chapters"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {book.coverImage && (
+                      <button
+                        onClick={handleRemoveCover}
+                        className={`${accentButtonClass}`}
+                        title="Remove cover image"
+                      >
+                        Remove Cover
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-3">
+                <div className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                  Danger Zone
+                </div>
+                <button
+                  onClick={() => {
+                    if (confirm(`Delete '${book.title}' and all chapters?`)) {
+                      onDeleteBook(book.id);
+                    }
+                  }}
+                  className="px-4 py-2 rounded-xl bg-red-600/10 text-red-600 text-[10px] font-black uppercase tracking-widest"
+                >
+                  Delete Book
                 </button>
               </div>
-            </div>
-
-            <div className="space-y-3">
-              <button
-                onClick={() => setShowBookMoreActions((v) => !v)}
-                className={`w-full flex items-center justify-between px-4 py-3 rounded-2xl border text-[10px] font-black uppercase tracking-widest ${isDark ? 'border-white/10 hover:bg-white/5' : 'border-black/10 hover:bg-black/5'}`}
-                title="Show more actions"
-              >
-                More Actions
-                {showBookMoreActions ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-              </button>
-              {showBookMoreActions && (
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Background Tools</div>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        onClick={handleRegenerateAudio}
-                        disabled={isRegeneratingAudio}
-                        title="Regenerate audio for this book"
-                        className={`px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 transition-all ${isRegeneratingAudio ? 'cursor-not-allowed opacity-60' : 'hover:bg-indigo-50'}`}
-                      >
-                        {isRegeneratingAudio ? <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" /> : <RotateCcw className="w-4 h-4 text-indigo-600" />}
-                        {isRegeneratingAudio ? 'Regenerating...' : 'Regenerate Audio'}
-                      </button>
-                      <button
-                        onClick={handleInitManifests}
-                        disabled={isInitManifests}
-                        title="Initialize Drive manifests"
-                        className={`px-4 py-2 rounded-xl bg-white text-indigo-600 border border-indigo-600/20 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 transition-all ${isInitManifests ? 'cursor-not-allowed opacity-60' : 'hover:bg-indigo-50'}`}
-                      >
-                        {isInitManifests ? <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" /> : <Cloud className="w-4 h-4 text-indigo-600" />}
-                        {isInitManifests ? 'Initializing...' : 'Init Manifests'}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[10px] font-black uppercase tracking-widest opacity-60">Uploads</span>
-                      <span className="text-[10px] font-black tracking-widest text-indigo-400">{uploadedChapterCount} uploaded - {uploadQueueCount} pending</span>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        onClick={onUploadAllChapters}
-                        disabled={isUploadingAll}
-                        title="Upload all chapters to Drive"
-                        className={`px-4 py-2 rounded-xl font-black uppercase tracking-widest text-[10px] transition-all flex items-center gap-2 ${isUploadingAll ? 'bg-indigo-500/60 text-white cursor-not-allowed shadow-none' : isDark ? 'bg-indigo-500 text-white hover:bg-indigo-400 shadow-lg' : 'bg-indigo-600 text-white hover:bg-indigo-500 shadow-lg'}`}
-                      >
-                        {isUploadingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Cloud className="w-3.5 h-3.5" />}
-                        {isUploadingAll ? 'Uploading...' : 'Upload all chapters'}
-                      </button>
-                    </div>
-                  </div>
-
-                  {book.coverImage && (
-                    <button
-                      onClick={handleRemoveCover}
-                      className={`${accentButtonClass}`}
-                      title="Remove cover image"
-                    >
-                      Remove Cover
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-
-            <div className="space-y-3">
-              <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Danger Zone</div>
-              <button
-                onClick={() => {
-                  if (confirm(`Delete '${book.title}' and all chapters?`)) {
-                    onDeleteBook(book.id);
-                  }
-                }}
-                className="px-4 py-2 rounded-xl bg-red-600/10 text-red-600 text-[10px] font-black uppercase tracking-widest"
-              >
-                Delete Book
-              </button>
-            </div>
             </div>
           </div>
         </div>
@@ -4167,121 +4799,330 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       {mobileMenuId && <MobileChapterMenu chapterId={mobileMenuId} />}
 
       {showFixModal && lastScan && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm overflow-y-auto">
-          <div className={`w-full max-w-2xl rounded-[2.5rem] shadow-2xl p-8 lg:p-12 space-y-8 animate-in zoom-in-95 ${isDark ? 'bg-slate-900 border border-white/10' : 'bg-white'}`}>
-             <div className="flex justify-between items-start"><div><h3 className="text-2xl font-black tracking-tight flex items-center gap-3"><Wrench className="w-7 h-7 text-indigo-600" /> Fix & Cleanup Cloud Folder</h3><p className="text-xs font-bold opacity-50 uppercase tracking-widest mt-2">Book: {book.title}</p></div>{!isFixing && <button onClick={() => setShowFixModal(false)} className="p-3 bg-black/5 rounded-full hover:bg-black/10"><X className="w-6 h-6" /></button>}</div>
-             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-               <div className="p-4 rounded-2xl bg-indigo-600/5 border border-indigo-600/10 flex flex-col gap-1"><span className="text-[10px] font-black uppercase text-indigo-600">Missing Text</span><span className="text-2xl font-black">{lastScan.missingTextIds.length}</span></div>
-               <div className="p-4 rounded-2xl bg-amber-600/5 border border-amber-600/10 flex flex-col gap-1"><span className="text-[10px] font-black uppercase text-amber-600">Missing Audio</span><span className="text-2xl font-black">{lastScan.missingAudioIds.length}</span></div>
-               <div className="p-4 rounded-2xl bg-red-600/5 border border-red-600/10 flex flex-col gap-1"><span className="text-[10px] font-black uppercase text-red-600">Stray Files</span><span className="text-2xl font-black">{lastScan.strayFiles.length}</span></div>
-              <div className="p-4 rounded-2xl bg-purple-600/5 border border-purple-600/10 flex flex-col gap-1"><span className="text-[10px] font-black uppercase text-purple-600">Legacy</span><span className="text-2xl font-black">{(lastScan as any).legacyCount || 0}</span></div>
-              {duplicateChapterCount > 0 && (
+        <div className="fixed inset-0 z-[100] overflow-y-auto bg-black/60 backdrop-blur-sm">
+          <div className="min-h-full flex items-start justify-center p-4 py-8">
+            <div
+              className={`w-full max-w-2xl rounded-[2.5rem] shadow-2xl p-8 lg:p-12 space-y-8 animate-in zoom-in-95 ${isDark ? "bg-slate-900 border border-white/10" : "bg-white"}`}
+            >
+              <div className="flex justify-between items-start">
+                <div>
+                  <h3 className="text-2xl font-black tracking-tight flex items-center gap-3">
+                    <Wrench className="w-7 h-7 text-indigo-600" /> Fix & Cleanup Cloud Folder
+                  </h3>
+                  <p className="text-xs font-bold opacity-50 uppercase tracking-widest mt-2">
+                    Book: {book.title}
+                  </p>
+                </div>
+                {!isFixing && (
+                  <button
+                    onClick={() => setShowFixModal(false)}
+                    className="p-3 bg-black/5 rounded-full hover:bg-black/10"
+                  >
+                    <X className="w-6 h-6" />
+                  </button>
+                )}
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                 <div className="p-4 rounded-2xl bg-indigo-600/5 border border-indigo-600/10 flex flex-col gap-1">
-                  <span className="text-[10px] font-black uppercase text-indigo-600">Duplicate Indexes</span>
-                  <span className="text-2xl font-black">{duplicateChapterCount}</span>
-                  <span className="text-[10px] uppercase tracking-widest opacity-70">
-                    Across {duplicateGroups.length} conflicted {duplicateGroups.length === 1 ? "index" : "indexes"}
+                  <span className="text-[10px] font-black uppercase text-indigo-600">
+                    Missing Text
                   </span>
+                  <span className="text-2xl font-black">{lastScan.missingTextIds.length}</span>
                 </div>
-              )}
-            </div>
-             <div className="space-y-4"><label className="text-[10px] font-black uppercase tracking-widest opacity-60">Actions to Perform</label>
-               <div className="space-y-3">
-                 <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.convertLegacy} onChange={e => setFixOptions(o => ({...o, convertLegacy: e.target.checked}))} /><div><div className="text-sm font-black">Convert Legacy Files</div><p className="text-[10px] opacity-60 uppercase font-bold">Create expected files from legacy matches</p></div></label>
-                 <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.genAudio} onChange={e => setFixOptions(o => ({...o, genAudio: e.target.checked}))} /><div><div className="text-sm font-black">Generate Missing Audio</div><p className="text-[10px] opacity-60 uppercase font-bold">Synthesize and upload MP3s</p></div></label>
-                 <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.cleanupStrays} onChange={e => setFixOptions(o => ({...o, cleanupStrays: e.target.checked}))} /><div><div className="text-sm font-black">Cleanup Book Folder</div><p className="text-[10px] opacity-60 uppercase font-bold">Move unrecognized files to trash</p></div></label>
-                 <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors"><input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={fixOptions.reindex} onChange={e => setFixOptions(o => ({...o, reindex: e.target.checked}))} /><div><div className="text-sm font-black">Renumber Chapters</div><p className="text-[10px] opacity-60 uppercase font-bold">Give each chapter a unique sequential index</p></div></label>
-               </div>
-             </div>
-             {isMobileInterface && onSyncNativeLibrary && (
-               <div className="border rounded-2xl p-4 bg-black/5 space-y-3">
-                 <div className="text-[10px] font-black uppercase tracking-widest opacity-60">Native DB Sync</div>
-                 <button
-                   onClick={async () => {
-                     setIsSyncingNative(true);
-                     setSyncSummary(null);
-                     try {
-                       const res = await onSyncNativeLibrary({
-                         bookId: book.id,
-                         chapterIds: book.chapters.map((c) => c.id),
-                       });
-                       setSyncSummary(res);
-                       pushNotice("Library synced to native DB.", "success");
-                     } catch (e: any) {
-                       pushNotice(`Native DB sync failed: ${String(e?.message ?? e)}`, "error", 6000);
-                     } finally {
-                       setIsSyncingNative(false);
-                     }
-                   }}
-                   disabled={isSyncingNative}
-                   className={`w-full py-3 rounded-xl font-black uppercase text-[10px] tracking-widest ${
-                     isSyncingNative ? "bg-slate-400 cursor-not-allowed" : "bg-indigo-600 text-white hover:bg-indigo-500"
-                   }`}
-                 >
-                   {isSyncingNative ? "Syncing..." : "Sync Library to Native DB"}
-                 </button>
-                 {syncSummary && (
-                   <div className="text-[10px] font-black uppercase tracking-widest opacity-70">
-                      {syncSummary.books} books - {syncSummary.chapters} chapters - {syncSummary.texts} texts - {syncSummary.failures} failures
-                   </div>
-                 )}
-               </div>
-             )}
-
-             <div className="border rounded-2xl p-4 bg-black/5 space-y-2">
-               <span className="text-[10px] font-black uppercase opacity-40">Preview</span>
-              <div className="text-xs font-bold flex items-center gap-2 text-purple-600"><Sparkles className="w-3 h-3" /> Will create {legacyTextCount} text files from legacy</div>
-              <div className="text-xs font-bold flex items-center gap-2 text-purple-600"><Sparkles className="w-3 h-3" /> Will create {legacyAudioCount} audio files from legacy</div>
-              <div className="text-xs font-bold flex items-center gap-2 text-amber-600"><Headphones className="w-3 h-3" /> Will generate {generateCount} audios</div>
-              <div className="text-xs font-bold flex items-center gap-2 text-red-600"><History className="w-3 h-3" /> Will move {cleanupCount} files to trash</div>
-              {fixOptions.cleanupStrays && !planPreview.safeToCleanup && (
-                <div className="text-[10px] font-bold uppercase text-red-600">Cleanup disabled (not safe yet)</div>
-              )}
-              {planPreview.reindex && duplicateChapterCount > 0 && (
-                <div className="text-xs font-bold flex items-center gap-2 text-indigo-600">
-                  <Sparkles className="w-3 h-3" />
-                  Will renumber {duplicateChapterCount} chapter{duplicateChapterCount === 1 ? "" : "s"} over {duplicateGroups.length} duplicated index{duplicateGroups.length === 1 ? "" : "es"}
+                <div className="p-4 rounded-2xl bg-amber-600/5 border border-amber-600/10 flex flex-col gap-1">
+                  <span className="text-[10px] font-black uppercase text-amber-600">
+                    Missing Audio
+                  </span>
+                  <span className="text-2xl font-black">{lastScan.missingAudioIds.length}</span>
                 </div>
-              )}
-            </div>
-             {isFixing ? (
-               <div className="space-y-4 pt-4">
-                <div className="flex justify-between items-center">
-                  <span className="text-sm font-black">Restoring Integrity...</span>
-                  <span className="text-xs font-mono font-black">{fixProgress.current} / {fixProgress.total}</span>
+                <div className="p-4 rounded-2xl bg-red-600/5 border border-red-600/10 flex flex-col gap-1">
+                  <span className="text-[10px] font-black uppercase text-red-600">Stray Files</span>
+                  <span className="text-2xl font-black">{lastScan.strayFiles.length}</span>
                 </div>
-                <div className="h-3 w-full bg-black/5 rounded-full overflow-hidden">
-                  <div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${fixProgress.total ? (fixProgress.current / fixProgress.total) * 100 : 0}%` }} />
+                <div className="p-4 rounded-2xl bg-purple-600/5 border border-purple-600/10 flex flex-col gap-1">
+                  <span className="text-[10px] font-black uppercase text-purple-600">Legacy</span>
+                  <span className="text-2xl font-black">{(lastScan as any).legacyCount || 0}</span>
                 </div>
-                {isMobileInterface && activeFixJob && (
-                  <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest opacity-70">
-                    <span>Status: {activeFixJob.status}</span>
-                    <button onClick={onRefreshJobs} className="text-indigo-500">Refresh</button>
+                {(lastScan.filesInRootToMove?.length ?? 0) > 0 && (
+                  <div className="p-4 rounded-2xl bg-slate-600/5 border border-slate-600/10 flex flex-col gap-1">
+                    <span className="text-[10px] font-black uppercase text-slate-600">In Root</span>
+                    <span className="text-2xl font-black">
+                      {lastScan.filesInRootToMove?.length ?? 0}
+                    </span>
+                    <span className="text-[10px] uppercase tracking-widest opacity-70">
+                      Should be in volume folders
+                    </span>
                   </div>
                 )}
-                <button
-                  onClick={() => {
-                    if (isMobileInterface && activeFixJob?.jobId) {
-                      onCancelJob(activeFixJob.jobId);
-                      pushNotice("Cancel requested.", "info");
-                      return;
-                    }
-                    abortFixRef.current = true;
-                  }}
-                  className="w-full py-3 mt-2 bg-red-500/10 text-red-600 rounded-xl font-black uppercase text-[10px] tracking-widest hover:bg-red-500/20"
-                >
-                  Stop Fix
-                </button>
-               </div>
-             ) : (
-               <div className="grid grid-cols-2 gap-4">
-                 <button onClick={() => setShowFixModal(false)} className="py-4 rounded-2xl font-black uppercase text-[10px] tracking-widest border-2 hover:bg-black/5">Cancel</button>
-                 <div className="flex flex-col gap-2">
-                   <button disabled={previewOnly} onClick={handleRunFix} className={`py-4 text-white rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-xl transition-all ${previewOnly ? 'bg-slate-400 cursor-not-allowed' : 'bg-indigo-600 hover:scale-[1.02] active:scale-95'}`}>Start Fixing</button>
-                   <label className="flex items-center justify-center gap-2 cursor-pointer opacity-60 hover:opacity-100 transition-opacity"><input type="checkbox" checked={previewOnly} onChange={e => setPreviewOnly(e.target.checked)} className="accent-indigo-600" /><span className="text-[10px] font-black uppercase">Preview Only (Safe Mode)</span></label>
-                 </div>
-               </div>
-             )}
+                {duplicateChapterCount > 0 && (
+                  <div className="p-4 rounded-2xl bg-indigo-600/5 border border-indigo-600/10 flex flex-col gap-1">
+                    <span className="text-[10px] font-black uppercase text-indigo-600">
+                      Duplicate Indexes
+                    </span>
+                    <span className="text-2xl font-black">{duplicateChapterCount}</span>
+                    <span className="text-[10px] uppercase tracking-widest opacity-70">
+                      Across {duplicateGroups.length} conflicted{" "}
+                      {duplicateGroups.length === 1 ? "index" : "indexes"}
+                    </span>
+                  </div>
+                )}
+              </div>
+              <div className="space-y-4">
+                <label className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                  Actions to Perform
+                </label>
+                <div className="space-y-3">
+                  <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors">
+                    <input
+                      type="checkbox"
+                      className="w-5 h-5 accent-indigo-600"
+                      checked={fixOptions.convertLegacy}
+                      onChange={(e) =>
+                        setFixOptions((o) => ({ ...o, convertLegacy: e.target.checked }))
+                      }
+                    />
+                    <div>
+                      <div className="text-sm font-black">Convert Legacy Files</div>
+                      <p className="text-[10px] opacity-60 uppercase font-bold">
+                        Create expected files from legacy matches
+                      </p>
+                    </div>
+                  </label>
+                  <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors">
+                    <input
+                      type="checkbox"
+                      className="w-5 h-5 accent-indigo-600"
+                      checked={fixOptions.genAudio}
+                      onChange={(e) => setFixOptions((o) => ({ ...o, genAudio: e.target.checked }))}
+                    />
+                    <div>
+                      <div className="text-sm font-black">Generate Missing Audio</div>
+                      <p className="text-[10px] opacity-60 uppercase font-bold">
+                        Synthesize and upload MP3s
+                      </p>
+                    </div>
+                  </label>
+                  <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors">
+                    <input
+                      type="checkbox"
+                      className="w-5 h-5 accent-indigo-600"
+                      checked={fixOptions.cleanupStrays}
+                      onChange={(e) =>
+                        setFixOptions((o) => ({ ...o, cleanupStrays: e.target.checked }))
+                      }
+                    />
+                    <div>
+                      <div className="text-sm font-black">Cleanup Book Folder</div>
+                      <p className="text-[10px] opacity-60 uppercase font-bold">
+                        Move unrecognized files to trash
+                      </p>
+                    </div>
+                  </label>
+                  {(lastScan.filesInRootToMove?.length ?? 0) > 0 && (
+                    <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors">
+                      <input
+                        type="checkbox"
+                        className="w-5 h-5 accent-indigo-600"
+                        checked={fixOptions.moveRootToVolume}
+                        onChange={(e) =>
+                          setFixOptions((o) => ({ ...o, moveRootToVolume: e.target.checked }))
+                        }
+                      />
+                      <div>
+                        <div className="text-sm font-black">Move Root Files to Volume Folders</div>
+                        <p className="text-[10px] opacity-60 uppercase font-bold">
+                          Move {lastScan.filesInRootToMove?.length ?? 0} files from book root into
+                          their volume subfolders
+                        </p>
+                      </div>
+                    </label>
+                  )}
+                  <label className="flex items-center gap-4 p-4 rounded-2xl border-2 border-black/5 cursor-pointer hover:bg-black/5 transition-colors">
+                    <input
+                      type="checkbox"
+                      className="w-5 h-5 accent-indigo-600"
+                      checked={fixOptions.reindex}
+                      onChange={(e) =>
+                        setFixOptions((o) => ({
+                          ...o,
+                          reindex: e.target.checked,
+                          resequence: e.target.checked,
+                        }))
+                      }
+                    />
+                    <div>
+                      <div className="text-sm font-black">Reindex Chapters</div>
+                      <p className="text-[10px] opacity-60 uppercase font-bold">
+                        Assign unique sequential indices and close gaps (e.g. 1,2,4,5 → 1,2,3,4)
+                      </p>
+                    </div>
+                  </label>
+                </div>
+              </div>
+              {isMobileInterface && onSyncNativeLibrary && (
+                <div className="border rounded-2xl p-4 bg-black/5 space-y-3">
+                  <div className="text-[10px] font-black uppercase tracking-widest opacity-60">
+                    Native DB Sync
+                  </div>
+                  <button
+                    onClick={async () => {
+                      setIsSyncingNative(true);
+                      setSyncSummary(null);
+                      try {
+                        const res = await onSyncNativeLibrary({
+                          bookId: book.id,
+                          chapterIds: book.chapters.map((c) => c.id),
+                        });
+                        setSyncSummary(res);
+                        pushNotice("Library synced to native DB.", "success");
+                      } catch (e: any) {
+                        pushNotice(
+                          `Native DB sync failed: ${String(e?.message ?? e)}`,
+                          "error",
+                          6000
+                        );
+                      } finally {
+                        setIsSyncingNative(false);
+                      }
+                    }}
+                    disabled={isSyncingNative}
+                    className={`w-full py-3 rounded-xl font-black uppercase text-[10px] tracking-widest ${
+                      isSyncingNative
+                        ? "bg-slate-400 cursor-not-allowed"
+                        : "bg-indigo-600 text-white hover:bg-indigo-500"
+                    }`}
+                  >
+                    {isSyncingNative ? "Syncing..." : "Sync Library to Native DB"}
+                  </button>
+                  {syncSummary && (
+                    <div className="text-[10px] font-black uppercase tracking-widest opacity-70">
+                      {syncSummary.books} books - {syncSummary.chapters} chapters -{" "}
+                      {syncSummary.texts} texts - {syncSummary.failures} failures
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="border rounded-2xl p-4 bg-black/5 space-y-2">
+                <span className="text-[10px] font-black uppercase opacity-40">Preview</span>
+                <div className="text-xs font-bold flex items-center gap-2 text-purple-600">
+                  <Sparkles className="w-3 h-3" /> Will create {legacyTextCount} text files from
+                  legacy
+                </div>
+                <div className="text-xs font-bold flex items-center gap-2 text-purple-600">
+                  <Sparkles className="w-3 h-3" /> Will create {legacyAudioCount} audio files from
+                  legacy
+                </div>
+                <div className="text-xs font-bold flex items-center gap-2 text-amber-600">
+                  <Headphones className="w-3 h-3" /> Will generate {generateCount} audios
+                </div>
+                <div className="text-xs font-bold flex items-center gap-2 text-red-600">
+                  <History className="w-3 h-3" /> Will move {cleanupCount} files to trash
+                </div>
+                {fixOptions.moveRootToVolume && (planPreview.moveRootToVolume?.length ?? 0) > 0 && (
+                  <div className="text-xs font-bold flex items-center gap-2 text-slate-600">
+                    <FolderSync className="w-3 h-3" /> Will move{" "}
+                    {planPreview.moveRootToVolume?.length ?? 0} files from root into volume folders
+                  </div>
+                )}
+                {fixOptions.cleanupStrays && !planPreview.safeToCleanup && (
+                  <div className="space-y-2 pt-1">
+                    <div className="text-[10px] font-bold uppercase text-amber-600">
+                      Some chapters not fully recoverable. Cleanup blocked for safety.
+                    </div>
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="w-4 h-4 accent-red-600"
+                        checked={fixOptions.forceCleanup}
+                        onChange={(e) =>
+                          setFixOptions((o) => ({ ...o, forceCleanup: e.target.checked }))
+                        }
+                      />
+                      <span className="text-[10px] font-black uppercase text-red-600">
+                        Force cleanup anyway (I understand files may be unrecoverable)
+                      </span>
+                    </label>
+                  </div>
+                )}
+                {(planPreview.reindex || fixOptions.reindex) && (
+                  <div className="text-xs font-bold flex items-center gap-2 text-indigo-600">
+                    <Sparkles className="w-3 h-3" />
+                    {duplicateChapterCount > 0
+                      ? `Will reindex chapters to fix ${duplicateChapterCount} duplicate${duplicateChapterCount === 1 ? "" : "s"} across ${duplicateGroups.length} index${duplicateGroups.length === 1 ? "" : "es"}`
+                      : "Will reindex chapters and close gaps in sequence"}
+                  </div>
+                )}
+              </div>
+              {isFixing ? (
+                <div className="space-y-4 pt-4">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm font-black">Restoring Integrity...</span>
+                    <span className="text-xs font-mono font-black">
+                      {fixProgress.current} / {fixProgress.total}
+                    </span>
+                  </div>
+                  <div className="h-3 w-full bg-black/5 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-indigo-600 transition-all duration-300"
+                      style={{
+                        width: `${fixProgress.total ? (fixProgress.current / fixProgress.total) * 100 : 0}%`,
+                      }}
+                    />
+                  </div>
+                  {isMobileInterface && activeFixJob && (
+                    <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest opacity-70">
+                      <span>Status: {activeFixJob.status}</span>
+                      <button onClick={onRefreshJobs} className="text-indigo-500">
+                        Refresh
+                      </button>
+                    </div>
+                  )}
+                  <button
+                    onClick={() => {
+                      if (isMobileInterface && activeFixJob?.jobId) {
+                        onCancelJob(activeFixJob.jobId);
+                        pushNotice("Cancel requested.", "info");
+                        return;
+                      }
+                      abortFixRef.current = true;
+                    }}
+                    className="w-full py-3 mt-2 bg-red-500/10 text-red-600 rounded-xl font-black uppercase text-[10px] tracking-widest hover:bg-red-500/20"
+                  >
+                    Stop Fix
+                  </button>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-4">
+                  <button
+                    onClick={() => setShowFixModal(false)}
+                    className="py-4 rounded-2xl font-black uppercase text-[10px] tracking-widest border-2 hover:bg-black/5"
+                  >
+                    Cancel
+                  </button>
+                  <div className="flex flex-col gap-2">
+                    <button
+                      disabled={previewOnly}
+                      onClick={handleRunFix}
+                      className={`py-4 text-white rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-xl transition-all ${previewOnly ? "bg-slate-400 cursor-not-allowed" : "bg-indigo-600 hover:scale-[1.02] active:scale-95"}`}
+                    >
+                      Start Fixing
+                    </button>
+                    <label className="flex items-center justify-center gap-2 cursor-pointer opacity-60 hover:opacity-100 transition-opacity">
+                      <input
+                        type="checkbox"
+                        checked={previewOnly}
+                        onChange={(e) => setPreviewOnly(e.target.checked)}
+                        className="accent-indigo-600"
+                      />
+                      <span className="text-[10px] font-black uppercase">
+                        Preview Only (Safe Mode)
+                      </span>
+                    </label>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -4302,11 +5143,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             <div>
               <h3 className="text-sm font-black uppercase tracking-widest">Assign Volume</h3>
               <p className="mt-1 text-xs opacity-70">
-                Apply one volume to {selectedChapterList.length} selected chapter{selectedChapterList.length === 1 ? "" : "s"}.
+                Apply one volume to {selectedChapterList.length} selected chapter
+                {selectedChapterList.length === 1 ? "" : "s"}.
               </p>
             </div>
             <div className="space-y-2">
-              <label className="text-[11px] font-black uppercase tracking-widest opacity-70">Volume</label>
+              <label className="text-[11px] font-black uppercase tracking-widest opacity-70">
+                Volume
+              </label>
               <select
                 className={`w-full rounded-xl border px-3 py-2 text-sm ${
                   isDark ? "bg-slate-950 border-slate-700" : "bg-white border-black/10"
@@ -4349,7 +5193,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             selectedCount={selectedIds.size}
             onClose={closeSelectionMode}
             onSelectAll={() => handleSelectAllVisible(visibleChapters.map((chapter) => chapter.id))}
-            onInvert={() => handleInvertVisibleSelection(visibleChapters.map((chapter) => chapter.id))}
+            onInvert={() =>
+              handleInvertVisibleSelection(visibleChapters.map((chapter) => chapter.id))
+            }
             showOverflow={showSelectionOverflow}
             onToggleOverflow={() => setShowSelectionOverflow((v) => !v)}
             onAssignVolume={() => {
@@ -4370,6 +5216,14 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             showOverflow={showBookOverflow}
             onToggleOverflow={() => setShowBookOverflow((v) => !v)}
             onOpenSettingsFromMenu={handleOpenSettingsFromMenu}
+            onOpenAttachments={
+              onOpenAttachments
+                ? () => {
+                    setShowBookOverflow(false);
+                    onOpenAttachments();
+                  }
+                : undefined
+            }
             onToggleOrganize={handleMenuToggleOrganize}
             isOrganizeMode={isOrganizeMode}
             onCheck={handleMenuCheck}
@@ -4407,15 +5261,97 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
         </div>
       ) : null}
 
+      {!selectionMode && activeGenJob ? (
+        <div className="px-4 sm:px-6 mt-2">
+          <div
+            className={`p-4 rounded-2xl border ${
+              isDark ? "border-slate-800 bg-slate-900/60" : "border-black/5 bg-white"
+            }`}
+          >
+            <div className="flex items-center justify-between text-xs font-black uppercase tracking-widest">
+              <span>
+                {((activeGenJob as any)?.payloadJson?.backend === "cloud" ? "Cloud" : "Device") +
+                  " audio job"}
+              </span>
+              <span>
+                {activeGenJob.progressJson?.completed ?? 0} /{" "}
+                {activeGenJob.progressJson?.total ?? "?"}
+              </span>
+            </div>
+            <div
+              className={`mt-3 h-2 w-full rounded-full overflow-hidden ${
+                isDark ? "bg-slate-800" : "bg-black/5"
+              }`}
+            >
+              <div
+                className="h-full bg-indigo-600 transition-all duration-300"
+                style={{
+                  width: `${
+                    activeGenJob.progressJson?.total
+                      ? Math.min(
+                          100,
+                          ((activeGenJob.progressJson.completed ?? 0) /
+                            activeGenJob.progressJson.total) *
+                            100
+                        )
+                      : 0
+                  }%`,
+                }}
+              />
+            </div>
+            <div className="mt-3 flex items-center justify-between text-[10px] font-black uppercase tracking-widest opacity-80">
+              <span>Status: {activeGenJob.status.toUpperCase()}</span>
+              <div className="flex items-center gap-2">
+                {(activeGenJob.status === "queued" || activeGenJob.status === "running") && (
+                  <button
+                    type="button"
+                    onClick={() => onCancelJob(activeGenJob.jobId)}
+                    className="px-2 py-1 rounded-full border border-black/10 text-[10px] font-black uppercase tracking-widest hover:bg-black/5"
+                  >
+                    Pause
+                  </button>
+                )}
+                {(activeGenJob.status === "failed" || activeGenJob.status === "canceled") && (
+                  <button
+                    type="button"
+                    onClick={() => onRetryJob(activeGenJob.jobId)}
+                    className="px-2 py-1 rounded-full border border-black/10 text-[10px] font-black uppercase tracking-widest hover:bg-black/5"
+                  >
+                    Retry
+                  </button>
+                )}
+              </div>
+            </div>
+            {activeGenJob.error ? (
+              <div className="mt-2 text-[10px] leading-snug opacity-80">
+                {String(activeGenJob.error).slice(0, 160)}
+                {String(activeGenJob.error).length > 160 ? "…" : ""}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
       {bgGenProgress && (
         <div className="px-4 sm:px-6 mt-3">
-          <div className={`p-4 rounded-2xl border ${isDark ? 'border-slate-800 bg-slate-900/60' : 'border-black/5 bg-white'}`}>
+          <div
+            className={`p-4 rounded-2xl border ${isDark ? "border-slate-800 bg-slate-900/60" : "border-black/5 bg-white"}`}
+          >
             <div className="flex items-center justify-between text-xs font-black uppercase tracking-widest">
               <span>Generating Audio</span>
-              <span>{bgGenProgress.current} / {bgGenProgress.total}</span>
+              <span>
+                {bgGenProgress.current} / {bgGenProgress.total}
+              </span>
             </div>
-            <div className={`mt-3 h-2 w-full rounded-full overflow-hidden ${isDark ? 'bg-slate-800' : 'bg-black/5'}`}>
-              <div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${bgGenProgress.total ? (bgGenProgress.current / bgGenProgress.total) * 100 : 0}%` }} />
+            <div
+              className={`mt-3 h-2 w-full rounded-full overflow-hidden ${isDark ? "bg-slate-800" : "bg-black/5"}`}
+            >
+              <div
+                className="h-full bg-indigo-600 transition-all duration-300"
+                style={{
+                  width: `${bgGenProgress.total ? (bgGenProgress.current / bgGenProgress.total) * 100 : 0}%`,
+                }}
+              />
             </div>
           </div>
         </div>
@@ -4424,13 +5360,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       <div ref={listWrapperRef} className="flex-1 min-h-0">
         {useVirtualization ? (
           chapters.length === 0 ? (
-            <div className="p-12 text-center text-xs font-black opacity-30 uppercase">No chapters found</div>
+            <div className="p-12 text-center text-xs font-black opacity-30 uppercase">
+              No chapters found
+            </div>
+          ) : viewMode === "sections" ? (
+            <ChapterList>{renderDetailsViewVirtualized()}</ChapterList>
           ) : (
-            viewMode === "sections" ? (
-              <ChapterList>{renderDetailsViewVirtualized()}</ChapterList>
-            ) : (
-              <ChapterGrid>{renderGridViewVirtualized()}</ChapterGrid>
-            )
+            <ChapterGrid>{renderGridViewVirtualized()}</ChapterGrid>
           )
         ) : (
           <div
@@ -4439,13 +5375,13 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
             className="h-full px-4 sm:px-6 py-6 sm:py-8 overflow-y-auto"
           >
             {chapters.length === 0 ? (
-              <div className="p-12 text-center text-xs font-black opacity-30 uppercase">No chapters found</div>
+              <div className="p-12 text-center text-xs font-black opacity-30 uppercase">
+                No chapters found
+              </div>
+            ) : viewMode === "sections" ? (
+              <ChapterList>{renderDetailsView()}</ChapterList>
             ) : (
-              viewMode === "sections" ? (
-                <ChapterList>{renderDetailsView()}</ChapterList>
-              ) : (
-                <ChapterGrid>{renderGridView()}</ChapterGrid>
-              )
+              <ChapterGrid>{renderGridView()}</ChapterGrid>
             )}
           </div>
         )}
@@ -4489,7 +5425,9 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
               className="w-14 h-14 rounded-full bg-indigo-600 text-white shadow-2xl flex items-center justify-center active:scale-95 transition-transform"
               title="Create"
             >
-              <Plus className={`w-6 h-6 transition-transform ${showCreateMenu ? "rotate-45" : ""}`} />
+              <Plus
+                className={`w-6 h-6 transition-transform ${showCreateMenu ? "rotate-45" : ""}`}
+              />
             </button>
           </div>
         </>
@@ -4510,6 +5448,7 @@ const ChapterFolderView: React.FC<ChapterFolderViewProps> = ({
       ) : null}
     </div>
   );
-};
+});
 
+ChapterFolderView.displayName = "ChapterFolderView";
 export default ChapterFolderView;

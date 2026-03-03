@@ -1,53 +1,58 @@
-
-
 export enum CaseMode {
-  EXACT = 'EXACT',
-  IGNORE = 'IGNORE',
-  SMART = 'SMART'
+  EXACT = "EXACT",
+  IGNORE = "IGNORE",
+  SMART = "SMART",
 }
 
 export enum RuleType {
-  REPLACE = 'REPLACE',
-  DELETE = 'DELETE'
+  REPLACE = "REPLACE",
+  DELETE = "DELETE",
 }
 
 export enum Scope {
-  PHRASE = 'PHRASE',
-  WORD = 'WORD'
+  PHRASE = "PHRASE",
+  WORD = "WORD",
 }
 
 export enum Theme {
-  LIGHT = 'light',
-  SEPIA = 'sepia',
-  DARK = 'dark'
+  LIGHT = "light",
+  SEPIA = "sepia",
+  DARK = "dark",
 }
 
 export enum HighlightMode {
-  WORD = 'word',
-  SENTENCE = 'sentence',
-  KARAOKE = 'karaoke'
+  WORD = "word",
+  SENTENCE = "sentence",
+  KARAOKE = "karaoke",
 }
 
 export enum StorageBackend {
-  LOCAL = 'local',
-  DRIVE = 'drive',
-  MEMORY = 'memory'
+  LOCAL = "local",
+  DRIVE = "drive",
+  MEMORY = "memory",
 }
 
 export enum AudioStatus {
-  NONE = 'none',
-  PENDING = 'pending',
-  GENERATING = 'generating',
-  READY = 'ready',
-  FAILED = 'failed'
+  NONE = "none",
+  PENDING = "pending",
+  GENERATING = "generating",
+  READY = "ready",
+  FAILED = "failed",
 }
 
-export type JobType = "generateAudio" | "fixIntegrity" | "uploadQueue" | "drive_upload_queue";
+export type JobType =
+  | "generateAudio"
+  | "generate_book_audio"
+  | "fixIntegrity"
+  | "uploadQueue"
+  | "drive_upload_queue";
 
 export type JobStatus =
   | "queued"
   | "running"
   | "paused"
+  | "paused_auth_expired"
+  | "paused_service_outage"
   | "completed"
   | "failed"
   | "canceled";
@@ -77,27 +82,27 @@ export type JobRecord = {
   updatedAt: number;
 };
 
-export type UiMode = 'auto' | 'desktop' | 'mobile';
+export type UiMode = "auto" | "desktop" | "mobile";
 
 export const CLOUD_VOICES = [
-  { id: 'en-US-Standard-C', name: 'Standard Female (US)' },
-  { id: 'en-US-Standard-D', name: 'Standard Male (US)' },
-  { id: 'en-US-Wavenet-D', name: 'Premium Male (US)' },
-  { id: 'en-US-Wavenet-C', name: 'Premium Female (US)' },
-  { id: 'en-GB-Wavenet-B', name: 'Premium Male (UK)' },
-  { id: 'en-GB-Wavenet-A', name: 'Premium Female (UK)' },
-  { id: 'openai:cedar', name: 'OpenAI Cedar' },
-  { id: 'openai:marin', name: 'OpenAI Marin' },
-  { id: 'openai:alloy', name: 'OpenAI Alloy' },
-  { id: 'openai:echo', name: 'OpenAI Echo' },
-  { id: 'openai:fable', name: 'OpenAI Fable' },
-  { id: 'openai:nova', name: 'OpenAI Nova' },
-  { id: 'openai:onyx', name: 'OpenAI Onyx' },
-  { id: 'openai:shimmer', name: 'OpenAI Shimmer' },
-  { id: 'openai:ash', name: 'OpenAI Ash' },
-  { id: 'openai:coral', name: 'OpenAI Coral' },
-  { id: 'openai:sage', name: 'OpenAI Sage' },
-  { id: 'openai:ballad', name: 'OpenAI Ballad' },
+  { id: "en-US-Standard-C", name: "Standard Female (US)" },
+  { id: "en-US-Standard-D", name: "Standard Male (US)" },
+  { id: "en-US-Wavenet-D", name: "Premium Male (US)" },
+  { id: "en-US-Wavenet-C", name: "Premium Female (US)" },
+  { id: "en-GB-Wavenet-B", name: "Premium Male (UK)" },
+  { id: "en-GB-Wavenet-A", name: "Premium Female (UK)" },
+  { id: "openai:cedar", name: "OpenAI Cedar" },
+  { id: "openai:marin", name: "OpenAI Marin" },
+  { id: "openai:alloy", name: "OpenAI Alloy" },
+  { id: "openai:echo", name: "OpenAI Echo" },
+  { id: "openai:fable", name: "OpenAI Fable" },
+  { id: "openai:nova", name: "OpenAI Nova" },
+  { id: "openai:onyx", name: "OpenAI Onyx" },
+  { id: "openai:shimmer", name: "OpenAI Shimmer" },
+  { id: "openai:ash", name: "OpenAI Ash" },
+  { id: "openai:coral", name: "OpenAI Coral" },
+  { id: "openai:sage", name: "OpenAI Sage" },
+  { id: "openai:ballad", name: "OpenAI Ballad" },
 ];
 
 export interface PlaybackMetadata {
@@ -110,17 +115,17 @@ export interface PlaybackMetadata {
 }
 
 export type PlaybackPhase =
-  | 'IDLE'
-  | 'LOADING_TEXT'
-  | 'READY'
-  | 'LOADING_AUDIO'
-  | 'SEEKING'
-  | 'SCRUBBING'
-  | 'PLAYING_INTRO'
-  | 'PLAYING_BODY'
-  | 'ENDING_SETTLE'
-  | 'TRANSITIONING'
-  | 'ERROR';
+  | "IDLE"
+  | "LOADING_TEXT"
+  | "READY"
+  | "LOADING_AUDIO"
+  | "SEEKING"
+  | "SCRUBBING"
+  | "PLAYING_INTRO"
+  | "PLAYING_BODY"
+  | "ENDING_SETTLE"
+  | "TRANSITIONING"
+  | "ERROR";
 
 export interface Rule {
   id: string;
@@ -183,21 +188,21 @@ export interface Chapter {
   progressChars: number; // actual character offset
   progressTotalLength?: number;
   // Canonical progress fields
-  progressSec?: number; 
+  progressSec?: number;
   durationSec?: number;
   textLength?: number;
-  
+
   isFavorite?: boolean;
   isCompleted?: boolean;
   driveId?: string; // Legacy field
   cloudTextFileId?: string; // Google Drive ID for .txt
   cloudAudioFileId?: string; // Google Drive ID for .mp3
-  audioDriveId?: string; 
+  audioDriveId?: string;
   audioStatus?: AudioStatus;
-  audioSignature?: string; 
-  audioPrefixLen?: number; 
-  audioIntroDurSec?: number; 
-  audioChunkMap?: AudioChunkMetadata[]; 
+  audioSignature?: string;
+  audioPrefixLen?: number;
+  audioIntroDurSec?: number;
+  audioChunkMap?: AudioChunkMetadata[];
   hasCachedAudio?: boolean;
   hasTextOnDrive?: boolean;
   updatedAt?: number;
@@ -211,7 +216,7 @@ export type ChapterIndexConflict = {
 export interface BookSettings {
   playbackSpeed?: number;
   selectedVoiceName?: string;
-  defaultVoiceId?: string; 
+  defaultVoiceId?: string;
   useBookSettings: boolean;
   highlightMode: HighlightMode;
   chapterLayout?: "sections" | "grid";
@@ -227,6 +232,7 @@ export interface BookSettings {
   confirmBulkDelete?: boolean;
 }
 
+/** Book-level attachment only. No chapterId; attachments belong to the book. */
 export type BookAttachment = {
   id: string;
   bookId: string;
@@ -260,6 +266,8 @@ export interface ReaderSettings {
   highlightDebugOverlay?: boolean;
   speakChapterIntro?: boolean;
   uiMode: UiMode;
+  /** When true and batch endpoint is set, always use cloud batch for generate-audio jobs (not only for large runs). */
+  useCloudBatchForAudio?: boolean;
 }
 
 export interface Book {
@@ -284,13 +292,24 @@ export interface StrayFile {
   name: string;
   mimeType: string;
   modifiedTime: string;
+  /** Set during Drive scan: parent folder id (book root or volume folder). Used to detect "file in root that should be in volume". */
+  parentFolderId?: string;
+}
+
+/** A file that is in the book root but should live in a volume subfolder (from inventory). */
+export interface FileInRootToMove {
+  file: StrayFile;
+  targetVolumeName: string;
+  chapterId: string;
 }
 
 export interface ScanResult {
   missingTextIds: string[];
   missingAudioIds: string[];
   strayFiles: StrayFile[];
-  duplicates: { chapterId: string, type: 'audio' | 'text', keepId: string, removeIds: string[] }[];
+  /** Files currently in book root that should be moved into their volume subfolder (by inventory). */
+  filesInRootToMove?: FileInRootToMove[];
+  duplicates: { chapterId: string; type: "audio" | "text"; keepId: string; removeIds: string[] }[];
   indexConflicts?: ChapterIndexConflict[];
   totalChecked: number;
   expectedChapters?: number;
@@ -324,7 +343,7 @@ export interface SyncDiagnostics {
   intervalMinutes?: number;
   cloudDirty?: boolean;
   dirtySince?: number;
-  lastCloudSaveTrigger?: 'manual' | 'auto';
+  lastCloudSaveTrigger?: "manual" | "auto";
   lastCloudSaveAt?: number;
 }
 
@@ -354,56 +373,6 @@ export interface SnapshotPointerV1 {
   latestCreatedAt: number;
 }
 
-export const BACKUP_SCHEMA_VERSION = 1 as const;
-
-export type BackupTarget = "drive" | "localFolder" | "download";
-
-export type BackupOptions = {
-  includeAudio: boolean;
-  includeDiagnostics: boolean;
-  includeAttachments: boolean;
-  includeChapterText: boolean;
-  includeOAuthTokens?: boolean;
-};
-
-export type BackupProgressStep =
-  | "collecting_state"
-  | "exporting_sqlite"
-  | "collecting_files"
-  | "zipping"
-  | "saving_drive"
-  | "saving_local"
-  | "downloading"
-  | "restoring_db"
-  | "restoring_prefs"
-  | "restoring_files"
-  | "finalizing";
-
-export type BackupProgress = {
-  step: BackupProgressStep;
-  message: string;
-  current?: number;
-  total?: number;
-};
-
-export interface BackupMetaV1 {
-  backupSchemaVersion: typeof BACKUP_SCHEMA_VERSION;
-  appVersion: string;
-  createdAt: number;
-  platform: "web" | "android" | "ios";
-  notes: string;
-  warnings: string[];
-  options: BackupOptions;
-}
-
-export interface BackupSchedulerSettings {
-  autoBackupToDrive: boolean;
-  autoBackupToDevice: boolean;
-  backupIntervalMin: 5 | 15 | 30 | 60;
-  keepDriveBackups: number;
-  keepLocalBackups: number;
-}
-
 export interface FullSnapshotV1 {
   schemaVersion: 1;
   createdAt: number;
@@ -414,6 +383,8 @@ export interface FullSnapshotV1 {
   globalRules: Rule[];
   books: Book[];
   chapters: Chapter[];
+  /** Chapter tombstones (deleted chapters) so they are not re-added from Drive during sync. */
+  chapterTombstones?: ChapterTombstone[];
   attachments: BookAttachment[];
   jobs: JobRecord[];
   uiState?: {
@@ -445,9 +416,4 @@ export interface AppState {
   autoSaveInterval: number;
   globalRules: Rule[];
   showDiagnostics: boolean;
-  backupSettings: BackupSchedulerSettings;
-  backupInProgress?: boolean;
-  lastBackupAt?: number;
-  lastBackupLocation?: string;
-  lastBackupError?: string;
 }
